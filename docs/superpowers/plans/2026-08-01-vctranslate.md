@@ -1217,7 +1217,7 @@ git commit -m "feat(vcTranslate): add Claude Haiku engine with structured output
 
 **Interfaces:**
 - Consumes: `translateWithGoogle`, `translateWithClaude`, `EngineId`, `BatchRequest`, `Result`.
-- Produces: `withRetry<T>(fn: () => Promise<T>, opts: { retries: number; delayMs: number; sleep?: (ms: number) => Promise<void> }): Promise<T>` from `retry.ts`; and the native entry point
+- Produces: `withRetry<T>(fn: () => Promise<T>, opts: { retries: number; delayMs: number; sleep?: (ms: number) => Promise<void>; shouldRetry?: (err: unknown) => boolean }): Promise<T>` from `retry.ts`; and the native entry point
   `translateBatch(_: IpcMainInvokeEvent, engine: EngineId, apiKey: string, reqJson: string): Promise<{ ok: true; results: Result[] } | { ok: false; error: string; retryAfterMs?: number }>`.
 
 The native function returns a result object rather than throwing — IPC serialises poorly across process boundaries, and every Vencord native module follows this convention.
@@ -1256,11 +1256,60 @@ describe("withRetry", () => {
         expect(fn).toHaveBeenCalledTimes(3);
     });
 
-    it("waits between attempts", async () => {
-        const sleep = vi.fn().mockResolvedValue(undefined);
-        const fn = vi.fn().mockRejectedValueOnce(new Error("x")).mockResolvedValue("ok");
-        await withRetry(fn, { retries: 1, delayMs: 1000, sleep });
+    it("awaits the delay before making the next attempt", async () => {
+        let release!: () => void;
+        const gate = new Promise<void>(r => { release = r; });
+        const sleep = vi.fn().mockReturnValue(gate);
+        const fn = vi.fn()
+            .mockRejectedValueOnce(new Error("boom"))
+            .mockResolvedValue("ok");
+
+        const p = withRetry(fn, { retries: 1, delayMs: 1000, sleep });
+
+        // Let the first rejection and the sleep() call settle, but leave the
+        // gate unresolved. If the implementation does not await sleep, it will
+        // already have made the second attempt by now.
+        await new Promise(r => setTimeout(r, 0));
         expect(sleep).toHaveBeenCalledWith(1000);
+        expect(fn).toHaveBeenCalledTimes(1);
+
+        release();
+        await expect(p).resolves.toBe("ok");
+        expect(fn).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not retry when shouldRetry returns false", async () => {
+        const sleep = vi.fn().mockResolvedValue(undefined);
+        const fn = vi.fn().mockRejectedValue(new Error("fatal"));
+        await expect(
+            withRetry(fn, { retries: 2, delayMs: 10, sleep, shouldRetry: () => false })
+        ).rejects.toThrow("fatal");
+        expect(fn).toHaveBeenCalledTimes(1);
+        expect(sleep).not.toHaveBeenCalled();
+    });
+
+    it("retries as usual when shouldRetry returns true", async () => {
+        const fn = vi.fn()
+            .mockRejectedValueOnce(new Error("boom"))
+            .mockResolvedValue("ok");
+        await expect(
+            withRetry(fn, { retries: 1, delayMs: 10, sleep: noSleep, shouldRetry: () => true })
+        ).resolves.toBe("ok");
+        expect(fn).toHaveBeenCalledTimes(2);
+    });
+
+    it("retries as before when shouldRetry is omitted (default behaviour)", async () => {
+        const fn = vi.fn().mockRejectedValue(new Error("always fails"));
+        await expect(withRetry(fn, { retries: 2, delayMs: 10, sleep: noSleep }))
+            .rejects.toThrow("always fails");
+        expect(fn).toHaveBeenCalledTimes(3);
+    });
+
+    it("treats a negative retries count as zero and still throws a real error", async () => {
+        const fn = vi.fn().mockRejectedValue(new Error("nope"));
+        await expect(withRetry(fn, { retries: -1, delayMs: 10, sleep: noSleep }))
+            .rejects.toThrow("nope");
+        expect(fn).toHaveBeenCalledTimes(1);
     });
 });
 ```
@@ -1277,17 +1326,27 @@ const defaultSleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 export async function withRetry<T>(
     fn: () => Promise<T>,
-    opts: { retries: number; delayMs: number; sleep?: (ms: number) => Promise<void> }
+    opts: {
+        retries: number;
+        delayMs: number;
+        sleep?: (ms: number) => Promise<void>;
+        shouldRetry?: (err: unknown) => boolean;
+    }
 ): Promise<T> {
     const sleep = opts.sleep ?? defaultSleep;
+    const shouldRetry = opts.shouldRetry ?? (() => true);
+    // A negative retry count would otherwise skip the loop entirely and
+    // `throw lastError` as `undefined`; clamp so at least one attempt runs.
+    const retries = Math.max(0, opts.retries);
     let lastError: unknown;
 
-    for (let attempt = 0; attempt <= opts.retries; attempt++) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
         try {
             return await fn();
         } catch (err) {
             lastError = err;
-            if (attempt < opts.retries) await sleep(opts.delayMs);
+            if (!shouldRetry(err)) throw err;
+            if (attempt < retries) await sleep(opts.delayMs);
         }
     }
     throw lastError;
@@ -1297,7 +1356,7 @@ export async function withRetry<T>(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/retry.test.ts`
-Expected: PASS — 4 tests.
+Expected: PASS — 8 tests.
 
 - [ ] **Step 5: Implement `native.ts`**
 
@@ -1314,6 +1373,16 @@ import type { BatchRequest, EngineId, Result } from "./types";
 export type NativeResponse =
     | { ok: true; results: Result[] }
     | { ok: false; error: string; retryAfterMs?: number };
+
+/** 4xx failures repeat identically on retry; 429 and everything else may not. */
+function isRetryable(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    const m = /\bHTTP (\d{3})\b/.exec(msg);
+    if (!m) return true;                 // network/parse error — one retry is worthwhile
+    const status = Number(m[1]);
+    if (status === 429) return true;     // rate limited — backoff then retry
+    return status < 400 || status >= 500; // retry 5xx, never other 4xx
+}
 
 export async function translateBatch(
     _: IpcMainInvokeEvent,
@@ -1334,7 +1403,7 @@ export async function translateBatch(
                 engine === "claude"
                     ? translateWithClaude(req, apiKey)
                     : translateWithGoogle(req),
-            { retries: 1, delayMs: 1000 }
+            { retries: 1, delayMs: 1000, shouldRetry: isRetryable }
         );
         return { ok: true, results };
     } catch (err) {
@@ -1349,7 +1418,7 @@ export async function translateBatch(
 - [ ] **Step 6: Run the full suite to confirm nothing regressed**
 
 Run: `npx vitest run`
-Expected: PASS — all suites from Tasks 1–6.
+Expected: PASS — all suites from Tasks 1–6 (66 tests).
 
 - [ ] **Step 7: Commit**
 
