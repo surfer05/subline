@@ -53,11 +53,24 @@ describe("shouldSkip", () => {
         expect(shouldSkip("́", false)).toBe(true);
     });
 
-    it("translates words with combining marks (café)", () => {
-        expect(shouldSkip("café", false)).toBe(false);
-    });
-
     it("skips Arabic-Indic digits", () => {
         expect(shouldSkip("١٢٣", false)).toBe(true);
+    });
+
+    // Real non-Latin text with combining marks must survive \p{M} stripping and still translate.
+    it("translates decomposed café (Latin with combining mark)", () => {
+        expect(shouldSkip("café", false)).toBe(false);
+    });
+
+    it("translates Devanagari script (has virama, category Mn)", () => {
+        expect(shouldSkip("नमस्ते", false)).toBe(false);
+    });
+
+    it("translates Thai script (has combining marks)", () => {
+        expect(shouldSkip("สวัสดี", false)).toBe(false);
+    });
+
+    it("translates Arabic script (non-Latin with no ASCII)", () => {
+        expect(shouldSkip("مرحبا", false)).toBe(false);
     });
 });
