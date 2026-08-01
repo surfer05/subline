@@ -971,11 +971,28 @@ describe("translateWithClaude", () => {
     });
 
     it("never includes the api key in a thrown error", async () => {
+        const key = "sk-secret-value-do-not-leak";
         const fetchImpl = vi.fn().mockResolvedValue({
             ok: false, status: 401, text: async () => "unauthorized"
         });
-        await expect(translateWithClaude(req, "sk-secret-value", fetchImpl as any))
-            .rejects.toThrow(expect.not.stringContaining("sk-secret-value") as any);
+
+        // NB: `.rejects.toThrow(expect.not.stringContaining(...))` does NOT work
+        // here — vitest applies the matcher to the Error object, not its message,
+        // so a negated string matcher passes unconditionally. Inspect the caught
+        // error explicitly instead.
+        let caught: unknown;
+        try {
+            await translateWithClaude(req, key, fetchImpl as any);
+        } catch (e) {
+            caught = e;
+        }
+
+        expect(caught).toBeInstanceOf(Error);
+        const err = caught as Error;
+        expect(err.message).toContain("401");
+        expect(err.message).not.toContain(key);
+        expect(err.stack ?? "").not.toContain(key);
+        expect(JSON.stringify(err, Object.getOwnPropertyNames(err))).not.toContain(key);
     });
 });
 ```
