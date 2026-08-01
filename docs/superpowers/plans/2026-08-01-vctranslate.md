@@ -146,6 +146,22 @@ describe("shouldSkip", () => {
     it("translates short but meaningful words", () => {
         expect(shouldSkip("да", false)).toBe(false);
     });
+
+    it("skips keycap emoji sequences", () => {
+        expect(shouldSkip("1️⃣2️⃣3️⃣", false)).toBe(true);
+    });
+
+    it("skips lone combining marks", () => {
+        expect(shouldSkip("́", false)).toBe(true);
+    });
+
+    it("translates words with combining marks (café)", () => {
+        expect(shouldSkip("café", false)).toBe(false);
+    });
+
+    it("skips Arabic-Indic digits", () => {
+        expect(shouldSkip("١٢٣", false)).toBe(true);
+    });
 });
 ```
 
@@ -173,9 +189,9 @@ export function shouldSkip(text: string, isOwnMessage: boolean): boolean {
         .replace(MENTION, "")
         .replace(URL, "")
         .replace(EMOJI, "")
-        // Anything left that is only digits, punctuation, or whitespace
+        // Anything left that is only digits, punctuation, whitespace, or combining marks
         // carries no translatable meaning.
-        .replace(/[\d\p{P}\p{S}\s]/gu, "");
+        .replace(/[\p{Nd}\p{P}\p{S}\p{M}\s]/gu, "");
 
     return stripped.length === 0;
 }

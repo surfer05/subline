@@ -12,9 +12,9 @@ export function shouldSkip(text: string, isOwnMessage: boolean): boolean {
         .replace(MENTION, "")
         .replace(URL, "")
         .replace(EMOJI, "")
-        // Anything left that is only digits, punctuation, or whitespace
+        // Anything left that is only digits, punctuation, whitespace, or combining marks
         // carries no translatable meaning.
-        .replace(/[\d\p{P}\p{S}\s]/gu, "");
+        .replace(/[\p{Nd}\p{P}\p{S}\p{M}\s]/gu, "");
 
     return stripped.length === 0;
 }
