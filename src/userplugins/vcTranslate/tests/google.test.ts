@@ -59,4 +59,24 @@ describe("translateWithGoogle", () => {
         const url = fetchImpl.mock.calls[0][0] as string;
         expect(url).toContain(encodeURIComponent("a&b c?"));
     });
+
+    it("throws when the detected-language field is not a string", async () => {
+        // Segments are valid but body[2] is a number. Without the shape guard
+        // this returns a Result with lang=123 instead of throwing, i.e. bogus
+        // data rendered as a real translation.
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => [[["hola", "orig"]], null, 123]
+        });
+        await expect(translateWithGoogle(req(["x"]), fetchImpl as any)).rejects.toThrow();
+    });
+
+    it("throws when the segments array is missing", async () => {
+        // body[0] is null rather than an array of segments.
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => [null, null, "es"]
+        });
+        await expect(translateWithGoogle(req(["x"]), fetchImpl as any)).rejects.toThrow();
+    });
 });
