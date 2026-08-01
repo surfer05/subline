@@ -26,11 +26,19 @@ function httpStatus(msg: string): number | undefined {
  * future one, or a dependency's error, need not be. Redact defensively.
  *
  * split/join rather than a regex: the key is arbitrary user input and must not
- * be interpreted as a pattern. Applied for any non-empty key, with no minimum
- * length, so there is no short-key hole.
+ * be interpreted as a pattern.
+ *
+ * No-op for an unset key. The blank check is `trim()`, not `length`: the google
+ * path passes "", and a whitespace-only key is not a secret but WOULD otherwise
+ * be a live separator — scrubbing on "   " would replace every three-space run
+ * in an unrelated message with [redacted]. Guarding on length alone leaves that
+ * hole open; splitting on "" would shred the message into single characters.
+ * A trimmed-blank key redacts nothing. Any other key, however short, is
+ * redacted in full — mangling a diagnostic beats leaking a credential, and the
+ * raw (untrimmed) value is what the header carries, so that is what we match.
  */
 function scrubKey(message: string, apiKey: string): string {
-    if (apiKey.length === 0) return message;
+    if (apiKey.trim().length === 0) return message;
     return message.split(apiKey).join("[redacted]");
 }
 

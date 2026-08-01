@@ -178,9 +178,20 @@ describe("translateBatch — api key safety", () => {
 
     it("does not redact anything when no api key is configured", async () => {
         // Guard against a scrubber that treats an empty key as a match and
-        // shreds every error message.
+        // shreds every error message into single characters.
         google.mockRejectedValue(new Error("google: HTTP 500"));
         const res = await run("google", "");
         expect((res as { error: string }).error).toBe("google: HTTP 500");
+    });
+
+    it("does not mangle an unrelated message when the key is whitespace-only", async () => {
+        // A whitespace-only key is not a secret, but it IS a live separator: a
+        // length-only blank check would replace every three-space run in this
+        // message with [redacted].
+        google.mockRejectedValue(new Error("google: HTTP 500   three   spaces"));
+        const res = await run("google", "   ");
+        const { error } = res as { error: string };
+        expect(error).toBe("google: HTTP 500   three   spaces");
+        expect(error).not.toContain("[redacted]");
     });
 });

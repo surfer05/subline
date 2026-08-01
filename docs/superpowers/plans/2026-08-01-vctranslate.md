@@ -339,7 +339,7 @@ const cache = new Map<string, StoredTranslation>();
 const listeners = new Set<() => void>();
 
 export function makeKey(messageId: string, lang: string, engine: string): string {
-    return `${messageId} ${lang} ${engine}`;
+    return `${messageId} ${lang} ${engine}`;
 }
 
 export function getTranslation(key: string): StoredTranslation | undefined {
@@ -362,7 +362,7 @@ export function setTranslation(key: string, value: StoredTranslation): void {
 }
 
 export function invalidateMessage(messageId: string): void {
-    const prefix = `${messageId} `;
+    const prefix = `${messageId} `;
     for (const key of [...cache.keys()]) {
         if (key.startsWith(prefix)) cache.delete(key);
     }
@@ -1741,10 +1741,21 @@ describe("translateBatch — api key safety", () => {
 
     it("does not redact anything when no api key is configured", async () => {
         // Guard against a scrubber that treats an empty key as a match and
-        // shreds every error message.
+        // shreds every error message into single characters.
         google.mockRejectedValue(new Error("google: HTTP 500"));
         const res = await run("google", "");
         expect((res as { error: string }).error).toBe("google: HTTP 500");
+    });
+
+    it("does not mangle an unrelated message when the key is whitespace-only", async () => {
+        // A whitespace-only key is not a secret, but it IS a live separator: a
+        // length-only blank check would replace every three-space run in this
+        // message with [redacted].
+        google.mockRejectedValue(new Error("google: HTTP 500   three   spaces"));
+        const res = await run("google", "   ");
+        const { error } = res as { error: string };
+        expect(error).toBe("google: HTTP 500   three   spaces");
+        expect(error).not.toContain("[redacted]");
     });
 });
 ```
@@ -1780,11 +1791,19 @@ function httpStatus(msg: string): number | undefined {
  * future one, or a dependency's error, need not be. Redact defensively.
  *
  * split/join rather than a regex: the key is arbitrary user input and must not
- * be interpreted as a pattern. Applied for any non-empty key, with no minimum
- * length, so there is no short-key hole.
+ * be interpreted as a pattern.
+ *
+ * No-op for an unset key. The blank check is `trim()`, not `length`: the google
+ * path passes "", and a whitespace-only key is not a secret but WOULD otherwise
+ * be a live separator — scrubbing on "   " would replace every three-space run
+ * in an unrelated message with [redacted]. Guarding on length alone leaves that
+ * hole open; splitting on "" would shred the message into single characters.
+ * A trimmed-blank key redacts nothing. Any other key, however short, is
+ * redacted in full — mangling a diagnostic beats leaking a credential, and the
+ * raw (untrimmed) value is what the header carries, so that is what we match.
  */
 function scrubKey(message: string, apiKey: string): string {
-    if (apiKey.length === 0) return message;
+    if (apiKey.trim().length === 0) return message;
     return message.split(apiKey).join("[redacted]");
 }
 
