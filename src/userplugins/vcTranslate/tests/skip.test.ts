@@ -57,7 +57,10 @@ describe("shouldSkip", () => {
         expect(shouldSkip("١٢٣", false)).toBe(true);
     });
 
-    // Real non-Latin text with combining marks must survive \p{M} stripping and still translate.
+    // Real non-Latin text must survive the strip pass and still translate.
+    // The first three cases carry category-M characters and so exercise \p{M}
+    // directly; the Arabic case has none — it guards the non-Latin/no-ASCII
+    // path in general. Each test's own title says which it is.
     it("translates decomposed café (Latin with combining mark)", () => {
         expect(shouldSkip("café", false)).toBe(false);
     });

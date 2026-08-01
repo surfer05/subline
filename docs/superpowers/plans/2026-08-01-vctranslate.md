@@ -70,9 +70,16 @@ export interface BatchRequest {
     targetLang: string;
 }
 
+// `failed` is the per-message failure variant: it lets a batch return a real
+// answer for the messages that worked and an explicit marker for the ones that
+// did not, instead of the whole batch being all-or-nothing (or, worse, a
+// message silently vanishing from the results with no marker at all — the
+// renderer would then show nothing forever and re-request it on every open).
+// It mirrors `StoredTranslation`'s `{ failed: true }` shape in store.ts.
 export type Result =
     | { id: string; lang: string; text: string; skip: false }
-    | { id: string; skip: true };
+    | { id: string; skip: true }
+    | { id: string; failed: true };
 
 export const ENGINE_CAPS: Record<EngineId, { supportsContext: boolean }> = {
     google: { supportsContext: false },
@@ -159,9 +166,12 @@ describe("shouldSkip", () => {
         expect(shouldSkip("١٢٣", false)).toBe(true);
     });
 
-    // Real non-Latin text with combining marks must survive \p{M} stripping and still translate.
+    // Real non-Latin text must survive the strip pass and still translate.
+    // The first three cases carry category-M characters and so exercise \p{M}
+    // directly; the Arabic case has none — it guards the non-Latin/no-ASCII
+    // path in general. Each test's own title says which it is.
     it("translates decomposed café (Latin with combining mark)", () => {
-        expect(shouldSkip("café", false)).toBe(false);
+        expect(shouldSkip("café", false)).toBe(false);
     });
 
     it("translates Devanagari script (has virama, category Mn)", () => {
@@ -231,7 +241,7 @@ git commit -m "feat(vcTranslate): add shared types and message skip rules"
 - Create: `src/userplugins/vcTranslate/tests/store.test.ts`
 
 **Interfaces:**
-- Consumes: `Result` from `types.ts`.
+- Consumes: nothing.
 - Produces: `makeKey(messageId, lang, engine): string`, `getTranslation(key): StoredTranslation | undefined`, `setTranslation(key, value): void`, `invalidateMessage(messageId): void`, `subscribe(fn: () => void): () => void`, `clearStore(): void`, and `type StoredTranslation = { lang: string; text: string } | { failed: true }`.
 
 The store doubles as the re-render trigger: translations arrive asynchronously, so the accessory component subscribes and re-renders when its entry lands.
@@ -611,6 +621,14 @@ export function createBatcher(opts: BatcherOptions): Batcher {
                 flushChannel(msg.channelId);
                 return;
             }
+            // DELIBERATE: a FIXED window from the first message of a burst, not
+            // a sliding per-message reset. Only arm the timer when none is
+            // running; a later message in the same burst must not push the
+            // deadline back. A sliding debounce would never fire while a channel
+            // stays active, so translations would appear only once everyone
+            // stopped talking — the opposite of what this plugin is for. The
+            // fixed window guarantees a flush within debounceMs of the first
+            // queued message. Do not "fix" this into a sliding debounce.
             if (s.timer === null) {
                 s.timer = setTimeout(() => flushChannel(msg.channelId), opts.debounceMs);
             }
@@ -717,9 +735,14 @@ describe("translateWithGoogle", () => {
         await expect(translateWithGoogle(req(["hola"]), fetchImpl as any)).rejects.toThrow();
     });
 
-    it("throws on an unexpected response shape rather than returning garbage", async () => {
+    // The shape guards below are per-MESSAGE failures, not whole-request ones:
+    // they mark that message failed rather than returning garbage for it, and
+    // leave the rest of the batch alone. `failed: true` is the assertion that
+    // matters — a bogus translation must never come back in its place.
+    it("marks a message failed on an unexpected response shape rather than returning garbage", async () => {
         const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ error: "nope" }) });
-        await expect(translateWithGoogle(req(["hola"]), fetchImpl as any)).rejects.toThrow();
+        await expect(translateWithGoogle(req(["hola"]), fetchImpl as any))
+            .resolves.toEqual([{ id: "0", failed: true }]);
     });
 
     it("url-encodes the message text", async () => {
@@ -729,35 +752,112 @@ describe("translateWithGoogle", () => {
         expect(url).toContain(encodeURIComponent("a&b c?"));
     });
 
-    it("throws when the detected-language field is not a string", async () => {
+    it("marks a message failed when the detected-language field is not a string", async () => {
         // Segments are valid but body[2] is a number. Without the shape guard
-        // this returns a Result with lang=123 instead of throwing, i.e. bogus
-        // data rendered as a real translation.
+        // this returns a Result with lang=123, i.e. bogus data rendered as a
+        // real translation.
         const fetchImpl = vi.fn().mockResolvedValue({
             ok: true,
             json: async () => [[["hola", "orig"]], null, 123]
         });
-        await expect(translateWithGoogle(req(["x"]), fetchImpl as any)).rejects.toThrow();
+        await expect(translateWithGoogle(req(["x"]), fetchImpl as any))
+            .resolves.toEqual([{ id: "0", failed: true }]);
     });
 
-    it("throws when the segments array is missing", async () => {
+    it("marks a message failed when the segments array is missing", async () => {
         // body[0] is null rather than an array of segments.
         const fetchImpl = vi.fn().mockResolvedValue({
             ok: true,
             json: async () => [null, null, "es"]
         });
-        await expect(translateWithGoogle(req(["x"]), fetchImpl as any)).rejects.toThrow();
+        await expect(translateWithGoogle(req(["x"]), fetchImpl as any))
+            .resolves.toEqual([{ id: "0", failed: true }]);
     });
 
-    it("throws when the response is an object rather than an array", async () => {
+    it("marks a message failed when the response is an object rather than an array", async () => {
         // A numeric-keyed object satisfies body[0] and body[2] but is not the
         // array wrapper the endpoint contracts for. Without the Array.isArray(body)
-        // guard this returns a bogus translation instead of throwing.
+        // guard this returns a bogus translation {lang:"es",text:"hola"}.
         const fetchImpl = vi.fn().mockResolvedValue({
             ok: true,
             json: async () => JSON.parse('{"0":[["hola","orig"]],"2":"es"}')
         });
-        await expect(translateWithGoogle(req(["x"]), fetchImpl as any)).rejects.toThrow();
+        await expect(translateWithGoogle(req(["x"]), fetchImpl as any))
+            .resolves.toEqual([{ id: "0", failed: true }]);
+    });
+
+    it("degrades only the failing message, keeping the rest of the batch", async () => {
+        // Without Promise.allSettled one bad message rejects the whole chunk,
+        // so the two good translations are thrown away and native.ts retries
+        // all three.
+        const fetchImpl = vi.fn()
+            .mockResolvedValueOnce(okResponse("one", "es"))
+            .mockResolvedValueOnce({ ok: true, json: async () => [[["   ", "orig"]], null, "es"] })
+            .mockResolvedValueOnce(okResponse("three", "es"));
+
+        const results = await translateWithGoogle(req(["uno", "dos", "tres"]), fetchImpl as any);
+
+        expect(results).toEqual([
+            { id: "0", lang: "es", text: "one", skip: false },
+            { id: "1", failed: true },
+            { id: "2", lang: "es", text: "three", skip: false }
+        ]);
+    });
+
+    it("still throws on a non-OK status even when other messages succeeded", async () => {
+        // A transport failure is NOT per-message: it must propagate so
+        // native.ts can retry or classify the whole request.
+        const fetchImpl = vi.fn()
+            .mockResolvedValueOnce(okResponse("one", "es"))
+            .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) });
+
+        await expect(translateWithGoogle(req(["uno", "dos"]), fetchImpl as any))
+            .rejects.toThrow(/503/);
+    });
+
+    it("caps concurrency at 4 and returns results in request order", async () => {
+        // Every other test in this file uses <= 3 messages, which makes the
+        // chunk loop degenerate: with a single chunk, CONCURRENCY and the
+        // push order are both unobservable. Nine messages force three chunks.
+        const texts = Array.from({ length: 9 }, (_, i) => `m${i}`);
+
+        let inFlight = 0;
+        let maxInFlight = 0;
+        let started = 0;
+        const pending: (() => void)[] = [];
+
+        const fetchImpl = vi.fn().mockImplementation(() => {
+            const n = started++;
+            inFlight++;
+            maxInFlight = Math.max(maxInFlight, inFlight);
+            // Deferred: nothing resolves until the test releases it, so the
+            // requests genuinely overlap instead of completing one at a time.
+            return new Promise(resolve => {
+                pending.push(() => {
+                    inFlight--;
+                    resolve(okResponse(`t${n}`, "es") as any);
+                });
+            });
+        });
+
+        let done = false;
+        const p = translateWithGoogle(req(texts), fetchImpl as any)
+            .then(r => { done = true; return r; });
+
+        for (let round = 0; round < 20 && !done; round++) {
+            await new Promise(r => setTimeout(r, 0));
+            // Release in REVERSE start order, so completion order differs from
+            // request order and the output ordering cannot come from timing.
+            pending.splice(0, pending.length).reverse().forEach(release => release());
+        }
+
+        const results = await p;
+        expect(results.map(r => r.id)).toEqual(["0", "1", "2", "3", "4", "5", "6", "7", "8"]);
+        expect(fetchImpl).toHaveBeenCalledTimes(9);
+        expect(maxInFlight).toBeLessThanOrEqual(4);
+        // And the cap is actually reached, so the assertion above is not
+        // passing merely because requests were serialised.
+        expect(maxInFlight).toBe(4);
     });
 });
 ```
@@ -775,6 +875,17 @@ import type { BatchRequest, Result } from "../types";
 const ENDPOINT = "https://translate.googleapis.com/translate_a/single";
 const CONCURRENCY = 4;
 
+/**
+ * A failure that concerns exactly ONE message — a garbled body, an empty
+ * translation. It degrades that message to `{ failed: true }` and leaves the
+ * rest of the batch intact.
+ *
+ * Transport-level failures (a non-OK HTTP status) are deliberately NOT of this
+ * kind: they mean the endpoint is refusing us, so they propagate out of
+ * translateWithGoogle and let native.ts retry or classify the whole request.
+ */
+class MessageError extends Error {}
+
 async function translateOne(
     msg: { id: string; text: string },
     targetLang: string,
@@ -790,7 +901,7 @@ async function translateOne(
     const body = await res.json();
     // Expected: [[["translated","original",...], ...], null, "<detected lang>"]
     if (!Array.isArray(body) || !Array.isArray(body[0]) || typeof body[2] !== "string") {
-        throw new Error("google: unexpected response shape");
+        throw new MessageError("google: unexpected response shape");
     }
 
     const detected = body[2] as string;
@@ -801,7 +912,7 @@ async function translateOne(
         .join("")
         .trim();
 
-    if (text.length === 0) throw new Error("google: empty translation");
+    if (text.length === 0) throw new MessageError("google: empty translation");
 
     return { id: msg.id, lang: detected, text, skip: false };
 }
@@ -813,10 +924,23 @@ export async function translateWithGoogle(
     const results: Result[] = [];
     for (let i = 0; i < req.messages.length; i += CONCURRENCY) {
         const slice = req.messages.slice(i, i + CONCURRENCY);
-        const settled = await Promise.all(
+        // allSettled, not all: one bad message must not discard the nine good
+        // translations alongside it (and make native.ts retry all ten).
+        const settled = await Promise.allSettled(
             slice.map(m => translateOne(m, req.targetLang, fetchImpl))
         );
-        results.push(...settled);
+        for (let j = 0; j < settled.length; j++) {
+            const outcome = settled[j];
+            if (outcome.status === "fulfilled") {
+                results.push(outcome.value);
+            } else if (outcome.reason instanceof MessageError) {
+                results.push({ id: slice[j].id, failed: true });
+            } else {
+                // Whole-request failure (non-OK HTTP status): rethrow so
+                // native.ts can retry or classify it.
+                throw outcome.reason;
+            }
+        }
     }
     return results;
 }
@@ -825,7 +949,7 @@ export async function translateWithGoogle(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/google.test.ts`
-Expected: PASS — 7 tests.
+Expected: PASS — 13 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -972,7 +1096,66 @@ describe("parseClaudeResponse", () => {
                 })
             }]
         };
-        expect(parseClaudeResponse(body, req).map(r => r.id)).toEqual(["10"]);
+        const results = parseClaudeResponse(body, req);
+        // "999" was never requested and must not appear at all. "11" WAS
+        // requested and is absent from the response, so it comes back as an
+        // explicit failure rather than being missing.
+        expect(results.map(r => r.id)).not.toContain("999");
+        expect(results).toEqual([
+            { id: "10", lang: "ja", text: "ok", skip: false },
+            { id: "11", failed: true }
+        ]);
+    });
+
+    it("marks a requested id absent from the response as failed", () => {
+        const body = {
+            content: [{
+                type: "text",
+                text: JSON.stringify({
+                    translations: [{ id: "10", lang: "ja", text: "ok", skip: false }]
+                })
+            }]
+        };
+        // Without the unresolved-id pass "11" would simply vanish: the renderer
+        // would show nothing for it forever and catch-up would re-request it on
+        // every channel open.
+        expect(parseClaudeResponse(body, req)).toContainEqual({ id: "11", failed: true });
+    });
+
+    it("marks a skip:false row with empty text as failed rather than dropping it", () => {
+        const body = {
+            content: [{
+                type: "text",
+                text: JSON.stringify({
+                    translations: [
+                        { id: "10", lang: "ja", text: "ok", skip: false },
+                        { id: "11", lang: "en", text: "   ", skip: false }
+                    ]
+                })
+            }]
+        };
+        expect(parseClaudeResponse(body, req)).toEqual([
+            { id: "10", lang: "ja", text: "ok", skip: false },
+            { id: "11", failed: true }
+        ]);
+    });
+
+    it("marks a row with a non-string lang as failed rather than dropping it", () => {
+        const body = {
+            content: [{
+                type: "text",
+                text: JSON.stringify({
+                    translations: [
+                        { id: "10", lang: "ja", text: "ok", skip: false },
+                        { id: "11", lang: 42, text: "hello", skip: false }
+                    ]
+                })
+            }]
+        };
+        expect(parseClaudeResponse(body, req)).toEqual([
+            { id: "10", lang: "ja", text: "ok", skip: false },
+            { id: "11", failed: true }
+        ]);
     });
 
     it("throws when the response contains no text block", () => {
@@ -1158,8 +1341,20 @@ export function parseClaudeResponse(body: unknown, req: BatchRequest): Result[] 
             results.push({ id: r.id, skip: true });
             continue;
         }
+        // Unusable row: a non-string lang/text, or skip:false with empty text.
+        // These used to be dropped silently; the id is now left unresolved and
+        // picked up by the failed-marker pass below, so the renderer gets an
+        // explicit failure instead of a message that never resolves.
         if (typeof r.lang !== "string" || typeof r.text !== "string" || r.text.trim() === "") continue;
         results.push({ id: r.id, lang: r.lang, text: r.text, skip: false });
+    }
+
+    // Every requested id must come back with SOME verdict. An id the model
+    // omitted, hallucinated a bad row for, or that we rejected above gets an
+    // explicit failure marker rather than vanishing.
+    const resolved = new Set(results.map(r => r.id));
+    for (const m of req.messages) {
+        if (!resolved.has(m.id)) results.push({ id: m.id, failed: true });
     }
 
     return results;
@@ -1197,7 +1392,7 @@ export async function translateWithClaude(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/claude.test.ts`
-Expected: PASS — 12 tests.
+Expected: PASS — 17 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1214,6 +1409,7 @@ git commit -m "feat(vcTranslate): add Claude Haiku engine with structured output
 - Create: `src/userplugins/vcTranslate/native.ts`
 - Create: `src/userplugins/vcTranslate/retry.ts`
 - Create: `src/userplugins/vcTranslate/tests/retry.test.ts`
+- Create: `src/userplugins/vcTranslate/tests/native.test.ts`
 
 **Interfaces:**
 - Consumes: `translateWithGoogle`, `translateWithClaude`, `EngineId`, `BatchRequest`, `Result`.
@@ -1358,9 +1554,202 @@ export async function withRetry<T>(
 Run: `npx vitest run tests/retry.test.ts`
 Expected: PASS — 8 tests.
 
-- [ ] **Step 5: Implement `native.ts`**
+- [ ] **Step 5: Write the failing test for the native bridge**
 
-No test file — this module is a thin dispatcher whose two branches are already covered by Tasks 4, 5, and the retry suite. It is verified in the Task 10 manual pass.
+`native.ts` needs its own suite. Its retry classifier, its JSON.parse failure path and its `retryAfterMs` signal are branches no other test file reaches — mutating `isRetryable`'s final line to `return true` left the Task 1-6 suite entirely green. `translateBatch` calls the engines directly, so the engine modules are the mocking seam; the `IpcMainInvokeEvent` first parameter is cast rather than stubbed so electron stays out of this package's dependency graph.
+
+`tests/native.test.ts`:
+
+```ts
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Mock at the module boundary: translateBatch calls the engines directly, so
+// this is the only seam. Without it these tests would hit the network.
+vi.mock("../engines/google", () => ({ translateWithGoogle: vi.fn() }));
+vi.mock("../engines/claude", () => ({ translateWithClaude: vi.fn() }));
+
+import { translateWithClaude } from "../engines/claude";
+import { translateWithGoogle } from "../engines/google";
+import { translateBatch } from "../native";
+import type { BatchRequest, Result } from "../types";
+
+const google = vi.mocked(translateWithGoogle);
+const claude = vi.mocked(translateWithClaude);
+
+const req: BatchRequest = {
+    messages: [{ id: "1", author: "ana", text: "hola" }],
+    context: [],
+    targetLang: "en"
+};
+const reqJson = JSON.stringify(req);
+
+// Vencord injects the IpcMainInvokeEvent; nothing in translateBatch touches it,
+// so a bare cast keeps electron out of this package's dependency graph.
+const EV = {} as never;
+
+/**
+ * Drive translateBatch to completion under fake timers so the 1000ms retry
+ * backoff does not make every retry test take a real second.
+ */
+async function run(engine: "google" | "claude", apiKey: string, json = reqJson) {
+    const p = translateBatch(EV, engine, apiKey, json);
+    const settled = Promise.allSettled([p]);
+    await vi.runAllTimersAsync();
+    const [outcome] = await settled;
+    if (outcome.status === "rejected") throw outcome.reason;
+    return outcome.value;
+}
+
+beforeEach(() => {
+    vi.useFakeTimers();
+    google.mockReset();
+    claude.mockReset();
+});
+
+afterEach(() => {
+    vi.useRealTimers();
+});
+
+describe("translateBatch — request payload", () => {
+    it("rejects a malformed request payload without calling any engine", async () => {
+        const res = await run("google", "", "not json");
+        expect(res).toEqual({ ok: false, error: "bad request payload" });
+        expect(google).not.toHaveBeenCalled();
+        expect(claude).not.toHaveBeenCalled();
+    });
+});
+
+describe("translateBatch — success", () => {
+    it("passes the engine's results through unchanged", async () => {
+        const results: Result[] = [
+            { id: "1", lang: "es", text: "hello", skip: false },
+            { id: "2", skip: true },
+            { id: "3", failed: true }
+        ];
+        google.mockResolvedValue(results);
+
+        const res = await run("google", "");
+
+        expect(res).toEqual({ ok: true, results });
+        expect(google).toHaveBeenCalledTimes(1);
+        expect(google.mock.calls[0][0]).toEqual(req);
+    });
+
+    it("dispatches to the claude engine with the api key when selected", async () => {
+        claude.mockResolvedValue([{ id: "1", skip: true }]);
+
+        const res = await run("claude", "sk-test");
+
+        expect(res).toEqual({ ok: true, results: [{ id: "1", skip: true }] });
+        expect(claude).toHaveBeenCalledTimes(1);
+        expect(claude.mock.calls[0][1]).toBe("sk-test");
+        expect(google).not.toHaveBeenCalled();
+    });
+});
+
+describe("translateBatch — isRetryable classifier boundaries", () => {
+    // One call = the failure was classified as unrecoverable and not retried.
+    // Two calls = classified as retryable, so withRetry made its one retry.
+    it("does not retry a 401 — the same wrong key fails identically", async () => {
+        claude.mockRejectedValue(new Error("claude: HTTP 401"));
+        const res = await run("claude", "bad");
+        expect(claude).toHaveBeenCalledTimes(1);
+        expect(res).toEqual({ ok: false, error: "claude: HTTP 401", retryAfterMs: undefined });
+    });
+
+    it("does not retry a 400 or a 403 either", async () => {
+        claude.mockRejectedValue(new Error("claude: HTTP 400"));
+        await run("claude", "k");
+        expect(claude).toHaveBeenCalledTimes(1);
+
+        claude.mockReset();
+        claude.mockRejectedValue(new Error("claude: HTTP 403"));
+        await run("claude", "k");
+        expect(claude).toHaveBeenCalledTimes(1);
+    });
+
+    it("retries a 429", async () => {
+        claude.mockRejectedValue(new Error("claude: HTTP 429"));
+        await run("claude", "k");
+        expect(claude).toHaveBeenCalledTimes(2);
+    });
+
+    it("retries a 500", async () => {
+        google.mockRejectedValue(new Error("google: HTTP 500"));
+        await run("google", "");
+        expect(google).toHaveBeenCalledTimes(2);
+    });
+
+    it("retries a 503", async () => {
+        google.mockRejectedValue(new Error("google: HTTP 503"));
+        await run("google", "");
+        expect(google).toHaveBeenCalledTimes(2);
+    });
+
+    it("retries a parse error that carries no HTTP status", async () => {
+        claude.mockRejectedValue(new Error("claude: response was not valid JSON"));
+        await run("claude", "k");
+        expect(claude).toHaveBeenCalledTimes(2);
+    });
+
+    it("retries a bare network error", async () => {
+        google.mockRejectedValue(new Error("fetch failed"));
+        await run("google", "");
+        expect(google).toHaveBeenCalledTimes(2);
+    });
+});
+
+describe("translateBatch — retryAfterMs", () => {
+    it("signals a 30s pause on a rate-limit failure", async () => {
+        claude.mockRejectedValue(new Error("claude: HTTP 429"));
+        const res = await run("claude", "k");
+        expect(res).toEqual({ ok: false, error: "claude: HTTP 429", retryAfterMs: 30_000 });
+    });
+
+    it("leaves retryAfterMs undefined for a non-rate-limit failure", async () => {
+        claude.mockRejectedValue(new Error("claude: HTTP 401"));
+        const res = await run("claude", "k");
+        expect(res.ok).toBe(false);
+        expect((res as { retryAfterMs?: number }).retryAfterMs).toBeUndefined();
+    });
+
+    it("does not treat a bare 429 without the HTTP prefix as a rate limit", async () => {
+        // isRetryable and the retryAfterMs signal must agree on what a message
+        // means; both use the strict /\bHTTP (\d{3})\b/ extractor. A message
+        // that merely contains the digits 429 is not a rate limit.
+        google.mockRejectedValue(new Error("google: 429 tokens over budget"));
+        const res = await run("google", "");
+        expect((res as { retryAfterMs?: number }).retryAfterMs).toBeUndefined();
+    });
+});
+
+describe("translateBatch — api key safety", () => {
+    it("never returns the api key in the error string", async () => {
+        // The existing canary in claude.test.ts only covers the message
+        // claude.ts itself throws. This one covers the value that actually
+        // crosses the IPC boundary into the renderer: translateBatch echoes
+        // err.message verbatim, so any engine (or a future one, or a
+        // dependency) that puts the key in an error would leak it.
+        const key = "sk-ant-secret-value-do-not-leak";
+        claude.mockRejectedValue(new Error(`claude: HTTP 401 for key ${key}`));
+
+        const res = await run("claude", key);
+
+        expect(res.ok).toBe(false);
+        expect((res as { error: string }).error).not.toContain(key);
+    });
+
+    it("does not redact anything when no api key is configured", async () => {
+        // Guard against a scrubber that treats an empty key as a match and
+        // shreds every error message.
+        google.mockRejectedValue(new Error("google: HTTP 500"));
+        const res = await run("google", "");
+        expect((res as { error: string }).error).toBe("google: HTTP 500");
+    });
+});
+```
+
+- [ ] **Step 6: Implement `native.ts`**
 
 ```ts
 import type { IpcMainInvokeEvent } from "electron";
@@ -1374,14 +1763,37 @@ export type NativeResponse =
     | { ok: true; results: Result[] }
     | { ok: false; error: string; retryAfterMs?: number };
 
+/**
+ * Both engines report transport failures as `<engine>: HTTP <status>`.
+ * One shared, strict extractor so the retry decision and the rate-limit
+ * signal can never disagree about what a message means.
+ */
+function httpStatus(msg: string): number | undefined {
+    const m = /\bHTTP (\d{3})\b/.exec(msg);
+    return m ? Number(m[1]) : undefined;
+}
+
+/**
+ * The `error` string below crosses the IPC boundary into the renderer, where it
+ * may be logged or displayed. It is whatever an engine threw, so nothing
+ * structurally stops a key ending up in it — today's engines are clean, but a
+ * future one, or a dependency's error, need not be. Redact defensively.
+ *
+ * split/join rather than a regex: the key is arbitrary user input and must not
+ * be interpreted as a pattern. Applied for any non-empty key, with no minimum
+ * length, so there is no short-key hole.
+ */
+function scrubKey(message: string, apiKey: string): string {
+    if (apiKey.length === 0) return message;
+    return message.split(apiKey).join("[redacted]");
+}
+
 /** 4xx failures repeat identically on retry; 429 and everything else may not. */
 function isRetryable(err: unknown): boolean {
-    const msg = err instanceof Error ? err.message : String(err);
-    const m = /\bHTTP (\d{3})\b/.exec(msg);
-    if (!m) return true;                 // network/parse error — one retry is worthwhile
-    const status = Number(m[1]);
-    if (status === 429) return true;     // rate limited — backoff then retry
-    return status < 400 || status >= 500; // retry 5xx, never other 4xx
+    const status = httpStatus(err instanceof Error ? err.message : String(err));
+    if (status === undefined) return true; // network/parse error — one retry is worthwhile
+    if (status === 429) return true;       // rate limited — backoff then retry
+    return status < 400 || status >= 500;  // retry 5xx, never other 4xx
 }
 
 export async function translateBatch(
@@ -1407,23 +1819,25 @@ export async function translateBatch(
         );
         return { ok: true, results };
     } catch (err) {
-        const message = err instanceof Error ? err.message : "unknown error";
-        // Surface rate limiting so the renderer can pause the queue.
-        const retryAfterMs = /\b429\b/.test(message) ? 30_000 : undefined;
+        const raw = err instanceof Error ? err.message : "unknown error";
+        const message = scrubKey(raw, apiKey);
+        // Surface rate limiting so the renderer can pause the queue. Same
+        // extractor as isRetryable, so the two can never disagree.
+        const retryAfterMs = httpStatus(message) === 429 ? 30_000 : undefined;
         return { ok: false, error: message, retryAfterMs };
     }
 }
 ```
 
-- [ ] **Step 6: Run the full suite to confirm nothing regressed**
+- [ ] **Step 7: Run the full suite to confirm nothing regressed**
 
 Run: `npx vitest run`
-Expected: PASS — all suites from Tasks 1–6 (66 tests).
+Expected: PASS — all suites from Tasks 1–6 (87 tests).
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/userplugins/vcTranslate/native.ts src/userplugins/vcTranslate/retry.ts src/userplugins/vcTranslate/tests/retry.test.ts
+git add src/userplugins/vcTranslate/native.ts src/userplugins/vcTranslate/retry.ts src/userplugins/vcTranslate/tests/retry.test.ts src/userplugins/vcTranslate/tests/native.test.ts
 git commit -m "feat(vcTranslate): add native IPC bridge with retry and rate-limit signalling"
 ```
 

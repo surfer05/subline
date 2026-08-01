@@ -105,8 +105,20 @@ export function parseClaudeResponse(body: unknown, req: BatchRequest): Result[] 
             results.push({ id: r.id, skip: true });
             continue;
         }
+        // Unusable row: a non-string lang/text, or skip:false with empty text.
+        // These used to be dropped silently; the id is now left unresolved and
+        // picked up by the failed-marker pass below, so the renderer gets an
+        // explicit failure instead of a message that never resolves.
         if (typeof r.lang !== "string" || typeof r.text !== "string" || r.text.trim() === "") continue;
         results.push({ id: r.id, lang: r.lang, text: r.text, skip: false });
+    }
+
+    // Every requested id must come back with SOME verdict. An id the model
+    // omitted, hallucinated a bad row for, or that we rejected above gets an
+    // explicit failure marker rather than vanishing.
+    const resolved = new Set(results.map(r => r.id));
+    for (const m of req.messages) {
+        if (!resolved.has(m.id)) results.push({ id: m.id, failed: true });
     }
 
     return results;

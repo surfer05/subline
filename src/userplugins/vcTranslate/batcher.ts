@@ -74,6 +74,14 @@ export function createBatcher(opts: BatcherOptions): Batcher {
                 flushChannel(msg.channelId);
                 return;
             }
+            // DELIBERATE: a FIXED window from the first message of a burst, not
+            // a sliding per-message reset. Only arm the timer when none is
+            // running; a later message in the same burst must not push the
+            // deadline back. A sliding debounce would never fire while a channel
+            // stays active, so translations would appear only once everyone
+            // stopped talking — the opposite of what this plugin is for. The
+            // fixed window guarantees a flush within debounceMs of the first
+            // queued message. Do not "fix" this into a sliding debounce.
             if (s.timer === null) {
                 s.timer = setTimeout(() => flushChannel(msg.channelId), opts.debounceMs);
             }

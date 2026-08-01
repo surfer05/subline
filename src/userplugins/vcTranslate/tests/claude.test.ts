@@ -115,7 +115,66 @@ describe("parseClaudeResponse", () => {
                 })
             }]
         };
-        expect(parseClaudeResponse(body, req).map(r => r.id)).toEqual(["10"]);
+        const results = parseClaudeResponse(body, req);
+        // "999" was never requested and must not appear at all. "11" WAS
+        // requested and is absent from the response, so it comes back as an
+        // explicit failure rather than being missing.
+        expect(results.map(r => r.id)).not.toContain("999");
+        expect(results).toEqual([
+            { id: "10", lang: "ja", text: "ok", skip: false },
+            { id: "11", failed: true }
+        ]);
+    });
+
+    it("marks a requested id absent from the response as failed", () => {
+        const body = {
+            content: [{
+                type: "text",
+                text: JSON.stringify({
+                    translations: [{ id: "10", lang: "ja", text: "ok", skip: false }]
+                })
+            }]
+        };
+        // Without the unresolved-id pass "11" would simply vanish: the renderer
+        // would show nothing for it forever and catch-up would re-request it on
+        // every channel open.
+        expect(parseClaudeResponse(body, req)).toContainEqual({ id: "11", failed: true });
+    });
+
+    it("marks a skip:false row with empty text as failed rather than dropping it", () => {
+        const body = {
+            content: [{
+                type: "text",
+                text: JSON.stringify({
+                    translations: [
+                        { id: "10", lang: "ja", text: "ok", skip: false },
+                        { id: "11", lang: "en", text: "   ", skip: false }
+                    ]
+                })
+            }]
+        };
+        expect(parseClaudeResponse(body, req)).toEqual([
+            { id: "10", lang: "ja", text: "ok", skip: false },
+            { id: "11", failed: true }
+        ]);
+    });
+
+    it("marks a row with a non-string lang as failed rather than dropping it", () => {
+        const body = {
+            content: [{
+                type: "text",
+                text: JSON.stringify({
+                    translations: [
+                        { id: "10", lang: "ja", text: "ok", skip: false },
+                        { id: "11", lang: 42, text: "hello", skip: false }
+                    ]
+                })
+            }]
+        };
+        expect(parseClaudeResponse(body, req)).toEqual([
+            { id: "10", lang: "ja", text: "ok", skip: false },
+            { id: "11", failed: true }
+        ]);
     });
 
     it("throws when the response contains no text block", () => {
