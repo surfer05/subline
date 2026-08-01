@@ -44,13 +44,13 @@ export function buildPrompt(req: BatchRequest): string {
 
     if (req.context.length > 0) {
         parts.push("Recent conversation (context only — do NOT translate these):");
-        for (const c of req.context) parts.push(`${c.author}: ${c.text}`);
+        for (const c of req.context) parts.push(`${JSON.stringify(c.author)}: ${JSON.stringify(c.text)}`);
         parts.push("");
     }
 
     parts.push("Messages to translate:");
     for (const m of req.messages) {
-        parts.push(`[id=${m.id}] ${m.author}: ${m.text}`);
+        parts.push(`[id=${m.id}] ${JSON.stringify(m.author)}: ${JSON.stringify(m.text)}`);
     }
 
     return parts.join("\n");
