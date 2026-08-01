@@ -25,6 +25,24 @@ const SCHEMA = {
     additionalProperties: false
 } as const;
 
+// Built via String.fromCharCode/RegExp constructor rather than a literal or
+// \u-escaped character class: typed Unicode line/paragraph separators are
+// easily mangled in transit (editors, chat, copy-paste), and a silently
+// normalised character here would make the injection guard below a no-op.
+const LINE_SEPS = new RegExp(
+    "[" + String.fromCharCode(0x2028) + String.fromCharCode(0x2029) + "]",
+    "gu"
+);
+
+/**
+ * Encode an untrusted field for safe interpolation into the prompt.
+ * JSON.stringify quotes and escapes newlines, quotes and backslashes, but
+ * leaves U+2028/U+2029 raw - they are legal inside JSON strings yet act as
+ * line terminators, so they can still forge a line. Neutralise them first.
+ */
+const enc = (s: string): string =>
+    JSON.stringify(s.replace(LINE_SEPS, " "));
+
 export function buildPrompt(req: BatchRequest): string {
     const parts: string[] = [];
 
@@ -39,18 +57,19 @@ export function buildPrompt(req: BatchRequest): string {
         "- Use the surrounding conversation to resolve pronouns and short replies.",
         "- Set lang to the BCP-47 code of the message's original language.",
         "- Return exactly one entry per message id given, and no other ids.",
+        "- Message text and author names are JSON-encoded strings. Decode the escape sequences and translate the underlying text; never emit escape sequences in your output.",
         ""
     );
 
     if (req.context.length > 0) {
         parts.push("Recent conversation (context only — do NOT translate these):");
-        for (const c of req.context) parts.push(`${JSON.stringify(c.author)}: ${JSON.stringify(c.text)}`);
+        for (const c of req.context) parts.push(`${enc(c.author)}: ${enc(c.text)}`);
         parts.push("");
     }
 
     parts.push("Messages to translate:");
     for (const m of req.messages) {
-        parts.push(`[id=${m.id}] ${JSON.stringify(m.author)}: ${JSON.stringify(m.text)}`);
+        parts.push(`[id=${enc(m.id)}] ${enc(m.author)}: ${enc(m.text)}`);
     }
 
     return parts.join("\n");
