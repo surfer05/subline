@@ -79,4 +79,15 @@ describe("translateWithGoogle", () => {
         });
         await expect(translateWithGoogle(req(["x"]), fetchImpl as any)).rejects.toThrow();
     });
+
+    it("throws when the response is an object rather than an array", async () => {
+        // A numeric-keyed object satisfies body[0] and body[2] but is not the
+        // array wrapper the endpoint contracts for. Without the Array.isArray(body)
+        // guard this returns a bogus translation instead of throwing.
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => JSON.parse('{"0":[["hola","orig"]],"2":"es"}')
+        });
+        await expect(translateWithGoogle(req(["x"]), fetchImpl as any)).rejects.toThrow();
+    });
 });
