@@ -77,3 +77,39 @@ describe("shouldSkip", () => {
         expect(shouldSkip("مرحبا", false)).toBe(false);
     });
 });
+
+describe("shouldSkip — repetition and laughter noise", () => {
+    it("skips a message that is one word repeated", () => {
+        // Google detected "GOJ GOJ GOJ GOJ" as Esperanto and rendered it as a
+        // slur attributed to the sender.
+        expect(shouldSkip("GOJ GOJ GOJ GOJ GOJ", false)).toBe(true);
+        expect(shouldSkip("NEG NEG NEG NEG", false)).toBe(true);
+        expect(shouldSkip("no no no", false)).toBe(true);
+    });
+
+    it("skips laughter in several languages", () => {
+        for (const s of [
+            "JAJAJAJAJ", "jajaja", "hahaha", "ahahahahhaa",
+            "kkkkk", "wwww", "xddd", "lolol", "rsrsrs", "55555"
+        ]) {
+            expect(shouldSkip(s, false), s).toBe(true);
+        }
+    });
+
+    it("does NOT skip real messages that merely repeat a word", () => {
+        // Two DIFFERENT tokens, so the repeated-token rule must not fire.
+        expect(shouldSkip("no no puedo", false)).toBe(false);
+        expect(shouldSkip("muy muy bueno", false)).toBe(false);
+    });
+
+    it("does NOT skip short real words that brush the laughter alphabet", () => {
+        expect(shouldSkip("haj", false)).toBe(false);   // under the 4-char floor
+        expect(shouldSkip("aha bueno", false)).toBe(false);
+        expect(shouldSkip("lo hago", false)).toBe(false);
+    });
+
+    it("does NOT skip a sentence that merely contains laughter", () => {
+        expect(shouldSkip("jajaja que gracioso", false)).toBe(false);
+        expect(shouldSkip("no puedo mas hahaha", false)).toBe(false);
+    });
+});

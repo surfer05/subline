@@ -1,6 +1,6 @@
 import { Logger } from "@utils/Logger";
 import definePlugin, { PluginNative } from "@utils/types";
-import { ChannelStore, FluxDispatcher, MessageStore, React, Toasts, UserStore } from "@webpack/common";
+import { ChannelStore, FluxDispatcher, MessageStore, React, SelectedChannelStore, Toasts, UserStore } from "@webpack/common";
 import type { Message } from "@vencord/discord-types";
 
 import { createBatcher, type Batcher } from "./batcher";
@@ -318,12 +318,22 @@ function catchUp(channelId: string) {
         return;
     }
 
+    // Walk newest-first over EVERY loaded message and cap on how many we
+    // actually enqueue, rather than slicing the newest `count` up front.
+    // Those are the same set on a first open, but they diverge as soon as you
+    // scroll up: scrolling loads older history and re-fires this, and a
+    // fixed tail slice would keep re-examining the same already-translated
+    // recent messages while the newly-loaded older ones never got picked up.
     const all = store.toArray();
-    const recent = all.slice(-count);
     const me = UserStore.getCurrentUser()?.id;
     const engine = effectiveEngine();
 
-    for (const message of recent) {
+    // Select newest-first so the messages nearest the viewport win the budget,
+    // then enqueue oldest-first.
+    const candidates: any[] = [];
+    for (let i = all.length - 1; i >= 0 && candidates.length < count; i--) {
+        const message = all[i];
+
         // A message already queued or awaiting a response is a cache miss
         // in getTranslation() for the whole round trip, not just briefly --
         // so a duplicate catch-up trigger (rapid channel reselection, or
@@ -339,6 +349,14 @@ function catchUp(channelId: string) {
         // and re-asking would produce the same answer at the same cost. Only
         // `{ failed: true }` gets another attempt.
         if (entry && !("failed" in entry)) continue;
+
+        candidates.push(message);
+    }
+    // Back to chronological order before enqueuing, so the batcher's rolling
+    // context window sees the conversation the right way round.
+    candidates.reverse();
+
+    for (const message of candidates) {
 
         // Skipped messages still shape the conversation, so enqueue() turns
         // them into context instead of a request. pushContext() de-duplicates
@@ -392,6 +410,8 @@ function onMessagesLoaded(payload: any) {
     catchUp(channelId);
 }
 
+const TEXT_COLOUR = "var(--text-default, var(--text-normal, #dbdee1))";
+
 function TranslationAccessory({ message }: { message: Message; }) {
     const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
 
@@ -410,17 +430,28 @@ function TranslationAccessory({ message }: { message: Message; }) {
     // failed".
     if ("skipped" in entry) return null;
 
+    // Colours come from Discord's own theme tokens rather than a bare opacity:
+    // the accessory container already renders muted, so stacking an opacity on
+    // top compounded into invisible text on the dark theme.
+    //
+    // The token chain matters. Discord renamed its primary text token, so
+    // --text-normal no longer resolves in current builds; an unresolvable var()
+    // invalidates the whole declaration and the text silently inherits the
+    // container's muted colour, i.e. becomes unreadable. --text-default is the
+    // current name, --text-normal the legacy one, and the literal is a
+    // dark-theme-readable last resort if Discord renames it again.
     if ("failed" in entry) {
         return (
-            <div style={{ fontSize: "0.8rem", opacity: 0.4, fontStyle: "italic" }}>
+            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
                 ⚠ translation failed
             </div>
         );
     }
 
     return (
-        <div style={{ fontSize: "0.9rem", opacity: 0.6, fontStyle: "italic" }}>
-            ⤷ {entry.lang} · {entry.text}
+        <div style={{ fontSize: "0.95rem", color: TEXT_COLOUR, fontStyle: "italic" }}>
+            <span style={{ color: "var(--text-muted)" }}>⤷ {entry.lang} · </span>
+            {entry.text}
         </div>
     );
 }
@@ -478,6 +509,14 @@ export default definePlugin({
         FluxDispatcher.subscribe("MESSAGE_UPDATE", onMessageUpdate);
         FluxDispatcher.subscribe("CHANNEL_SELECT", onChannelSelect);
         FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS", onMessagesLoaded);
+
+        // Catch up whatever channel is already on screen. Both catch-up
+        // triggers are events that already fired before we subscribed, so
+        // enabling the plugin (or restarting Discord) while sitting in a
+        // channel would otherwise translate nothing currently visible until
+        // you navigated away and back.
+        const openChannelId = SelectedChannelStore.getChannelId();
+        if (openChannelId) catchUp(openChannelId);
     },
 
     stop() {
