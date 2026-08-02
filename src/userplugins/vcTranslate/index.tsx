@@ -5,6 +5,7 @@ import type { Message } from "@vencord/discord-types";
 import { createBatcher, type Batcher } from "./batcher";
 import { isChannelEnabled, loadEnabledChannels } from "./channels";
 import settings from "./settings";
+import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
 import {
     getTranslation, invalidateMessage, makeKey,
@@ -17,6 +18,14 @@ const Native = VencordNative.pluginHelpers.VcTranslate as PluginNative<typeof im
 let batcher: Batcher | null = null;
 let pausedUntil = 0;
 let sessionFallback = false;   // set when Claude is unusable this session
+
+// Bumped on every rebuildBatcher(). Each onFlush closure captures the
+// generation it was created under; if a response lands after a later
+// rebuild has already happened (settings changed mid-flight, or a Claude
+// auth failure triggered the Google fallback), the closure's `engine` is
+// stale and writing under it would land under a key nobody reads (or
+// clobber the new engine's cache with a translation from the old one).
+let batcherGeneration = 0;
 
 /** The engine actually in use — may differ from the configured one. */
 function effectiveEngine(): EngineId {
@@ -44,6 +53,14 @@ function fallBackToGoogle(reason: string) {
 function rebuildBatcher() {
     batcher?.dispose();
     const engine = effectiveEngine();
+    batcherGeneration++;
+    const myGeneration = batcherGeneration;
+
+    const markAllFailed = (req: { messages: { id: string }[]; targetLang: string; }) => {
+        for (const m of req.messages) {
+            setTranslation(makeKey(m.id, req.targetLang, engine), { failed: true });
+        }
+    };
 
     batcher = createBatcher({
         debounceMs: 700,
@@ -52,25 +69,63 @@ function rebuildBatcher() {
         supportsContext: ENGINE_CAPS[engine].supportsContext,
         targetLang: settings.store.targetLang,
         onFlush: async req => {
-            if (Date.now() < pausedUntil) return;
+            // Superseded by a later rebuild (settings changed, or a fallback
+            // fired) before this flush even started — this closure's `engine`
+            // no longer matches reality, so just drop it rather than write
+            // under a stale key.
+            if (myGeneration !== batcherGeneration) return;
 
-            const res = await Native.translateBatch(
-                engine,
-                settings.store.anthropicApiKey,
-                JSON.stringify(req)
-            );
+            if (Date.now() < pausedUntil) {
+                // The queue was already spliced out of the batcher before
+                // onFlush ran, so if we silently return here these messages
+                // are gone forever: no entry, no marker, no retry. Mark them
+                // failed instead so the accessory shows ⚠ and catch-up can
+                // retry later.
+                markAllFailed(req);
+                return;
+            }
+
+            let res;
+            try {
+                res = await Native.translateBatch(
+                    engine,
+                    settings.store.anthropicApiKey,
+                    JSON.stringify(req)
+                );
+            } catch {
+                // IPC-level rejection (onFlush is void-returning and invoked
+                // un-awaited, so an unhandled rejection here would otherwise
+                // just vanish the batch with no marker).
+                markAllFailed(req);
+                return;
+            }
+
+            // THE race this guard exists for: rebuildBatcher() can run WHILE
+            // the line above is awaiting the network round trip (a settings
+            // change, or a Claude 401 triggering fallBackToGoogle mid-flight).
+            // The check above this await only catches a flush that was already
+            // stale before it started — it cannot catch one that went stale
+            // during the await, because it isn't re-evaluated after control
+            // resumes. Re-check here, before any write, so a superseded
+            // response is dropped instead of landing under the old engine's
+            // key (or worse, clobbering the new engine's in-progress results).
+            if (myGeneration !== batcherGeneration) return;
 
             if (!res.ok) {
                 if (res.retryAfterMs) pausedUntil = Date.now() + res.retryAfterMs;
 
+                // Always mark this batch's messages as failed on a request-level
+                // error, regardless of cause — an auth failure must not leave
+                // them silently unresolved just because it ALSO triggers a
+                // session fallback.
+                markAllFailed(req);
+
                 // An auth failure means the key is wrong, not that the network
-                // blipped — retrying it every batch would be pure noise.
+                // blipped — retrying it every batch would be pure noise, so
+                // fall back to Google for the rest of the session IN ADDITION
+                // to (not instead of) marking this batch failed.
                 if (engine === "claude" && /\b40[13]\b/.test(res.error)) {
                     fallBackToGoogle("Claude rejected the API key");
-                } else {
-                    for (const m of req.messages) {
-                        setTranslation(makeKey(m.id, req.targetLang, engine), { failed: true });
-                    }
                 }
                 return;
             }
@@ -153,14 +208,21 @@ export default definePlugin({
     async start() {
         await loadEnabledChannels();
         rebuildBatcher();
+        onSettingsChanged(rebuildBatcher);
         FluxDispatcher.subscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.subscribe("MESSAGE_UPDATE", onMessageUpdate);
     },
 
     stop() {
+        onSettingsChanged(null);
         FluxDispatcher.unsubscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onMessageUpdate);
         batcher?.dispose();
         batcher = null;
+        // So toggling the plugin off/on after fixing a bad key retries
+        // Claude instead of staying pinned to Google, and a stale pause
+        // window doesn't carry over into the next session.
+        sessionFallback = false;
+        pausedUntil = 0;
     }
 });

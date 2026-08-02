@@ -1880,6 +1880,8 @@ git commit -m "feat(vcTranslate): add native IPC bridge with retry and rate-limi
 import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
 
+import { notifySettingsChanged } from "./settingsBridge";
+
 export const settings = definePluginSettings({
     engine: {
         type: OptionType.SELECT,
@@ -1887,18 +1889,27 @@ export const settings = definePluginSettings({
         options: [
             { label: "Google (free, no key, lower quality)", value: "google", default: true },
             { label: "Claude Haiku (needs API key, best quality)", value: "claude" }
-        ]
+        ],
+        // engine is captured by value when the batcher is built, so a change
+        // here must rebuild it (see settingsBridge.ts / index.tsx).
+        onChange: notifySettingsChanged
     },
     anthropicApiKey: {
         type: OptionType.STRING,
         description: "Anthropic API key (only used when the Claude engine is selected)",
         default: "",
-        placeholder: "sk-ant-..."
+        placeholder: "sk-ant-...",
+        // Pasting a key (or clearing one) must be picked up by effectiveEngine()
+        // immediately, not on next reload.
+        onChange: notifySettingsChanged
     },
     targetLang: {
         type: OptionType.STRING,
         description: "Target language code",
-        default: "en"
+        default: "en",
+        // targetLang is captured by value when the batcher is built, so a
+        // change here must rebuild it too.
+        onChange: notifySettingsChanged
     },
     catchUpCount: {
         type: OptionType.SLIDER,
@@ -1916,6 +1927,16 @@ export const settings = definePluginSettings({
 
 export default settings;
 ```
+
+`engine`, `anthropicApiKey`, and `targetLang` are captured **by value** when
+`index.tsx` builds the batcher (`rebuildBatcher()`); the accessory reads the
+current settings **live**. Without `onChange` here, changing any of these
+three after start (e.g. pasting an API key) desyncs the writer from the
+reader and every translation silently stops appearing for the rest of the
+session — no error, no toast. `catchUpCount` and `globalAuto` are not
+captured by the batcher and are deliberately left without `onChange`. See
+`settingsBridge.ts` in Task 8 for how this reaches `index.tsx` without a
+circular import.
 
 - [ ] **Step 2: Implement `channels.ts`**
 
@@ -1977,15 +1998,39 @@ git commit -m "feat(vcTranslate): add plugin settings and per-channel enablement
 ### Task 8: Plugin shell — Flux hook and subtitle rendering
 
 **Files:**
+- Create: `src/userplugins/vcTranslate/settingsBridge.ts`
 - Create: `src/userplugins/vcTranslate/index.tsx`
 
 **Interfaces:**
 - Consumes: everything produced by Tasks 1–7.
-- Produces: the default-exported plugin object. `VencordNative.pluginHelpers.VcTranslate` becomes available once `name: "VcTranslate"` is registered.
+- Produces: `onSettingsChanged(fn): void`, `notifySettingsChanged(): void` from `settingsBridge.ts`; and from `index.tsx`, the default-exported plugin object. `VencordNative.pluginHelpers.VcTranslate` becomes available once `name: "VcTranslate"` is registered.
 
 This is the Discord-coupled shell. It is deliberately thin — it wires modules together and contains no translation logic of its own.
 
-- [ ] **Step 1: Implement `index.tsx`**
+- [ ] **Step 1: Implement `settingsBridge.ts`**
+
+`engine`, `anthropicApiKey`, and `targetLang` are captured **by value** when
+`index.tsx` builds the batcher; `settings.ts` cannot import `index.tsx` to
+call `rebuildBatcher()` directly without creating a circular import. This
+tiny bridge lets `settings.ts`'s `onChange` notify `index.tsx` instead.
+
+```ts
+/**
+ * Lets settings.ts notify index.tsx that a setting changed, without a
+ * circular import. index.tsx registers on start() and clears on stop().
+ */
+let handler: (() => void) | null = null;
+
+export function onSettingsChanged(fn: (() => void) | null): void {
+    handler = fn;
+}
+
+export function notifySettingsChanged(): void {
+    handler?.();
+}
+```
+
+- [ ] **Step 2: Implement `index.tsx`**
 
 Note the `effectiveEngine()` indirection. The spec requires that a missing or
 rejected Claude key falls back to Google **for the session** rather than leaving
@@ -1993,6 +2038,29 @@ you staring at untranslated text. Because the cache key includes the engine,
 every read and write must go through the same effective value — otherwise a
 fallback would write under `google` and the accessory would read under `claude`
 and never find it.
+
+Three failure modes to hold in mind while reading `onFlush`, all of which
+must leave an explicit `{ failed: true }` marker rather than letting a
+message vanish with nothing rendered and nothing to retry:
+1. the request throws (IPC-level rejection — `onFlush` is void-returning and
+   invoked un-awaited, so an unhandled rejection would otherwise be silent),
+2. the request returns `{ ok: false }` (auth failure, transport error — and a
+   Claude 401 triggers a session fallback to Google *in addition to*, not
+   instead of, marking this batch failed), or
+3. the batch was dropped because a prior rate limit is still in its pause
+   window (`pausedUntil`) — the queue was already spliced out of the batcher
+   before `onFlush` ran, so returning silently here loses those messages
+   entirely.
+
+A generation counter (`batcherGeneration`) guards against a slower failure
+mode: `rebuildBatcher()` can run *while* `onFlush` is awaiting the network
+round trip (a settings change, or a Claude 401 firing the fallback,
+mid-flight). A response that lands after that must not write under the old
+engine's key. This needs checking **twice** — once before the await (drops a
+flush that was already stale before it started) and once after the await
+resolves (drops one that went stale *during* it, which is the actual race
+this exists for; a single check before the await cannot catch that, since
+it is never re-evaluated once control resumes).
 
 ```tsx
 import definePlugin, { PluginNative } from "@utils/types";
@@ -2002,6 +2070,7 @@ import type { Message } from "@vencord/discord-types";
 import { createBatcher, type Batcher } from "./batcher";
 import { isChannelEnabled, loadEnabledChannels } from "./channels";
 import settings from "./settings";
+import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
 import {
     getTranslation, invalidateMessage, makeKey,
@@ -2014,6 +2083,14 @@ const Native = VencordNative.pluginHelpers.VcTranslate as PluginNative<typeof im
 let batcher: Batcher | null = null;
 let pausedUntil = 0;
 let sessionFallback = false;   // set when Claude is unusable this session
+
+// Bumped on every rebuildBatcher(). Each onFlush closure captures the
+// generation it was created under; if a response lands after a later
+// rebuild has already happened (settings changed mid-flight, or a Claude
+// auth failure triggered the Google fallback), the closure's `engine` is
+// stale and writing under it would land under a key nobody reads (or
+// clobber the new engine's cache with a translation from the old one).
+let batcherGeneration = 0;
 
 /** The engine actually in use — may differ from the configured one. */
 function effectiveEngine(): EngineId {
@@ -2041,6 +2118,14 @@ function fallBackToGoogle(reason: string) {
 function rebuildBatcher() {
     batcher?.dispose();
     const engine = effectiveEngine();
+    batcherGeneration++;
+    const myGeneration = batcherGeneration;
+
+    const markAllFailed = (req: { messages: { id: string }[]; targetLang: string; }) => {
+        for (const m of req.messages) {
+            setTranslation(makeKey(m.id, req.targetLang, engine), { failed: true });
+        }
+    };
 
     batcher = createBatcher({
         debounceMs: 700,
@@ -2049,30 +2134,72 @@ function rebuildBatcher() {
         supportsContext: ENGINE_CAPS[engine].supportsContext,
         targetLang: settings.store.targetLang,
         onFlush: async req => {
-            if (Date.now() < pausedUntil) return;
+            // Superseded by a later rebuild (settings changed, or a fallback
+            // fired) before this flush even started — this closure's `engine`
+            // no longer matches reality, so just drop it rather than write
+            // under a stale key.
+            if (myGeneration !== batcherGeneration) return;
 
-            const res = await Native.translateBatch(
-                engine,
-                settings.store.anthropicApiKey,
-                JSON.stringify(req)
-            );
+            if (Date.now() < pausedUntil) {
+                // The queue was already spliced out of the batcher before
+                // onFlush ran, so if we silently return here these messages
+                // are gone forever: no entry, no marker, no retry. Mark them
+                // failed instead so the accessory shows ⚠ and catch-up can
+                // retry later.
+                markAllFailed(req);
+                return;
+            }
+
+            let res;
+            try {
+                res = await Native.translateBatch(
+                    engine,
+                    settings.store.anthropicApiKey,
+                    JSON.stringify(req)
+                );
+            } catch {
+                // IPC-level rejection (onFlush is void-returning and invoked
+                // un-awaited, so an unhandled rejection here would otherwise
+                // just vanish the batch with no marker).
+                markAllFailed(req);
+                return;
+            }
+
+            // THE race this guard exists for: rebuildBatcher() can run WHILE
+            // the line above is awaiting the network round trip (a settings
+            // change, or a Claude 401 triggering fallBackToGoogle mid-flight).
+            // The check above this await only catches a flush that was already
+            // stale before it started — it cannot catch one that went stale
+            // during the await, because it isn't re-evaluated after control
+            // resumes. Re-check here, before any write, so a superseded
+            // response is dropped instead of landing under the old engine's
+            // key (or worse, clobbering the new engine's in-progress results).
+            if (myGeneration !== batcherGeneration) return;
 
             if (!res.ok) {
                 if (res.retryAfterMs) pausedUntil = Date.now() + res.retryAfterMs;
 
+                // Always mark this batch's messages as failed on a request-level
+                // error, regardless of cause — an auth failure must not leave
+                // them silently unresolved just because it ALSO triggers a
+                // session fallback.
+                markAllFailed(req);
+
                 // An auth failure means the key is wrong, not that the network
-                // blipped — retrying it every batch would be pure noise.
+                // blipped — retrying it every batch would be pure noise, so
+                // fall back to Google for the rest of the session IN ADDITION
+                // to (not instead of) marking this batch failed.
                 if (engine === "claude" && /\b40[13]\b/.test(res.error)) {
                     fallBackToGoogle("Claude rejected the API key");
-                } else {
-                    for (const m of req.messages) {
-                        setTranslation(makeKey(m.id, req.targetLang, engine), { failed: true });
-                    }
                 }
                 return;
             }
 
             for (const r of res.results) {
+                if ("failed" in r) {
+                    setTranslation(makeKey(r.id, req.targetLang, engine), { failed: true });
+                    continue;
+                }
                 if (r.skip) continue;
                 setTranslation(
                     makeKey(r.id, req.targetLang, engine),
@@ -2139,32 +2266,43 @@ export default definePlugin({
     authors: [{ name: "surfer", id: 0n }],
     settings,
 
-    renderMessageAccessory: ({ message }: { message: Message; }) => (
-        <TranslationAccessory message={message} />
+    // Untyped `props` (not a typed `{ message }` destructure): matches
+    // MessageAccessoryFactory's `(props: Record<string, any>) => ReactNode`
+    // signature (see Vencord's own built-in `translate` plugin) — a typed
+    // destructure does not satisfy it.
+    renderMessageAccessory: props => (
+        <TranslationAccessory message={props.message} />
     ),
 
     async start() {
         await loadEnabledChannels();
         rebuildBatcher();
+        onSettingsChanged(rebuildBatcher);
         FluxDispatcher.subscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.subscribe("MESSAGE_UPDATE", onMessageUpdate);
     },
 
     stop() {
+        onSettingsChanged(null);
         FluxDispatcher.unsubscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onMessageUpdate);
         batcher?.dispose();
         batcher = null;
+        // So toggling the plugin off/on after fixing a bad key retries
+        // Claude instead of staying pinned to Google, and a stale pause
+        // window doesn't carry over into the next session.
+        sessionFallback = false;
+        pausedUntil = 0;
     }
 });
 ```
 
-- [ ] **Step 2: Build Vencord**
+- [ ] **Step 3: Build Vencord**
 
 Run: `pnpm build` from the Vencord root.
 Expected: build succeeds with no errors mentioning `vcTranslate`.
 
-- [ ] **Step 3: Verify in Discord**
+- [ ] **Step 4: Verify in Discord**
 
 1. Restart Discord.
 2. Settings → Plugins → enable **VcTranslate**.
@@ -2172,10 +2310,10 @@ Expected: build succeeds with no errors mentioning `vcTranslate`.
 4. Have someone post a non-English message (or post one from a second account).
 5. Confirm a dimmed italic subtitle appears beneath it within ~1 second.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/userplugins/vcTranslate/index.tsx
+git add src/userplugins/vcTranslate/settingsBridge.ts src/userplugins/vcTranslate/index.tsx
 git commit -m "feat(vcTranslate): add plugin shell with Flux hook and subtitle rendering"
 ```
 
