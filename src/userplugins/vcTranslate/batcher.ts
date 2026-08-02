@@ -13,6 +13,8 @@ export interface Batcher {
     add(msg: PendingMessage): void;
     recordContext(msg: PendingMessage): void;
     flushNow(): void;
+    /** Remove and return every queued message across all channels, without flushing. */
+    drainPending(): PendingMessage[];
     dispose(): void;
 }
 
@@ -93,6 +95,23 @@ export function createBatcher(opts: BatcherOptions): Batcher {
 
         flushNow() {
             for (const channelId of [...channels.keys()]) flushChannel(channelId);
+        },
+
+        drainPending() {
+            const drained: PendingMessage[] = [];
+            for (const s of channels.values()) {
+                if (s.timer !== null) {
+                    clearTimeout(s.timer);
+                    s.timer = null;
+                }
+                if (s.queue.length > 0) {
+                    // Splice, not slice: the messages leave the queue entirely
+                    // (caller is responsible for re-queueing them elsewhere).
+                    // Context is deliberately untouched.
+                    drained.push(...s.queue.splice(0, s.queue.length));
+                }
+            }
+            return drained;
         },
 
         dispose() {

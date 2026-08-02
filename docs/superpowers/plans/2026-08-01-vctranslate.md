@@ -404,9 +404,18 @@ git commit -m "feat(vcTranslate): add LRU translation store with change notifica
 - Consumes: `PendingMessage`, `BatchRequest` from `types.ts`.
 - Produces: `createBatcher(opts: BatcherOptions): Batcher`, where
   `BatcherOptions = { debounceMs: number; maxBatch: number; contextSize: number; supportsContext: boolean; targetLang: string; onFlush: (req: BatchRequest, channelId: string) => void }`
-  and `Batcher = { add(msg: PendingMessage): void; recordContext(msg: PendingMessage): void; flushNow(): void; dispose(): void }`.
+  and `Batcher = { add(msg: PendingMessage): void; recordContext(msg: PendingMessage): void; flushNow(): void; drainPending(): PendingMessage[]; dispose(): void }`.
 
 Two entry points matter. `add()` queues a message **for translation**. `recordContext()` records a message into the rolling context window **without** queueing it — used for messages that were skipped (already English, emote-only) but still carry conversational meaning.
+
+`drainPending()` (added in a Task 8 fix round) removes and returns every
+queued-but-not-yet-flushed message across all channels, without flushing
+them and without touching the rolling context windows. `index.tsx` uses it
+in `rebuildBatcher()`: `dispose()` alone clears timers and queues with no
+trace, so anything mid-debounce-window at rebuild time (a settings change,
+not a failure) would otherwise vanish with no entry, no marker, and no
+retry. Draining first lets those messages be re-queued into the new batcher
+instead.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -534,6 +543,60 @@ describe("createBatcher", () => {
         vi.advanceTimersByTime(2000);
         expect(flushed).toHaveLength(0);
     });
+
+    describe("drainPending", () => {
+        it("returns every queued message across multiple channels", () => {
+            const { batcher } = setup();
+            batcher.add(msg("1", "hola", "c1"));
+            batcher.add(msg("2", "que tal", "c1"));
+            batcher.add(msg("3", "salut", "c2"));
+
+            const drained = batcher.drainPending();
+
+            expect(drained.map(m => m.id).sort()).toEqual(["1", "2", "3"]);
+        });
+
+        it("empties the queues so a later timer advance flushes nothing", () => {
+            const { batcher, flushed } = setup();
+            batcher.add(msg("1", "hola", "c1"));
+            batcher.add(msg("2", "salut", "c2"));
+
+            batcher.drainPending();
+            vi.advanceTimersByTime(2000);
+
+            expect(flushed).toHaveLength(0);
+        });
+
+        it("preserves the rolling context windows without leaking the drained message back in", () => {
+            const { batcher, flushed } = setup();
+            batcher.recordContext(msg("1", "first", "c1"));
+            batcher.add(msg("2", "queued", "c1"));
+
+            batcher.drainPending();
+
+            // Re-add a fresh message and flush: if context survived the drain,
+            // it must still include "first" ahead of the new message. And if
+            // "2" was actually removed from the queue (not just ignored while
+            // its timer kept running), it must not resurface in this flush's
+            // messages either.
+            batcher.add(msg("3", "third", "c1"));
+            vi.advanceTimersByTime(700);
+
+            expect(flushed).toHaveLength(1);
+            expect(flushed[0].req.messages.map(m => m.id)).toEqual(["3"]);
+            expect(flushed[0].req.context.map(c => c.text)).toEqual(["first"]);
+        });
+
+        it("does not flush the drained messages itself", () => {
+            const { batcher, flushed } = setup();
+            batcher.add(msg("1", "hola", "c1"));
+
+            const drained = batcher.drainPending();
+
+            expect(drained).toHaveLength(1);
+            expect(flushed).toHaveLength(0);
+        });
+    });
 });
 ```
 
@@ -560,6 +623,8 @@ export interface Batcher {
     add(msg: PendingMessage): void;
     recordContext(msg: PendingMessage): void;
     flushNow(): void;
+    /** Remove and return every queued message across all channels, without flushing. */
+    drainPending(): PendingMessage[];
     dispose(): void;
 }
 
@@ -642,6 +707,23 @@ export function createBatcher(opts: BatcherOptions): Batcher {
             for (const channelId of [...channels.keys()]) flushChannel(channelId);
         },
 
+        drainPending() {
+            const drained: PendingMessage[] = [];
+            for (const s of channels.values()) {
+                if (s.timer !== null) {
+                    clearTimeout(s.timer);
+                    s.timer = null;
+                }
+                if (s.queue.length > 0) {
+                    // Splice, not slice: the messages leave the queue entirely
+                    // (caller is responsible for re-queueing them elsewhere).
+                    // Context is deliberately untouched.
+                    drained.push(...s.queue.splice(0, s.queue.length));
+                }
+            }
+            return drained;
+        },
+
         dispose() {
             for (const s of channels.values()) {
                 if (s.timer !== null) clearTimeout(s.timer);
@@ -655,7 +737,8 @@ export function createBatcher(opts: BatcherOptions): Batcher {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/batcher.test.ts`
-Expected: PASS — 10 tests.
+Expected: PASS — 14 tests (10 original + 4 `drainPending`, the latter added
+in a Task 8 fix round alongside `index.tsx`'s `rebuildBatcher()` change).
 
 - [ ] **Step 5: Commit**
 
@@ -2056,11 +2139,37 @@ A generation counter (`batcherGeneration`) guards against a slower failure
 mode: `rebuildBatcher()` can run *while* `onFlush` is awaiting the network
 round trip (a settings change, or a Claude 401 firing the fallback,
 mid-flight). A response that lands after that must not write under the old
-engine's key. This needs checking **twice** — once before the await (drops a
-flush that was already stale before it started) and once after the await
-resolves (drops one that went stale *during* it, which is the actual race
-this exists for; a single check before the await cannot catch that, since
-it is never re-evaluated once control resumes).
+engine's key. This needs checking on **every** path that resumes after the
+await — the success path, and the `catch` path too (an IPC rejection after a
+mid-flight rebuild must not write `{ failed: true }` under the stale engine
+key either, since that could clobber a valid cached entry for the same id
+under the OLD engine while leaving the real failure unmarked under the new
+one). A single check before the await is not enough on its own: it only
+catches a flush that was already stale before it started, never one that
+went stale *during* the await, because it is never re-evaluated once control
+resumes.
+
+`stop()` also bumps `batcherGeneration`. Without it, an in-flight request
+that started before `stop()` (e.g. a Claude call still awaiting its
+response) can resolve afterward, pass its (otherwise unaffected) generation
+check, and call `fallBackToGoogle()` → `rebuildBatcher()` — resurrecting a
+batcher, and re-arming `sessionFallback`, on an already-stopped plugin. The
+bump closes this because the check in `onFlush` runs *after* the await, and
+`stop()` runs entirely synchronously — there is no interleaving where an
+`onFlush` resumption can land in the middle of `stop()`'s own execution, so
+any `myGeneration` captured before `stop()` can never match again once it
+returns. (A `let started = false` guard on `fallBackToGoogle` was considered
+as well, but is redundant given this: `fallBackToGoogle` is only ever
+reached from inside `onFlush`'s `!res.ok` branch, which the generation check
+above it already prevents from being reached at all post-`stop()`.)
+
+`rebuildBatcher()` drains the outgoing batcher's still-queued (not yet
+flushed) messages via `drainPending()` *before* bumping the generation or
+disposing it, and re-queues them into the new batcher. Without this,
+anything sitting in the current debounce window at rebuild time — which
+`dispose()` alone clears with no trace — would be lost with no entry, no
+marker, and no retry, even though nothing about those messages actually
+failed; the settings just changed under them.
 
 ```tsx
 import definePlugin, { PluginNative } from "@utils/types";
@@ -2116,10 +2225,17 @@ function fallBackToGoogle(reason: string) {
 }
 
 function rebuildBatcher() {
-    batcher?.dispose();
+    // Anything still sitting in the current debounce window would otherwise
+    // be lost when dispose() clears it below — no entry, no marker, no
+    // retry. These messages didn't fail; the settings just changed under
+    // them, so re-queue them into the new batcher instead of dropping or
+    // failing them. Must happen BEFORE the generation bump and dispose.
+    const orphaned = batcher?.drainPending() ?? [];
+
     const engine = effectiveEngine();
     batcherGeneration++;
     const myGeneration = batcherGeneration;
+    batcher?.dispose();
 
     const markAllFailed = (req: { messages: { id: string }[]; targetLang: string; }) => {
         for (const m of req.messages) {
@@ -2127,7 +2243,7 @@ function rebuildBatcher() {
         }
     };
 
-    batcher = createBatcher({
+    const newBatcher = createBatcher({
         debounceMs: 700,
         maxBatch: 10,
         contextSize: 8,
@@ -2158,6 +2274,11 @@ function rebuildBatcher() {
                     JSON.stringify(req)
                 );
             } catch {
+                // Re-check here too: a rebuild during the in-flight call means
+                // this batch's engine key is stale, so writing markers would
+                // land under a key nothing reads — and could clobber a valid
+                // cached entry for the same id under the OLD engine.
+                if (myGeneration !== batcherGeneration) return;
                 // IPC-level rejection (onFlush is void-returning and invoked
                 // un-awaited, so an unhandled rejection here would otherwise
                 // just vanish the batch with no marker).
@@ -2208,6 +2329,11 @@ function rebuildBatcher() {
             }
         }
     });
+
+    batcher = newBatcher;
+    // Retry the orphaned messages under the new settings/engine, rather than
+    // marking them failed — nothing about THEM failed, the settings changed.
+    for (const m of orphaned) newBatcher.add(m);
 }
 
 function onMessageCreate({ message, optimistic }: { message: Message; optimistic?: boolean; }) {
@@ -2288,6 +2414,14 @@ export default definePlugin({
         FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onMessageUpdate);
         batcher?.dispose();
         batcher = null;
+        // Bump the generation so an in-flight request from before stop()
+        // (e.g. a Claude call awaiting its response) fails its post-await
+        // guard check in onFlush and returns before ever reaching
+        // fallBackToGoogle()/rebuildBatcher() — otherwise it could resurrect
+        // a batcher (and re-set sessionFallback) on an already-stopped
+        // plugin. Must happen so any myGeneration captured before this
+        // point can never match again.
+        batcherGeneration++;
         // So toggling the plugin off/on after fixing a bad key retries
         // Claude instead of staying pinned to Google, and a stale pause
         // window doesn't carry over into the next session.

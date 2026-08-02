@@ -119,4 +119,58 @@ describe("createBatcher", () => {
         vi.advanceTimersByTime(2000);
         expect(flushed).toHaveLength(0);
     });
+
+    describe("drainPending", () => {
+        it("returns every queued message across multiple channels", () => {
+            const { batcher } = setup();
+            batcher.add(msg("1", "hola", "c1"));
+            batcher.add(msg("2", "que tal", "c1"));
+            batcher.add(msg("3", "salut", "c2"));
+
+            const drained = batcher.drainPending();
+
+            expect(drained.map(m => m.id).sort()).toEqual(["1", "2", "3"]);
+        });
+
+        it("empties the queues so a later timer advance flushes nothing", () => {
+            const { batcher, flushed } = setup();
+            batcher.add(msg("1", "hola", "c1"));
+            batcher.add(msg("2", "salut", "c2"));
+
+            batcher.drainPending();
+            vi.advanceTimersByTime(2000);
+
+            expect(flushed).toHaveLength(0);
+        });
+
+        it("preserves the rolling context windows without leaking the drained message back in", () => {
+            const { batcher, flushed } = setup();
+            batcher.recordContext(msg("1", "first", "c1"));
+            batcher.add(msg("2", "queued", "c1"));
+
+            batcher.drainPending();
+
+            // Re-add a fresh message and flush: if context survived the drain,
+            // it must still include "first" ahead of the new message. And if
+            // "2" was actually removed from the queue (not just ignored while
+            // its timer kept running), it must not resurface in this flush's
+            // messages either.
+            batcher.add(msg("3", "third", "c1"));
+            vi.advanceTimersByTime(700);
+
+            expect(flushed).toHaveLength(1);
+            expect(flushed[0].req.messages.map(m => m.id)).toEqual(["3"]);
+            expect(flushed[0].req.context.map(c => c.text)).toEqual(["first"]);
+        });
+
+        it("does not flush the drained messages itself", () => {
+            const { batcher, flushed } = setup();
+            batcher.add(msg("1", "hola", "c1"));
+
+            const drained = batcher.drainPending();
+
+            expect(drained).toHaveLength(1);
+            expect(flushed).toHaveLength(0);
+        });
+    });
 });

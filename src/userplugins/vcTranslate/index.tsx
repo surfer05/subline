@@ -51,10 +51,17 @@ function fallBackToGoogle(reason: string) {
 }
 
 function rebuildBatcher() {
-    batcher?.dispose();
+    // Anything still sitting in the current debounce window would otherwise
+    // be lost when dispose() clears it below — no entry, no marker, no
+    // retry. These messages didn't fail; the settings just changed under
+    // them, so re-queue them into the new batcher instead of dropping or
+    // failing them. Must happen BEFORE the generation bump and dispose.
+    const orphaned = batcher?.drainPending() ?? [];
+
     const engine = effectiveEngine();
     batcherGeneration++;
     const myGeneration = batcherGeneration;
+    batcher?.dispose();
 
     const markAllFailed = (req: { messages: { id: string }[]; targetLang: string; }) => {
         for (const m of req.messages) {
@@ -62,7 +69,7 @@ function rebuildBatcher() {
         }
     };
 
-    batcher = createBatcher({
+    const newBatcher = createBatcher({
         debounceMs: 700,
         maxBatch: 10,
         contextSize: 8,
@@ -93,6 +100,11 @@ function rebuildBatcher() {
                     JSON.stringify(req)
                 );
             } catch {
+                // Re-check here too: a rebuild during the in-flight call means
+                // this batch's engine key is stale, so writing markers would
+                // land under a key nothing reads — and could clobber a valid
+                // cached entry for the same id under the OLD engine.
+                if (myGeneration !== batcherGeneration) return;
                 // IPC-level rejection (onFlush is void-returning and invoked
                 // un-awaited, so an unhandled rejection here would otherwise
                 // just vanish the batch with no marker).
@@ -143,6 +155,11 @@ function rebuildBatcher() {
             }
         }
     });
+
+    batcher = newBatcher;
+    // Retry the orphaned messages under the new settings/engine, rather than
+    // marking them failed — nothing about THEM failed, the settings changed.
+    for (const m of orphaned) newBatcher.add(m);
 }
 
 function onMessageCreate({ message, optimistic }: { message: Message; optimistic?: boolean; }) {
@@ -219,6 +236,14 @@ export default definePlugin({
         FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onMessageUpdate);
         batcher?.dispose();
         batcher = null;
+        // Bump the generation so an in-flight request from before stop()
+        // (e.g. a Claude call awaiting its response) fails its post-await
+        // guard check in onFlush and returns before ever reaching
+        // fallBackToGoogle()/rebuildBatcher() — otherwise it could resurrect
+        // a batcher (and re-set sessionFallback) on an already-stopped
+        // plugin. Must happen so any myGeneration captured before this
+        // point can never match again.
+        batcherGeneration++;
         // So toggling the plugin off/on after fixing a bad key retries
         // Claude instead of staying pinned to Google, and a stale pause
         // window doesn't carry over into the next session.
