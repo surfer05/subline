@@ -1,9 +1,9 @@
 import definePlugin, { PluginNative } from "@utils/types";
-import { FluxDispatcher, React, Toasts, UserStore } from "@webpack/common";
+import { ChannelStore, FluxDispatcher, MessageStore, React, Toasts, UserStore } from "@webpack/common";
 import type { Message } from "@vencord/discord-types";
 
 import { createBatcher, type Batcher } from "./batcher";
-import { isChannelEnabled, loadEnabledChannels } from "./channels";
+import { isChannelEnabled, loadEnabledChannels, toggleChannel } from "./channels";
 import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
@@ -184,6 +184,55 @@ function onMessageUpdate({ message }: { message: Message; }) {
     if (message?.id) invalidateMessage(message.id);
 }
 
+// Reselecting a channel that was JUST opened (rapid tab-switching, or a
+// duplicate CHANNEL_SELECT for the channel already showing) must not
+// re-enqueue the same backlog before the earlier request has even had a
+// chance to land in the store -- that would double-spend API calls on
+// messages that are simply still in flight, not actually untranslated.
+// getTranslation() alone can't catch this: a message stays cache-miss for
+// the whole round trip, not just until it's "seen".
+const CATCH_UP_COOLDOWN_MS = 3000;
+const lastCatchUpAt = new Map<string, number>();
+
+function catchUp(channelId: string) {
+    if (!channelActive(channelId)) return;
+
+    const count = settings.store.catchUpCount;
+    if (count <= 0) return;
+
+    const now = Date.now();
+    if (now - (lastCatchUpAt.get(channelId) ?? 0) < CATCH_UP_COOLDOWN_MS) return;
+    lastCatchUpAt.set(channelId, now);
+
+    const all = MessageStore.getMessages(channelId)?.toArray?.() ?? [];
+    const recent = all.slice(-count);
+    const me = UserStore.getCurrentUser()?.id;
+    const engine = effectiveEngine();
+
+    for (const message of recent) {
+        const key = makeKey(message.id, settings.store.targetLang, engine);
+        if (getTranslation(key)) continue;   // already done, don't re-spend
+
+        const pending: PendingMessage = {
+            id: message.id,
+            author: message.author?.username ?? "unknown",
+            text: message.content ?? "",
+            channelId
+        };
+
+        // Skipped messages still shape the conversation, so they become
+        // context. This also avoids re-requesting messages the server would
+        // skip anyway (skip results write nothing to the store, so without
+        // this check they'd be re-requested on every channel open forever).
+        if (shouldSkip(pending.text, message.author?.id === me)) batcher?.recordContext(pending);
+        else batcher?.add(pending);
+    }
+}
+
+function onChannelSelect({ channelId }: { channelId: string; }) {
+    if (channelId) catchUp(channelId);
+}
+
 function TranslationAccessory({ message }: { message: Message; }) {
     const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
 
@@ -222,18 +271,54 @@ export default definePlugin({
         <TranslationAccessory message={props.message} />
     ),
 
+    messagePopoverButton: {
+        icon: () => <span style={{ fontSize: "1rem" }}>🌐</span>,
+        render(message: Message) {
+            const channel = ChannelStore.getChannel(message.channel_id);
+            if (!channel) return null;
+
+            const on = channelActive(message.channel_id);
+            return {
+                label: on ? "Disable auto-translate here" : "Enable auto-translate here",
+                icon: () => <span style={{ fontSize: "1rem" }}>{on ? "🌐" : "🌫"}</span>,
+                message,
+                channel,
+                onClick: async () => {
+                    let nowOn: boolean;
+                    try {
+                        nowOn = await toggleChannel(message.channel_id);
+                    } catch {
+                        // toggleChannel rethrows on persistence failure (memory
+                        // already rolled back by then) -- surface it instead of
+                        // leaving an unhandled rejection, and skip catch-up
+                        // since we don't actually know the toggle stuck.
+                        Toasts.show({
+                            id: Toasts.genId(),
+                            type: Toasts.Type.FAILURE,
+                            message: "VcTranslate: couldn't save that toggle, try again."
+                        });
+                        return;
+                    }
+                    if (nowOn) catchUp(message.channel_id);
+                }
+            };
+        }
+    },
+
     async start() {
         await loadEnabledChannels();
         rebuildBatcher();
         onSettingsChanged(rebuildBatcher);
         FluxDispatcher.subscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.subscribe("MESSAGE_UPDATE", onMessageUpdate);
+        FluxDispatcher.subscribe("CHANNEL_SELECT", onChannelSelect);
     },
 
     stop() {
         onSettingsChanged(null);
         FluxDispatcher.unsubscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onMessageUpdate);
+        FluxDispatcher.unsubscribe("CHANNEL_SELECT", onChannelSelect);
         batcher?.dispose();
         batcher = null;
         // Bump the generation so an in-flight request from before stop()
