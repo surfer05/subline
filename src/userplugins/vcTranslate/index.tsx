@@ -48,7 +48,17 @@ function effectiveEngine(): EngineId {
 }
 
 function channelActive(channelId: string): boolean {
-    return settings.store.globalAuto || isChannelEnabled(channelId);
+    // An explicit per-channel opt-in always wins, including for DMs.
+    if (isChannelEnabled(channelId)) return true;
+    if (!settings.store.globalAuto) return false;
+
+    // globalAuto means "every server channel I read", not "every private
+    // conversation I have". Translating a public channel is a decision the
+    // user makes for a room where everyone can already read everything;
+    // shipping a DM to a third-party endpoint is a materially different one,
+    // and the spec puts DMs out of scope. DMs and group DMs have no guild_id.
+    const channel = ChannelStore.getChannel(channelId);
+    return Boolean(channel?.guild_id);
 }
 
 function fallBackToGoogle(reason: string) {
