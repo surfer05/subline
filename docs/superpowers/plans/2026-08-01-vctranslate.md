@@ -2582,8 +2582,23 @@ function onChannelSelect({ channelId }: { channelId: string; }) {
 // from MessageStore's own consistent naming (getMessages(channelId),
 // isLoadingMessages(channelId)) and CHANNEL_SELECT's confirmed shape, not
 // independently verified against a real dispatch.
-function onLoadMessagesSuccess({ channelId }: { channelId: string; }) {
-    if (channelId) catchUp(channelId);
+function onMessagesLoaded(payload: any) {
+    // The payload shape for this event is not exercised anywhere in the
+    // Vencord checkout, so the field name is unverified. Accept the two
+    // plausible spellings and log loudly if neither is present, so a
+    // Discord-internals change is diagnosable instead of a silent no-op --
+    // this is the headline "tab back in after a game" case, so a silent
+    // failure here would be the worst kind: no error, just nothing happens.
+    const channelId: string | undefined = payload?.channelId ?? payload?.channel_id;
+    if (!channelId) {
+        logger.warn(
+            "LOAD_MESSAGES_SUCCESS payload had no channelId/channel_id; " +
+            "cold-channel catch-up will not run. Payload keys: " +
+            Object.keys(payload ?? {}).join(", ")
+        );
+        return;
+    }
+    catchUp(channelId);
 }
 ```
 
@@ -2612,7 +2627,7 @@ In `start()`, after the existing subscriptions:
 
 ```tsx
 FluxDispatcher.subscribe("CHANNEL_SELECT", onChannelSelect);
-FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS", onLoadMessagesSuccess);
+FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS", onMessagesLoaded);
 ```
 
 In `stop()`, alongside the others (the `inFlight.clear()` call belongs here too — anything
@@ -2621,7 +2636,7 @@ would otherwise stay permanently unretryable across a stop/start cycle):
 
 ```tsx
 FluxDispatcher.unsubscribe("CHANNEL_SELECT", onChannelSelect);
-FluxDispatcher.unsubscribe("LOAD_MESSAGES_SUCCESS", onLoadMessagesSuccess);
+FluxDispatcher.unsubscribe("LOAD_MESSAGES_SUCCESS", onMessagesLoaded);
 ```
 
 - [ ] **Step 4: Add the per-channel toggle to the message popover**
