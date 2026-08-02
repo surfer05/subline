@@ -18,7 +18,7 @@ import type { NativeResponse } from "../native";
 import { __resetSettings } from "./stubs/api-settings";
 import { __reset as resetDataStore } from "./stubs/api-datastore";
 import {
-    __resetWebpackCommon, FluxDispatcher, LocaleStore, shownToasts, stubMessages
+    __resetWebpackCommon, __stubMarkAsDm, FluxDispatcher, LocaleStore, shownToasts, stubMessages
 } from "./stubs/webpack-common";
 
 const CHANNEL = "c1";
@@ -272,5 +272,35 @@ describe("settings wiring", () => {
         __resetSettings();
         LocaleStore.locale = "ja";
         expect(settings.store.targetLang).toBe("ja");
+    });
+});
+
+describe("globalAuto does not reach private conversations", () => {
+    it("translates a guild channel but never a DM", async () => {
+        settings.store.globalAuto = true;
+
+        // Same message posted in a guild channel and in a DM. The only
+        // difference is the channel type, which is exactly the distinction
+        // globalAuto must respect: sending a public channel to a third-party
+        // endpoint is the user's decision to make, a private DM is not.
+        __stubMarkAsDm("dm1");
+        respondWith({
+            ok: true,
+            results: [{ id: "g1", lang: "es", text: "hello", skip: false }]
+        });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", {
+            message: { ...discordMessage("g1", "hola"), channel_id: CHANNEL }
+        });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", {
+            message: { ...discordMessage("d1", "hola"), channel_id: "dm1" }
+        });
+        await settle();
+
+        const sent = native.translateBatch.mock.calls
+            .flatMap(c => JSON.parse(c[2] as string).messages.map((m: any) => m.id));
+
+        expect(sent).toContain("g1");
+        expect(sent).not.toContain("d1");
     });
 });

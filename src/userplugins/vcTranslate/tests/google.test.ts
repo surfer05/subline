@@ -173,3 +173,33 @@ describe("translateWithGoogle", () => {
         expect(maxInFlight).toBe(4);
     });
 });
+
+describe("translateWithGoogle — pass-through detection", () => {
+    it("skips when the translation is identical to the source", async () => {
+        // Google misdetects English slang and echoes it back verbatim.
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => [[["hbu", "hbu", null, null, 10]], null, "fy"]
+        });
+        const [result] = await translateWithGoogle(req(["hbu"]), fetchImpl as any);
+        expect(result).toEqual({ id: "0", skip: true });
+    });
+
+    it("ignores case and spacing when comparing", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => [[["  U2   <2 ", "u2 <2"]], null, "zh-CN"]
+        });
+        const [result] = await translateWithGoogle(req(["u2 <2"]), fetchImpl as any);
+        expect(result).toEqual({ id: "0", skip: true });
+    });
+
+    it("still returns a real translation when the text actually changed", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => [[["let's go", "vamos"]], null, "es"]
+        });
+        const [result] = await translateWithGoogle(req(["vamos"]), fetchImpl as any);
+        expect(result).toEqual({ id: "0", lang: "es", text: "let's go", skip: false });
+    });
+});

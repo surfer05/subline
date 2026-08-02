@@ -1,4 +1,4 @@
-import type { BatchRequest, Result } from "../types";
+import { isSameText, type BatchRequest, type Result } from "../types";
 
 const ENDPOINT = "https://api.anthropic.com/v1/messages";
 const MODEL = "claude-haiku-4-5";
@@ -127,6 +127,15 @@ export function parseClaudeResponse(body: unknown, req: BatchRequest): Result[] 
         // picked up by the failed-marker pass below, so the renderer gets an
         // explicit failure instead of a message that never resolves.
         if (typeof r.lang !== "string" || typeof r.text !== "string" || r.text.trim() === "") continue;
+        // Same pass-through guard as the Google engine: a "translation"
+        // identical to its source is nothing to render. Cheaper to catch here
+        // than to show the user a subtitle that repeats the message verbatim.
+        const source = req.messages.find(m => m.id === r.id)?.text ?? "";
+        if (isSameText(r.text, source)) {
+            results.push({ id: r.id, skip: true });
+            continue;
+        }
+
         results.push({ id: r.id, lang: r.lang, text: r.text, skip: false });
     }
 

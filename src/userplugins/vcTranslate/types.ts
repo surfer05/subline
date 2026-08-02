@@ -28,3 +28,18 @@ export const ENGINE_CAPS: Record<EngineId, { supportsContext: boolean }> = {
     google: { supportsContext: false },
     claude: { supportsContext: true }
 };
+
+/**
+ * True when a translation is indistinguishable from its source, so there is
+ * nothing worth rendering. Engines pass text through unchanged when they
+ * misdetect the language — Google reads "hbu" as Frisian and "u2 <2" as
+ * Chinese — and the detected-language check cannot catch that, because the
+ * bogus detection is not the target language either.
+ *
+ * Compares case-insensitively with whitespace collapsed, so a translation
+ * differing only in spacing or capitalisation still counts as no translation.
+ */
+export function isSameText(a: string, b: string): boolean {
+    const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+    return norm(a) === norm(b);
+}

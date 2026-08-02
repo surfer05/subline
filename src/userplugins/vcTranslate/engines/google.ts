@@ -1,4 +1,4 @@
-import type { BatchRequest, Result } from "../types";
+import { isSameText, type BatchRequest, type Result } from "../types";
 
 const ENDPOINT = "https://translate.googleapis.com/translate_a/single";
 const CONCURRENCY = 4;
@@ -41,6 +41,14 @@ async function translateOne(
         .trim();
 
     if (text.length === 0) throw new MessageError("google: empty translation");
+
+    // The engine handed back exactly what we sent, so there is nothing to
+    // show. This is the usual outcome for English chat slang: Google
+    // misdetects "hbu" as Frisian and "u2 <2" as Chinese, then passes the text
+    // through untouched. The detected-language check above does not catch it,
+    // because the bogus detection is not the target language — so without
+    // this we render a subtitle identical to the message it sits under.
+    if (isSameText(text, msg.text)) return { id: msg.id, skip: true };
 
     return { id: msg.id, lang: detected, text, skip: false };
 }

@@ -29,6 +29,33 @@ function isRepeatedToken(s: string): boolean {
     return tokens.every(t => t.toLowerCase() === first);
 }
 
+/**
+ * English chat shorthand. These are already in the target language for an
+ * English-speaking user, but they are too short and too unlike dictionary
+ * words for statistical detection to place them: Google reads "hbu" as
+ * Frisian and "u2" as Chinese, then returns them unchanged. Catching them
+ * here avoids the request entirely rather than paying for a no-op.
+ *
+ * Only fires when the WHOLE message is shorthand, so "hbu, tienes hambre?"
+ * still translates.
+ */
+const CHAT_SHORTHAND = new Set([
+    "hbu", "wbu", "u2", "you2", "same", "ty", "tysm", "np", "yw", "nvm", "idk",
+    "idc", "imo", "imho", "tbh", "ngl", "fr", "brb", "afk", "gtg", "ttyl",
+    "wtf", "omg", "omfg", "ikr", "smh", "irl", "rn", "atm", "asap", "btw",
+    "gg", "ggwp", "wp", "gl", "hf", "glhf", "ez", "op", "nt", "n1", "sry",
+    "pls", "plz", "thx", "ok", "okay", "k", "kk", "yh", "ye", "yep", "yup",
+    "nah", "nope", "yeet", "bruh", "bro", "sus", "af", "ffs", "istg", "tldr"
+]);
+
+function isChatShorthand(s: string): boolean {
+    // Bare numbers survive punctuation stripping ("u2 <2" becomes "u2 2") and
+    // carry no meaning of their own, so they neither qualify nor disqualify.
+    const tokens = s.toLowerCase().split(/\s+/).filter(t => t && !/^\d+$/.test(t));
+    if (tokens.length === 0 || tokens.length > 4) return false;
+    return tokens.every(t => CHAT_SHORTHAND.has(t));
+}
+
 export function shouldSkip(text: string, isOwnMessage: boolean): boolean {
     if (isOwnMessage) return true;
 
@@ -54,6 +81,7 @@ export function shouldSkip(text: string, isOwnMessage: boolean): boolean {
         .replace(/[\p{P}\p{S}\p{M}]/gu, "")
         .trim();
 
+    if (isChatShorthand(words)) return true;
     if (isRepeatedToken(words)) return true;
     if (LAUGHTER.test(words.replace(/\s+/g, ""))) return true;
 

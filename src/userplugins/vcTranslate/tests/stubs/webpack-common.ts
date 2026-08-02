@@ -63,8 +63,30 @@ export const MessageStore = {
 
 /* ---------------------------------------------------------- ChannelStore -- */
 
+// Channels carry a guild_id; DMs and group DMs do not. The plugin relies on
+// that distinction to keep globalAuto from translating private conversations,
+// so the stub has to model it or that guard is untestable.
+const dmChannels = new Set<string>();
+
+export function __stubMarkAsDm(channelId: string): void {
+    dmChannels.add(channelId);
+}
+
 export const ChannelStore = {
-    getChannel: (id: string) => ({ id })
+    getChannel: (id: string) =>
+        dmChannels.has(id) ? { id } : { id, guild_id: "stub-guild" }
+};
+
+/* -------------------------------------------------- SelectedChannelStore -- */
+
+let selectedChannelId: string | null = null;
+
+export function __stubSetSelectedChannel(id: string | null): void {
+    selectedChannelId = id;
+}
+
+export const SelectedChannelStore = {
+    getChannelId: () => selectedChannelId
 };
 
 /* --------------------------------------------------------- FluxDispatcher -- */
@@ -100,6 +122,8 @@ export const LocaleStore = { locale: "en-US" };
 /* ------------------------------------------------------------------------- */
 
 export function __resetWebpackCommon(): void {
+    dmChannels.clear();
+    selectedChannelId = null;
     shownToasts.length = 0;
     stubMessages.clear();
     handlers.clear();

@@ -113,3 +113,18 @@ describe("shouldSkip — repetition and laughter noise", () => {
         expect(shouldSkip("no puedo mas hahaha", false)).toBe(false);
     });
 });
+
+describe("shouldSkip — English chat shorthand", () => {
+    it("skips messages that are entirely shorthand", () => {
+        // Google reads "hbu" as Frisian and "u2 <2" as Chinese, returns them
+        // unchanged, and we would render a subtitle identical to the message.
+        for (const s of ["hbu", "u2", "u2 <2", "gg wp", "brb", "idk tbh", "kk"]) {
+            expect(shouldSkip(s, false), s).toBe(true);
+        }
+    });
+
+    it("does NOT skip shorthand mixed with real content", () => {
+        expect(shouldSkip("hbu, tienes hambre?", false)).toBe(false);
+        expect(shouldSkip("gg pero perdimos", false)).toBe(false);
+    });
+});
