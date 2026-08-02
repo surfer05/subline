@@ -1,0 +1,92 @@
+import type { IpcMainInvokeEvent } from "electron";
+
+import { translateWithClaude, TRUNCATED_ERROR } from "./engines/claude";
+import { translateWithGoogle } from "./engines/google";
+import { withRetry } from "./retry";
+import type { BatchRequest, EngineId, Result } from "./types";
+
+export type NativeResponse =
+    | { ok: true; results: Result[] }
+    | { ok: false; error: string; retryAfterMs?: number };
+
+/**
+ * Both engines report transport failures as `<engine>: HTTP <status>`.
+ * One shared, strict extractor so the retry decision and the rate-limit
+ * signal can never disagree about what a message means.
+ */
+function httpStatus(msg: string): number | undefined {
+    const m = /\bHTTP (\d{3})\b/.exec(msg);
+    return m ? Number(m[1]) : undefined;
+}
+
+/**
+ * The `error` string below crosses the IPC boundary into the renderer, where it
+ * may be logged or displayed. It is whatever an engine threw, so nothing
+ * structurally stops a key ending up in it — today's engines are clean, but a
+ * future one, or a dependency's error, need not be. Redact defensively.
+ *
+ * split/join rather than a regex: the key is arbitrary user input and must not
+ * be interpreted as a pattern.
+ *
+ * No-op for an unset key. The blank check is `trim()`, not `length`: the google
+ * path passes "", and a whitespace-only key is not a secret but WOULD otherwise
+ * be a live separator — scrubbing on "   " would replace every three-space run
+ * in an unrelated message with [redacted]. Guarding on length alone leaves that
+ * hole open; splitting on "" would shred the message into single characters.
+ * A trimmed-blank key redacts nothing. Any other key, however short, is
+ * redacted in full — mangling a diagnostic beats leaking a credential, and the
+ * raw (untrimmed) value is what the header carries, so that is what we match.
+ */
+function scrubKey(message: string, apiKey: string): string {
+    if (apiKey.trim().length === 0) return message;
+    return message.split(apiKey).join("[redacted]");
+}
+
+/** 4xx failures repeat identically on retry; 429 and everything else may not. */
+function isRetryable(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    // A truncated response carries no HTTP status, so the "no status → retry"
+    // default below would retry it — and the retry sends the same prompt with
+    // the same output budget, truncating at exactly the same place. Pure
+    // double spend for a guaranteed second failure.
+    if (msg === TRUNCATED_ERROR) return false;
+    const status = httpStatus(msg);
+    if (status === undefined) return true; // network/parse error — one retry is worthwhile
+    if (status === 429) return true;       // rate limited — backoff then retry
+    return status < 400 || status >= 500;  // retry 5xx, never other 4xx
+}
+
+export async function translateBatch(
+    _: IpcMainInvokeEvent,
+    engine: EngineId,
+    apiKey: string,
+    reqJson: string
+): Promise<NativeResponse> {
+    let req: BatchRequest;
+    try {
+        req = JSON.parse(reqJson) as BatchRequest;
+    } catch {
+        return { ok: false, error: "bad request payload" };
+    }
+
+    try {
+        const results = await withRetry(
+            () =>
+                engine === "claude"
+                    ? translateWithClaude(req, apiKey)
+                    : translateWithGoogle(req),
+            { retries: 1, delayMs: 1000, shouldRetry: isRetryable }
+        );
+        return { ok: true, results };
+    } catch (err) {
+        const raw = err instanceof Error ? err.message : "unknown error";
+        // Surface rate limiting so the renderer can pause the queue. Extracted
+        // from the RAW message, exactly as isRetryable saw it. Reading it off
+        // the scrubbed string instead would let a degenerate key (one that
+        // happens to contain "HTTP 429", or a substring of it) rewrite the
+        // status out from under this check and desync the two decisions.
+        // Scrubbing happens afterwards, and only for the value that leaves.
+        const retryAfterMs = httpStatus(raw) === 429 ? 30_000 : undefined;
+        return { ok: false, error: scrubKey(raw, apiKey), retryAfterMs };
+    }
+}

@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "lib": ["ES2020"],
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "strict": true,
+
+    // src/userplugins/vcTranslate is symlinked into the Vencord checkout
+    // (a sibling directory) for building. esbuild's tsconfig auto-discovery
+    // walks up from a file's REAL (symlink-resolved) path, so files under
+    // this plugin resolve to THIS tsconfig, not Vencord's — and would
+    // otherwise fail to resolve Vencord's "@api/*", "@utils/*", etc. bare
+    // specifiers. Mirroring Vencord's own path map (relative to the sibling
+    // checkout) lets esbuild's default per-file discovery find the real
+    // files. Vencord's own internal files are unaffected: they still resolve
+    // via their own tsconfig.json through normal walk-up discovery.
+    "paths": {
+      "@main/*": ["../Vencord/src/main/*"],
+      "@api/*": ["../Vencord/src/api/*"],
+      "@components/*": ["../Vencord/src/components/*"],
+      "@debug/*": ["../Vencord/src/debug/*"],
+      "@utils/*": ["../Vencord/src/utils/*"],
+      "@plugins/*": ["../Vencord/src/plugins/*"],
+      "@shared/*": ["../Vencord/src/shared/*"],
+      "@webpack/common": ["../Vencord/src/webpack/common"],
+      "@webpack/common/*": ["../Vencord/src/webpack/common/*"],
+      "@webpack": ["../Vencord/src/webpack/webpack"],
+      "@webpack/patcher": ["../Vencord/src/webpack/patchWebpack"],
+      "@webpack/wreq.d": ["../Vencord/src/webpack/wreq.d"],
+      "@webpack/types": ["../Vencord/src/webpack/types"]
+    }
+  }
+}
