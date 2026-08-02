@@ -2193,6 +2193,17 @@ let batcher: Batcher | null = null;
 let pausedUntil = 0;
 let sessionFallback = false;   // set when Claude is unusable this session
 
+// Ids currently queued in the batcher or awaiting a translateBatch response.
+// getTranslation() alone can't tell "in flight" apart from "never
+// requested" -- a message is a cache miss for the WHOLE round trip (700ms
+// debounce plus several seconds of network for Claude), not just briefly.
+// Populated wherever a message is handed to batcher.add(), and drained in
+// onFlush once that request settles (success, failure, or stranded by a
+// rebuild) so it becomes retryable again. (Added in Task 9's fix round 1 to
+// replace a time-based cooldown that only narrowed, not closed, the
+// double-enqueue window on catch-up.)
+const inFlight = new Set<string>();
+
 // Bumped on every rebuildBatcher(). Each onFlush closure captures the
 // generation it was created under; if a response lands after a later
 // rebuild has already happened (settings changed mid-flight, or a Claude
@@ -2253,16 +2264,24 @@ function rebuildBatcher() {
             // Superseded by a later rebuild (settings changed, or a fallback
             // fired) before this flush even started — this closure's `engine`
             // no longer matches reality, so just drop it rather than write
-            // under a stale key.
-            if (myGeneration !== batcherGeneration) return;
+            // under a stale key. Still release these ids first: a batch
+            // stranded here never reaches the finally below, so without this
+            // they'd stay "in flight" forever and catch-up could never retry
+            // them.
+            if (myGeneration !== batcherGeneration) {
+                for (const m of req.messages) inFlight.delete(m.id);
+                return;
+            }
 
             if (Date.now() < pausedUntil) {
                 // The queue was already spliced out of the batcher before
                 // onFlush ran, so if we silently return here these messages
                 // are gone forever: no entry, no marker, no retry. Mark them
                 // failed instead so the accessory shows ⚠ and catch-up can
-                // retry later.
+                // retry later. This path never sends a request, so release
+                // the ids here rather than waiting on the finally below.
                 markAllFailed(req);
+                for (const m of req.messages) inFlight.delete(m.id);
                 return;
             }
 
@@ -2284,6 +2303,12 @@ function rebuildBatcher() {
                 // just vanish the batch with no marker).
                 markAllFailed(req);
                 return;
+            } finally {
+                // Fires once the round trip has actually settled (success OR
+                // rejection), which is the earliest point these ids are safe
+                // to retry — not when they were queued, and not only on the
+                // happy path.
+                for (const m of req.messages) inFlight.delete(m.id);
             }
 
             // THE race this guard exists for: rebuildBatcher() can run WHILE
@@ -2351,7 +2376,10 @@ function onMessageCreate({ message, optimistic }: { message: Message; optimistic
 
     // Skipped messages still shape the conversation, so they become context.
     if (shouldSkip(pending.text, isOwn)) batcher?.recordContext(pending);
-    else batcher?.add(pending);
+    else {
+        inFlight.add(pending.id);
+        batcher?.add(pending);
+    }
 }
 
 function onMessageUpdate({ message }: { message: Message; }) {
@@ -2414,6 +2442,10 @@ export default definePlugin({
         FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onMessageUpdate);
         batcher?.dispose();
         batcher = null;
+        // Anything still marked in-flight belongs to a batcher that just got
+        // disposed without flushing -- without this, those ids would stay
+        // permanently unretryable across a stop/start cycle.
+        inFlight.clear();
         // Bump the generation so an in-flight request from before stop()
         // (e.g. a Claude call awaiting its response) fails its post-await
         // guard check in onFlush and returns before ever reaching
@@ -2459,10 +2491,23 @@ git commit -m "feat(vcTranslate): add plugin shell with Flux hook and subtitle r
 - Modify: `src/userplugins/vcTranslate/index.tsx`
 
 **Interfaces:**
-- Consumes: `toggleChannel`, `isChannelEnabled` from `channels.ts`; `MessageStore`, `SelectedChannelStore` from `@webpack/common`.
+- Consumes: `toggleChannel`, `isChannelEnabled` from `channels.ts`; `ChannelStore`, `MessageStore` from `@webpack/common`.
 - Produces: no new exports.
 
 Two behaviours: a globe button so the user does not have to leave the channel to enable translation, and a backlog pass so tabbing back in after a game shows the last N messages already translated.
+
+> **Corrected against Vencord source, and against fix round 1** (see `task-9-report.md`
+> for the full trace): `messagePopoverButton` is `{ render, icon }` only — no top-level
+> `key`; the item `render()` returns needs `channel: Channel` (an object, via
+> `ChannelStore.getChannel(...)`), not the channel id string. A 3s catch-up cooldown
+> was tried first and proven insufficient (debounce 700ms + a 3-8s Claude round trip
+> means the common case exceeds 3s, so a re-select at t=3.2s would still re-enqueue the
+> whole backlog) — replaced with a state-based `inFlight` id set that is only cleared
+> once each request actually settles. Catch-up also now retries `{failed: true}`
+> entries (previously skipped forever, contradicting Task 8's own "catch-up can retry
+> later" comment) and subscribes to `LOAD_MESSAGES_SUCCESS` in addition to
+> `CHANNEL_SELECT`, since `CHANNEL_SELECT` fires before Discord has necessarily fetched
+> the backlog of a channel not yet visited this session.
 
 - [ ] **Step 1: Add the catch-up handler**
 
@@ -2475,14 +2520,32 @@ function catchUp(channelId: string) {
     const count = settings.store.catchUpCount;
     if (count <= 0) return;
 
-    const all = MessageStore.getMessages(channelId)?.toArray?.() ?? [];
+    const store = MessageStore.getMessages(channelId);
+    if (!store || typeof store.toArray !== "function") {
+        // Not necessarily an error -- a channel with no messages loaded yet
+        // legitimately has nothing to iterate. But if the store or method
+        // itself is gone, Discord's internals moved and we'd otherwise fail
+        // silently with no way to tell "empty channel" from "broken".
+        logger.warn(`MessageStore.getMessages(${channelId}) has no usable toArray(); skipping catch-up.`);
+        return;
+    }
+
+    const all = store.toArray();
     const recent = all.slice(-count);
     const me = UserStore.getCurrentUser()?.id;
     const engine = effectiveEngine();
 
     for (const message of recent) {
+        // A message already queued or awaiting a response is a cache miss
+        // in getTranslation() for the whole round trip, not just briefly --
+        // so a duplicate catch-up trigger (rapid channel reselection, or
+        // CHANNEL_SELECT followed by LOAD_MESSAGES_SUCCESS for the same
+        // channel) must not treat "no cache entry yet" as "never requested".
+        if (inFlight.has(message.id)) continue;
+
         const key = makeKey(message.id, settings.store.targetLang, engine);
-        if (getTranslation(key)) continue;   // already done, don't re-spend
+        const entry = getTranslation(key);
+        if (entry && !("failed" in entry)) continue;   // retry failures, skip real translations
 
         const pending: PendingMessage = {
             id: message.id,
@@ -2491,36 +2554,74 @@ function catchUp(channelId: string) {
             channelId
         };
 
-        if (shouldSkip(pending.text, message.author?.id === me)) batcher?.recordContext(pending);
-        else batcher?.add(pending);
+        // Skipped messages still shape the conversation, so they become
+        // context. This also avoids re-requesting messages the server would
+        // skip anyway (skip results write nothing to the store, so without
+        // this check they'd be re-requested on every channel open forever).
+        if (shouldSkip(pending.text, message.author?.id === me)) {
+            batcher?.recordContext(pending);
+        } else {
+            inFlight.add(pending.id);
+            batcher?.add(pending);
+        }
     }
 }
 
 function onChannelSelect({ channelId }: { channelId: string; }) {
     if (channelId) catchUp(channelId);
 }
+
+// CHANNEL_SELECT fires before Discord has necessarily fetched the backlog
+// of a channel not yet visited this session, so MessageStore.getMessages()
+// can still be empty when catchUp() above runs -- exactly the "tab back in
+// after a game" case the feature exists for. LOAD_MESSAGES_SUCCESS is
+// Discord's event for "message history for this channel just landed"; it's
+// confirmed as a real client event via the FluxEvents union in
+// packages/discord-types/src/fluxEvents.d.ts, but no existing Vencord
+// plugin subscribes to it, so its `channelId` payload field is inferred
+// from MessageStore's own consistent naming (getMessages(channelId),
+// isLoadingMessages(channelId)) and CHANNEL_SELECT's confirmed shape, not
+// independently verified against a real dispatch.
+function onLoadMessagesSuccess({ channelId }: { channelId: string; }) {
+    if (channelId) catchUp(channelId);
+}
 ```
 
-- [ ] **Step 2: Add `MessageStore` to the webpack imports**
+- [ ] **Step 2: Add `ChannelStore`/`MessageStore` to the webpack imports, and `Logger`**
 
 Change the `@webpack/common` import line to:
 
 ```tsx
-import { FluxDispatcher, MessageStore, React, UserStore } from "@webpack/common";
+import { ChannelStore, FluxDispatcher, MessageStore, React, Toasts, UserStore } from "@webpack/common";
 ```
 
-- [ ] **Step 3: Subscribe and unsubscribe the handler**
+Add, near the top alongside the other imports, and declare a module-level logger for the
+diagnostic warning in Step 1:
+
+```tsx
+import { Logger } from "@utils/Logger";
+```
+
+```tsx
+const logger = new Logger("VcTranslate");
+```
+
+- [ ] **Step 3: Subscribe and unsubscribe the handlers**
 
 In `start()`, after the existing subscriptions:
 
 ```tsx
 FluxDispatcher.subscribe("CHANNEL_SELECT", onChannelSelect);
+FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS", onLoadMessagesSuccess);
 ```
 
-In `stop()`, alongside the others:
+In `stop()`, alongside the others (the `inFlight.clear()` call belongs here too — anything
+still marked in-flight belongs to a batcher that just got disposed without flushing, and
+would otherwise stay permanently unretryable across a stop/start cycle):
 
 ```tsx
 FluxDispatcher.unsubscribe("CHANNEL_SELECT", onChannelSelect);
+FluxDispatcher.unsubscribe("LOAD_MESSAGES_SUCCESS", onLoadMessagesSuccess);
 ```
 
 - [ ] **Step 4: Add the per-channel toggle to the message popover**
@@ -2529,23 +2630,44 @@ Vencord's `messagePopoverButton` is the lowest-risk place to hang this — it ne
 
 ```tsx
     messagePopoverButton: {
-        key: "vc-translate-toggle",
         icon: () => <span style={{ fontSize: "1rem" }}>🌐</span>,
         render(message: Message) {
+            const channel = ChannelStore.getChannel(message.channel_id);
+            if (!channel) return null;
+
             const on = channelActive(message.channel_id);
             return {
                 label: on ? "Disable auto-translate here" : "Enable auto-translate here",
                 icon: () => <span style={{ fontSize: "1rem" }}>{on ? "🌐" : "🌫"}</span>,
                 message,
-                channel: message.channel_id,
+                channel,
                 onClick: async () => {
-                    const nowOn = await toggleChannel(message.channel_id);
-                    if (nowOn) catchUp(message.channel_id);
+                    try {
+                        const nowOn = await toggleChannel(message.channel_id);
+                        if (nowOn) catchUp(message.channel_id);
+                    } catch {
+                        // toggleChannel rethrows on persistence failure (memory
+                        // already rolled back by then) -- surface it instead of
+                        // leaving an unhandled rejection. catchUp() is inside
+                        // this try too, so a throw there can't escape unhandled
+                        // either.
+                        Toasts.show({
+                            id: Toasts.genId(),
+                            type: Toasts.Type.FAILURE,
+                            message: "VcTranslate: couldn't save that toggle, try again."
+                        });
+                    }
                 }
             };
         }
     },
 ```
+
+`MessagePopoverButtonData` is `{ render, icon }` only — there is no top-level `key`.
+`MessagePopoverButtonItem` (what `render` returns) requires `channel: Channel`, an
+object, obtained via `ChannelStore.getChannel(message.channel_id)`; `render` returns
+`null` if the channel can't be resolved. See `Vencord/src/api/MessagePopover.tsx:29-41`
+and `Vencord/src/plugins/translate/index.tsx` for the verified shapes.
 
 - [ ] **Step 5: Add `toggleChannel` to the channels import**
 
@@ -2559,8 +2681,9 @@ Run: `pnpm build`, then restart Discord.
 
 1. Turn **globalAuto** back off.
 2. Hover a message → click the 🌐 button → confirm the channel's backlog translates.
-3. Switch away and back → confirm no duplicate API calls (translations appear instantly from cache).
+3. Switch away and back → confirm no duplicate API calls (translations appear instantly from cache, and no message is re-sent while its first request is still in flight).
 4. Click 🌐 again → confirm subtitles disappear.
+5. Open a channel not visited yet this session and confirm the backlog translates once history loads (`LOAD_MESSAGES_SUCCESS`), not just on later re-selection.
 
 - [ ] **Step 7: Commit**
 
