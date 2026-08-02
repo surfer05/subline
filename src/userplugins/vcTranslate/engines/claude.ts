@@ -75,7 +75,24 @@ export function buildPrompt(req: BatchRequest): string {
     return parts.join("\n");
 }
 
+/**
+ * Thrown when the model hit the output budget mid-answer. Kept as a distinct,
+ * exact string because native.ts's isRetryable matches on it: a truncated
+ * response reproduces IDENTICALLY on retry (same prompt, same budget), so
+ * retrying only doubles the token bill before failing the batch anyway.
+ * Without this it looks like a generic parse error, which IS retried.
+ */
+export const TRUNCATED_ERROR = "claude: response truncated (max_tokens)";
+
 export function parseClaudeResponse(body: unknown, req: BatchRequest): Result[] {
+    // Checked before anything else: a max_tokens stop means the JSON below is
+    // cut off mid-object, so every downstream diagnostic ("not valid JSON",
+    // "missing translations array") would be a misleading description of a
+    // budget problem — and, worse, a retryable-looking one.
+    if ((body as { stop_reason?: unknown })?.stop_reason === "max_tokens") {
+        throw new Error(TRUNCATED_ERROR);
+    }
+
     const content = (body as { content?: unknown[] })?.content;
     if (!Array.isArray(content)) throw new Error("claude: missing content");
 
@@ -138,7 +155,14 @@ export async function translateWithClaude(
         },
         body: JSON.stringify({
             model: MODEL,
-            max_tokens: 2048,
+            // A full batch is 10 Discord messages; each translation carries the
+            // original id and lang alongside the text, and JSON-encoded CJK
+            // expands badly. 2048 could be exhausted by a batch of long
+            // messages, and a truncated response fails the WHOLE batch (see
+            // TRUNCATED_ERROR). Output tokens are only billed for what is
+            // actually produced, so a headroom-generous cap costs nothing on a
+            // normal batch and prevents an all-or-nothing failure on a long one.
+            max_tokens: 8000,
             output_config: { format: { type: "json_schema", schema: SCHEMA } },
             messages: [{ role: "user", content: buildPrompt(req) }]
         })

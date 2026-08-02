@@ -80,7 +80,15 @@ translation on everywhere at once, overriding the per-channel list.
 Opening (or reopening) an enabled channel also translates a backlog of its
 most recent messages — how many is controlled by the **"How many recent
 messages to translate when opening an enabled channel"** slider (default 20,
-0 disables catch-up).
+0 disables catch-up). Messages the engine reports as *already* in your target
+language get no subtitle, and are remembered as resolved: reopening the
+channel does not re-send them. Editing a message clears its subtitle and
+re-translates the new text.
+
+The **"Target language code"** setting defaults to your Discord client's own
+language (`en-US` becomes `en`, `pt-BR` becomes `pt`, and so on) rather than
+always English. Set it explicitly if you want subtitles in something other
+than the language your client is in.
 
 ## Engines
 
@@ -89,16 +97,19 @@ messages to translate when opening an enabled channel"** slider (default 20,
 | Google (default) | Free, no API key | Weaker on slang, mixed languages, and short fragments; each message is translated in isolation, with no conversation context |
 | Claude Haiku (`claude-haiku-4-5`) | Roughly $2-3/month at typical chat volume | Noticeably better on slang and code-mixed text; batches multiple messages per request and includes a rolling window of recent channel context, so it can disambiguate short or ambiguous lines the way a person following the conversation would |
 
-To use Claude: create a key at console.anthropic.com, paste it into the
-**"Anthropic API key"** field in the plugin settings, and switch the
-**"Translation engine"** dropdown to Claude Haiku. **Scope the key to a
-dedicated project with a spend limit** — it is stored in plaintext in
-Vencord's settings file, like every other Vencord plugin credential, not in
-your OS keychain.
+To use Claude: create a key at console.anthropic.com, switch the
+**"Translation engine"** dropdown to Claude Haiku — the **"Anthropic API
+key"** field is hidden until you do, since it is meaningless for Google — then
+paste the key into it. **Scope the key to a dedicated project with a spend
+limit** — it is stored in plaintext in Vencord's settings file, like every
+other Vencord plugin credential, not in your OS keychain.
 
 If the key field is left empty while Claude is selected, or if Claude ever
-rejects the key, the plugin falls back to Google for the rest of the session
-rather than failing outright — see Troubleshooting below.
+rejects the key, the plugin falls back to Google rather than failing
+outright. Both cases show one toast, and only one per session. The two are
+not the same, though: a *rejected* key pins the session to Google until you
+restart Discord, whereas a *missing* key does not — paste one and Claude
+starts being used immediately. See Troubleshooting below.
 
 ## Troubleshooting
 
@@ -113,17 +124,28 @@ rather than failing outright — see Troubleshooting below.
    catch-up) before assuming the plugin is broken.
 
 **A message you expected to translate is silently skipped.**
-By design: your own messages, and messages that are only emotes, mentions,
-links, digits/punctuation, or emoji once those are stripped out, are treated
-as untranslatable and never sent to any engine (see `skip.ts`). This is
-deliberate, not a bug — it also avoids burning API calls on content with
-nothing to translate.
+By design, in one of two ways. Locally: your own messages, and messages that
+are only emotes, mentions, links, digits/punctuation, or emoji once those are
+stripped out, are treated as untranslatable and never sent to any engine (see
+`skip.ts`). Remotely: the engine itself reports a message that is already in
+your target language, and there is nothing to subtitle. Both are deliberate —
+they avoid burning API calls on content with nothing to translate. The second
+kind is recorded as resolved rather than left blank, so reopening the channel
+does not re-request the whole already-translated backlog.
+
+**A message edit doesn't update the subtitle.**
+It should: an edit clears the old subtitle and re-queues the new text, so the
+subtitle reappears within about a second. Updates that carry no message text
+(a link preview loading, an attachment finishing processing — Discord fires
+the same event for those) are deliberately not re-translated, since the text
+has not changed.
 
 **Translations stopped after previously working, with no visible error.**
 A bad or rejected Anthropic API key does not disable the plugin — it falls
-back to Google silently for the rest of that Discord session (one toast is
-shown the first time this happens; after that it's quiet, so it doesn't spam
-you every batch). If translations still look "worse than they used to,"
+back to Google for the rest of that Discord session (one toast is shown the
+first time this happens; after that it's quiet, so it doesn't spam you every
+batch). Selecting Claude with the key field still empty shows its own,
+separate one-per-session toast and uses Google until you paste one. If translations still look "worse than they used to,"
 that's expected: you're on Google until you fix the key and **restart
 Discord** (the fallback is per-session and does not clear itself while
 Discord stays open, even if you re-paste a working key — see the item below).
@@ -176,13 +198,13 @@ about what the plugin does — not a recommendation either way.
   app only (it uses `pnpm inject`'s desktop patch target and Node-side IPC for
   the network calls; there is no browser-userscript equivalent of the native
   bridge).
-- `index.tsx` is currently 409 lines, against this project's own 200-line
+- `index.tsx` is currently 510 lines, against this project's own 200-line
   per-file convention. It grew past that budget across several correctness
-  fixes (catch-up de-duplication, cold-channel handling, session fallback)
-  where splitting mid-fix would have made the diffs harder to review than the
-  size overrun was worth. Splitting it — likely into the Flux
-  handlers/catch-up logic, the popover button, and the accessory component —
-  is planned as a follow-up task, not done here.
+  fixes (catch-up de-duplication, cold-channel handling, session fallback,
+  edit re-translation) where splitting mid-fix would have made the diffs
+  harder to review than the size overrun was worth. Splitting it — likely into
+  the Flux handlers/catch-up logic, the popover button, and the accessory
+  component — is planned as a follow-up task, not done here.
 
 ## Tests
 
@@ -190,32 +212,40 @@ about what the plugin does — not a recommendation either way.
 npx vitest run
 ```
 
-92 tests across 7 suites (`batcher`, `channels` via `store`/`skip` coverage,
-`claude`, `google`, `native`, `retry`, `skip`, `store` — see `tests/`), all
-targeting pure-logic modules with no Discord/Vencord runtime dependency.
-`index.tsx` itself (the Flux wiring, the popover button, the React
-accessory) has no automated test coverage — exercising it would require
-mocking `definePlugin`, `FluxDispatcher`, `ChannelStore`, `MessageStore`,
-`UserStore`, `Toasts`, `React`, and the native IPC bridge, which is why the
-manual checklist below exists.
+122 tests across 8 suites (`batcher`, `claude`, `google`, `index`, `native`,
+`retry`, `skip`, `store` — see `tests/`).
+
+Seven of the eight target pure-logic modules with no Discord/Vencord runtime
+dependency. `index.test.ts` covers `index.tsx` — the Flux wiring, the
+catch-up logic and the subtitle accessory — against the small set of Vencord
+stand-ins in `tests/stubs/` (`FluxDispatcher`, `MessageStore`, `UserStore`,
+`ChannelStore`, `Toasts`, `LocaleStore`, `DataStore`, the settings API, and
+just enough of `React` to call a function component and inspect what it
+returned). `vitest.config.ts` aliases the `@api/*`, `@utils/*` and
+`@webpack/common` specifiers onto those stubs. What remains uncovered is the
+part that only exists inside a running Discord — whether Discord actually
+dispatches the events with the payload shapes assumed here, and the real
+network calls — which is what the manual checklist below is for.
 
 ## Manual verification checklist
 
-The automated suite covers every pure-logic module. It cannot cover anything
-that only exists once this plugin is running inside a real, injected Discord
-client — Flux event wiring, the message-hover popover, actual network calls,
-and Discord's own restart/reload behavior. The items below are exactly that
-set, flagged during review as unverifiable from source alone. **Nothing in
-this table has been executed.** It is a checklist for you (the person
-running `pnpm inject` and Discord) to work through, not a report of results.
+The automated suite covers every module, `index.tsx` included, but it does so
+against stand-ins for Discord. It cannot cover what only exists once this
+plugin is running inside a real, injected Discord client — whether Discord's
+own events carry the payload shapes assumed here, the message-hover popover,
+actual network calls, and Discord's restart/reload behavior. The items below
+are exactly that set, flagged during review as unverifiable from source
+alone. **Nothing in this table has been executed.** It is a checklist for you
+(the person running `pnpm inject` and Discord) to work through, not a report
+of results.
 
 | # | What to do | Expected | Pass/Fail |
 |---|---|---|---|
 | 1 | Post a non-English message in an enabled channel | Dimmed italic subtitle appears within ~1s | ☐ |
-| 2 | Post an English message | No subtitle | ☐ |
+| 2 | Post a message already in your target language, then reopen the channel | No subtitle, and no second API call on reopen (the skip is cached as resolved) | ☐ |
 | 3 | Post an emote-only message, a link-only message, or your own message | No subtitle, no API call | ☐ |
 | 4 | Have three people post at once in three different languages | All three translate, in one batch | ☐ |
-| 5 | Edit a message that already has a translated subtitle | Subtitle re-translates to match the edit | ☐ |
+| 5 | Edit a message that already has a translated subtitle | Subtitle re-translates to match the edit (the old one clears, the new one appears within ~1s) | ☐ |
 | 6 | Scroll far up in a channel, then back down | Subtitles persist; nothing is re-requested | ☐ |
 | 7 | **Cold channel:** open a channel not visited yet this session | Its backlog translates without needing a second channel selection. If it does not, check the console for the `VcTranslate` warning listing `Payload keys:` — see Troubleshooting | ☐ |
 | 8 | Count how many times `LOAD_MESSAGES_SUCCESS` fires for one channel open (scrolling up to load more history also dispatches it) | Confirm no duplicate API spend from repeated catch-up triggers for the same channel open | ☐ |
@@ -230,11 +260,15 @@ running `pnpm inject` and Discord) to work through, not a report of results.
 | 17 | Reconnect the network, post again | Translation resumes normally | ☐ |
 | 18 | Disable the plugin mid-flight (a translation in progress), then re-enable it | The next channel-open catch-up still enqueues correctly | ☐ |
 | 19 | Restart Discord entirely | Previously enabled channels are remembered | ☐ |
+| 20 | Post a message containing a link, and let Discord's preview embed load | Exactly one translation request for that message — the embed's own `MESSAGE_UPDATE` must not trigger a second | ☐ |
+| 21 | Open the plugin settings with engine = Google, then switch to Claude | The "Anthropic API key" field is absent for Google and appears for Claude | ☐ |
+| 22 | Select Claude while the key field is empty, then post a message | Exactly one "no Anthropic API key" toast; pasting a valid key afterwards starts using Claude with no restart | ☐ |
+| 23 | Check the "Target language code" setting on a fresh install with a non-English Discord client | It defaults to your client's language as a bare code (`pt`, not `pt-BR`) | ☐ |
 
 If you'd rather work from the brief's original phrasing, items 1-3 and 5-6
 above correspond to the brief's manual checklist 1-8 (minus a redundant
 "delete a message" case not repeated here since it's a strict subset of
-"edit"); items 7-19 are the additional cases raised in code review that the
+"edit"); items 7-23 are the additional cases raised in code review that the
 brief's original list did not cover (cold-channel catch-up, duplicate-event
 counting, mid-flight re-selection, retry-on-reopen, persistence-failure UX,
 and the empty/invalid/fixed API-key sequence).

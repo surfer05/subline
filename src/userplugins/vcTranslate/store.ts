@@ -1,6 +1,13 @@
+// Three terminal states, not two. `skipped` exists because a message that is
+// ALREADY in the target language has no translation to store — but writing
+// nothing at all would make it a permanent cache miss, so catch-up would
+// re-enqueue the entire already-target-language backlog on every channel open,
+// forever. In a mixed-language chat that is most of the backlog. Both `failed`
+// and `skipped` are "resolved"; only `failed` is worth retrying.
 export type StoredTranslation =
     | { lang: string; text: string }
-    | { failed: true };
+    | { failed: true }
+    | { skipped: true };
 
 const MAX_ENTRIES = 500;
 

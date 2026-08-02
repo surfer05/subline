@@ -89,15 +89,52 @@ export const ENGINE_CAPS: Record<EngineId, { supportsContext: boolean }> = {
 
 - [ ] **Step 2: Add the vitest config**
 
-`vitest.config.ts`:
+`vitest.config.ts`. The JSX and `resolve.alias` sections were added in the
+final fix round, when `index.tsx` gained test coverage: the aliases point
+Vencord's bare specifiers (`@api/*`, `@utils/*`, `@webpack/common`) at the
+stand-ins in `tests/stubs/`, and the JSX settings pin the classic
+`React.createElement` transform that Vencord's own build uses — without them
+the toolchain reaches for `react/jsx-runtime`, which this repo has no reason
+to depend on. Everything else in `tests/` is pure-logic and unaffected.
 
 ```ts
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
+
+const stub = (name: string) => fileURLToPath(new URL(`tests/stubs/${name}`, import.meta.url));
+
+// index.tsx uses the CLASSIC JSX transform with React pulled in from
+// @webpack/common, exactly as Vencord's own build does. Without this the
+// toolchain defaults to the automatic runtime and tries to import
+// "react/jsx-runtime", which this repo deliberately does not depend on.
+const jsx = {
+    runtime: "classic",
+    pragma: "React.createElement",
+    pragmaFrag: "React.Fragment"
+} as const;
 
 export default defineConfig({
     test: {
         include: ["tests/**/*.test.ts"],
         environment: "node"
+    },
+    // Vitest 4 transforms with oxc. On an older vitest (esbuild) this key is
+    // ignored and JSX fails to resolve "react/jsx-runtime"; the equivalent
+    // there is `esbuild: { jsx: "transform", jsxFactory, jsxFragment }`.
+    // Setting both is not an option — vite warns that one is being discarded.
+    oxc: { jsx },
+    resolve: {
+        // The plugin's Vencord-provided imports. These bare specifiers only
+        // resolve inside a Vencord checkout, so tests/stubs/ supplies the small
+        // surface the plugin actually touches. Everything else in tests/ is
+        // pure-logic and unaffected.
+        alias: {
+            "@api/DataStore": stub("api-datastore.ts"),
+            "@api/Settings": stub("api-settings.ts"),
+            "@utils/Logger": stub("utils-logger.ts"),
+            "@utils/types": stub("utils-types.ts"),
+            "@webpack/common": stub("webpack-common.ts")
+        }
     }
 });
 ```
@@ -242,9 +279,17 @@ git commit -m "feat(vcTranslate): add shared types and message skip rules"
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `makeKey(messageId, lang, engine): string`, `getTranslation(key): StoredTranslation | undefined`, `setTranslation(key, value): void`, `invalidateMessage(messageId): void`, `subscribe(fn: () => void): () => void`, `clearStore(): void`, and `type StoredTranslation = { lang: string; text: string } | { failed: true }`.
+- Produces: `makeKey(messageId, lang, engine): string`, `getTranslation(key): StoredTranslation | undefined`, `setTranslation(key, value): void`, `invalidateMessage(messageId): void`, `subscribe(fn: () => void): () => void`, `clearStore(): void`, and `type StoredTranslation = { lang: string; text: string } | { failed: true } | { skipped: true }`.
 
 The store doubles as the re-render trigger: translations arrive asynchronously, so the accessory component subscribes and re-renders when its entry lands.
+
+The `{ skipped: true }` variant was added in the final fix round. A message the
+engine reports as already being in the target language has no translation to
+store — but writing *nothing* made it indistinguishable from a message that was
+never requested, so catch-up re-enqueued the entire already-target-language
+backlog on every channel open, forever. In a mixed-language chat that is most
+of the backlog. All three variants are "resolved"; only `failed` is retried,
+and only `failed` renders anything.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -281,6 +326,32 @@ describe("store", () => {
         const k = makeKey("1", "en", "claude");
         setTranslation(k, { failed: true });
         expect(getTranslation(k)).toEqual({ failed: true });
+    });
+
+    it("stores a skipped marker", () => {
+        const k = makeKey("1", "en", "claude");
+        setTranslation(k, { skipped: true });
+        expect(getTranslation(k)).toEqual({ skipped: true });
+    });
+
+    it("keeps skipped distinguishable from failed and from a translation", () => {
+        // These three are the whole point of the union: the accessory renders a
+        // different thing for each, and catch-up retries exactly one of them.
+        setTranslation(makeKey("1", "en", "claude"), { skipped: true });
+        setTranslation(makeKey("2", "en", "claude"), { failed: true });
+        setTranslation(makeKey("3", "en", "claude"), { lang: "ja", text: "hi" });
+
+        expect(getTranslation(makeKey("1", "en", "claude"))).not.toHaveProperty("failed");
+        expect(getTranslation(makeKey("2", "en", "claude"))).not.toHaveProperty("skipped");
+        expect(getTranslation(makeKey("3", "en", "claude"))).not.toHaveProperty("skipped");
+    });
+
+    it("a skipped entry is a hit, not a miss", () => {
+        // The whole reason the variant exists: an unwritten id looks identical
+        // to one that was never requested, so catch-up re-enqueues it forever.
+        const k = makeKey("1", "en", "claude");
+        setTranslation(k, { skipped: true });
+        expect(getTranslation(k)).toBeDefined();
     });
 
     it("evicts the least recently used entry past the cap", () => {
@@ -329,9 +400,16 @@ Expected: FAIL — cannot resolve `../store`.
 `Map` preserves insertion order, so delete-then-set moves an entry to the most-recent position. That is the whole LRU mechanism.
 
 ```ts
+// Three terminal states, not two. `skipped` exists because a message that is
+// ALREADY in the target language has no translation to store — but writing
+// nothing at all would make it a permanent cache miss, so catch-up would
+// re-enqueue the entire already-target-language backlog on every channel open,
+// forever. In a mixed-language chat that is most of the backlog. Both `failed`
+// and `skipped` are "resolved"; only `failed` is worth retrying.
 export type StoredTranslation =
     | { lang: string; text: string }
-    | { failed: true };
+    | { failed: true }
+    | { skipped: true };
 
 const MAX_ENTRIES = 500;
 
@@ -383,7 +461,7 @@ export function clearStore(): void {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/store.test.ts`
-Expected: PASS — 7 tests.
+Expected: PASS — 10 tests (7 original + 3 for the `{ skipped: true }` variant).
 
 - [ ] **Step 5: Commit**
 
@@ -416,6 +494,14 @@ trace, so anything mid-debounce-window at rebuild time (a settings change,
 not a failure) would otherwise vanish with no entry, no marker, and no
 retry. Draining first lets those messages be re-queued into the new batcher
 instead.
+
+`recordContext()`/`pushContext()` de-duplicate by message id (added in the
+final fix round). Catch-up runs for **both** `CHANNEL_SELECT` and
+`LOAD_MESSAGES_SUCCESS` on a single channel open, so every skipped message in
+the backlog is offered as context twice; without the check, the 8-slot ring
+fills with two copies of each and evicts genuine context. The id is carried on
+the internal context entries only and stripped before the context reaches a
+`BatchRequest`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -536,6 +622,47 @@ describe("createBatcher", () => {
         expect(flushed[1].req.context.map(c => c.text)).toEqual(["uno"]);
     });
 
+    it("records the same message as context only once", () => {
+        // catchUp() runs for BOTH CHANNEL_SELECT and LOAD_MESSAGES_SUCCESS on a
+        // single channel open, so every skipped message in the backlog is
+        // offered as context twice. Without de-duplication the ring fills with
+        // two copies of each and genuine context gets evicted by duplicates.
+        const { batcher, flushed } = setup();
+        batcher.recordContext(msg("1", "first"));
+        batcher.recordContext(msg("1", "first"));
+        batcher.add(msg("2", "segundo"));
+        vi.advanceTimersByTime(700);
+
+        expect(flushed[0].req.context.map(c => c.text)).toEqual(["first"]);
+    });
+
+    it("a duplicated backlog does not reorder or evict genuine context", () => {
+        // One channel open dispatching two catch-up passes over the same three
+        // skipped messages. NB the ring size (4) is deliberately NOT a multiple
+        // of the backlog size: with 4 and 4 the duplicated pushes wrap around
+        // to exactly the right answer and the assertion cannot fail.
+        const { batcher, flushed } = setup({ contextSize: 4 });
+        for (const pass of [0, 1]) {
+            void pass;
+            for (const id of ["1", "2", "3"]) batcher.recordContext(msg(id, `m${id}`));
+        }
+        batcher.add(msg("9", "nueve"));
+        vi.advanceTimersByTime(700);
+
+        // Without de-duplication this is ["m3", "m1", "m2", "m3"] — the oldest
+        // real context evicted by a copy of the newest.
+        expect(flushed[0].req.context.map(c => c.text)).toEqual(["m1", "m2", "m3"]);
+    });
+
+    it("does not leak the internal dedup id into the request", () => {
+        const { batcher, flushed } = setup();
+        batcher.recordContext(msg("1", "first"));
+        batcher.add(msg("2", "segundo"));
+        vi.advanceTimersByTime(700);
+
+        expect(flushed[0].req.context).toEqual([{ author: "user1", text: "first" }]);
+    });
+
     it("dispose cancels a pending flush", () => {
         const { batcher, flushed } = setup();
         batcher.add(msg("1", "hola"));
@@ -630,7 +757,9 @@ export interface Batcher {
 
 interface ChannelState {
     queue: PendingMessage[];
-    context: { author: string; text: string }[];
+    // `id` is carried internally for de-duplication only; it is stripped before
+    // the context reaches a BatchRequest.
+    context: { id: string; author: string; text: string }[];
     timer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -647,7 +776,14 @@ export function createBatcher(opts: BatcherOptions): Batcher {
     };
 
     const pushContext = (s: ChannelState, msg: PendingMessage) => {
-        s.context.push({ author: msg.author, text: msg.text });
+        // The same message can legitimately be offered as context more than
+        // once: catch-up runs for BOTH CHANNEL_SELECT and LOAD_MESSAGES_SUCCESS
+        // on a single channel open, so every skipped message in the backlog is
+        // handed over twice. Without this check the 8-slot ring fills with two
+        // copies of each, halving the real context the model sees. Linear scan
+        // is fine — the ring is contextSize (8) long.
+        if (s.context.some(c => c.id === msg.id)) return;
+        s.context.push({ id: msg.id, author: msg.author, text: msg.text });
         if (s.context.length > opts.contextSize) {
             s.context.splice(0, s.context.length - opts.contextSize);
         }
@@ -663,8 +799,11 @@ export function createBatcher(opts: BatcherOptions): Batcher {
         if (s.queue.length === 0) return;
 
         const batch = s.queue.splice(0, s.queue.length);
-        // Snapshot context BEFORE the batch's own messages join it.
-        const context = opts.supportsContext ? [...s.context] : [];
+        // Snapshot context BEFORE the batch's own messages join it. The
+        // internal `id` is dropped here — it exists only for de-duplication.
+        const context = opts.supportsContext
+            ? s.context.map(c => ({ author: c.author, text: c.text }))
+            : [];
         for (const m of batch) pushContext(s, m);
 
         opts.onFlush(
@@ -737,8 +876,9 @@ export function createBatcher(opts: BatcherOptions): Batcher {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/batcher.test.ts`
-Expected: PASS — 14 tests (10 original + 4 `drainPending`, the latter added
-in a Task 8 fix round alongside `index.tsx`'s `rebuildBatcher()` change).
+Expected: PASS — 17 tests (10 original + 4 `drainPending`, the latter added
+in a Task 8 fix round alongside `index.tsx`'s `rebuildBatcher()` change, + 3 for
+context de-duplication).
 
 - [ ] **Step 5: Commit**
 
@@ -1057,13 +1197,22 @@ git commit -m "feat(vcTranslate): add Google free-endpoint translation engine"
 
 This uses **structured outputs** (`output_config.format`) so the model returns schema-valid JSON rather than prose that needs regex-scraping. Every schema field is `required` — structured outputs handle optional fields poorly — so a skipped message is expressed as `skip: true` with an empty `text`.
 
+`max_tokens` is 8000, and `parseClaudeResponse` throws the distinct exported
+`TRUNCATED_ERROR` when the response's `stop_reason` is `"max_tokens"` (both
+added in the final fix round). At the original 2048 a batch of ten long
+messages could exhaust the budget, and the resulting truncated JSON surfaced as
+a generic parse failure — which carries no HTTP status, so `native.ts` classed
+it retryable, re-sent the identical prompt, truncated at the identical point,
+and failed all ten at double the token cost. Output tokens are billed on what
+is actually produced, so the raised ceiling costs nothing on a normal batch.
+
 - [ ] **Step 1: Write the failing test**
 
 `tests/claude.test.ts`:
 
 ```ts
 import { describe, expect, it, vi } from "vitest";
-import { buildPrompt, parseClaudeResponse, translateWithClaude } from "../engines/claude";
+import { buildPrompt, parseClaudeResponse, translateWithClaude, TRUNCATED_ERROR } from "../engines/claude";
 import type { BatchRequest } from "../types";
 
 // Built via String.fromCharCode/RegExp constructor, not a literal or
@@ -1254,6 +1403,34 @@ describe("parseClaudeResponse", () => {
         const body = { content: [{ type: "text", text: JSON.stringify({ nope: [] }) }] };
         expect(() => parseClaudeResponse(body, req)).toThrow();
     });
+
+    it("throws the distinct truncation error when the model hit max_tokens", () => {
+        // A truncated response is cut off mid-object, so it ALSO fails to
+        // parse. Reporting it as a generic parse error made native.ts retry it,
+        // and the retry truncates at exactly the same place: double the tokens,
+        // same failure. The distinct message is what makes it non-retryable.
+        const body = {
+            stop_reason: "max_tokens",
+            content: [{ type: "text", text: '{"translations":[{"id":"10","lang":"ja","te' }]
+        };
+        expect(() => parseClaudeResponse(body, req)).toThrow(TRUNCATED_ERROR);
+    });
+
+    it("does not report truncation for a normal end_turn response", () => {
+        const body = {
+            stop_reason: "end_turn",
+            content: [{
+                type: "text",
+                text: JSON.stringify({
+                    translations: [
+                        { id: "10", lang: "ja", text: "ok", skip: false },
+                        { id: "11", lang: "en", text: "", skip: true }
+                    ]
+                })
+            }]
+        };
+        expect(() => parseClaudeResponse(body, req)).not.toThrow();
+    });
 });
 
 describe("translateWithClaude", () => {
@@ -1273,6 +1450,19 @@ describe("translateWithClaude", () => {
         expect(sent.output_config.format.type).toBe("json_schema");
         expect(sent).not.toHaveProperty("thinking");
         expect(sent.output_config).not.toHaveProperty("effort");
+    });
+
+    it("asks for enough output budget that a full batch cannot truncate", () => {
+        // A 10-message batch of long Discord messages blew straight past the
+        // old 2048 cap; a truncated response fails ALL ten. Output tokens are
+        // billed on what is produced, so headroom is free on a normal batch.
+        const fetchImpl = vi.fn().mockResolvedValue(
+            apiResponse({ translations: [{ id: "10", lang: "ja", text: "ok", skip: false }] })
+        );
+        void translateWithClaude(req, "sk-test", fetchImpl as any);
+
+        const sent = JSON.parse(fetchImpl.mock.calls[0][1].body);
+        expect(sent.max_tokens).toBeGreaterThanOrEqual(8000);
     });
 
     it("throws on a non-OK status", async () => {
@@ -1394,7 +1584,24 @@ export function buildPrompt(req: BatchRequest): string {
     return parts.join("\n");
 }
 
+/**
+ * Thrown when the model hit the output budget mid-answer. Kept as a distinct,
+ * exact string because native.ts's isRetryable matches on it: a truncated
+ * response reproduces IDENTICALLY on retry (same prompt, same budget), so
+ * retrying only doubles the token bill before failing the batch anyway.
+ * Without this it looks like a generic parse error, which IS retried.
+ */
+export const TRUNCATED_ERROR = "claude: response truncated (max_tokens)";
+
 export function parseClaudeResponse(body: unknown, req: BatchRequest): Result[] {
+    // Checked before anything else: a max_tokens stop means the JSON below is
+    // cut off mid-object, so every downstream diagnostic ("not valid JSON",
+    // "missing translations array") would be a misleading description of a
+    // budget problem — and, worse, a retryable-looking one.
+    if ((body as { stop_reason?: unknown })?.stop_reason === "max_tokens") {
+        throw new Error(TRUNCATED_ERROR);
+    }
+
     const content = (body as { content?: unknown[] })?.content;
     if (!Array.isArray(content)) throw new Error("claude: missing content");
 
@@ -1457,7 +1664,14 @@ export async function translateWithClaude(
         },
         body: JSON.stringify({
             model: MODEL,
-            max_tokens: 2048,
+            // A full batch is 10 Discord messages; each translation carries the
+            // original id and lang alongside the text, and JSON-encoded CJK
+            // expands badly. 2048 could be exhausted by a batch of long
+            // messages, and a truncated response fails the WHOLE batch (see
+            // TRUNCATED_ERROR). Output tokens are only billed for what is
+            // actually produced, so a headroom-generous cap costs nothing on a
+            // normal batch and prevents an all-or-nothing failure on a long one.
+            max_tokens: 8000,
             output_config: { format: { type: "json_schema", schema: SCHEMA } },
             messages: [{ role: "user", content: buildPrompt(req) }]
         })
@@ -1475,7 +1689,8 @@ export async function translateWithClaude(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/claude.test.ts`
-Expected: PASS — 17 tests.
+Expected: PASS — 20 tests (17 original + 3 for the `max_tokens` truncation
+guard and the output-budget floor).
 
 - [ ] **Step 5: Commit**
 
@@ -1502,6 +1717,18 @@ git commit -m "feat(vcTranslate): add Claude Haiku engine with structured output
 The native function returns a result object rather than throwing — IPC serialises poorly across process boundaries, and every Vencord native module follows this convention.
 
 `BatchRequest` crosses the IPC boundary as a JSON string to avoid structured-clone surprises.
+
+Two classifier details, both settled in the final fix round:
+
+- `isRetryable` returns **false** for `TRUNCATED_ERROR` (see Task 5). It carries
+  no HTTP status, so the "no status → retry once" default would otherwise pick
+  it up, and a retry reproduces a truncation exactly.
+- `retryAfterMs` is extracted from the **raw** error message, the same string
+  `isRetryable` saw, and the message is scrubbed only for the value that is
+  returned. Reading the status off the scrubbed string let a degenerate API key
+  (one containing, say, `HTTP 429`) redact the status out from under the check,
+  so the two decisions could disagree about the same error. An earlier comment
+  here claimed they never could — it was wrong, which was worse than the bug.
 
 - [ ] **Step 1: Write the failing test for retry**
 
@@ -1649,9 +1876,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Mock at the module boundary: translateBatch calls the engines directly, so
 // this is the only seam. Without it these tests would hit the network.
 vi.mock("../engines/google", () => ({ translateWithGoogle: vi.fn() }));
-vi.mock("../engines/claude", () => ({ translateWithClaude: vi.fn() }));
+// PARTIAL mock: only the network-calling function is replaced. TRUNCATED_ERROR
+// must be the REAL constant — stubbing it here would let native.ts and this
+// test agree on a string that claude.ts never actually throws, which is exactly
+// the kind of agreement that makes a test vacuous.
+vi.mock("../engines/claude", async importOriginal => ({
+    // `as`, not a type argument: `vi` is untyped when this file is compiled
+    // inside the Vencord checkout (vitest resolves only from this repo), and a
+    // type argument on an untyped call is a hard TS error there.
+    ...(await importOriginal() as typeof import("../engines/claude")),
+    translateWithClaude: vi.fn()
+}));
 
-import { translateWithClaude } from "../engines/claude";
+import { translateWithClaude, TRUNCATED_ERROR } from "../engines/claude";
 import { translateWithGoogle } from "../engines/google";
 import { translateBatch } from "../native";
 import type { BatchRequest, Result } from "../types";
@@ -1780,6 +2017,27 @@ describe("translateBatch — isRetryable classifier boundaries", () => {
         await run("google", "");
         expect(google).toHaveBeenCalledTimes(2);
     });
+
+    it("does NOT retry a max_tokens truncation", async () => {
+        // Truncation carries no HTTP status, so the "no status → retry"
+        // default would pick it up — but the retry sends the same prompt with
+        // the same output budget and truncates at the identical point. Pure
+        // double spend for a guaranteed second failure, same class of bug as
+        // the 401 blanket retry.
+        claude.mockRejectedValue(new Error(TRUNCATED_ERROR));
+        // A realistic key: the one-character "k" used elsewhere in this file is
+        // itself a substring of "max_tokens", and the scrubber would redact it.
+        const res = await run("claude", "sk-ant-truncation-test");
+        expect(claude).toHaveBeenCalledTimes(1);
+        expect(res).toEqual({ ok: false, error: TRUNCATED_ERROR, retryAfterMs: undefined });
+    });
+
+    it("still retries a truncation-shaped message that is not the real marker", async () => {
+        // Guards the exact-match: a generic parse failure must keep its retry.
+        claude.mockRejectedValue(new Error("claude: response truncated somehow"));
+        await run("claude", "k");
+        expect(claude).toHaveBeenCalledTimes(2);
+    });
 });
 
 describe("translateBatch — retryAfterMs", () => {
@@ -1803,6 +2061,24 @@ describe("translateBatch — retryAfterMs", () => {
         google.mockRejectedValue(new Error("google: 429 tokens over budget"));
         const res = await run("google", "");
         expect((res as { retryAfterMs?: number }).retryAfterMs).toBeUndefined();
+    });
+
+    it("reads the status from the RAW message, so scrubbing cannot desync it from isRetryable", async () => {
+        // A degenerate key that happens to contain the status text. isRetryable
+        // classifies the raw message (rate limited → retry), so if the pause
+        // signal were read off the SCRUBBED string it would see "[redacted]",
+        // find no status, and skip the pause — the queue would keep hammering
+        // an endpoint that just rate-limited us. The api key is arbitrary user
+        // input; nothing stops it looking like this.
+        const key = "HTTP 429";
+        claude.mockRejectedValue(new Error("claude: HTTP 429"));
+
+        const res = await run("claude", key);
+
+        expect(claude).toHaveBeenCalledTimes(2);            // isRetryable saw the 429
+        expect((res as { retryAfterMs?: number }).retryAfterMs).toBe(30_000);   // and so did this
+        // ...while the value that crosses IPC is still scrubbed.
+        expect((res as { error: string }).error).toBe("claude: [redacted]");
     });
 });
 
@@ -1848,7 +2124,7 @@ describe("translateBatch — api key safety", () => {
 ```ts
 import type { IpcMainInvokeEvent } from "electron";
 
-import { translateWithClaude } from "./engines/claude";
+import { translateWithClaude, TRUNCATED_ERROR } from "./engines/claude";
 import { translateWithGoogle } from "./engines/google";
 import { withRetry } from "./retry";
 import type { BatchRequest, EngineId, Result } from "./types";
@@ -1892,7 +2168,13 @@ function scrubKey(message: string, apiKey: string): string {
 
 /** 4xx failures repeat identically on retry; 429 and everything else may not. */
 function isRetryable(err: unknown): boolean {
-    const status = httpStatus(err instanceof Error ? err.message : String(err));
+    const msg = err instanceof Error ? err.message : String(err);
+    // A truncated response carries no HTTP status, so the "no status → retry"
+    // default below would retry it — and the retry sends the same prompt with
+    // the same output budget, truncating at exactly the same place. Pure
+    // double spend for a guaranteed second failure.
+    if (msg === TRUNCATED_ERROR) return false;
+    const status = httpStatus(msg);
     if (status === undefined) return true; // network/parse error — one retry is worthwhile
     if (status === 429) return true;       // rate limited — backoff then retry
     return status < 400 || status >= 500;  // retry 5xx, never other 4xx
@@ -1922,11 +2204,14 @@ export async function translateBatch(
         return { ok: true, results };
     } catch (err) {
         const raw = err instanceof Error ? err.message : "unknown error";
-        const message = scrubKey(raw, apiKey);
-        // Surface rate limiting so the renderer can pause the queue. Same
-        // extractor as isRetryable, so the two can never disagree.
-        const retryAfterMs = httpStatus(message) === 429 ? 30_000 : undefined;
-        return { ok: false, error: message, retryAfterMs };
+        // Surface rate limiting so the renderer can pause the queue. Extracted
+        // from the RAW message, exactly as isRetryable saw it. Reading it off
+        // the scrubbed string instead would let a degenerate key (one that
+        // happens to contain "HTTP 429", or a substring of it) rewrite the
+        // status out from under this check and desync the two decisions.
+        // Scrubbing happens afterwards, and only for the value that leaves.
+        const retryAfterMs = httpStatus(raw) === 429 ? 30_000 : undefined;
+        return { ok: false, error: scrubKey(raw, apiKey), retryAfterMs };
     }
 }
 ```
@@ -1934,7 +2219,8 @@ export async function translateBatch(
 - [ ] **Step 7: Run the full suite to confirm nothing regressed**
 
 Run: `npx vitest run`
-Expected: PASS — all suites from Tasks 1–6 (87 tests).
+Expected: PASS — all suites from Tasks 1–6 (104 tests: skip 17, store 10,
+batcher 17, google 13, claude 20, native 19, retry 8).
 
 - [ ] **Step 8: Commit**
 
@@ -1957,13 +2243,51 @@ git commit -m "feat(vcTranslate): add native IPC bridge with retry and rate-limi
 
 `channels.ts` keeps an in-memory `Set` for synchronous reads (the accessory renderer and the Flux handler are both hot paths and cannot await), and persists to Vencord's `DataStore` asynchronously.
 
+Two settings details from the final fix round:
+
+- `anthropicApiKey` is hidden unless Claude is the selected engine, via the
+  `hidden()` predicate in `definePluginSettings`' second (checks) argument.
+  That is Vencord's own supported mechanism for conditional visibility — see
+  `IsDisabledOrHidden` in `src/utils/types.ts`, and `src/plugins/translate/settings.tsx`
+  for the same pattern applied to the DeepL/Kagi credentials.
+- `targetLang` defaults to `LocaleStore.locale`'s primary subtag rather than a
+  hardcoded `"en"`. It is a **getter**, because Vencord resolves a setting's
+  `default` lazily on first read (`getDefaultValue` in `src/api/Settings.ts`)
+  and stores the definition object by reference; evaluating `LocaleStore` at
+  module scope would run before `waitForStore("LocaleStore")` resolves and
+  freeze the `"en"` fallback in for everyone. The region subtag is dropped
+  (`pt-BR` → `pt`) because `google.ts` decides "already in the target language"
+  by comparing the target against the bare code the endpoint reports as
+  detected; a region-qualified target would never match.
+
 - [ ] **Step 1: Implement `settings.ts`**
 
 ```ts
 import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
+import { LocaleStore } from "@webpack/common";
 
 import { notifySettingsChanged } from "./settingsBridge";
+
+/**
+ * Default target language, taken from Discord's own locale rather than a
+ * hardcoded "en".
+ *
+ * Truncated to the primary subtag: Discord reports region-qualified tags
+ * ("en-US", "pt-BR"), but google.ts decides "this message is already in the
+ * target language" by comparing the target against the DETECTED language the
+ * endpoint returns, which is a bare code ("en", "pt"). A region-qualified
+ * target would therefore never match, and every message already in the user's
+ * own language would be pointlessly translated.
+ *
+ * LocaleStore is resolved asynchronously by Vencord's webpack search, so it can
+ * legitimately still be undefined very early; "en" is the fallback.
+ */
+function defaultTargetLang(): string {
+    const locale = LocaleStore?.locale;
+    if (typeof locale !== "string" || locale === "") return "en";
+    return locale.split("-")[0].toLowerCase();
+}
 
 export const settings = definePluginSettings({
     engine: {
@@ -1989,7 +2313,15 @@ export const settings = definePluginSettings({
     targetLang: {
         type: OptionType.STRING,
         description: "Target language code",
-        default: "en",
+        // A getter, not a literal. Vencord resolves a setting's `default`
+        // LAZILY — getDefaultValue() in src/api/Settings.ts reads
+        // `setting.default` the first time the value is actually needed, and
+        // `definePluginSettings` stores this object by reference without
+        // copying it. Evaluating LocaleStore at module scope instead would run
+        // while the plugin index is being constructed, before
+        // waitForStore("LocaleStore") has resolved, and would freeze the "en"
+        // fallback in for everyone.
+        get default() { return defaultTargetLang(); },
         // targetLang is captured by value when the batcher is built, so a
         // change here must rebuild it too.
         onChange: notifySettingsChanged
@@ -2005,6 +2337,15 @@ export const settings = definePluginSettings({
         type: OptionType.BOOLEAN,
         description: "Auto-translate every channel (otherwise use the per-channel globe button)",
         default: false
+    }
+}, {
+    anthropicApiKey: {
+        // The key field is meaningless unless Claude is the selected engine.
+        // `hidden` as a function of `this.store` is Vencord's own supported
+        // mechanism for conditional visibility (see IsDisabledOrHidden in
+        // src/utils/types.ts, and src/plugins/translate/settings.tsx for the
+        // same pattern applied to the DeepL/Kagi credentials).
+        hidden() { return this.store.engine !== "claude"; }
     }
 });
 
@@ -2083,6 +2424,8 @@ git commit -m "feat(vcTranslate): add plugin settings and per-channel enablement
 **Files:**
 - Create: `src/userplugins/vcTranslate/settingsBridge.ts`
 - Create: `src/userplugins/vcTranslate/index.tsx`
+- Create (final fix round): `src/userplugins/vcTranslate/tests/index.test.ts`
+  and `src/userplugins/vcTranslate/tests/stubs/{api-datastore,api-settings,utils-logger,utils-types,webpack-common}.ts`
 
 **Interfaces:**
 - Consumes: everything produced by Tasks 1–7.
@@ -2171,6 +2514,33 @@ anything sitting in the current debounce window at rebuild time — which
 marker, and no retry, even though nothing about those messages actually
 failed; the settings just changed under them.
 
+Four changes from the final fix round land in this file:
+
+1. **`enqueue(pending, isOwn)`** is now the single path from "this message
+   needs handling" to the batcher, shared by `MESSAGE_CREATE`,
+   `MESSAGE_UPDATE` and catch-up, so the skip rule, the `inFlight` guard and
+   the context bookkeeping cannot drift apart between the three callers.
+2. **`onMessageUpdate` re-queues, not just invalidates.** The spec required
+   both; only invalidation was implemented, so an edited message's subtitle
+   vanished and came back only on the next channel open (manual checklist
+   item 5 would have failed). `MESSAGE_UPDATE` also fires for embed hydration
+   and pin/flag changes, whose payloads carry no `content`, so re-queuing is
+   gated on non-empty `message.content` — embed-only updates are invalidated
+   but never re-requested.
+3. **A `skip:true` result writes `{ skipped: true }`** instead of writing
+   nothing, and the accessory returns `null` for it *before* the `failed`
+   branch (falling through would render "⚠ translation failed" for a message
+   that did not fail).
+4. **`announceMissingKeyOnce()`** covers the spec's promised toast for a
+   *missing* Claude key, which previously fell back to Google in silence. It
+   keeps its own flag rather than reusing `sessionFallback`, because a missing
+   key must not pin the session to Google — pasting one mid-session has to
+   start using Claude immediately.
+
+`index.tsx` gained automated coverage in the same round
+(`tests/index.test.ts`, driving the plugin through stubbed Vencord modules —
+see the `resolve.alias` block in `vitest.config.ts` and `tests/stubs/`).
+
 ```tsx
 import definePlugin, { PluginNative } from "@utils/types";
 import { FluxDispatcher, React, Toasts, UserStore } from "@webpack/common";
@@ -2192,6 +2562,7 @@ const Native = VencordNative.pluginHelpers.VcTranslate as PluginNative<typeof im
 let batcher: Batcher | null = null;
 let pausedUntil = 0;
 let sessionFallback = false;   // set when Claude is unusable this session
+let announcedMissingKey = false;   // one toast per session, never per batch
 
 // Ids currently queued in the batcher or awaiting a translateBatch response.
 // getTranslation() alone can't tell "in flight" apart from "never
@@ -2233,6 +2604,33 @@ function fallBackToGoogle(reason: string) {
         message: `VcTranslate: ${reason}. Using Google for this session.`
     });
     rebuildBatcher();
+}
+
+/**
+ * Claude is selected but no key has been entered, so effectiveEngine() is
+ * quietly using Google. Say so — once.
+ *
+ * Deliberately NOT routed through fallBackToGoogle(): that sets
+ * `sessionFallback`, which pins the session to Google until Discord restarts.
+ * That is right for a key Claude REJECTED (retrying a wrong key every batch is
+ * noise) and wrong for a key that simply has not been pasted yet — pasting one
+ * mid-session must start using Claude immediately. So this shares the
+ * announce-once shape but keeps its own flag and does not touch the engine.
+ *
+ * Called from the enqueue path rather than from effectiveEngine(), because
+ * effectiveEngine() also runs during render and a toast must not be a render
+ * side effect.
+ */
+function announceMissingKeyOnce() {
+    if (announcedMissingKey) return;
+    if (settings.store.engine !== "claude") return;
+    if (settings.store.anthropicApiKey.trim() !== "") return;
+    announcedMissingKey = true;
+    Toasts.show({
+        id: Toasts.genId(),
+        type: Toasts.Type.FAILURE,
+        message: "VcTranslate: no Anthropic API key set. Using Google until you add one."
+    });
 }
 
 function rebuildBatcher() {
@@ -2346,7 +2744,19 @@ function rebuildBatcher() {
                     setTranslation(makeKey(r.id, req.targetLang, engine), { failed: true });
                     continue;
                 }
-                if (r.skip) continue;
+                if (r.skip) {
+                    // A skip has nothing to DISPLAY, but something must still
+                    // be WRITTEN. An id with no entry is indistinguishable from
+                    // one that was never requested, so leaving it blank made
+                    // every already-in-the-target-language message a permanent
+                    // cache miss: catch-up re-enqueued the entire backlog on
+                    // every single channel open, forever. In a mixed-language
+                    // chat most messages ARE already in the target language, so
+                    // that was the common case, not the edge case — free on
+                    // Google, real recurring spend on Claude.
+                    setTranslation(makeKey(r.id, req.targetLang, engine), { skipped: true });
+                    continue;
+                }
                 setTranslation(
                     makeKey(r.id, req.targetLang, engine),
                     { lang: r.lang, text: r.text }
@@ -2361,29 +2771,79 @@ function rebuildBatcher() {
     for (const m of orphaned) newBatcher.add(m);
 }
 
+/**
+ * The single path from "this message needs handling" to the batcher, shared by
+ * MESSAGE_CREATE, MESSAGE_UPDATE and catch-up. Keeping it in one place is what
+ * stops the skip rule, the in-flight guard and the context bookkeeping from
+ * drifting apart between the three callers — the edited-message path in
+ * particular has to do exactly what the created-message path does.
+ */
+function enqueue(pending: PendingMessage, isOwn: boolean) {
+    // Skipped messages still shape the conversation, so they become context.
+    if (shouldSkip(pending.text, isOwn)) {
+        batcher?.recordContext(pending);
+        return;
+    }
+    // Already queued or awaiting a response: the store shows a miss for the
+    // whole round trip, so "no entry" must not be read as "never requested".
+    if (inFlight.has(pending.id)) return;
+
+    announceMissingKeyOnce();
+    inFlight.add(pending.id);
+    batcher?.add(pending);
+}
+
 function onMessageCreate({ message, optimistic }: { message: Message; optimistic?: boolean; }) {
     if (optimistic || !message?.id) return;
     if (!channelActive(message.channel_id)) return;
 
-    const pending: PendingMessage = {
-        id: message.id,
-        author: message.author?.username ?? "unknown",
-        text: message.content ?? "",
-        channelId: message.channel_id
-    };
-
-    const isOwn = message.author?.id === UserStore.getCurrentUser()?.id;
-
-    // Skipped messages still shape the conversation, so they become context.
-    if (shouldSkip(pending.text, isOwn)) batcher?.recordContext(pending);
-    else {
-        inFlight.add(pending.id);
-        batcher?.add(pending);
-    }
+    enqueue(
+        {
+            id: message.id,
+            author: message.author?.username ?? "unknown",
+            text: message.content ?? "",
+            channelId: message.channel_id
+        },
+        message.author?.id === UserStore.getCurrentUser()?.id
+    );
 }
 
 function onMessageUpdate({ message }: { message: Message; }) {
-    if (message?.id) invalidateMessage(message.id);
+    if (!message?.id) return;
+
+    // Whatever we had cached describes the pre-edit text, so it is wrong now
+    // regardless of what kind of update this is.
+    invalidateMessage(message.id);
+
+    // MESSAGE_UPDATE is not only fired for user edits: it also fires for embed
+    // hydration (a link preview resolving, an attachment finishing processing)
+    // and for pin/flag changes. Those payloads are PARTIAL — they carry no
+    // `content` field at all — so re-queuing unconditionally would spend a
+    // translation call on every link anyone posts. Requiring non-empty content
+    // means embed-only updates are invalidated (harmless, the text is
+    // unchanged so it re-resolves identically) but never re-requested.
+    const text = message.content;
+    if (typeof text !== "string" || text === "") return;
+
+    if (!message.channel_id || !channelActive(message.channel_id)) return;
+
+    // Invalidating without re-queuing was the bug this replaces: the subtitle
+    // vanished on edit and only came back on the next channel open. Goes
+    // through enqueue() so the skip rule and the in-flight guard apply exactly
+    // as they do for a new message. (An edit landing inside the ~1s window
+    // while the original is still in flight is dropped by that guard, and the
+    // in-flight response then writes the pre-edit translation; the next
+    // channel-open catch-up does not correct it, since that entry looks
+    // resolved. Rare enough to accept rather than add a second cache layer.)
+    enqueue(
+        {
+            id: message.id,
+            author: message.author?.username ?? "unknown",
+            text,
+            channelId: message.channel_id
+        },
+        message.author?.id === UserStore.getCurrentUser()?.id
+    );
 }
 
 function TranslationAccessory({ message }: { message: Message; }) {
@@ -2396,6 +2856,13 @@ function TranslationAccessory({ message }: { message: Message; }) {
     const key = makeKey(message.id, settings.store.targetLang, effectiveEngine());
     const entry: StoredTranslation | undefined = getTranslation(key);
     if (!entry) return null;
+
+    // A skipped message is already in the target language: there is nothing to
+    // subtitle. This MUST come before the failure branch — the marker exists so
+    // catch-up can tell "resolved, nothing to show" from "never requested", and
+    // falling through would label a perfectly fine message "translation
+    // failed".
+    if ("skipped" in entry) return null;
 
     if ("failed" in entry) {
         return (
@@ -2459,6 +2926,7 @@ export default definePlugin({
         // window doesn't carry over into the next session.
         sessionFallback = false;
         pausedUntil = 0;
+        announcedMissingKey = false;
     }
 });
 ```
@@ -2509,6 +2977,15 @@ Two behaviours: a globe button so the user does not have to leave the channel to
 > `CHANNEL_SELECT`, since `CHANNEL_SELECT` fires before Discord has necessarily fetched
 > the backlog of a channel not yet visited this session.
 
+> **Final fix round:** the skip branch here now goes through `index.tsx`'s shared
+> `enqueue()` helper, and the duplicate-context problem it created is fixed inside
+> the batcher: `pushContext()` de-duplicates by message id. With both
+> `CHANNEL_SELECT` and `LOAD_MESSAGES_SUCCESS` subscribed, the skipped backlog was
+> being pushed into the 8-slot context ring twice per channel open, evicting
+> genuine context with copies of itself. Catch-up also now treats a
+> `{ skipped: true }` entry as resolved (see Task 2) while still retrying
+> `{ failed: true }`.
+
 - [ ] **Step 1: Add the catch-up handler**
 
 Insert into `index.tsx`, after `onMessageUpdate`:
@@ -2545,25 +3022,28 @@ function catchUp(channelId: string) {
 
         const key = makeKey(message.id, settings.store.targetLang, engine);
         const entry = getTranslation(key);
-        if (entry && !("failed" in entry)) continue;   // retry failures, skip real translations
+        // Three resolved states, one of which is worth retrying. A real
+        // translation is done. A `{ skipped: true }` marker means the engine
+        // already told us the message is in the target language — also done,
+        // and re-asking would produce the same answer at the same cost. Only
+        // `{ failed: true }` gets another attempt.
+        if (entry && !("failed" in entry)) continue;
 
-        const pending: PendingMessage = {
-            id: message.id,
-            author: message.author?.username ?? "unknown",
-            text: message.content ?? "",
-            channelId
-        };
-
-        // Skipped messages still shape the conversation, so they become
-        // context. This also avoids re-requesting messages the server would
-        // skip anyway (skip results write nothing to the store, so without
-        // this check they'd be re-requested on every channel open forever).
-        if (shouldSkip(pending.text, message.author?.id === me)) {
-            batcher?.recordContext(pending);
-        } else {
-            inFlight.add(pending.id);
-            batcher?.add(pending);
-        }
+        // Skipped messages still shape the conversation, so enqueue() turns
+        // them into context instead of a request. pushContext() de-duplicates
+        // by message id, which matters here: catch-up runs for BOTH
+        // CHANNEL_SELECT and LOAD_MESSAGES_SUCCESS on a single channel open,
+        // so without that the same backlog would be pushed into the 8-slot
+        // ring twice, evicting genuine context with copies of itself.
+        enqueue(
+            {
+                id: message.id,
+                author: message.author?.username ?? "unknown",
+                text: message.content ?? "",
+                channelId
+            },
+            message.author?.id === me
+        );
     }
 }
 
@@ -2730,17 +3210,20 @@ Mark each line pass/fail. These are the paths no unit test covers because they c
 | # | Check | Expected |
 |---|---|---|
 | 1 | Post a non-English message in an enabled channel | Subtitle appears within ~1s |
-| 2 | Post an English message | No subtitle (skipped) |
+| 2 | Post a message already in the target language, then reopen the channel | No subtitle (skipped), and no second API call on reopen — the skip is cached as `{ skipped: true }` |
 | 3 | Post only an emote or a link | No subtitle, no API call |
 | 4 | Post your own non-English message | No subtitle |
 | 5 | Three people post at once in three languages | One batch; all three translate |
-| 6 | Edit a translated message | Subtitle re-translates to match |
+| 6 | Edit a translated message | Subtitle re-translates to match (old one clears, new one appears within ~1s) |
+| 6b | Post a link and let its preview embed load | Exactly one translation request — the embed's own `MESSAGE_UPDATE` carries no `content` and must not trigger a second |
 | 7 | Delete a translated message | Subtitle disappears with it |
 | 8 | Scroll far up and back down | Subtitles persist, no re-translation |
 | 9 | Switch engine Google → Claude in settings | New messages use Claude; old cached ones keep their engine's result |
-| 10 | Select Claude with an **empty** API key | Silently uses Google; translations still appear, no toast |
+| 9b | Open settings with engine = Google, then switch to Claude | The "Anthropic API key" field is absent for Google and appears for Claude |
+| 10 | Select Claude with an **empty** API key | Uses Google; translations still appear; exactly one "no Anthropic API key" toast, and pasting a key afterwards starts using Claude with no restart |
 | 11 | Select Claude with an **invalid** API key | One toast, then Google for the rest of the session; translations appear |
 | 12 | Fix the key and restart Discord | Claude is used again (session fallback resets) |
+| 12b | Fresh install on a non-English Discord client | "Target language code" defaults to the client's language as a bare code (`pt`, not `pt-BR`) |
 | 13 | Disconnect network, post a message | `⚠ translation failed`, no popup, no console spam |
 | 14 | Reconnect, post again | Translation resumes |
 | 15 | Disable the plugin in settings | Subtitles stop; no console errors |
@@ -2777,6 +3260,11 @@ Hover any message → click 🌐 to enable auto-translate for that channel.
 The choice persists across restarts. Settings → VcTranslate has a
 `globalAuto` option to enable every channel at once.
 
+Messages already in your target language get no subtitle and are remembered
+as resolved, so reopening the channel does not re-send them. Editing a
+message clears its subtitle and re-translates the new text. The target
+language defaults to your Discord client's own locale (`pt-BR` → `pt`).
+
 ## Engines
 
 | Engine | Cost | Quality |
@@ -2784,10 +3272,12 @@ The choice persists across restarts. Settings → VcTranslate has a
 | Google (default) | free, no key | Poor on slang and short fragments; no conversation context |
 | Claude Haiku | ~$2-3/month | Handles slang and mixed languages; uses conversation context |
 
-To use Claude: create a key at console.anthropic.com, paste it into the
-plugin settings, and switch the engine dropdown. **Scope the key to a
-dedicated project with a spend limit** — it is stored in plaintext in
-Vencord's settings, like every other Vencord credential.
+To use Claude: create a key at console.anthropic.com, switch the engine
+dropdown to Claude Haiku (the key field is hidden until you do), and paste
+the key in. **Scope the key to a dedicated project with a spend limit** — it
+is stored in plaintext in Vencord's settings, like every other Vencord
+credential. A missing key and a rejected key both fall back to Google with
+one toast each; only a *rejected* key pins the session until you restart.
 
 ## Privacy
 
@@ -2822,6 +3312,6 @@ git commit -m "docs(vcTranslate): add README and record manual verification pass
 
 **If the accessory never appears** — check that the plugin is enabled *and* that `channelActive()` returns true. During bring-up, flip `globalAuto` on to eliminate the per-channel state as a variable.
 
-**If translations appear but never update on edit** — `MESSAGE_UPDATE` fires for embed hydration too, so it can invalidate more often than expected. That is intentional (correctness over a few extra calls), but if it proves noisy, compare `message.content` against the cached original before invalidating.
+**If translations appear but never update on edit** — `onMessageUpdate` must both invalidate the cache entry *and* re-queue the message; an earlier version only invalidated, so the subtitle vanished until the next channel open. Note that `MESSAGE_UPDATE` also fires for embed hydration and pin/flag changes, whose payloads carry no `content`, so the re-queue is gated on non-empty `message.content` — invalidate always, re-queue only when there is text.
 
 **Do not add `effort` or `thinking` to the Claude request.** `effort` errors on Haiku 4.5, and thinking would add latency and cost for no quality gain on this task.

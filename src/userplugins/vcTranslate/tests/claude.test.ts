@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildPrompt, parseClaudeResponse, translateWithClaude } from "../engines/claude";
+import { buildPrompt, parseClaudeResponse, translateWithClaude, TRUNCATED_ERROR } from "../engines/claude";
 import type { BatchRequest } from "../types";
 
 // Built via String.fromCharCode/RegExp constructor, not a literal or
@@ -190,6 +190,34 @@ describe("parseClaudeResponse", () => {
         const body = { content: [{ type: "text", text: JSON.stringify({ nope: [] }) }] };
         expect(() => parseClaudeResponse(body, req)).toThrow();
     });
+
+    it("throws the distinct truncation error when the model hit max_tokens", () => {
+        // A truncated response is cut off mid-object, so it ALSO fails to
+        // parse. Reporting it as a generic parse error made native.ts retry it,
+        // and the retry truncates at exactly the same place: double the tokens,
+        // same failure. The distinct message is what makes it non-retryable.
+        const body = {
+            stop_reason: "max_tokens",
+            content: [{ type: "text", text: '{"translations":[{"id":"10","lang":"ja","te' }]
+        };
+        expect(() => parseClaudeResponse(body, req)).toThrow(TRUNCATED_ERROR);
+    });
+
+    it("does not report truncation for a normal end_turn response", () => {
+        const body = {
+            stop_reason: "end_turn",
+            content: [{
+                type: "text",
+                text: JSON.stringify({
+                    translations: [
+                        { id: "10", lang: "ja", text: "ok", skip: false },
+                        { id: "11", lang: "en", text: "", skip: true }
+                    ]
+                })
+            }]
+        };
+        expect(() => parseClaudeResponse(body, req)).not.toThrow();
+    });
 });
 
 describe("translateWithClaude", () => {
@@ -209,6 +237,19 @@ describe("translateWithClaude", () => {
         expect(sent.output_config.format.type).toBe("json_schema");
         expect(sent).not.toHaveProperty("thinking");
         expect(sent.output_config).not.toHaveProperty("effort");
+    });
+
+    it("asks for enough output budget that a full batch cannot truncate", () => {
+        // A 10-message batch of long Discord messages blew straight past the
+        // old 2048 cap; a truncated response fails ALL ten. Output tokens are
+        // billed on what is produced, so headroom is free on a normal batch.
+        const fetchImpl = vi.fn().mockResolvedValue(
+            apiResponse({ translations: [{ id: "10", lang: "ja", text: "ok", skip: false }] })
+        );
+        void translateWithClaude(req, "sk-test", fetchImpl as any);
+
+        const sent = JSON.parse(fetchImpl.mock.calls[0][1].body);
+        expect(sent.max_tokens).toBeGreaterThanOrEqual(8000);
     });
 
     it("throws on a non-OK status", async () => {

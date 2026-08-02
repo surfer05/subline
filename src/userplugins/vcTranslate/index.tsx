@@ -20,6 +20,7 @@ const logger = new Logger("VcTranslate");
 let batcher: Batcher | null = null;
 let pausedUntil = 0;
 let sessionFallback = false;   // set when Claude is unusable this session
+let announcedMissingKey = false;   // one toast per session, never per batch
 
 // Ids currently queued in the batcher or awaiting a translateBatch response.
 // getTranslation() alone can't tell "in flight" apart from "never
@@ -59,6 +60,33 @@ function fallBackToGoogle(reason: string) {
         message: `VcTranslate: ${reason}. Using Google for this session.`
     });
     rebuildBatcher();
+}
+
+/**
+ * Claude is selected but no key has been entered, so effectiveEngine() is
+ * quietly using Google. Say so — once.
+ *
+ * Deliberately NOT routed through fallBackToGoogle(): that sets
+ * `sessionFallback`, which pins the session to Google until Discord restarts.
+ * That is right for a key Claude REJECTED (retrying a wrong key every batch is
+ * noise) and wrong for a key that simply has not been pasted yet — pasting one
+ * mid-session must start using Claude immediately. So this shares the
+ * announce-once shape but keeps its own flag and does not touch the engine.
+ *
+ * Called from the enqueue path rather than from effectiveEngine(), because
+ * effectiveEngine() also runs during render and a toast must not be a render
+ * side effect.
+ */
+function announceMissingKeyOnce() {
+    if (announcedMissingKey) return;
+    if (settings.store.engine !== "claude") return;
+    if (settings.store.anthropicApiKey.trim() !== "") return;
+    announcedMissingKey = true;
+    Toasts.show({
+        id: Toasts.genId(),
+        type: Toasts.Type.FAILURE,
+        message: "VcTranslate: no Anthropic API key set. Using Google until you add one."
+    });
 }
 
 function rebuildBatcher() {
@@ -172,7 +200,19 @@ function rebuildBatcher() {
                     setTranslation(makeKey(r.id, req.targetLang, engine), { failed: true });
                     continue;
                 }
-                if (r.skip) continue;
+                if (r.skip) {
+                    // A skip has nothing to DISPLAY, but something must still
+                    // be WRITTEN. An id with no entry is indistinguishable from
+                    // one that was never requested, so leaving it blank made
+                    // every already-in-the-target-language message a permanent
+                    // cache miss: catch-up re-enqueued the entire backlog on
+                    // every single channel open, forever. In a mixed-language
+                    // chat most messages ARE already in the target language, so
+                    // that was the common case, not the edge case — free on
+                    // Google, real recurring spend on Claude.
+                    setTranslation(makeKey(r.id, req.targetLang, engine), { skipped: true });
+                    continue;
+                }
                 setTranslation(
                     makeKey(r.id, req.targetLang, engine),
                     { lang: r.lang, text: r.text }
@@ -187,29 +227,79 @@ function rebuildBatcher() {
     for (const m of orphaned) newBatcher.add(m);
 }
 
+/**
+ * The single path from "this message needs handling" to the batcher, shared by
+ * MESSAGE_CREATE, MESSAGE_UPDATE and catch-up. Keeping it in one place is what
+ * stops the skip rule, the in-flight guard and the context bookkeeping from
+ * drifting apart between the three callers — the edited-message path in
+ * particular has to do exactly what the created-message path does.
+ */
+function enqueue(pending: PendingMessage, isOwn: boolean) {
+    // Skipped messages still shape the conversation, so they become context.
+    if (shouldSkip(pending.text, isOwn)) {
+        batcher?.recordContext(pending);
+        return;
+    }
+    // Already queued or awaiting a response: the store shows a miss for the
+    // whole round trip, so "no entry" must not be read as "never requested".
+    if (inFlight.has(pending.id)) return;
+
+    announceMissingKeyOnce();
+    inFlight.add(pending.id);
+    batcher?.add(pending);
+}
+
 function onMessageCreate({ message, optimistic }: { message: Message; optimistic?: boolean; }) {
     if (optimistic || !message?.id) return;
     if (!channelActive(message.channel_id)) return;
 
-    const pending: PendingMessage = {
-        id: message.id,
-        author: message.author?.username ?? "unknown",
-        text: message.content ?? "",
-        channelId: message.channel_id
-    };
-
-    const isOwn = message.author?.id === UserStore.getCurrentUser()?.id;
-
-    // Skipped messages still shape the conversation, so they become context.
-    if (shouldSkip(pending.text, isOwn)) batcher?.recordContext(pending);
-    else {
-        inFlight.add(pending.id);
-        batcher?.add(pending);
-    }
+    enqueue(
+        {
+            id: message.id,
+            author: message.author?.username ?? "unknown",
+            text: message.content ?? "",
+            channelId: message.channel_id
+        },
+        message.author?.id === UserStore.getCurrentUser()?.id
+    );
 }
 
 function onMessageUpdate({ message }: { message: Message; }) {
-    if (message?.id) invalidateMessage(message.id);
+    if (!message?.id) return;
+
+    // Whatever we had cached describes the pre-edit text, so it is wrong now
+    // regardless of what kind of update this is.
+    invalidateMessage(message.id);
+
+    // MESSAGE_UPDATE is not only fired for user edits: it also fires for embed
+    // hydration (a link preview resolving, an attachment finishing processing)
+    // and for pin/flag changes. Those payloads are PARTIAL — they carry no
+    // `content` field at all — so re-queuing unconditionally would spend a
+    // translation call on every link anyone posts. Requiring non-empty content
+    // means embed-only updates are invalidated (harmless, the text is
+    // unchanged so it re-resolves identically) but never re-requested.
+    const text = message.content;
+    if (typeof text !== "string" || text === "") return;
+
+    if (!message.channel_id || !channelActive(message.channel_id)) return;
+
+    // Invalidating without re-queuing was the bug this replaces: the subtitle
+    // vanished on edit and only came back on the next channel open. Goes
+    // through enqueue() so the skip rule and the in-flight guard apply exactly
+    // as they do for a new message. (An edit landing inside the ~1s window
+    // while the original is still in flight is dropped by that guard, and the
+    // in-flight response then writes the pre-edit translation; the next
+    // channel-open catch-up does not correct it, since that entry looks
+    // resolved. Rare enough to accept rather than add a second cache layer.)
+    enqueue(
+        {
+            id: message.id,
+            author: message.author?.username ?? "unknown",
+            text,
+            channelId: message.channel_id
+        },
+        message.author?.id === UserStore.getCurrentUser()?.id
+    );
 }
 
 function catchUp(channelId: string) {
@@ -243,25 +333,28 @@ function catchUp(channelId: string) {
 
         const key = makeKey(message.id, settings.store.targetLang, engine);
         const entry = getTranslation(key);
-        if (entry && !("failed" in entry)) continue;   // retry failures, skip real translations
+        // Three resolved states, one of which is worth retrying. A real
+        // translation is done. A `{ skipped: true }` marker means the engine
+        // already told us the message is in the target language — also done,
+        // and re-asking would produce the same answer at the same cost. Only
+        // `{ failed: true }` gets another attempt.
+        if (entry && !("failed" in entry)) continue;
 
-        const pending: PendingMessage = {
-            id: message.id,
-            author: message.author?.username ?? "unknown",
-            text: message.content ?? "",
-            channelId
-        };
-
-        // Skipped messages still shape the conversation, so they become
-        // context. This also avoids re-requesting messages the server would
-        // skip anyway (skip results write nothing to the store, so without
-        // this check they'd be re-requested on every channel open forever).
-        if (shouldSkip(pending.text, message.author?.id === me)) {
-            batcher?.recordContext(pending);
-        } else {
-            inFlight.add(pending.id);
-            batcher?.add(pending);
-        }
+        // Skipped messages still shape the conversation, so enqueue() turns
+        // them into context instead of a request. pushContext() de-duplicates
+        // by message id, which matters here: catch-up runs for BOTH
+        // CHANNEL_SELECT and LOAD_MESSAGES_SUCCESS on a single channel open,
+        // so without that the same backlog would be pushed into the 8-slot
+        // ring twice, evicting genuine context with copies of itself.
+        enqueue(
+            {
+                id: message.id,
+                author: message.author?.username ?? "unknown",
+                text: message.content ?? "",
+                channelId
+            },
+            message.author?.id === me
+        );
     }
 }
 
@@ -309,6 +402,13 @@ function TranslationAccessory({ message }: { message: Message; }) {
     const key = makeKey(message.id, settings.store.targetLang, effectiveEngine());
     const entry: StoredTranslation | undefined = getTranslation(key);
     if (!entry) return null;
+
+    // A skipped message is already in the target language: there is nothing to
+    // subtitle. This MUST come before the failure branch — the marker exists so
+    // catch-up can tell "resolved, nothing to show" from "never requested", and
+    // falling through would label a perfectly fine message "translation
+    // failed".
+    if ("skipped" in entry) return null;
 
     if ("failed" in entry) {
         return (
@@ -405,5 +505,6 @@ export default definePlugin({
         // window doesn't carry over into the next session.
         sessionFallback = false;
         pausedUntil = 0;
+        announcedMissingKey = false;
     }
 });

@@ -20,7 +20,9 @@ export interface Batcher {
 
 interface ChannelState {
     queue: PendingMessage[];
-    context: { author: string; text: string }[];
+    // `id` is carried internally for de-duplication only; it is stripped before
+    // the context reaches a BatchRequest.
+    context: { id: string; author: string; text: string }[];
     timer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -37,7 +39,14 @@ export function createBatcher(opts: BatcherOptions): Batcher {
     };
 
     const pushContext = (s: ChannelState, msg: PendingMessage) => {
-        s.context.push({ author: msg.author, text: msg.text });
+        // The same message can legitimately be offered as context more than
+        // once: catch-up runs for BOTH CHANNEL_SELECT and LOAD_MESSAGES_SUCCESS
+        // on a single channel open, so every skipped message in the backlog is
+        // handed over twice. Without this check the 8-slot ring fills with two
+        // copies of each, halving the real context the model sees. Linear scan
+        // is fine — the ring is contextSize (8) long.
+        if (s.context.some(c => c.id === msg.id)) return;
+        s.context.push({ id: msg.id, author: msg.author, text: msg.text });
         if (s.context.length > opts.contextSize) {
             s.context.splice(0, s.context.length - opts.contextSize);
         }
@@ -53,8 +62,11 @@ export function createBatcher(opts: BatcherOptions): Batcher {
         if (s.queue.length === 0) return;
 
         const batch = s.queue.splice(0, s.queue.length);
-        // Snapshot context BEFORE the batch's own messages join it.
-        const context = opts.supportsContext ? [...s.context] : [];
+        // Snapshot context BEFORE the batch's own messages join it. The
+        // internal `id` is dropped here — it exists only for de-duplication.
+        const context = opts.supportsContext
+            ? s.context.map(c => ({ author: c.author, text: c.text }))
+            : [];
         for (const m of batch) pushContext(s, m);
 
         opts.onFlush(

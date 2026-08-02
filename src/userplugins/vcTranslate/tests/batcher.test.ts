@@ -112,6 +112,47 @@ describe("createBatcher", () => {
         expect(flushed[1].req.context.map(c => c.text)).toEqual(["uno"]);
     });
 
+    it("records the same message as context only once", () => {
+        // catchUp() runs for BOTH CHANNEL_SELECT and LOAD_MESSAGES_SUCCESS on a
+        // single channel open, so every skipped message in the backlog is
+        // offered as context twice. Without de-duplication the ring fills with
+        // two copies of each and genuine context gets evicted by duplicates.
+        const { batcher, flushed } = setup();
+        batcher.recordContext(msg("1", "first"));
+        batcher.recordContext(msg("1", "first"));
+        batcher.add(msg("2", "segundo"));
+        vi.advanceTimersByTime(700);
+
+        expect(flushed[0].req.context.map(c => c.text)).toEqual(["first"]);
+    });
+
+    it("a duplicated backlog does not reorder or evict genuine context", () => {
+        // One channel open dispatching two catch-up passes over the same three
+        // skipped messages. NB the ring size (4) is deliberately NOT a multiple
+        // of the backlog size: with 4 and 4 the duplicated pushes wrap around
+        // to exactly the right answer and the assertion cannot fail.
+        const { batcher, flushed } = setup({ contextSize: 4 });
+        for (const pass of [0, 1]) {
+            void pass;
+            for (const id of ["1", "2", "3"]) batcher.recordContext(msg(id, `m${id}`));
+        }
+        batcher.add(msg("9", "nueve"));
+        vi.advanceTimersByTime(700);
+
+        // Without de-duplication this is ["m3", "m1", "m2", "m3"] — the oldest
+        // real context evicted by a copy of the newest.
+        expect(flushed[0].req.context.map(c => c.text)).toEqual(["m1", "m2", "m3"]);
+    });
+
+    it("does not leak the internal dedup id into the request", () => {
+        const { batcher, flushed } = setup();
+        batcher.recordContext(msg("1", "first"));
+        batcher.add(msg("2", "segundo"));
+        vi.advanceTimersByTime(700);
+
+        expect(flushed[0].req.context).toEqual([{ author: "user1", text: "first" }]);
+    });
+
     it("dispose cancels a pending flush", () => {
         const { batcher, flushed } = setup();
         batcher.add(msg("1", "hola"));

@@ -30,6 +30,32 @@ describe("store", () => {
         expect(getTranslation(k)).toEqual({ failed: true });
     });
 
+    it("stores a skipped marker", () => {
+        const k = makeKey("1", "en", "claude");
+        setTranslation(k, { skipped: true });
+        expect(getTranslation(k)).toEqual({ skipped: true });
+    });
+
+    it("keeps skipped distinguishable from failed and from a translation", () => {
+        // These three are the whole point of the union: the accessory renders a
+        // different thing for each, and catch-up retries exactly one of them.
+        setTranslation(makeKey("1", "en", "claude"), { skipped: true });
+        setTranslation(makeKey("2", "en", "claude"), { failed: true });
+        setTranslation(makeKey("3", "en", "claude"), { lang: "ja", text: "hi" });
+
+        expect(getTranslation(makeKey("1", "en", "claude"))).not.toHaveProperty("failed");
+        expect(getTranslation(makeKey("2", "en", "claude"))).not.toHaveProperty("skipped");
+        expect(getTranslation(makeKey("3", "en", "claude"))).not.toHaveProperty("skipped");
+    });
+
+    it("a skipped entry is a hit, not a miss", () => {
+        // The whole reason the variant exists: an unwritten id looks identical
+        // to one that was never requested, so catch-up re-enqueues it forever.
+        const k = makeKey("1", "en", "claude");
+        setTranslation(k, { skipped: true });
+        expect(getTranslation(k)).toBeDefined();
+    });
+
     it("evicts the least recently used entry past the cap", () => {
         for (let i = 0; i < 500; i++) {
             setTranslation(makeKey(String(i), "en", "claude"), { lang: "ja", text: String(i) });

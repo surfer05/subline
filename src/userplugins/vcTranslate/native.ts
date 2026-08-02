@@ -1,6 +1,6 @@
 import type { IpcMainInvokeEvent } from "electron";
 
-import { translateWithClaude } from "./engines/claude";
+import { translateWithClaude, TRUNCATED_ERROR } from "./engines/claude";
 import { translateWithGoogle } from "./engines/google";
 import { withRetry } from "./retry";
 import type { BatchRequest, EngineId, Result } from "./types";
@@ -44,7 +44,13 @@ function scrubKey(message: string, apiKey: string): string {
 
 /** 4xx failures repeat identically on retry; 429 and everything else may not. */
 function isRetryable(err: unknown): boolean {
-    const status = httpStatus(err instanceof Error ? err.message : String(err));
+    const msg = err instanceof Error ? err.message : String(err);
+    // A truncated response carries no HTTP status, so the "no status → retry"
+    // default below would retry it — and the retry sends the same prompt with
+    // the same output budget, truncating at exactly the same place. Pure
+    // double spend for a guaranteed second failure.
+    if (msg === TRUNCATED_ERROR) return false;
+    const status = httpStatus(msg);
     if (status === undefined) return true; // network/parse error — one retry is worthwhile
     if (status === 429) return true;       // rate limited — backoff then retry
     return status < 400 || status >= 500;  // retry 5xx, never other 4xx
@@ -74,10 +80,13 @@ export async function translateBatch(
         return { ok: true, results };
     } catch (err) {
         const raw = err instanceof Error ? err.message : "unknown error";
-        const message = scrubKey(raw, apiKey);
-        // Surface rate limiting so the renderer can pause the queue. Same
-        // extractor as isRetryable, so the two can never disagree.
-        const retryAfterMs = httpStatus(message) === 429 ? 30_000 : undefined;
-        return { ok: false, error: message, retryAfterMs };
+        // Surface rate limiting so the renderer can pause the queue. Extracted
+        // from the RAW message, exactly as isRetryable saw it. Reading it off
+        // the scrubbed string instead would let a degenerate key (one that
+        // happens to contain "HTTP 429", or a substring of it) rewrite the
+        // status out from under this check and desync the two decisions.
+        // Scrubbing happens afterwards, and only for the value that leaves.
+        const retryAfterMs = httpStatus(raw) === 429 ? 30_000 : undefined;
+        return { ok: false, error: scrubKey(raw, apiKey), retryAfterMs };
     }
 }

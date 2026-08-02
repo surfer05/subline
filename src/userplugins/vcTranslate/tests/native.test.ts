@@ -3,9 +3,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Mock at the module boundary: translateBatch calls the engines directly, so
 // this is the only seam. Without it these tests would hit the network.
 vi.mock("../engines/google", () => ({ translateWithGoogle: vi.fn() }));
-vi.mock("../engines/claude", () => ({ translateWithClaude: vi.fn() }));
+// PARTIAL mock: only the network-calling function is replaced. TRUNCATED_ERROR
+// must be the REAL constant — stubbing it here would let native.ts and this
+// test agree on a string that claude.ts never actually throws, which is exactly
+// the kind of agreement that makes a test vacuous.
+vi.mock("../engines/claude", async importOriginal => ({
+    // `as`, not a type argument: `vi` is untyped when this file is compiled
+    // inside the Vencord checkout (vitest resolves only from this repo), and a
+    // type argument on an untyped call is a hard TS error there.
+    ...(await importOriginal() as typeof import("../engines/claude")),
+    translateWithClaude: vi.fn()
+}));
 
-import { translateWithClaude } from "../engines/claude";
+import { translateWithClaude, TRUNCATED_ERROR } from "../engines/claude";
 import { translateWithGoogle } from "../engines/google";
 import { translateBatch } from "../native";
 import type { BatchRequest, Result } from "../types";
@@ -134,6 +144,27 @@ describe("translateBatch — isRetryable classifier boundaries", () => {
         await run("google", "");
         expect(google).toHaveBeenCalledTimes(2);
     });
+
+    it("does NOT retry a max_tokens truncation", async () => {
+        // Truncation carries no HTTP status, so the "no status → retry"
+        // default would pick it up — but the retry sends the same prompt with
+        // the same output budget and truncates at the identical point. Pure
+        // double spend for a guaranteed second failure, same class of bug as
+        // the 401 blanket retry.
+        claude.mockRejectedValue(new Error(TRUNCATED_ERROR));
+        // A realistic key: the one-character "k" used elsewhere in this file is
+        // itself a substring of "max_tokens", and the scrubber would redact it.
+        const res = await run("claude", "sk-ant-truncation-test");
+        expect(claude).toHaveBeenCalledTimes(1);
+        expect(res).toEqual({ ok: false, error: TRUNCATED_ERROR, retryAfterMs: undefined });
+    });
+
+    it("still retries a truncation-shaped message that is not the real marker", async () => {
+        // Guards the exact-match: a generic parse failure must keep its retry.
+        claude.mockRejectedValue(new Error("claude: response truncated somehow"));
+        await run("claude", "k");
+        expect(claude).toHaveBeenCalledTimes(2);
+    });
 });
 
 describe("translateBatch — retryAfterMs", () => {
@@ -157,6 +188,24 @@ describe("translateBatch — retryAfterMs", () => {
         google.mockRejectedValue(new Error("google: 429 tokens over budget"));
         const res = await run("google", "");
         expect((res as { retryAfterMs?: number }).retryAfterMs).toBeUndefined();
+    });
+
+    it("reads the status from the RAW message, so scrubbing cannot desync it from isRetryable", async () => {
+        // A degenerate key that happens to contain the status text. isRetryable
+        // classifies the raw message (rate limited → retry), so if the pause
+        // signal were read off the SCRUBBED string it would see "[redacted]",
+        // find no status, and skip the pause — the queue would keep hammering
+        // an endpoint that just rate-limited us. The api key is arbitrary user
+        // input; nothing stops it looking like this.
+        const key = "HTTP 429";
+        claude.mockRejectedValue(new Error("claude: HTTP 429"));
+
+        const res = await run("claude", key);
+
+        expect(claude).toHaveBeenCalledTimes(2);            // isRetryable saw the 429
+        expect((res as { retryAfterMs?: number }).retryAfterMs).toBe(30_000);   // and so did this
+        // ...while the value that crosses IPC is still scrubbed.
+        expect((res as { error: string }).error).toBe("claude: [redacted]");
     });
 });
 
