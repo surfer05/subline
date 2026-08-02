@@ -209,10 +209,19 @@ about what the plugin does — not a recommendation either way.
 ## Tests
 
 ```bash
-npx vitest run
+cd src/userplugins/vcTranslate && npx vitest run
 ```
 
-122 tests across 8 suites (`batcher`, `claude`, `google`, `index`, `native`,
+**Run it from this directory.** `vitest.config.ts` lives here and supplies the
+aliases that stub out Vencord's modules. Run from the repo root, vitest never
+finds the config and `tests/index.test.ts` fails to import — and because the
+summary line counts only tests in files that actually loaded, it silently
+reports a *smaller* pass count that still looks like success.
+
+`vitest` is not saved as a dependency; in a fresh clone run `npm i -D vitest`
+first.
+
+133 tests across 8 suites (`batcher`, `claude`, `google`, `index`, `native`,
 `retry`, `skip`, `store` — see `tests/`).
 
 Seven of the eight target pure-logic modules with no Discord/Vencord runtime
