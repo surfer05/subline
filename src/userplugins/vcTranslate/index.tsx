@@ -6,7 +6,7 @@ import type { Message } from "@vencord/discord-types";
 import { createBatcher, type Batcher } from "./batcher";
 import { isChannelEnabled, loadEnabledChannels, toggleChannel } from "./channels";
 import { isConfidentlyTargetLanguage } from "./detectLang";
-import { acquireSlot, resetRateGate, tuneRateGateToObservedLimit } from "./rateGate";
+import { acquireSlot, rateGateSettings, resetRateGate, tuneRateGateToObservedLimit } from "./rateGate";
 import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
@@ -139,9 +139,10 @@ function formatDuration(ms: number): string {
  *     traffic became 429s; the point of this phase is to stop doing that.
  *  2. The rate gate is retuned if the response stated the real quota. See
  *     rateGate.ts — this is what stops the SAME 429 recurring once the
- *     cooldown lifts, and it is why the cooldown itself can safely be as short
- *     as the API says (sub-second, in the captured real response) rather than
- *     a padded guess.
+ *     cooldown lifts, so the cooldown stays close to what the API asked for
+ *     rather than a padded guess. It is floored at the gate's refill interval
+ *     (see below): the API's sub-second hint frees exactly one slot, which is
+ *     not enough to be worth waking up for.
  *  3. The user is told, at most once per session.
  *
  * The batch that triggered this is NOT lost: the caller re-runs it through
@@ -152,14 +153,31 @@ function enterCooldown(
     retryAfterMs: number | undefined,
     quotaLimitPerMinute: number | undefined
 ): void {
-    const cooldownMs = typeof retryAfterMs === "number" && retryAfterMs > 0
+    const asked = typeof retryAfterMs === "number" && retryAfterMs > 0
         ? retryAfterMs
         : DEFAULT_COOLDOWN_MS;
-    llmCooldownUntil[engine] = Date.now() + cooldownMs;
 
+    // Retune BEFORE flooring: the floor below is read off the gate, so a
+    // response that states its quota should size the floor using the rate it
+    // just taught us, not the one we were using when we broke it.
     if (typeof quotaLimitPerMinute === "number") {
         tuneRateGateToObservedLimit(quotaLimitPerMinute);
     }
+
+    // The API's hint answers "when does ONE slot free up?" — 551ms in the
+    // captured response, because that is when the oldest request ages out of
+    // its rolling window. Taken literally that means: wait half a second, get
+    // exactly one request through, and be rejected again. Repeated every
+    // debounce window, that is the 429 treadmill this phase exists to stop.
+    //
+    // The floor is the gate's own refill interval rather than a constant,
+    // because a cooldown shorter than that cannot change what actually
+    // happens — the gate would withhold the token anyway — and because it
+    // then tracks the retune above instead of needing its own tuning. The
+    // retune is still what fixes the steady state; this only stops us
+    // spending requests to relearn that during the transient.
+    const cooldownMs = Math.max(asked, rateGateSettings().refillMs);
+    llmCooldownUntil[engine] = Date.now() + cooldownMs;
 
     announceCooldownOnce(engine, cooldownMs);
 }

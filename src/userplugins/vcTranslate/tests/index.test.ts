@@ -323,6 +323,48 @@ describe("a rate-limited LLM falls back to Google rather than showing nothing", 
             .toEqual({ lang: "es", text: "from gemini", via: "gemini" });
     });
 
+    it("ignores a sub-second retry hint that would put us straight back on the wall", async () => {
+        // The numbers here are the ones a REAL Gemini 429 returned: retry in
+        // 551ms, limit 20/min. Obeying 551ms literally means waking up, being
+        // granted the single slot that just aged out of the rolling window,
+        // and being rejected again on the very next batch — the 429 treadmill
+        // this phase exists to stop. The cooldown is floored at the rate
+        // gate's refill interval instead.
+        useGemini();
+        respondByEngine({
+            gemini: {
+                ok: false, error: "gemini: HTTP 429",
+                retryAfterMs: 551, quotaLimitPerMinute: 20
+            },
+            google: googleTranslated("2")
+        });
+
+        // One LLM debounce window (3s) per step, NOT settle()'s 5s: the whole
+        // point is to land the second flush inside a cooldown that is longer
+        // than 551ms but shorter than 5s.
+        const tick = async () => {
+            await vi.advanceTimersByTimeAsync(3_000);
+            for (let i = 0; i < 20; i++) await Promise.resolve();
+        };
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await tick();
+        // The 429 retuned the gate to 75% of 20/min, i.e. one token per 4s —
+        // which is what the floor is then read off.
+        expect(rateGateSettings().refillMs).toBe(4_000);
+        const before = native.translateBatch.mock.calls.length;
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await tick();
+
+        // ~6s in: well past the 551ms the API asked for, still inside the 4s
+        // floor. The gate has refilled, so a token IS available — the cooldown
+        // is the only thing that can be keeping this off Gemini.
+        const laterCalls = native.translateBatch.mock.calls.slice(before).map(c => c[0]);
+        expect(laterCalls).not.toContain("gemini");
+        expect(getTranslation(makeKey("2", "en"))).toMatchObject({ via: "google" });
+    });
+
     it("says so once per session, not once per batch", async () => {
         useGemini();
         // A 2s cooldown that lapses between the two messages, so the engine is
