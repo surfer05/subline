@@ -142,7 +142,7 @@ function rebuildBatcher() {
 
     const markAllFailed = (req: { messages: { id: string }[]; targetLang: string; }) => {
         for (const m of req.messages) {
-            setTranslation(makeKey(m.id, req.targetLang, engine), { failed: true });
+            setTranslation(makeKey(m.id, req.targetLang), { failed: true });
         }
     };
 
@@ -152,7 +152,7 @@ function rebuildBatcher() {
     // differently from `failed`. See store.ts's StoredTranslation comment.
     const markAllDeferred = (req: { messages: { id: string }[]; targetLang: string; }) => {
         for (const m of req.messages) {
-            setTranslation(makeKey(m.id, req.targetLang, engine), { deferred: true });
+            setTranslation(makeKey(m.id, req.targetLang), { deferred: true });
         }
     };
 
@@ -272,7 +272,7 @@ function rebuildBatcher() {
 
             for (const r of res.results) {
                 if ("failed" in r) {
-                    setTranslation(makeKey(r.id, req.targetLang, engine), { failed: true });
+                    setTranslation(makeKey(r.id, req.targetLang), { failed: true });
                     continue;
                 }
                 if (r.skip) {
@@ -285,12 +285,17 @@ function rebuildBatcher() {
                     // chat most messages ARE already in the target language, so
                     // that was the common case, not the edge case — free on
                     // Google, real recurring spend on Claude.
-                    setTranslation(makeKey(r.id, req.targetLang, engine), { skipped: true });
+                    setTranslation(makeKey(r.id, req.targetLang), { skipped: true });
                     continue;
                 }
+                // `engine` is this flush closure's captured engine — the one
+                // the request was actually sent to, already re-validated
+                // against batcherGeneration above. Recording it in the value
+                // is what survives the engine no longer being part of the key:
+                // the reader can still say WHICH engine produced this line.
                 setTranslation(
-                    makeKey(r.id, req.targetLang, engine),
-                    { lang: r.lang, text: r.text }
+                    makeKey(r.id, req.targetLang),
+                    { lang: r.lang, text: r.text, via: engine }
                 );
             }
         }
@@ -401,7 +406,6 @@ function catchUp(channelId: string) {
     // recent messages while the newly-loaded older ones never got picked up.
     const all = store.toArray();
     const me = UserStore.getCurrentUser()?.id;
-    const engine = effectiveEngine();
 
     // Select newest-first so the messages nearest the viewport win the budget,
     // then enqueue oldest-first.
@@ -416,17 +420,23 @@ function catchUp(channelId: string) {
         // channel) must not treat "no cache entry yet" as "never requested".
         if (inFlight.has(message.id)) continue;
 
-        const key = makeKey(message.id, settings.store.targetLang, engine);
+        const key = makeKey(message.id, settings.store.targetLang);
         const entry = getTranslation(key);
         // Four resolved states, two of which are worth retrying. A real
-        // translation is done. A `{ skipped: true }` marker means the engine
-        // already told us the message is in the target language — also done,
-        // and re-asking would produce the same answer at the same cost.
+        // translation is done — whichever engine produced it. That is the
+        // deliberate consequence of dropping the engine from the key: a
+        // message Google already translated is NOT re-requested just because
+        // Gemini is now selected. Re-translating what the user has already
+        // read would spend the LLM budget on the one thing it is least needed
+        // for. A `{ skipped: true }` marker means the engine already told us
+        // the message is in the target language — also done, and re-asking
+        // would produce the same answer at the same cost.
         // `{ failed: true }` (a genuine attempt that came back broken) and
         // `{ deferred: true }` (never attempted, or rate-limited before the
         // model saw it) both get another attempt — a deferred message that
         // catch-up never retries is worse than the failed-forever bug this
-        // whole scheme replaces.
+        // whole scheme replaces. Both are engine-agnostic too: a failure
+        // recorded under Google is retried under Gemini and vice versa.
         if (entry && !("failed" in entry) && !("deferred" in entry)) continue;
 
         candidates.push(message);
@@ -491,6 +501,28 @@ function onMessagesLoaded(payload: any) {
 
 const TEXT_COLOUR = "var(--text-default, var(--text-normal, #dbdee1))";
 
+/**
+ * How each engine's output is announced on the subtitle itself.
+ *
+ * With the engine gone from the cache key, a subtitle no longer implicitly
+ * means "produced by whatever is currently configured" — a Google line and a
+ * Gemini line sit side by side in the same channel. The glyph is the reader's
+ * only way to tell a context-aware translation from an approximate one, which
+ * matters most exactly when it differs from what they configured.
+ *
+ * One lookup keyed by EngineId rather than per-engine literals scattered
+ * through the renderer: adding a fourth engine is one row here, and it is
+ * impossible for the glyph and the hover text to disagree about which engine
+ * they describe.
+ */
+const ENGINE_PROVENANCE: Record<EngineId, { glyph: string; label: string; }> = {
+    // ≈ — approximate: per-message, no conversation context.
+    google: { glyph: "≈", label: "Google Translate" },
+    // ✦ — context-aware: batched, with a rolling window of recent messages.
+    claude: { glyph: "✦", label: "Claude" },
+    gemini: { glyph: "✦", label: "Gemini" }
+};
+
 function TranslationAccessory({ message }: { message: Message; }) {
     const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
 
@@ -498,7 +530,10 @@ function TranslationAccessory({ message }: { message: Message; }) {
 
     if (!channelActive(message.channel_id)) return null;
 
-    const key = makeKey(message.id, settings.store.targetLang, effectiveEngine());
+    // No engine component: whatever engine produced this line, this is where
+    // it is read from. That is what makes a Google-produced translation
+    // visible while an LLM engine is selected.
+    const key = makeKey(message.id, settings.store.targetLang);
     const entry: StoredTranslation | undefined = getTranslation(key);
     if (!entry) return null;
 
@@ -541,9 +576,20 @@ function TranslationAccessory({ message }: { message: Message; }) {
         );
     }
 
+    // The prefix says both WHAT language this was and WHERE it came from. The
+    // whole prefix stays on the muted token and the body on the --text-default
+    // chain — same split as before, just with the provenance glyph replacing
+    // the decorative ⤷. `title` spells the glyph out on hover, since a symbol
+    // alone can't teach its own meaning.
+    const provenance = ENGINE_PROVENANCE[entry.via];
     return (
         <div style={{ fontSize: "0.95rem", color: TEXT_COLOUR, fontStyle: "italic" }}>
-            <span style={{ color: "var(--text-muted)" }}>⤷ {entry.lang} · </span>
+            <span
+                style={{ color: "var(--text-muted)" }}
+                title={`Translated by ${provenance.label}`}
+            >
+                {provenance.glyph} {entry.lang} ·{" "}
+            </span>
             {entry.text}
         </div>
     );

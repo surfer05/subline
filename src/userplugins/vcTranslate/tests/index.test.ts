@@ -68,7 +68,7 @@ afterEach(() => {
     vi.useRealTimers();
 });
 
-const key = (id: string) => makeKey(id, "en", "google");
+const key = (id: string) => makeKey(id, "en");
 
 describe("skip results are written as a resolved marker", () => {
     it("stores { skipped: true } for a message the engine reported as already in the target language", async () => {
@@ -118,7 +118,7 @@ describe("deferred results — rate-limited, not failed", () => {
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
 
-        expect(getTranslation(makeKey("1", "en", "gemini"))).toEqual({ deferred: true });
+        expect(getTranslation(makeKey("1", "en"))).toEqual({ deferred: true });
         expect(native.translateBatch).toHaveBeenCalledTimes(1);
 
         // A second message arrives while still inside the 30s pause window
@@ -129,12 +129,12 @@ describe("deferred results — rate-limited, not failed", () => {
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
         await settle();
 
-        expect(getTranslation(makeKey("2", "en", "gemini"))).toEqual({ deferred: true });
+        expect(getTranslation(makeKey("2", "en"))).toEqual({ deferred: true });
         expect(native.translateBatch).toHaveBeenCalledTimes(1);
     });
 
     it("retries a deferred message on the next channel open, exactly like a failed one", async () => {
-        setTranslation(makeKey("1", "en", "google"), { deferred: true });
+        setTranslation(makeKey("1", "en"), { deferred: true });
         stubMessages.set(CHANNEL, [discordMessage("1", "hola")]);
 
         FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
@@ -146,14 +146,45 @@ describe("deferred results — rate-limited, not failed", () => {
 
     it("does NOT retry a skipped or a real translation the way it retries deferred", async () => {
         // Guards against a catch-up check broad enough to retry everything.
-        setTranslation(makeKey("1", "en", "google"), { skipped: true });
-        setTranslation(makeKey("2", "en", "google"), { lang: "es", text: "hola" });
+        setTranslation(makeKey("1", "en"), { skipped: true });
+        setTranslation(makeKey("2", "en"), { lang: "es", text: "hola", via: "google" });
         stubMessages.set(CHANNEL, [discordMessage("1", "a"), discordMessage("2", "b")]);
 
         FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
         await settle();
 
         expect(native.translateBatch).not.toHaveBeenCalled();
+    });
+
+    it("does not re-request a Google translation just because an LLM engine is now selected", async () => {
+        // The deliberate consequence of dropping the engine from the cache
+        // key. Switching engines must not re-spend budget upgrading messages
+        // the user has already read — a real translation is resolved,
+        // whichever engine produced it.
+        setTranslation(makeKey("1", "en"), { lang: "es", text: "hola", via: "google" });
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+        stubMessages.set(CHANNEL, [discordMessage("1", "a")]);
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+
+        expect(native.translateBatch).not.toHaveBeenCalled();
+    });
+
+    it("still retries a failure recorded under one engine when another is selected", async () => {
+        // The flip side: engine-agnostic resolution must not make `failed`
+        // and `deferred` sticky across an engine switch.
+        setTranslation(makeKey("1", "en"), { failed: true });
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+        stubMessages.set(CHANNEL, [discordMessage("1", "hola")]);
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+
+        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+        expect(requestAt(0).messages.map((m: any) => m.id)).toEqual(["1"]);
     });
 });
 
@@ -243,9 +274,95 @@ describe("the subtitle accessory", () => {
         expect(rendered).not.toContain("⚠");
     });
 
+    /** The first node in the rendered tree carrying a `title` prop. */
+    const titleOf = (node: any): string | undefined => {
+        if (node === null || typeof node !== "object") return undefined;
+        if (Array.isArray(node)) {
+            for (const child of node) {
+                const found = titleOf(child);
+                if (found !== undefined) return found;
+            }
+            return undefined;
+        }
+        if (node.props?.title) return node.props.title;
+        return titleOf(node.children);
+    };
+
     it("renders the translation for a real result", () => {
-        setTranslation(key("1"), { lang: "es", text: "hello there" });
+        setTranslation(key("1"), { lang: "es", text: "hello there", via: "google" });
         expect(text(render(discordMessage("1", "hola")))).toContain("hello there");
+    });
+
+    it("finds and renders a Google translation while Gemini is the configured engine", () => {
+        // THE point of dropping the engine from the cache key. A fallback
+        // translation written under Google used to be written to a key the
+        // Gemini-configured accessory never looked at, so the subtitle simply
+        // never appeared. If this ever fails again, an engine fallback is
+        // invisible to the user no matter how well it works.
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+        setTranslation(makeKey("1", "en"), { lang: "es", text: "hello there", via: "google" });
+
+        const rendered = render(discordMessage("1", "hola"));
+        expect(rendered).not.toBeNull();
+        expect(text(rendered)).toContain("hello there");
+    });
+
+    it("marks an LLM translation with ✦ and a Google one with ≈", () => {
+        setTranslation(key("1"), { lang: "es", text: "from gemini", via: "gemini" });
+        setTranslation(key("2"), { lang: "es", text: "from claude", via: "claude" });
+        setTranslation(key("3"), { lang: "es", text: "from google", via: "google" });
+
+        expect(text(render(discordMessage("1", "hola")))).toContain("✦");
+        expect(text(render(discordMessage("1", "hola")))).not.toContain("≈");
+        expect(text(render(discordMessage("2", "hola")))).toContain("✦");
+        expect(text(render(discordMessage("3", "hola")))).toContain("≈");
+        expect(text(render(discordMessage("3", "hola")))).not.toContain("✦");
+    });
+
+    it("still shows the language code next to the provenance glyph", () => {
+        setTranslation(key("1"), { lang: "es", text: "hello there", via: "gemini" });
+        expect(text(render(discordMessage("1", "hola")))).toContain("es");
+    });
+
+    it("names the engine in a title attribute so the glyph is explainable on hover", () => {
+        setTranslation(key("1"), { lang: "es", text: "a", via: "gemini" });
+        expect(titleOf(render(discordMessage("1", "hola")))).toBe("Translated by Gemini");
+
+        setTranslation(key("2"), { lang: "es", text: "b", via: "google" });
+        expect(titleOf(render(discordMessage("2", "hola")))).toBe("Translated by Google Translate");
+
+        setTranslation(key("3"), { lang: "es", text: "c", via: "claude" });
+        expect(titleOf(render(discordMessage("3", "hola")))).toBe("Translated by Claude");
+    });
+});
+
+describe("provenance is recorded from the engine that actually ran", () => {
+    it("records via: gemini when Gemini produced the translation", async () => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        respondWith({ ok: true, results: [{ id: "1", lang: "es", text: "hello", skip: false }] });
+        await settle();
+
+        expect(native.translateBatch.mock.calls[0][0]).toBe("gemini");
+        expect(getTranslation(makeKey("1", "en"))).toEqual({ lang: "es", text: "hello", via: "gemini" });
+    });
+
+    it("records via: google when the Gemini key is missing and Google actually ran", async () => {
+        // The engine the request was SENT to, not the one in settings — this
+        // is the shape a Phase 3 fallback will write, and mislabelling it
+        // would tell the user a Google line came from an LLM.
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "";
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        respondWith({ ok: true, results: [{ id: "1", lang: "es", text: "hello", skip: false }] });
+        await settle();
+
+        expect(native.translateBatch.mock.calls[0][0]).toBe("google");
+        expect(getTranslation(makeKey("1", "en"))).toEqual({ lang: "es", text: "hello", via: "google" });
     });
 });
 
@@ -254,7 +371,7 @@ describe("MESSAGE_UPDATE", () => {
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         respondWith({ ok: true, results: [{ id: "1", lang: "es", text: "hello", skip: false }] });
         await settle();
-        expect(getTranslation(key("1"))).toEqual({ lang: "es", text: "hello" });
+        expect(getTranslation(key("1"))).toEqual({ lang: "es", text: "hello", via: "google" });
         expect(native.translateBatch).toHaveBeenCalledTimes(1);
     }
 
@@ -278,7 +395,7 @@ describe("MESSAGE_UPDATE", () => {
 
         expect(native.translateBatch).toHaveBeenCalledTimes(2);
         expect(requestAt(1).messages).toEqual([{ id: "1", author: "ana", text: "adios" }]);
-        expect(getTranslation(key("1"))).toEqual({ lang: "es", text: "bye" });
+        expect(getTranslation(key("1"))).toEqual({ lang: "es", text: "bye", via: "google" });
     });
 
     it("ignores an embed-hydration update that carries no content", async () => {

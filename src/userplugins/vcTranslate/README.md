@@ -85,6 +85,18 @@ language get no subtitle, and are remembered as resolved: reopening the
 channel does not re-send them. Editing a message clears its subtitle and
 re-translates the new text.
 
+Every subtitle starts with a small marker saying which engine produced it,
+because that is no longer always the engine you have selected (see
+"Which engine produced this line?" below):
+
+| Prefix | Meaning |
+|---|---|
+| `✦ es · …` | Translated by a context-aware LLM engine (Claude or Gemini) — batched, with a rolling window of recent channel messages |
+| `≈ es · …` | Translated by Google — each message in isolation, no conversation context, so it is an approximation |
+
+Hovering the marker shows the engine's full name ("Translated by Gemini",
+"Translated by Google Translate").
+
 The **"Target language code"** setting defaults to your Discord client's own
 language (`en-US` becomes `en`, `pt-BR` becomes `pt`, and so on) rather than
 always English. Set it explicitly if you want subtitles in something other
@@ -225,16 +237,32 @@ the same way a failure does — reopening the channel retries it — and usually
 clears within seconds once the client-side rate limiter (below) lets the next
 batch through.
 
-### The three-way resolved-state model
+**Which engine produced this line? / Some subtitles show `≈`, others `✦`.**
+Translations are cached by (message, target language) only — deliberately
+*not* by engine. That is what lets a translation produced by one engine stay
+readable when another is selected, and it is the precondition for falling back
+to Google when an LLM engine is unavailable rather than showing nothing at
+all. The consequence you will actually notice: **switching engines does not
+re-translate anything you have already read.** A message Google translated
+stays on screen, still marked `≈`, after you switch to Gemini; only messages
+that have not been translated yet (or that are marked failed/rate-limited)
+use the new engine. That is intentional — re-spending an LLM budget upgrading
+messages you have already read is the least valuable thing it could be spent
+on. If you genuinely want a specific message redone by the new engine, edit
+anything in your own copy of it, or reopen the channel after the message has
+scrolled out of the cached 500.
+
+### The four-way resolved-state model
 
 Internally, every message id a translation was ever requested for resolves to
 exactly one of four states (`store.ts`'s `StoredTranslation`), so that "no
 entry yet" always means "never requested" and nothing silently falls through
-the cracks:
+the cracks. All four are engine-independent: the entry records which engine
+produced it (`via`) rather than being filed under that engine.
 
 | State | Meaning | Rendered as | Retried on next catch-up? |
 |---|---|---|---|
-| `{ lang, text }` | A real translation | The dimmed subtitle | No — already done |
+| `{ lang, text, via }` | A real translation, plus the engine that produced it | The dimmed subtitle, prefixed `✦` (Claude/Gemini) or `≈` (Google) | No — already done, whichever engine did it |
 | `{ skipped: true }` | The engine reported the message is already in your target language | Nothing (no subtitle) | No — re-asking would produce the same answer at the same cost |
 | `{ failed: true }` | A genuine attempt came back broken | "⚠ translation failed" | Yes |
 | `{ deferred: true }` | Never attempted, or rejected before the model saw it (rate limited) | "⏳ rate limited — retrying" | Yes |
@@ -312,7 +340,8 @@ of results.
 
 | # | What to do | Expected | Pass/Fail |
 |---|---|---|---|
-| 1 | Post a non-English message in an enabled channel | Dimmed italic subtitle appears within ~1s | ☐ |
+| 1 | Post a non-English message in an enabled channel | Dimmed italic subtitle appears within ~1s, prefixed with the engine marker (`≈` on Google, `✦` on Claude/Gemini); hovering the marker names the engine | ☐ |
+| 1b | With some messages already translated on Google, switch the engine to Claude or Gemini and reopen the channel | The existing subtitles stay visible and stay marked `≈`; no new API calls for them. Only untranslated messages use the new engine, and those show `✦` | ☐ |
 | 2 | Post a message already in your target language, then reopen the channel | No subtitle, and no second API call on reopen (the skip is cached as resolved) | ☐ |
 | 3 | Post an emote-only message, a link-only message, or your own message | No subtitle, no API call | ☐ |
 | 4 | Have three people post at once in three different languages | All three translate, in one batch | ☐ |
