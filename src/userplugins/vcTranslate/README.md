@@ -111,6 +111,36 @@ not the same, though: a *rejected* key pins the session to Google until you
 restart Discord, whereas a *missing* key does not — paste one and Claude
 starts being used immediately. See Troubleshooting below.
 
+### Free-tier rate limiting
+
+Claude and Gemini are both key-gated and both rate-limited on typical
+free/low tiers — Gemini's free tier allows on the order of 15 requests per
+minute, and Anthropic's lowest tiers are comparably tight. Google is
+per-message with its own concurrency cap and is not affected by any of this.
+
+Nothing previously limited how fast *this plugin* sent requests to Claude or
+Gemini. With "Auto-translate every channel" on, restarting Discord fires
+catch-up for every open server channel within seconds of each other, each
+flushing its own batch independently — easily enough requests in that first
+second to blow straight through a free-tier per-minute ceiling and get every
+one of those batches back as a 429.
+
+A small client-side token-bucket gate (`rateGate.ts`) now sits in front of
+every Claude/Gemini request: a burst of 5 requests is always available
+immediately, refilling at roughly 1 every 4 seconds (~15/minute — matched to
+the tighter free-tier ceiling above). A single live conversation flushes at
+most one batch per its 700ms debounce window, so **normal chat is never
+throttled** — it never needs more than one token at a time. A catch-up storm
+across many channels, by contrast, gets smoothed out to that steady rate
+instead of front-loading a burst that gets rejected wholesale. Anything the
+gate holds back is not lost: it is marked `{ deferred: true }` if the request
+is paused after a 429 (see below), not `{ failed: true }`.
+
+If a 429 does still get through, native.ts also reads the API's own retry
+hint when one is present — Gemini's error body can carry a `RetryInfo`/
+`retryDelay`, and either engine's response may carry a `Retry-After` header —
+and only falls back to a guessed 30-second pause when neither is available.
+
 ## Troubleshooting
 
 **Nothing translates at all.**
@@ -177,10 +207,42 @@ report it if you hit this — it's the one behavior in this plugin that
 automated tests could not pin down.
 
 **A message shows "⚠ translation failed."**
-The request for that message errored (network issue, rate limit, bad
-response shape) after retrying once. It is not stuck permanently: the next
+The request for that message was actually attempted and came back broken
+(network issue, an unparseable response, an id the model never returned a
+usable row for) after retrying once. It is not stuck permanently: the next
 time you open (or reopen) that channel, catch-up retries any message still
 marked failed automatically.
+
+**A message shows a dim "⏳ rate limited — retrying" instead of ⚠.**
+This is a *different*, non-broken state: the message's batch was never
+attempted at all, or was rejected by the API before any model ever saw it —
+almost always a 429 from Claude or Gemini's rate limit (see "Free-tier rate
+limiting" below), most commonly right after a restart with "Auto-translate
+every channel" on, when catch-up fires for every server channel within
+seconds of each other. Nothing about the translation itself failed, so this
+is deliberately not styled or worded like the ⚠ marker. It resolves itself
+the same way a failure does — reopening the channel retries it — and usually
+clears within seconds once the client-side rate limiter (below) lets the next
+batch through.
+
+### The three-way resolved-state model
+
+Internally, every message id a translation was ever requested for resolves to
+exactly one of four states (`store.ts`'s `StoredTranslation`), so that "no
+entry yet" always means "never requested" and nothing silently falls through
+the cracks:
+
+| State | Meaning | Rendered as | Retried on next catch-up? |
+|---|---|---|---|
+| `{ lang, text }` | A real translation | The dimmed subtitle | No — already done |
+| `{ skipped: true }` | The engine reported the message is already in your target language | Nothing (no subtitle) | No — re-asking would produce the same answer at the same cost |
+| `{ failed: true }` | A genuine attempt came back broken | "⚠ translation failed" | Yes |
+| `{ deferred: true }` | Never attempted, or rejected before the model saw it (rate limited) | "⏳ rate limited — retrying" | Yes |
+
+`failed` and `deferred` look and read differently on purpose: a plain English
+message caught in a 429 storm was never actually wrong about anything, and
+telling the user "failed" for it is what previously made a rate-limited
+catch-up look like the plugin being broken.
 
 ## Privacy
 
@@ -221,10 +283,10 @@ reports a *smaller* pass count that still looks like success.
 `vitest` is not saved as a dependency; in a fresh clone run `npm i -D vitest`
 first.
 
-133 tests across 8 suites (`batcher`, `claude`, `google`, `index`, `native`,
-`retry`, `skip`, `store` — see `tests/`).
+191 tests across 11 suites (`batcher`, `claude`, `gemini`, `google`, `index`,
+`native`, `rateGate`, `rateHint`, `retry`, `skip`, `store` — see `tests/`).
 
-Seven of the eight target pure-logic modules with no Discord/Vencord runtime
+Nine of the eleven target pure-logic modules with no Discord/Vencord runtime
 dependency. `index.test.ts` covers `index.tsx` — the Flux wiring, the
 catch-up logic and the subtitle accessory — against the small set of Vencord
 stand-ins in `tests/stubs/` (`FluxDispatcher`, `MessageStore`, `UserStore`,

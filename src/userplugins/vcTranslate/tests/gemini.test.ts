@@ -235,6 +235,59 @@ describe("translateWithGemini", () => {
         expect(JSON.stringify(err, Object.getOwnPropertyNames(err))).not.toContain(key);
     });
 
+    it("attaches the retry-after header as retryAfterMs on a 429", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: false,
+            status: 429,
+            headers: { get: (n: string) => (n === "retry-after" ? "7" : null) },
+            json: async () => ({})
+        });
+
+        let caught: unknown;
+        try {
+            await translateWithGemini(req, "k", fetchImpl as any);
+        } catch (e) {
+            caught = e;
+        }
+
+        expect((caught as { retryAfterMs?: number }).retryAfterMs).toBe(7_000);
+    });
+
+    it("falls back to the RetryInfo body when there is no Retry-After header", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: false,
+            status: 429,
+            headers: { get: () => null },
+            json: async () => ({
+                error: { details: [{ "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "9s" }] }
+            })
+        });
+
+        let caught: unknown;
+        try {
+            await translateWithGemini(req, "k", fetchImpl as any);
+        } catch (e) {
+            caught = e;
+        }
+
+        expect((caught as { retryAfterMs?: number }).retryAfterMs).toBe(9_000);
+    });
+
+    it("leaves retryAfterMs undefined when neither header nor body carries a hint", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: false, status: 429, text: async () => "rate limited"
+        });
+
+        let caught: unknown;
+        try {
+            await translateWithGemini(req, "k", fetchImpl as any);
+        } catch (e) {
+            caught = e;
+        }
+
+        expect((caught as { retryAfterMs?: number }).retryAfterMs).toBeUndefined();
+    });
+
     it("does not leak the api key even when parsing the response body fails", async () => {
         // A defensive-parsing failure error (missing steps, no text block)
         // must not accidentally echo the key either.

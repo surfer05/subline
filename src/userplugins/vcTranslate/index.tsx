@@ -5,6 +5,7 @@ import type { Message } from "@vencord/discord-types";
 
 import { createBatcher, type Batcher } from "./batcher";
 import { isChannelEnabled, loadEnabledChannels, toggleChannel } from "./channels";
+import { acquireSlot, resetRateGate } from "./rateGate";
 import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
@@ -145,6 +146,16 @@ function rebuildBatcher() {
         }
     };
 
+    // For a batch that was never attempted, or was rejected before the model
+    // ever saw it (rate-limited). Not a translation failure — nothing about
+    // the translation itself went wrong — so it must render and retry
+    // differently from `failed`. See store.ts's StoredTranslation comment.
+    const markAllDeferred = (req: { messages: { id: string }[]; targetLang: string; }) => {
+        for (const m of req.messages) {
+            setTranslation(makeKey(m.id, req.targetLang, engine), { deferred: true });
+        }
+    };
+
     const newBatcher = createBatcher({
         debounceMs: 700,
         maxBatch: 10,
@@ -167,13 +178,33 @@ function rebuildBatcher() {
             if (Date.now() < pausedUntil) {
                 // The queue was already spliced out of the batcher before
                 // onFlush ran, so if we silently return here these messages
-                // are gone forever: no entry, no marker, no retry. Mark them
-                // failed instead so the accessory shows ⚠ and catch-up can
-                // retry later. This path never sends a request, so release
-                // the ids here rather than waiting on the finally below.
-                markAllFailed(req);
+                // are gone forever: no entry, no marker, no retry. This batch
+                // never left the client — it was never attempted, let alone
+                // failed — so mark it deferred, not failed: the accessory
+                // shows a muted "rate limited" line instead of ⚠, and
+                // catch-up retries it exactly as it retries a real failure.
+                // This path never sends a request, so release the ids here
+                // rather than waiting on the finally below.
+                markAllDeferred(req);
                 for (const m of req.messages) inFlight.delete(m.id);
                 return;
+            }
+
+            // Only the two key-gated LLM engines are rate-gated — Google is
+            // per-message with its own concurrency cap (engines/google.ts)
+            // and was never the source of the 429 storm this gate exists for.
+            if (isLlmEngine(engine)) {
+                await acquireSlot();
+                // stop()/rebuild may have happened while this flush sat
+                // behind the gate (resetRateGate() wakes queued waiters
+                // immediately for exactly that reason, rather than leaving
+                // them to time out on the next refill tick). Re-check before
+                // spending a real request on a batch nothing will ever read
+                // the result of.
+                if (myGeneration !== batcherGeneration) {
+                    for (const m of req.messages) inFlight.delete(m.id);
+                    return;
+                }
             }
 
             let res;
@@ -214,13 +245,20 @@ function rebuildBatcher() {
             if (myGeneration !== batcherGeneration) return;
 
             if (!res.ok) {
-                if (res.retryAfterMs) pausedUntil = Date.now() + res.retryAfterMs;
-
-                // Always mark this batch's messages as failed on a request-level
-                // error, regardless of cause — an auth failure must not leave
-                // them silently unresolved just because it ALSO triggers a
-                // session fallback.
-                markAllFailed(req);
+                // Always mark this batch's messages as resolved on a
+                // request-level error, regardless of cause — an auth failure
+                // must not leave them silently unresolved just because it
+                // ALSO triggers a session fallback. `retryAfterMs` is only
+                // ever set for a 429 (see native.ts) — a rate limit, not a
+                // genuine translation failure, so those messages get
+                // `deferred` (retried, rendered as pending) instead of
+                // `failed` (retried, rendered as broken).
+                if (res.retryAfterMs) {
+                    pausedUntil = Date.now() + res.retryAfterMs;
+                    markAllDeferred(req);
+                } else {
+                    markAllFailed(req);
+                }
 
                 // An auth failure means the key is wrong, not that the network
                 // blipped — retrying it every batch would be pure noise, so
@@ -380,12 +418,16 @@ function catchUp(channelId: string) {
 
         const key = makeKey(message.id, settings.store.targetLang, engine);
         const entry = getTranslation(key);
-        // Three resolved states, one of which is worth retrying. A real
+        // Four resolved states, two of which are worth retrying. A real
         // translation is done. A `{ skipped: true }` marker means the engine
         // already told us the message is in the target language — also done,
-        // and re-asking would produce the same answer at the same cost. Only
-        // `{ failed: true }` gets another attempt.
-        if (entry && !("failed" in entry)) continue;
+        // and re-asking would produce the same answer at the same cost.
+        // `{ failed: true }` (a genuine attempt that came back broken) and
+        // `{ deferred: true }` (never attempted, or rate-limited before the
+        // model saw it) both get another attempt — a deferred message that
+        // catch-up never retries is worse than the failed-forever bug this
+        // whole scheme replaces.
+        if (entry && !("failed" in entry) && !("deferred" in entry)) continue;
 
         candidates.push(message);
     }
@@ -481,6 +523,20 @@ function TranslationAccessory({ message }: { message: Message; }) {
         return (
             <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
                 ⚠ translation failed
+            </div>
+        );
+    }
+
+    // A deferred message was never attempted, or was rejected before the
+    // model ever saw it (rate limited) — it will be retried, so it must NOT
+    // read as broken the way `failed` does. Same muted token as the failure
+    // marker (this is still a "nothing to show yet" line, not a real
+    // subtitle), different wording and glyph so a rate-limited catch-up storm
+    // doesn't look like the plugin failing on every message in it.
+    if ("deferred" in entry) {
+        return (
+            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
+                ⏳ rate limited — retrying
             </div>
         );
     }
@@ -582,5 +638,9 @@ export default definePlugin({
         sessionFallback = false;
         pausedUntil = 0;
         announcedMissingKey = false;
+        // Wakes anything still queued behind the rate gate immediately
+        // (rather than leaving it to time out on the next refill tick) and
+        // refills it to full capacity for the next start().
+        resetRateGate();
     }
 });

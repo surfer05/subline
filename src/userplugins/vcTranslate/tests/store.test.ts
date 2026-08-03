@@ -36,16 +36,41 @@ describe("store", () => {
         expect(getTranslation(k)).toEqual({ skipped: true });
     });
 
-    it("keeps skipped distinguishable from failed and from a translation", () => {
-        // These three are the whole point of the union: the accessory renders a
-        // different thing for each, and catch-up retries exactly one of them.
+    it("stores a deferred marker", () => {
+        const k = makeKey("1", "en", "claude");
+        setTranslation(k, { deferred: true });
+        expect(getTranslation(k)).toEqual({ deferred: true });
+    });
+
+    it("keeps skipped, failed and deferred distinguishable from each other and from a translation", () => {
+        // These four are the whole point of the union: the accessory renders a
+        // different thing for each, and catch-up retries exactly two of them
+        // (failed, deferred) but not the other two (a real translation,
+        // skipped).
         setTranslation(makeKey("1", "en", "claude"), { skipped: true });
         setTranslation(makeKey("2", "en", "claude"), { failed: true });
         setTranslation(makeKey("3", "en", "claude"), { lang: "ja", text: "hi" });
+        setTranslation(makeKey("4", "en", "claude"), { deferred: true });
 
         expect(getTranslation(makeKey("1", "en", "claude"))).not.toHaveProperty("failed");
+        expect(getTranslation(makeKey("1", "en", "claude"))).not.toHaveProperty("deferred");
         expect(getTranslation(makeKey("2", "en", "claude"))).not.toHaveProperty("skipped");
+        expect(getTranslation(makeKey("2", "en", "claude"))).not.toHaveProperty("deferred");
         expect(getTranslation(makeKey("3", "en", "claude"))).not.toHaveProperty("skipped");
+        expect(getTranslation(makeKey("3", "en", "claude"))).not.toHaveProperty("deferred");
+        expect(getTranslation(makeKey("4", "en", "claude"))).not.toHaveProperty("failed");
+        expect(getTranslation(makeKey("4", "en", "claude"))).not.toHaveProperty("skipped");
+    });
+
+    it("a deferred entry is a hit, not a miss", () => {
+        // Same reasoning as the skipped case: an unwritten id looks identical
+        // to one that was never requested. Unlike skipped, catch-up DOES
+        // re-request a deferred hit — but it must still be a hit, or the
+        // "resolved vs never requested" distinction the whole store exists
+        // for collapses for this variant too.
+        const k = makeKey("1", "en", "claude");
+        setTranslation(k, { deferred: true });
+        expect(getTranslation(k)).toBeDefined();
     });
 
     it("a skipped entry is a hit, not a miss", () => {

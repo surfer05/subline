@@ -1,3 +1,5 @@
+import { HttpError } from "../httpError";
+import { retryAfterFromHeader } from "../rateHint";
 import { isSameText, type BatchRequest, type Result } from "../types";
 
 const ENDPOINT = "https://translate.googleapis.com/translate_a/single";
@@ -24,7 +26,7 @@ async function translateOne(
         `&dt=t&q=${encodeURIComponent(msg.text)}`;
 
     const res = await fetchImpl(url);
-    if (!res.ok) throw new Error(`google: HTTP ${res.status}`);
+    if (!res.ok) throw new HttpError(`google: HTTP ${res.status}`, res.status, retryAfterFromHeader(res));
 
     const body = await res.json();
     // Expected: [[["translated","original",...], ...], null, "<detected lang>"]

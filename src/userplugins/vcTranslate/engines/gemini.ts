@@ -1,3 +1,5 @@
+import { HttpError } from "../httpError";
+import { retryAfterFromGeminiBody, retryAfterFromHeader } from "../rateHint";
 import type { BatchRequest, Result } from "../types";
 import { buildPrompt, extractRows, mapRows, parseJsonText, SCHEMA } from "./llmShared";
 
@@ -92,8 +94,22 @@ export async function translateWithGemini(
     });
 
     if (!res.ok) {
-        // Deliberately does not include the request body or key.
-        throw new Error(`gemini: HTTP ${res.status}`);
+        // Deliberately does not include the request body or key. The retry
+        // hint, when present, lives in either place: a `Retry-After` header
+        // (checked first — cheap, no body read needed) or, Gemini-specifically,
+        // a RetryInfo entry inside the JSON error body. The body read is
+        // best-effort: a 4xx response is not guaranteed to be JSON at all, and
+        // a parse failure here must not shadow the real `HTTP <status>` error.
+        let retryAfterMs = retryAfterFromHeader(res);
+        if (retryAfterMs === undefined) {
+            try {
+                retryAfterMs = retryAfterFromGeminiBody(await res.json());
+            } catch {
+                // Not JSON, or no body to read — no hint available, fall
+                // through with retryAfterMs left undefined.
+            }
+        }
+        throw new HttpError(`gemini: HTTP ${res.status}`, res.status, retryAfterMs);
     }
 
     return parseGeminiResponse(await res.json(), req);

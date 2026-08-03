@@ -48,6 +48,37 @@ describe("translateWithGoogle", () => {
         await expect(translateWithGoogle(req(["hola"]), fetchImpl as any)).rejects.toThrow();
     });
 
+    it("attaches a Retry-After header as retryAfterMs on the thrown error", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: false,
+            status: 429,
+            headers: { get: (n: string) => (n === "retry-after" ? "20" : null) },
+            json: async () => ({})
+        });
+
+        let caught: unknown;
+        try {
+            await translateWithGoogle(req(["hola"]), fetchImpl as any);
+        } catch (e) {
+            caught = e;
+        }
+
+        expect((caught as { retryAfterMs?: number }).retryAfterMs).toBe(20_000);
+    });
+
+    it("leaves retryAfterMs undefined when there is no Retry-After header", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 429, json: async () => ({}) });
+
+        let caught: unknown;
+        try {
+            await translateWithGoogle(req(["hola"]), fetchImpl as any);
+        } catch (e) {
+            caught = e;
+        }
+
+        expect((caught as { retryAfterMs?: number }).retryAfterMs).toBeUndefined();
+    });
+
     // The shape guards below are per-MESSAGE failures, not whole-request ones:
     // they mark that message failed rather than returning garbage for it, and
     // leave the rest of the batch alone. `failed: true` is the assertion that

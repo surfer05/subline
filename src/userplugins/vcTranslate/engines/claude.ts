@@ -1,3 +1,5 @@
+import { HttpError } from "../httpError";
+import { retryAfterFromHeader } from "../rateHint";
 import type { BatchRequest, Result } from "../types";
 import { buildPrompt, extractRows, mapRows, parseJsonText, SCHEMA } from "./llmShared";
 
@@ -72,7 +74,7 @@ export async function translateWithClaude(
 
     if (!res.ok) {
         // Deliberately does not include the request body or key.
-        throw new Error(`claude: HTTP ${res.status}`);
+        throw new HttpError(`claude: HTTP ${res.status}`, res.status, retryAfterFromHeader(res));
     }
 
     return parseClaudeResponse(await res.json(), req);

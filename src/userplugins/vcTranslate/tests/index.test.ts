@@ -109,6 +109,103 @@ describe("skip results are written as a resolved marker", () => {
     });
 });
 
+describe("deferred results — rate-limited, not failed", () => {
+    it("marks a batch deferred (not failed) when paused after a 429, without a second request", async () => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+        respondWith({ ok: false, error: "gemini: HTTP 429", retryAfterMs: 30_000 });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(getTranslation(makeKey("1", "en", "gemini"))).toEqual({ deferred: true });
+        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+
+        // A second message arrives while still inside the 30s pause window
+        // (only ~1s of fake time has elapsed). It must never reach
+        // translateBatch at all, and must be marked deferred, not failed —
+        // this is the paused-early-return path in onFlush, distinct from the
+        // 429-response path exercised above.
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+
+        expect(getTranslation(makeKey("2", "en", "gemini"))).toEqual({ deferred: true });
+        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+    });
+
+    it("retries a deferred message on the next channel open, exactly like a failed one", async () => {
+        setTranslation(makeKey("1", "en", "google"), { deferred: true });
+        stubMessages.set(CHANNEL, [discordMessage("1", "hola")]);
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+
+        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+        expect(requestAt(0).messages.map((m: any) => m.id)).toEqual(["1"]);
+    });
+
+    it("does NOT retry a skipped or a real translation the way it retries deferred", async () => {
+        // Guards against a catch-up check broad enough to retry everything.
+        setTranslation(makeKey("1", "en", "google"), { skipped: true });
+        setTranslation(makeKey("2", "en", "google"), { lang: "es", text: "hola" });
+        stubMessages.set(CHANNEL, [discordMessage("1", "a"), discordMessage("2", "b")]);
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+
+        expect(native.translateBatch).not.toHaveBeenCalled();
+    });
+});
+
+describe("the rate gate — smooths a catch-up storm, never slows live chat", () => {
+    it("caps an immediate burst across many channels, then drains at the refill rate", async () => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+        respondWith({ ok: true, results: [] });
+
+        // Simulate globalAuto catch-up firing across 8 channels at once, each
+        // with its own independent 700ms debounce window.
+        const channels = Array.from({ length: 8 }, (_, i) => `burst-${i}`);
+        for (const c of channels) {
+            FluxDispatcher.dispatch("MESSAGE_CREATE", {
+                message: { ...discordMessage(`m-${c}`, "hola"), channel_id: c }
+            });
+        }
+
+        // Let every channel's debounce timer fire, but nothing beyond that.
+        await vi.advanceTimersByTimeAsync(700);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        // Only the burst capacity's worth of requests actually leave the
+        // client immediately — this is the whole point of the gate. If this
+        // is 8, nothing is throttling the storm at all.
+        const afterBurst = native.translateBatch.mock.calls.length;
+        expect(afterBurst).toBeGreaterThan(0);
+        expect(afterBurst).toBeLessThan(8);
+
+        // The remainder drains steadily rather than being dropped or stuck
+        // forever: enough refill time gets every one of them through.
+        await vi.advanceTimersByTimeAsync(4_000 * 8);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        expect(native.translateBatch).toHaveBeenCalledTimes(8);
+    });
+
+    it("never makes a single live-chat batch wait", async () => {
+        settings.store.engine = "claude";
+        settings.store.anthropicApiKey = "sk-ant-test";
+        respondWith({ ok: true, results: [] });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        // Advance by exactly the debounce window, nothing more — a real
+        // conversation's single flush must clear the gate with no extra wait.
+        await vi.advanceTimersByTimeAsync(700);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+    });
+});
+
 describe("the subtitle accessory", () => {
     /** Call the accessory component directly and return what it rendered. */
     const render = (message: unknown) => {
@@ -137,6 +234,13 @@ describe("the subtitle accessory", () => {
     it("still renders the failure marker for a failed message", () => {
         setTranslation(key("1"), { failed: true });
         expect(text(render(discordMessage("1", "hola")))).toContain("⚠");
+    });
+
+    it("renders a deferred message as pending, not as failed", () => {
+        setTranslation(key("1"), { deferred: true });
+        const rendered = text(render(discordMessage("1", "hola")));
+        expect(rendered).toContain("retrying");
+        expect(rendered).not.toContain("⚠");
     });
 
     it("renders the translation for a real result", () => {

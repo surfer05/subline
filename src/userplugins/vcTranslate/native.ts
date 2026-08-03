@@ -88,7 +88,16 @@ export async function translateBatch(
         // happens to contain "HTTP 429", or a substring of it) rewrite the
         // status out from under this check and desync the two decisions.
         // Scrubbing happens afterwards, and only for the value that leaves.
-        const retryAfterMs = httpStatus(raw) === 429 ? 30_000 : undefined;
+        //
+        // The engine may have parsed the API's own retry hint (a `Retry-After`
+        // header, or Gemini's RetryInfo body — see rateHint.ts) onto the error
+        // as `retryAfterMs` (see httpError.ts). Prefer that real number over
+        // the guessed 30s constant; fall back to the constant only when the
+        // engine had no hint to offer.
+        const hinted = (err as { retryAfterMs?: unknown })?.retryAfterMs;
+        const retryAfterMs = httpStatus(raw) === 429
+            ? (typeof hinted === "number" ? hinted : 30_000)
+            : undefined;
         return { ok: false, error: scrubKey(raw, apiKey), retryAfterMs };
     }
 }

@@ -201,6 +201,36 @@ describe("translateBatch — isRetryable classifier boundaries", () => {
 });
 
 describe("translateBatch — retryAfterMs", () => {
+    it("prefers the engine's own parsed retry hint over the hardcoded 30s default", async () => {
+        // The engine (see httpError.ts/rateHint.ts) may have parsed a real
+        // Retry-After/RetryInfo hint onto the thrown error's `retryAfterMs`
+        // property. If native.ts ignored it and always used the constant,
+        // this would come back 30_000 instead of 5_000.
+        const err = new Error("claude: HTTP 429");
+        (err as { retryAfterMs?: number }).retryAfterMs = 5_000;
+        claude.mockRejectedValue(err);
+
+        const res = await run("claude", "k");
+
+        expect(res).toEqual({ ok: false, error: "claude: HTTP 429", retryAfterMs: 5_000 });
+    });
+
+    it("falls back to the 30s default when the engine attached no hint", async () => {
+        claude.mockRejectedValue(new Error("claude: HTTP 429"));
+        const res = await run("claude", "k");
+        expect((res as { retryAfterMs?: number }).retryAfterMs).toBe(30_000);
+    });
+
+    it("ignores a non-numeric retryAfterMs property rather than trusting it blindly", async () => {
+        const err = new Error("claude: HTTP 429");
+        (err as { retryAfterMs?: unknown }).retryAfterMs = "soon";
+        claude.mockRejectedValue(err);
+
+        const res = await run("claude", "k");
+
+        expect((res as { retryAfterMs?: number }).retryAfterMs).toBe(30_000);
+    });
+
     it("signals a 30s pause on a rate-limit failure", async () => {
         claude.mockRejectedValue(new Error("claude: HTTP 429"));
         const res = await run("claude", "k");
