@@ -12,6 +12,7 @@ const native = vi.hoisted(() => {
 });
 
 import plugin from "../index";
+import { rateGateSettings, REFILL_MS } from "../rateGate";
 import settings from "../settings";
 import { clearStore, getTranslation, makeKey, setTranslation } from "../store";
 import type { NativeResponse } from "../native";
@@ -126,27 +127,34 @@ describe("skip results are written as a resolved marker", () => {
 });
 
 describe("deferred results — rate-limited, not failed", () => {
-    it("marks a batch deferred (not failed) when paused after a 429, without a second request", async () => {
+    it("marks a batch deferred (not failed) only when the Google fallback fails too", async () => {
         settings.store.engine = "gemini";
         settings.store.geminiApiKey = "AIza-test";
+        // Blanket 429: Gemini is rate limited AND the Google fallback comes
+        // back empty-handed. This is now the ONLY route to `deferred` — the
+        // reader is shown a pending marker only when there is genuinely no
+        // translation to be had from anywhere.
         respondWith({ ok: false, error: "gemini: HTTP 429", retryAfterMs: 30_000 });
 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
 
         expect(getTranslation(makeKey("1", "en"))).toEqual({ deferred: true });
-        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+        // Gemini refused, so the batch was immediately re-run through Google
+        // rather than abandoned.
+        expect(native.translateBatch.mock.calls.map(c => c[0])).toEqual(["gemini", "google"]);
 
-        // A second message arrives while still inside the 30s pause window
-        // (two settle() calls are ~10s of fake time). It must never reach
-        // translateBatch at all, and must be marked deferred, not failed —
-        // this is the paused-early-return path in onFlush, distinct from the
-        // 429-response path exercised above.
+        // A second message arrives while still inside the 30s cooldown window
+        // (two settle() calls are ~10s of fake time). It must not touch Gemini
+        // again — but it must still be ATTEMPTED, via Google — and with Google
+        // also failing it is deferred, not failed.
+        const before = native.translateBatch.mock.calls.length;
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
         await settle();
 
         expect(getTranslation(makeKey("2", "en"))).toEqual({ deferred: true });
-        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+        const laterCalls = native.translateBatch.mock.calls.slice(before).map(c => c[0]);
+        expect(laterCalls).toEqual(["google"]);
     });
 
     it("retries a deferred message on the next channel open, exactly like a failed one", async () => {
@@ -201,6 +209,175 @@ describe("deferred results — rate-limited, not failed", () => {
 
         expect(native.translateBatch).toHaveBeenCalledTimes(1);
         expect(requestAt(0).messages.map((m: any) => m.id)).toEqual(["1"]);
+    });
+});
+
+describe("a rate-limited LLM falls back to Google rather than showing nothing", () => {
+    /** Per-engine canned responses; anything unlisted succeeds emptily. */
+    function respondByEngine(map: Partial<Record<string, NativeResponse>>) {
+        native.translateBatch.mockImplementation(
+            async (engine: string) => map[engine] ?? { ok: true, results: [] }
+        );
+    }
+
+    const RATE_LIMITED: NativeResponse = {
+        ok: false, error: "gemini: HTTP 429", retryAfterMs: 30_000
+    };
+
+    const googleTranslated = (id: string): NativeResponse => ({
+        ok: true, results: [{ id, lang: "es", text: "hello there", skip: false }]
+    });
+
+    /** Every string the accessory renders for a message id. */
+    function renderedText(id: string): string {
+        const el: any = plugin.renderMessageAccessory!({ message: discordMessage(id, "hola") } as any);
+        const node = el.type(el.props);
+        const walk = (n: any): string => {
+            if (n === null || n === undefined || n === false) return "";
+            if (typeof n === "string" || typeof n === "number") return String(n);
+            if (Array.isArray(n)) return n.map(walk).join("");
+            return walk(n.children);
+        };
+        return walk(node);
+    }
+
+    function useGemini() {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+    }
+
+    it("re-runs the rate-limited batch through Google instead of deferring it", async () => {
+        // THE point of this phase. A mediocre Google translation is strictly
+        // better than "⏳ retrying" forever.
+        useGemini();
+        respondByEngine({ gemini: RATE_LIMITED, google: googleTranslated("1") });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(native.translateBatch.mock.calls.map(c => c[0])).toEqual(["gemini", "google"]);
+        const entry = getTranslation(makeKey("1", "en"));
+        expect(entry).toEqual({ lang: "es", text: "hello there", via: "google" });
+        expect(entry).not.toHaveProperty("deferred");
+    });
+
+    it("labels the fallback line as Google (≈), never as the configured LLM (✦)", async () => {
+        // The provenance glyph is the reader's only signal that this is an
+        // approximate, context-free translation. Recording `via: "gemini"` for
+        // a line Google produced would make ✦ a lie.
+        useGemini();
+        respondByEngine({ gemini: RATE_LIMITED, google: googleTranslated("1") });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(getTranslation(makeKey("1", "en"))).toMatchObject({ via: "google" });
+        expect(renderedText("1")).toContain("≈");
+        expect(renderedText("1")).not.toContain("✦");
+    });
+
+    it("sends every batch during the cooldown straight to Google, without retrying the LLM", async () => {
+        // Not retrying into the wall is the other half: roughly half the
+        // observed API traffic was 429s we asked for.
+        useGemini();
+        respondByEngine({ gemini: RATE_LIMITED, google: googleTranslated("2") });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        const before = native.translateBatch.mock.calls.length;
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+
+        const laterCalls = native.translateBatch.mock.calls.slice(before).map(c => c[0]);
+        expect(laterCalls.length).toBeGreaterThan(0);
+        expect(laterCalls).not.toContain("gemini");
+        expect(getTranslation(makeKey("2", "en"))).toMatchObject({ via: "google" });
+    });
+
+    it("resumes the LLM engine automatically once the cooldown expires — no restart", async () => {
+        useGemini();
+        let geminiCalls = 0;
+        native.translateBatch.mockImplementation(async (engine: string) => {
+            if (engine === "gemini") {
+                geminiCalls++;
+                // Rate limited for 2s, then healthy again.
+                if (geminiCalls === 1) {
+                    return { ok: false, error: "gemini: HTTP 429", retryAfterMs: 2_000 };
+                }
+                return { ok: true, results: [{ id: "2", lang: "es", text: "from gemini", skip: false }] };
+            }
+            return googleTranslated("1");
+        });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();   // 5s of fake time — well past the 2s cooldown
+        expect(getTranslation(makeKey("1", "en"))).toMatchObject({ via: "google" });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+
+        // Back on the good engine, with nothing restarted and no setting
+        // touched. If the cooldown never expired this would still say google.
+        expect(getTranslation(makeKey("2", "en")))
+            .toEqual({ lang: "es", text: "from gemini", via: "gemini" });
+    });
+
+    it("says so once per session, not once per batch", async () => {
+        useGemini();
+        // A 2s cooldown that lapses between the two messages, so the engine is
+        // genuinely re-entered into cooldown a second time — otherwise this
+        // would pass without any guard at all.
+        respondByEngine({
+            gemini: { ok: false, error: "gemini: HTTP 429", retryAfterMs: 2_000 },
+            google: googleTranslated("1")
+        });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+
+        const geminiAttempts = native.translateBatch.mock.calls.filter(c => c[0] === "gemini");
+        expect(geminiAttempts.length).toBeGreaterThan(1);   // cooldown entered twice
+
+        const cooldownToasts = shownToasts.filter(t => /rate limited/i.test(t.message));
+        expect(cooldownToasts).toHaveLength(1);
+        // ...and it says what happened and roughly for how long.
+        expect(cooldownToasts[0].message).toMatch(/Google/);
+        expect(cooldownToasts[0].message).toMatch(/\d+[sm]/);
+    });
+
+    it("retunes the rate gate from the quota the 429 reported", async () => {
+        // The compiled-in 15/minute guess is exactly that — a guess about
+        // someone else's project. A response that states the real ceiling
+        // wins.
+        expect(rateGateSettings().refillMs).toBe(REFILL_MS);
+
+        useGemini();
+        respondByEngine({
+            gemini: {
+                ok: false, error: "gemini: HTTP 429", retryAfterMs: 2_000, quotaLimitPerMinute: 4
+            },
+            google: googleTranslated("1")
+        });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        // floor(4 * 0.75) = 3/minute.
+        expect(rateGateSettings().refillMs).toBe(20_000);
+        expect(rateGateSettings().refillMs).toBeGreaterThan(REFILL_MS);
+    });
+
+    it("does not touch the rate gate when the 429 stated no quota", async () => {
+        useGemini();
+        respondByEngine({ gemini: RATE_LIMITED, google: googleTranslated("1") });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(rateGateSettings().refillMs).toBe(REFILL_MS);
     });
 });
 

@@ -6,7 +6,7 @@ import type { Message } from "@vencord/discord-types";
 import { createBatcher, type Batcher } from "./batcher";
 import { isChannelEnabled, loadEnabledChannels, toggleChannel } from "./channels";
 import { isConfidentlyTargetLanguage } from "./detectLang";
-import { acquireSlot, resetRateGate } from "./rateGate";
+import { acquireSlot, resetRateGate, tuneRateGateToObservedLimit } from "./rateGate";
 import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
@@ -20,9 +20,9 @@ const Native = VencordNative.pluginHelpers.VcTranslate as PluginNative<typeof im
 const logger = new Logger("VcTranslate");
 
 let batcher: Batcher | null = null;
-let pausedUntil = 0;
 let sessionFallback = false;   // set when the configured LLM engine (Claude/Gemini) is unusable this session
 let announcedMissingKey = false;   // one toast per session, never per batch
+let announcedCooldown = false;     // ditto, for the rate-limit-to-Google fallback
 
 // Ids currently queued in the batcher or awaiting a translateBatch response.
 // getTranslation() alone can't tell "in flight" apart from "never
@@ -95,6 +95,91 @@ function effectiveEngine(): EngineId {
     if (!isLlmEngine(configured)) return configured;
     if (sessionFallback || apiKeyFor(configured).trim() === "") return "google";
     return configured;
+}
+
+/* ------------------------------------------------- LLM cooldown / fallback -- */
+
+/**
+ * Used only when a 429 arrives with no usable retry hint at all. Every real
+ * Gemini 429 observed so far states its own delay in the error body, and
+ * native.ts already substitutes 30s when an engine offers nothing, so this is
+ * a third line of defence rather than the normal case.
+ */
+const DEFAULT_COOLDOWN_MS = 60_000;
+
+/**
+ * Per-engine "do not send to this engine before <timestamp>".
+ *
+ * A TIMESTAMP, not a flag and not a timer: expiry is then a comparison that
+ * every flush does for itself, so the engine resumes automatically the first
+ * time a batch becomes due after the window closes. Nothing has to fire, be
+ * cancelled on stop(), or be restarted by the user.
+ *
+ * Per engine rather than global because switching Gemini → Claude mid-cooldown
+ * should use Claude immediately; Claude's quota has nothing to do with
+ * Gemini's.
+ */
+const llmCooldownUntil: Partial<Record<LlmEngineId, number>> = {};
+
+function isCoolingDown(engine: LlmEngineId): boolean {
+    return Date.now() < (llmCooldownUntil[engine] ?? 0);
+}
+
+/** "45s" / "2m" — deliberately coarse; this is a toast, not a countdown. */
+function formatDuration(ms: number): string {
+    if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))}s`;
+    return `${Math.max(1, Math.round(ms / 60_000))}m`;
+}
+
+/**
+ * A 429 from an LLM engine. Three things happen, in this order:
+ *
+ *  1. The engine is parked for as long as the API itself asked for. Retrying
+ *     into a wall that just rejected us is how roughly half the observed API
+ *     traffic became 429s; the point of this phase is to stop doing that.
+ *  2. The rate gate is retuned if the response stated the real quota. See
+ *     rateGate.ts — this is what stops the SAME 429 recurring once the
+ *     cooldown lifts, and it is why the cooldown itself can safely be as short
+ *     as the API says (sub-second, in the captured real response) rather than
+ *     a padded guess.
+ *  3. The user is told, at most once per session.
+ *
+ * The batch that triggered this is NOT lost: the caller re-runs it through
+ * Google immediately.
+ */
+function enterCooldown(
+    engine: LlmEngineId,
+    retryAfterMs: number | undefined,
+    quotaLimitPerMinute: number | undefined
+): void {
+    const cooldownMs = typeof retryAfterMs === "number" && retryAfterMs > 0
+        ? retryAfterMs
+        : DEFAULT_COOLDOWN_MS;
+    llmCooldownUntil[engine] = Date.now() + cooldownMs;
+
+    if (typeof quotaLimitPerMinute === "number") {
+        tuneRateGateToObservedLimit(quotaLimitPerMinute);
+    }
+
+    announceCooldownOnce(engine, cooldownMs);
+}
+
+/**
+ * Same one-toast-per-session discipline as announceMissingKeyOnce(): a
+ * catch-up storm can enter cooldown on several batches in a row, and a toast
+ * per batch would be worse than the problem it describes.
+ */
+function announceCooldownOnce(engine: LlmEngineId, cooldownMs: number): void {
+    if (announcedCooldown) return;
+    announcedCooldown = true;
+    const { label } = LLM_ENGINES[engine];
+    Toasts.show({
+        id: Toasts.genId(),
+        type: Toasts.Type.FAILURE,
+        message:
+            `VcTranslate: ${label} is rate limited — translations are using Google ` +
+            `(≈) for about ${formatDuration(cooldownMs)}.`
+    });
 }
 
 /**
@@ -215,140 +300,158 @@ function rebuildBatcher() {
         supportsContext: ENGINE_CAPS[engine].supportsContext,
         targetLang: settings.store.targetLang,
         onFlush: async req => {
-            // Superseded by a later rebuild (settings changed, or a fallback
-            // fired) before this flush even started — this closure's `engine`
-            // no longer matches reality, so just drop it rather than write
-            // under a stale key. Still release these ids first: a batch
-            // stranded here never reaches the finally below, so without this
-            // they'd stay "in flight" forever and catch-up could never retry
-            // them.
-            if (myGeneration !== batcherGeneration) {
-                for (const m of req.messages) inFlight.delete(m.id);
-                return;
-            }
+            // `null` means the IPC call itself rejected — distinct from an
+            // `ok: false` response, which is an engine-level failure the
+            // native side successfully reported.
+            const send = async (target: EngineId) => {
+                try {
+                    return await Native.translateBatch(
+                        target,
+                        isLlmEngine(target) ? apiKeyFor(target) : "",
+                        JSON.stringify(req)
+                    );
+                } catch {
+                    // onFlush is void-returning and invoked un-awaited, so an
+                    // unhandled rejection here would otherwise just vanish the
+                    // batch with no marker.
+                    return null;
+                }
+            };
 
-            if (Date.now() < pausedUntil) {
-                // The queue was already spliced out of the batcher before
-                // onFlush ran, so if we silently return here these messages
-                // are gone forever: no entry, no marker, no retry. This batch
-                // never left the client — it was never attempted, let alone
-                // failed — so mark it deferred, not failed: the accessory
-                // shows a muted "rate limited" line instead of ⚠, and
-                // catch-up retries it exactly as it retries a real failure.
-                // This path never sends a request, so release the ids here
-                // rather than waiting on the finally below.
-                markAllDeferred(req);
-                for (const m of req.messages) inFlight.delete(m.id);
-                return;
-            }
+            try {
+                // Superseded by a later rebuild (settings changed, or a
+                // fallback fired) before this flush even started — this
+                // closure's `engine` no longer matches reality, so just drop
+                // it rather than write under a stale key. The finally below
+                // still releases the ids: a batch stranded here that stayed
+                // "in flight" forever could never be retried by catch-up.
+                if (myGeneration !== batcherGeneration) return;
 
-            // Only the two key-gated LLM engines are rate-gated — Google is
-            // per-message with its own concurrency cap (engines/google.ts)
-            // and was never the source of the 429 storm this gate exists for.
-            if (isLlmEngine(engine)) {
-                await acquireSlot();
-                // stop()/rebuild may have happened while this flush sat
-                // behind the gate (resetRateGate() wakes queued waiters
-                // immediately for exactly that reason, rather than leaving
-                // them to time out on the next refill tick). Re-check before
-                // spending a real request on a batch nothing will ever read
-                // the result of.
-                if (myGeneration !== batcherGeneration) {
-                    for (const m of req.messages) inFlight.delete(m.id);
+                // THE fallback decision. An LLM engine that cannot serve this
+                // batch — cooling down after a 429, or with no key — is not a
+                // reason to show the user nothing. Google is worse; nothing is
+                // worse still. `runEngine` is what the request is ACTUALLY sent
+                // to and what gets recorded as `via`, so the ≈/✦ glyph stays
+                // honest about which engine produced the line.
+                //
+                // (The no-key case already resolves to "google" in
+                // effectiveEngine(), so `engine` is google here and this
+                // condition simply doesn't fire.)
+                let runEngine: EngineId = engine;
+                if (isLlmEngine(engine) && isCoolingDown(engine)) runEngine = "google";
+
+                // Only the two key-gated LLM engines are rate-gated — Google is
+                // per-message with its own concurrency cap (engines/google.ts)
+                // and was never the source of the 429 storm this gate exists
+                // for. Gated on runEngine, not engine: a batch being diverted
+                // to Google must not also burn an LLM token.
+                if (isLlmEngine(runEngine)) {
+                    await acquireSlot();
+                    // stop()/rebuild may have happened while this flush sat
+                    // behind the gate (resetRateGate() wakes queued waiters
+                    // immediately for exactly that reason, rather than leaving
+                    // them to time out on the next refill tick). Re-check
+                    // before spending a real request on a batch nothing will
+                    // ever read the result of.
+                    if (myGeneration !== batcherGeneration) return;
+                }
+
+                let res = await send(runEngine);
+
+                // THE race this guard exists for: rebuildBatcher() can run
+                // WHILE the line above is awaiting the network round trip (a
+                // settings change, or an LLM engine's 401 triggering
+                // fallBackToGoogle mid-flight). The check before the await
+                // only catches a flush that was already stale when it started
+                // — it cannot catch one that went stale during the await.
+                // Re-check before any write, so a superseded response is
+                // dropped instead of landing under the old engine's key (or
+                // worse, clobbering the new engine's in-progress results).
+                if (myGeneration !== batcherGeneration) return;
+
+                // The LLM engine just told us it is rate limited. Park it (see
+                // enterCooldown) and serve THIS batch from Google rather than
+                // handing the reader a pending marker: a mediocre translation
+                // now beats a good one that never arrives.
+                let rateLimitedToGoogle = false;
+                if (res !== null && !res.ok && isLlmEngine(runEngine) && res.retryAfterMs) {
+                    enterCooldown(runEngine, res.retryAfterMs, res.quotaLimitPerMinute);
+                    rateLimitedToGoogle = true;
+                    runEngine = "google";
+                    res = await send(runEngine);
+                    if (myGeneration !== batcherGeneration) return;
+                }
+
+                if (res === null) {
+                    markAllFailed(req);
                     return;
                 }
-            }
 
-            let res;
-            try {
-                res = await Native.translateBatch(
-                    engine,
-                    isLlmEngine(engine) ? apiKeyFor(engine) : "",
-                    JSON.stringify(req)
-                );
-            } catch {
-                // Re-check here too: a rebuild during the in-flight call means
-                // this batch's engine key is stale, so writing markers would
-                // land under a key nothing reads — and could clobber a valid
-                // cached entry for the same id under the OLD engine.
-                if (myGeneration !== batcherGeneration) return;
-                // IPC-level rejection (onFlush is void-returning and invoked
-                // un-awaited, so an unhandled rejection here would otherwise
-                // just vanish the batch with no marker).
-                markAllFailed(req);
-                return;
+                if (!res.ok) {
+                    // Always mark this batch's messages as resolved on a
+                    // request-level error, regardless of cause — an auth
+                    // failure must not leave them silently unresolved just
+                    // because it ALSO triggers a session fallback.
+                    //
+                    // `deferred` is now the narrow case it was always meant to
+                    // be: the message was never given a fair attempt. That is
+                    // true when the request was rate-limited (`retryAfterMs` is
+                    // only ever set for a 429, see native.ts) and when the
+                    // Google fallback above ALSO failed. Anything else is a
+                    // genuine attempt that came back broken, i.e. `failed`.
+                    if (rateLimitedToGoogle || res.retryAfterMs) {
+                        markAllDeferred(req);
+                    } else {
+                        markAllFailed(req);
+                    }
+
+                    // An auth failure means the key is wrong, not that the
+                    // network blipped — retrying it every batch would be pure
+                    // noise, so fall back to Google for the rest of the session
+                    // IN ADDITION to (not instead of) marking this batch failed.
+                    if (isLlmEngine(runEngine) && /\b40[13]\b/.test(res.error)) {
+                        fallBackToGoogle(`${LLM_ENGINES[runEngine].label} rejected the API key`);
+                    }
+                    return;
+                }
+
+                for (const r of res.results) {
+                    if ("failed" in r) {
+                        setTranslation(makeKey(r.id, req.targetLang), { failed: true });
+                        continue;
+                    }
+                    if (r.skip) {
+                        // A skip has nothing to DISPLAY, but something must
+                        // still be WRITTEN. An id with no entry is
+                        // indistinguishable from one that was never requested,
+                        // so leaving it blank made every
+                        // already-in-the-target-language message a permanent
+                        // cache miss: catch-up re-enqueued the entire backlog
+                        // on every single channel open, forever. In a
+                        // mixed-language chat most messages ARE already in the
+                        // target language, so that was the common case, not the
+                        // edge case — free on Google, real recurring spend on
+                        // Claude.
+                        setTranslation(makeKey(r.id, req.targetLang), { skipped: true });
+                        continue;
+                    }
+                    // `runEngine`, NOT the configured engine: the one the
+                    // request was actually sent to, already re-validated
+                    // against batcherGeneration above. Recording it in the
+                    // value is what survives the engine no longer being part of
+                    // the key — and it is what makes a fallback line render as
+                    // ≈ (Google, approximate) instead of claiming ✦.
+                    setTranslation(
+                        makeKey(r.id, req.targetLang),
+                        { lang: r.lang, text: r.text, via: runEngine }
+                    );
+                }
             } finally {
-                // Fires once the round trip has actually settled (success OR
-                // rejection), which is the earliest point these ids are safe
-                // to retry — not when they were queued, and not only on the
-                // happy path.
+                // Fires once this flush has fully settled, whichever way it
+                // went (sent, diverted, stranded by a rebuild, rejected). That
+                // is the earliest point these ids are safe to retry — not when
+                // they were queued, and not only on the happy path.
                 for (const m of req.messages) inFlight.delete(m.id);
-            }
-
-            // THE race this guard exists for: rebuildBatcher() can run WHILE
-            // the line above is awaiting the network round trip (a settings
-            // change, or an LLM engine's 401 triggering fallBackToGoogle mid-flight).
-            // The check above this await only catches a flush that was already
-            // stale before it started — it cannot catch one that went stale
-            // during the await, because it isn't re-evaluated after control
-            // resumes. Re-check here, before any write, so a superseded
-            // response is dropped instead of landing under the old engine's
-            // key (or worse, clobbering the new engine's in-progress results).
-            if (myGeneration !== batcherGeneration) return;
-
-            if (!res.ok) {
-                // Always mark this batch's messages as resolved on a
-                // request-level error, regardless of cause — an auth failure
-                // must not leave them silently unresolved just because it
-                // ALSO triggers a session fallback. `retryAfterMs` is only
-                // ever set for a 429 (see native.ts) — a rate limit, not a
-                // genuine translation failure, so those messages get
-                // `deferred` (retried, rendered as pending) instead of
-                // `failed` (retried, rendered as broken).
-                if (res.retryAfterMs) {
-                    pausedUntil = Date.now() + res.retryAfterMs;
-                    markAllDeferred(req);
-                } else {
-                    markAllFailed(req);
-                }
-
-                // An auth failure means the key is wrong, not that the network
-                // blipped — retrying it every batch would be pure noise, so
-                // fall back to Google for the rest of the session IN ADDITION
-                // to (not instead of) marking this batch failed.
-                if (isLlmEngine(engine) && /\b40[13]\b/.test(res.error)) {
-                    fallBackToGoogle(`${LLM_ENGINES[engine].label} rejected the API key`);
-                }
-                return;
-            }
-
-            for (const r of res.results) {
-                if ("failed" in r) {
-                    setTranslation(makeKey(r.id, req.targetLang), { failed: true });
-                    continue;
-                }
-                if (r.skip) {
-                    // A skip has nothing to DISPLAY, but something must still
-                    // be WRITTEN. An id with no entry is indistinguishable from
-                    // one that was never requested, so leaving it blank made
-                    // every already-in-the-target-language message a permanent
-                    // cache miss: catch-up re-enqueued the entire backlog on
-                    // every single channel open, forever. In a mixed-language
-                    // chat most messages ARE already in the target language, so
-                    // that was the common case, not the edge case — free on
-                    // Google, real recurring spend on Claude.
-                    setTranslation(makeKey(r.id, req.targetLang), { skipped: true });
-                    continue;
-                }
-                // `engine` is this flush closure's captured engine — the one
-                // the request was actually sent to, already re-validated
-                // against batcherGeneration above. Recording it in the value
-                // is what survives the engine no longer being part of the key:
-                // the reader can still say WHICH engine produced this line.
-                setTranslation(
-                    makeKey(r.id, req.targetLang),
-                    { lang: r.lang, text: r.text, via: engine }
-                );
             }
         }
     });
@@ -654,16 +757,18 @@ function TranslationAccessory({ message }: { message: Message; }) {
         );
     }
 
-    // A deferred message was never attempted, or was rejected before the
-    // model ever saw it (rate limited) — it will be retried, so it must NOT
-    // read as broken the way `failed` does. Same muted token as the failure
-    // marker (this is still a "nothing to show yet" line, not a real
-    // subtitle), different wording and glyph so a rate-limited catch-up storm
-    // doesn't look like the plugin failing on every message in it.
+    // A deferred message was never given a fair attempt: the LLM engine was
+    // rate limited AND the Google fallback did not come through either. It
+    // will be retried, so it must NOT read as broken the way `failed` does.
+    // Same muted token as the failure marker (this is still a "nothing to show
+    // yet" line, not a real subtitle), different wording and glyph so a
+    // rate-limited catch-up storm doesn't look like the plugin failing on
+    // every message in it. Since the Google fallback landed this is now the
+    // rare case rather than the routine one.
     if ("deferred" in entry) {
         return (
             <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-                ⏳ rate limited — retrying
+                ⏳ translation delayed — retrying
             </div>
         );
     }
@@ -796,11 +901,14 @@ export default definePlugin({
         // point can never match again.
         batcherGeneration++;
         // So toggling the plugin off/on after fixing a bad key retries
-        // Claude instead of staying pinned to Google, and a stale pause
+        // Claude instead of staying pinned to Google, and a stale cooldown
         // window doesn't carry over into the next session.
         sessionFallback = false;
-        pausedUntil = 0;
+        for (const id of Object.keys(llmCooldownUntil) as LlmEngineId[]) {
+            delete llmCooldownUntil[id];
+        }
         announcedMissingKey = false;
+        announcedCooldown = false;
         // Wakes anything still queued behind the rate gate immediately
         // (rather than leaving it to time out on the next refill tick) and
         // refills it to full capacity for the next start().

@@ -11,15 +11,28 @@
  * computed here: not every non-OK response carries a retry hint, and this
  * class has no opinion about what a missing one should default to (that
  * fallback is native.ts's `30_000` constant, applied only for a 429).
+ *
+ * `quotaLimitPerMinute` rides along for the same reason: a 429 body sometimes
+ * states the quota it just enforced ("limit: 20" — see rateHint.ts), and the
+ * rate gate in the renderer wants that number, but the only code that ever
+ * sees the response body is the engine. Without a slot here it would be
+ * parsed and then thrown away.
  */
 export class HttpError extends Error {
     readonly status: number;
     readonly retryAfterMs?: number;
+    readonly quotaLimitPerMinute?: number;
 
-    constructor(message: string, status: number, retryAfterMs?: number) {
+    constructor(
+        message: string,
+        status: number,
+        retryAfterMs?: number,
+        quotaLimitPerMinute?: number
+    ) {
         super(message);
         this.name = "HttpError";
         this.status = status;
         this.retryAfterMs = retryAfterMs;
+        this.quotaLimitPerMinute = quotaLimitPerMinute;
     }
 }

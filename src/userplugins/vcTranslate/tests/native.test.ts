@@ -244,6 +244,44 @@ describe("translateBatch — retryAfterMs", () => {
         expect((res as { retryAfterMs?: number }).retryAfterMs).toBeUndefined();
     });
 
+    it("carries the engine's parsed quota limit across the IPC boundary", async () => {
+        // The renderer retunes its rate gate from this number, and the ONLY
+        // code that ever sees the 429 body is the engine — so if native.ts
+        // drops it here it is parsed and thrown away, and the gate keeps its
+        // compiled-in guess forever.
+        const err = new Error("gemini: HTTP 429");
+        (err as { retryAfterMs?: number }).retryAfterMs = 552;
+        (err as { quotaLimitPerMinute?: number }).quotaLimitPerMinute = 20;
+        gemini.mockRejectedValue(err);
+
+        const res = await run("gemini", "k");
+
+        expect(res).toEqual({
+            ok: false,
+            error: "gemini: HTTP 429",
+            retryAfterMs: 552,
+            quotaLimitPerMinute: 20
+        });
+    });
+
+    it("does not invent a quota limit when the engine reported none", async () => {
+        // Unlike retryAfterMs there is deliberately no default: guessing a
+        // ceiling would be worse than keeping the one the gate already has.
+        claude.mockRejectedValue(new Error("claude: HTTP 429"));
+        const res = await run("claude", "k");
+        expect((res as { quotaLimitPerMinute?: number }).quotaLimitPerMinute).toBeUndefined();
+    });
+
+    it("ignores a nonsensical quota limit rather than trusting it blindly", async () => {
+        const err = new Error("gemini: HTTP 429");
+        (err as { quotaLimitPerMinute?: unknown }).quotaLimitPerMinute = "twenty";
+        gemini.mockRejectedValue(err);
+
+        const res = await run("gemini", "k");
+
+        expect((res as { quotaLimitPerMinute?: number }).quotaLimitPerMinute).toBeUndefined();
+    });
+
     it("does not treat a bare 429 without the HTTP prefix as a rate limit", async () => {
         // isRetryable and the retryAfterMs signal must agree on what a message
         // means; both use the strict /\bHTTP (\d{3})\b/ extractor. A message

@@ -8,7 +8,7 @@ import type { BatchRequest, EngineId, Result } from "./types";
 
 export type NativeResponse =
     | { ok: true; results: Result[] }
-    | { ok: false; error: string; retryAfterMs?: number };
+    | { ok: false; error: string; retryAfterMs?: number; quotaLimitPerMinute?: number };
 
 /**
  * Both engines report transport failures as `<engine>: HTTP <status>`.
@@ -94,10 +94,21 @@ export async function translateBatch(
         // as `retryAfterMs` (see httpError.ts). Prefer that real number over
         // the guessed 30s constant; fall back to the constant only when the
         // engine had no hint to offer.
+        const rateLimited = httpStatus(raw) === 429;
         const hinted = (err as { retryAfterMs?: unknown })?.retryAfterMs;
-        const retryAfterMs = httpStatus(raw) === 429
+        const retryAfterMs = rateLimited
             ? (typeof hinted === "number" ? hinted : 30_000)
             : undefined;
-        return { ok: false, error: scrubKey(raw, apiKey), retryAfterMs };
+
+        // The quota the API says it just enforced, when it said so (see
+        // rateHint.ts). Unlike retryAfterMs there is NO default: the renderer
+        // retunes its rate gate from this, and inventing a ceiling would be
+        // worse than keeping the one it already has.
+        const limit = (err as { quotaLimitPerMinute?: unknown })?.quotaLimitPerMinute;
+        const quotaLimitPerMinute = rateLimited && typeof limit === "number" && limit > 0
+            ? limit
+            : undefined;
+
+        return { ok: false, error: scrubKey(raw, apiKey), retryAfterMs, quotaLimitPerMinute };
     }
 }

@@ -121,6 +121,13 @@ because that is no longer always the engine you have selected (see
 Hovering the marker shows the engine's full name ("Translated by Gemini",
 "Translated by Google Translate").
 
+With Claude or Gemini selected, the marker doubles as a live quota readout:
+`✦` means the LLM engine served that line, `≈` means it could not and Google
+stepped in — because the key field is empty, because the key was rejected, or
+because the engine is rate limited right now. **A run of `≈` lines while an LLM
+engine is selected means you are out of quota for the moment, not that the
+plugin is broken.** They go back to `✦` on their own once the engine recovers.
+
 The **"Target language code"** setting defaults to your Discord client's own
 language (`en-US` becomes `en`, `pt-BR` becomes `pt`, and so on) rather than
 always English. Set it explicitly if you want subtitles in something other
@@ -140,12 +147,17 @@ paste the key into it. **Scope the key to a dedicated project with a spend
 limit** — it is stored in plaintext in Vencord's settings file, like every
 other Vencord plugin credential, not in your OS keychain.
 
-If the key field is left empty while Claude is selected, or if Claude ever
-rejects the key, the plugin falls back to Google rather than failing
-outright. Both cases show one toast, and only one per session. The two are
-not the same, though: a *rejected* key pins the session to Google until you
-restart Discord, whereas a *missing* key does not — paste one and Claude
-starts being used immediately. See Troubleshooting below.
+Whenever the selected LLM engine cannot serve a batch, the plugin falls back
+to Google rather than failing outright, so you always see *a* translation.
+There are three such cases and they recover differently:
+
+| Why | Recovers when |
+|---|---|
+| Key field is empty | Immediately, as soon as you paste a key |
+| Engine rejected the key (401/403) | Only after restarting Discord — the session is pinned to Google |
+| Engine is rate limited (429) | Automatically, when the cooldown lapses (see below) |
+
+Each shows one toast, and only one per session — never one per batch.
 
 ### Free-tier rate limiting
 
@@ -168,9 +180,51 @@ the tighter free-tier ceiling above). A single live conversation flushes at
 most one batch per debounce window, so **normal chat is never
 throttled** — it never needs more than one token at a time. A catch-up storm
 across many channels, by contrast, gets smoothed out to that steady rate
-instead of front-loading a burst that gets rejected wholesale. Anything the
-gate holds back is not lost: it is marked `{ deferred: true }` if the request
-is paused after a 429 (see below), not `{ failed: true }`.
+instead of front-loading a burst that gets rejected wholesale.
+
+**The gate re-tunes itself from the API's own reported limit.** Those 5-and-4
+seconds numbers are only a starting guess. A Gemini 429 body states the quota
+it just enforced — literally `limit: 20` in the middle of the error message —
+and when it does, the gate throws away the guess and aims at 75% of the real
+number instead (20/minute becomes 15/minute; a project limited to 4/minute
+becomes 3/minute, one request every 20 seconds). This is deliberately adaptive
+rather than a compiled-in constant: free-tier quotas differ per project, per
+model, and get changed by the provider without notice, so any number hardcoded
+here is guaranteed to be wrong for someone — and being wrong in the generous
+direction is exactly what produced the 429 storm. The learned value lasts for
+the session and is re-learned after a restart, at the cost of one 429 whose
+batch Google serves anyway.
+
+### When the LLM engine is rate limited, Google takes over
+
+Previously, a batch that ran into a 429 was marked "rate limited — retrying"
+and the reader saw no translation at all until catch-up got round to it.
+**Now that batch is immediately re-run through Google instead.** A mediocre
+translation is strictly better than none.
+
+Concretely, on a 429 from Claude or Gemini:
+
+1. That engine is put in a **cooldown** for exactly as long as the API asked
+   for. The real captured Gemini 429 says "Please retry in 551.874307ms." in
+   the prose of its error message — there is no `Retry-After` header and no
+   structured `RetryInfo` field on a real response, so `rateHint.ts` parses
+   the sentence (a 30-second default only applies when nothing at all is
+   stated). Retrying straight back into a wall that just rejected us is how
+   roughly half of the observed API traffic became 429s.
+2. The rate gate re-tunes from any quota the same message reports (above).
+3. Every batch that becomes due during the cooldown goes to Google, marked
+   `≈`, without touching the LLM engine.
+4. When the cooldown lapses, the LLM engine resumes **automatically** on the
+   next batch. Nothing to restart, no setting to touch.
+
+You get one toast the first time this happens in a session, saying
+translations have dropped to Google and roughly how long until the better
+engine is back — and only one, however many batches are affected.
+
+`{ deferred: true }` (the "⏳ translation delayed — retrying" line) still
+exists, but it is now the narrow case it was always meant to be: the LLM
+engine was rate limited *and* the Google fallback did not come through either.
+It should be rare rather than routine.
 
 ### Batch sizes are set by the daily budget, not by latency
 
@@ -185,10 +239,12 @@ The visible cost is latency: a subtitle can take up to ~3 seconds to appear
 instead of ~1. That is the trade — a subtitle two seconds later beats one that
 never arrives because the day's budget ran out at lunchtime.
 
-If a 429 does still get through, native.ts also reads the API's own retry
-hint when one is present — Gemini's error body can carry a `RetryInfo`/
-`retryDelay`, and either engine's response may carry a `Retry-After` header —
-and only falls back to a guessed 30-second pause when neither is available.
+If a 429 does still get through, the API's own retry hint is read from
+whichever of three places actually carries it: the prose of Gemini's error
+message ("Please retry in 551.874307ms." — the only one a real Gemini 429 has
+been observed to use), a structured `RetryInfo`/`retryDelay` entry (kept as a
+fallback because other Google APIs do send it), or a `Retry-After` header. The
+guessed 30-second pause applies only when none of the three is available.
 
 ## Troubleshooting
 
@@ -270,17 +326,23 @@ usable row for) after retrying once. It is not stuck permanently: the next
 time you open (or reopen) that channel, catch-up retries any message still
 marked failed automatically.
 
-**A message shows a dim "⏳ rate limited — retrying" instead of ⚠.**
-This is a *different*, non-broken state: the message's batch was never
-attempted at all, or was rejected by the API before any model ever saw it —
-almost always a 429 from Claude or Gemini's rate limit (see "Free-tier rate
-limiting" below), most commonly right after a restart with "Auto-translate
-every channel" on, when catch-up fires for every server channel within
-seconds of each other. Nothing about the translation itself failed, so this
-is deliberately not styled or worded like the ⚠ marker. It resolves itself
-the same way a failure does — reopening the channel retries it — and usually
-clears within seconds once the client-side rate limiter (below) lets the next
-batch through.
+**Subtitles suddenly all say `≈` even though Claude/Gemini is selected.**
+Expected, and self-healing. The LLM engine is unavailable right now — most
+often rate limited — so Google is translating instead so that you still get
+*something* (see "When the LLM engine is rate limited, Google takes over"
+above). A toast said so once when it started. The `✦` marker comes back on its
+own as soon as the engine recovers; you do not have to restart anything. If it
+never comes back, the cause is a *rejected* key rather than a rate limit —
+that one does pin the session to Google, see the two items above.
+
+**A message shows a dim "⏳ translation delayed — retrying" instead of ⚠.**
+This is a *different*, non-broken state, and it should now be rare: the
+message's batch was rejected by the API before any model ever saw it (a 429),
+**and** the Google fallback did not come through either. Nothing about the
+translation itself failed, so this is deliberately not styled or worded like
+the ⚠ marker. It resolves itself the same way a failure does — reopening the
+channel retries it — and usually clears within seconds once the cooldown lapses
+or Google recovers.
 
 **Which engine produced this line? / Some subtitles show `≈`, others `✦`.**
 Translations are cached by (message, target language) only — deliberately
@@ -310,12 +372,15 @@ produced it (`via`) rather than being filed under that engine.
 | `{ lang, text, via }` | A real translation, plus the engine that produced it | The dimmed subtitle, prefixed `✦` (Claude/Gemini) or `≈` (Google) | No — already done, whichever engine did it |
 | `{ skipped: true }` | The engine reported the message is already in your target language | Nothing (no subtitle) | No — re-asking would produce the same answer at the same cost |
 | `{ failed: true }` | A genuine attempt came back broken | "⚠ translation failed" | Yes |
-| `{ deferred: true }` | Never attempted, or rejected before the model saw it (rate limited) | "⏳ rate limited — retrying" | Yes |
+| `{ deferred: true }` | Rate limited before the model saw it, *and* the Google fallback failed too | "⏳ translation delayed — retrying" | Yes |
 
 `failed` and `deferred` look and read differently on purpose: a plain English
 message caught in a 429 storm was never actually wrong about anything, and
 telling the user "failed" for it is what previously made a rate-limited
-catch-up look like the plugin being broken.
+catch-up look like the plugin being broken. Since the Google fallback landed,
+`deferred` is the rare bottom of the ladder rather than the routine outcome of
+every 429 — a rate-limited batch now becomes a `≈` Google translation, not a
+pending marker.
 
 ## Privacy
 
@@ -374,9 +439,12 @@ reports a *smaller* pass count that still looks like success.
 `vitest` is not saved as a dependency; in a fresh clone run `npm i -D vitest`
 first.
 
-241 tests across 12 suites (`batcher`, `claude`, `detectLang`, `gemini`,
+272 tests across 12 suites (`batcher`, `claude`, `detectLang`, `gemini`,
 `google`, `index`, `native`, `rateGate`, `rateHint`, `retry`, `skip`, `store`
-— see `tests/`).
+— see `tests/`). `tests/fixtures/` holds shared non-test data, notably the
+verbatim bytes of a real Gemini 429 captured against the live API, which
+`rateHint.test.ts` and `gemini.test.ts` both assert against so they cannot
+drift apart from each other or from reality.
 
 Ten of the twelve target pure-logic modules with no Discord/Vencord runtime
 dependency (`store.test.ts` is pure logic plus the `DataStore` stub, which its

@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildPrompt, parseGeminiResponse, translateWithGemini } from "../engines/gemini";
 import type { BatchRequest } from "../types";
+import {
+    REAL_GEMINI_429_JSON, REAL_GEMINI_429_LIMIT, REAL_GEMINI_429_RETRY_MS
+} from "./fixtures/real429";
 
 const req: BatchRequest = {
     messages: [
@@ -271,6 +274,52 @@ describe("translateWithGemini", () => {
         }
 
         expect((caught as { retryAfterMs?: number }).retryAfterMs).toBe(9_000);
+    });
+
+    it("parses the retry hint and the quota out of a VERBATIM captured live 429", async () => {
+        // End to end through the engine, on the exact bytes the live API
+        // returned: no Retry-After header, no RetryInfo, both numbers living
+        // only in the prose of error.message.
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: false,
+            status: 429,
+            headers: { get: () => null },
+            json: async () => JSON.parse(REAL_GEMINI_429_JSON)
+        });
+
+        let caught: unknown;
+        try {
+            await translateWithGemini(req, "k", fetchImpl as any);
+        } catch (e) {
+            caught = e;
+        }
+
+        expect((caught as { retryAfterMs?: number }).retryAfterMs).toBe(REAL_GEMINI_429_RETRY_MS);
+        expect((caught as { quotaLimitPerMinute?: number }).quotaLimitPerMinute)
+            .toBe(REAL_GEMINI_429_LIMIT);
+        // Both numbers come from ONE body read — res.json() consumes the
+        // stream, so a second call would reject and lose whichever number was
+        // parsed second.
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
+    it("leaves quotaLimitPerMinute undefined when the body states no quota", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: false,
+            status: 429,
+            headers: { get: () => null },
+            json: async () => ({ error: { message: "Please retry in 2s." } })
+        });
+
+        let caught: unknown;
+        try {
+            await translateWithGemini(req, "k", fetchImpl as any);
+        } catch (e) {
+            caught = e;
+        }
+
+        expect((caught as { retryAfterMs?: number }).retryAfterMs).toBe(2_000);
+        expect((caught as { quotaLimitPerMinute?: number }).quotaLimitPerMinute).toBeUndefined();
     });
 
     it("leaves retryAfterMs undefined when neither header nor body carries a hint", async () => {
