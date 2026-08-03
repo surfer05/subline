@@ -69,6 +69,19 @@ export function parseGeminiResponse(body: unknown, req: BatchRequest): Result[] 
     return mapRows(rows, req);
 }
 
+/**
+ * KNOWN GAP, flagged rather than fixed: this engine sends no output-token cap
+ * and checks no finish/stop reason, so it has no equivalent of claude.ts's
+ * TRUNCATED_ERROR. If a 25-message batch ever did exhaust the server-side
+ * default output budget, the cut-off JSON would surface as "response was not
+ * valid JSON" — which native.ts's isRetryable treats as retryable, so the same
+ * over-long batch would be sent twice before failing. Gemini 3 Flash's default
+ * output ceiling is far above what 25 short chat translations produce, so this
+ * is not expected to fire; it is not fixed here because the `interactions`
+ * endpoint's request shape could not be verified against a live call (see the
+ * parser comment above) and guessing a field name risks a 400 on every
+ * request, which is a much worse failure than the one it would prevent.
+ */
 export async function translateWithGemini(
     req: BatchRequest,
     apiKey: string,

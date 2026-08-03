@@ -1,10 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-    clearStore, getTranslation, invalidateMessage,
-    makeKey, setTranslation, subscribe
+    clearStore, getTranslation, invalidateMessage, loadPersistedTranslations,
+    makeKey, persistenceSettled, PERSIST_KEY, setTranslation, subscribe
 } from "../store";
+import * as DataStore from "./stubs/api-datastore";
 
-beforeEach(() => clearStore());
+beforeEach(() => {
+    clearStore();
+    DataStore.__reset();
+});
 
 describe("makeKey", () => {
     it("distinguishes the target language for the same message", () => {
@@ -141,6 +145,139 @@ describe("store", () => {
 
         expect(getTranslation(makeKey("7", "en"))).toBeUndefined();
         expect(getTranslation(makeKey("70", "en"))).toBeDefined();
+    });
+
+    it("survives a restart: what was written is still there after a reload", async () => {
+        // The whole point of persisting: a Discord restart used to re-translate
+        // the entire visible backlog from scratch, every time, out of a budget
+        // of a few dozen requests a day.
+        setTranslation(makeKey("1", "en"), { lang: "es", text: "hello", via: "gemini" });
+        setTranslation(makeKey("2", "en"), { skipped: true });
+        await persistenceSettled();
+
+        // Simulate the restart: memory is gone, disk is not.
+        clearStore();
+        expect(getTranslation(makeKey("1", "en"))).toBeUndefined();
+
+        await loadPersistedTranslations();
+
+        expect(getTranslation(makeKey("1", "en"))).toEqual({ lang: "es", text: "hello", via: "gemini" });
+        expect(getTranslation(makeKey("2", "en"))).toEqual({ skipped: true });
+    });
+
+    it("does not resurrect a translation that was invalidated by an edit", async () => {
+        setTranslation(makeKey("1", "en"), { lang: "es", text: "hello", via: "gemini" });
+        await persistenceSettled();
+
+        invalidateMessage("1");
+        await persistenceSettled();
+
+        clearStore();
+        await loadPersistedTranslations();
+
+        expect(getTranslation(makeKey("1", "en"))).toBeUndefined();
+    });
+
+    it("drops a persisted entry whose shape does not match", async () => {
+        // Anything on disk is untrusted input: it was written by an older
+        // version of this plugin, or corrupted, or hand-edited.
+        await DataStore.set(PERSIST_KEY, [
+            ["good en", { lang: "es", text: "hello", via: "google" }],
+            ["missing-text en", { lang: "es", via: "google" }],
+            ["wrong-types en", { lang: 5, text: [], via: "google" }],
+            ["not-a-marker en", { failed: true, extra: 1 }],
+            ["null en", null],
+            "not-a-pair",
+            ["only-one-element"],
+            [42, { lang: "es", text: "hello", via: "google" }]
+        ]);
+
+        await loadPersistedTranslations();
+
+        expect(getTranslation("good en")).toEqual({ lang: "es", text: "hello", via: "google" });
+        for (const key of ["missing-text en", "wrong-types en", "not-a-marker en", "null en", "only-one-element"]) {
+            expect(getTranslation(key)).toBeUndefined();
+        }
+    });
+
+    it("drops a persisted entry whose engine id is no longer known", async () => {
+        // The failure the Phase 1 implementer flagged: `via` lives in the
+        // stored VALUE, so it outlives a rename of the engine ids. A trusted
+        // stale id would reach the accessory's ENGINE_PROVENANCE lookup and
+        // render as undefined; dropping it costs one re-translation.
+        await DataStore.set(PERSIST_KEY, [
+            ["stale en", { lang: "es", text: "hello", via: "claude-haiku-legacy" }],
+            ["current en", { lang: "es", text: "hello", via: "claude" }]
+        ]);
+
+        await loadPersistedTranslations();
+
+        expect(getTranslation("stale en")).toBeUndefined();
+        expect(getTranslation("current en")).toBeDefined();
+    });
+
+    it("does not throw or wipe the session when the stored value is not an array", async () => {
+        await DataStore.set(PERSIST_KEY, { nope: true });
+        setTranslation(makeKey("1", "en"), { lang: "es", text: "hello", via: "google" });
+
+        await expect(loadPersistedTranslations()).resolves.toBeUndefined();
+
+        expect(getTranslation(makeKey("1", "en"))).toBeDefined();
+    });
+
+    it("degrades to an empty cache when the read itself fails", async () => {
+        const get = vi.spyOn(DataStore, "get").mockRejectedValueOnce(new Error("IndexedDB is having a day"));
+
+        await expect(loadPersistedTranslations()).resolves.toBeUndefined();
+        expect(getTranslation(makeKey("1", "en"))).toBeUndefined();
+
+        get.mockRestore();
+    });
+
+    it("does not let a load clobber something translated while it was in flight", async () => {
+        await DataStore.set(PERSIST_KEY, [[makeKey("1", "en"), { lang: "es", text: "stale", via: "google" }]]);
+        setTranslation(makeKey("1", "en"), { lang: "es", text: "fresh", via: "gemini" });
+
+        await loadPersistedTranslations();
+
+        expect(getTranslation(makeKey("1", "en"))).toEqual({ lang: "es", text: "fresh", via: "gemini" });
+    });
+
+    it("caps what it stores so the on-disk cache cannot grow without bound", async () => {
+        for (let i = 0; i < 2100; i++) {
+            setTranslation(makeKey(String(i), "en"), { lang: "es", text: String(i), via: "google" });
+        }
+        await persistenceSettled();
+
+        const stored = await DataStore.get<[string, unknown][]>(PERSIST_KEY);
+        expect(stored).toHaveLength(2000);
+        // Newest kept, oldest evicted.
+        expect(stored!.some(([k]) => k === makeKey("2099", "en"))).toBe(true);
+        expect(stored!.some(([k]) => k === makeKey("0", "en"))).toBe(false);
+    });
+
+    it("rolls the mirror back when a write fails, rather than claiming it saved", async () => {
+        setTranslation(makeKey("1", "en"), { lang: "es", text: "saved", via: "google" });
+        await persistenceSettled();
+
+        const set = vi.spyOn(DataStore, "set").mockRejectedValueOnce(new Error("disk full"));
+        setTranslation(makeKey("2", "en"), { lang: "es", text: "lost", via: "google" });
+        await persistenceSettled();
+        set.mockRestore();
+
+        // The entry stays usable for this session...
+        expect(getTranslation(makeKey("2", "en"))).toBeDefined();
+
+        // ...but the next successful write must not re-assert it as persisted,
+        // because it never reached the disk.
+        setTranslation(makeKey("3", "en"), { lang: "es", text: "next", via: "google" });
+        await persistenceSettled();
+
+        const stored = await DataStore.get<[string, unknown][]>(PERSIST_KEY);
+        const keys = stored!.map(([k]) => k);
+        expect(keys).toContain(makeKey("1", "en"));
+        expect(keys).toContain(makeKey("3", "en"));
+        expect(keys).not.toContain(makeKey("2", "en"));
     });
 
     it("notifies subscribers on write and stops after unsubscribe", () => {

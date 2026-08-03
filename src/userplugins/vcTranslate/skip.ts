@@ -5,6 +5,28 @@ const URL = /https?:\/\/\S+/g;
 const EMOJI = /[\p{Extended_Pictographic}\u{FE0F}\u{200D}\u{1F3FB}-\u{1F3FF}\u{1F1E6}-\u{1F1FF}]/gu;
 
 /**
+ * Remove the non-linguistic markup from a message: custom emotes, mentions,
+ * links and emoji.
+ *
+ * Exported because detectLang.ts has to strip exactly the same things before it
+ * can judge what language a message is in — `🌞🌿` and `<@123>` are not
+ * evidence for or against English. A second private copy of these four patterns
+ * is precisely the bug shape this project keeps hitting: a future fix (a new
+ * mention form, a new emoji range) reaches whichever copy got patched.
+ *
+ * `replacement` is the caller's, because the two questions differ: "" when
+ * asking whether anything translatable is left at all, " " when token structure
+ * has to survive the strip.
+ */
+export function stripMarkup(text: string, replacement: string): string {
+    return text
+        .replace(CUSTOM_EMOTE, replacement)
+        .replace(MENTION, replacement)
+        .replace(URL, replacement)
+        .replace(EMOJI, replacement);
+}
+
+/**
  * Laughter and keyboard mash, across the languages this is aimed at:
  * hahaha / ahaha (en), jajaja / jeje (es), kkkk (pt), wwww (ja), 555 (th),
  * xd / xddd, lol / lolol, rsrs (pt), ㅋㅋ / ㅎㅎ (ko).
@@ -59,13 +81,9 @@ function isChatShorthand(s: string): boolean {
 export function shouldSkip(text: string, isOwnMessage: boolean): boolean {
     if (isOwnMessage) return true;
 
-    const stripped = text
-        .replace(CUSTOM_EMOTE, "")
-        .replace(MENTION, "")
-        .replace(URL, "")
-        .replace(EMOJI, "")
-        // Anything left that is only digits, punctuation, whitespace, or combining marks
-        // carries no translatable meaning.
+    // Anything left that is only digits, punctuation, whitespace, or combining
+    // marks carries no translatable meaning.
+    const stripped = stripMarkup(text, "")
         .replace(/[\p{Nd}\p{P}\p{S}\p{M}\s]/gu, "");
 
     if (stripped.length === 0) return true;
@@ -73,11 +91,7 @@ export function shouldSkip(text: string, isOwnMessage: boolean): boolean {
     // Noise checks run on the ORIGINAL text with punctuation removed but
     // whitespace kept, so token structure survives ("GOJ GOJ GOJ" must stay
     // three tokens) while "jaja!!!" and "jaja" collapse to the same thing.
-    const words = text
-        .replace(CUSTOM_EMOTE, " ")
-        .replace(MENTION, " ")
-        .replace(URL, " ")
-        .replace(EMOJI, " ")
+    const words = stripMarkup(text, " ")
         .replace(/[\p{P}\p{S}\p{M}]/gu, "")
         .trim();
 

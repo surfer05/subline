@@ -59,14 +59,21 @@ export async function translateWithClaude(
         },
         body: JSON.stringify({
             model: MODEL,
-            // A full batch is 10 Discord messages; each translation carries the
-            // original id and lang alongside the text, and JSON-encoded CJK
-            // expands badly. 2048 could be exhausted by a batch of long
-            // messages, and a truncated response fails the WHOLE batch (see
-            // TRUNCATED_ERROR). Output tokens are only billed for what is
-            // actually produced, so a headroom-generous cap costs nothing on a
-            // normal batch and prevents an all-or-nothing failure on a long one.
-            max_tokens: 8000,
+            // A full batch is 25 Discord messages (raised from 10 to fit a
+            // day's chat into a few dozen requests — see LLM_MAX_BATCH in
+            // index.tsx). Each translation carries the original id and lang
+            // alongside the text, and JSON-encoded CJK expands badly: a single
+            // escaped CJK character is `\uXXXX`, several tokens for one glyph.
+            // 8000 was sized for 10 messages and a 2.5x larger batch could
+            // exhaust it, which fails the WHOLE batch (see TRUNCATED_ERROR) and
+            // is explicitly NOT retried — so under-sizing this converts a
+            // latency win into 25 lost translations.
+            //
+            // 24000 is the 8000-for-10 ratio with headroom, and well under
+            // claude-haiku-4-5's 64K output ceiling. Output tokens are billed
+            // only for what is actually produced, so the unused headroom costs
+            // nothing on a normal batch.
+            max_tokens: 24000,
             output_config: { format: { type: "json_schema", schema: SCHEMA } },
             messages: [{ role: "user", content: buildPrompt(req) }]
         })

@@ -18,7 +18,8 @@ import type { NativeResponse } from "../native";
 import { __resetSettings } from "./stubs/api-settings";
 import { __reset as resetDataStore } from "./stubs/api-datastore";
 import {
-    __resetWebpackCommon, __stubMarkAsDm, FluxDispatcher, LocaleStore, shownToasts, stubMessages
+    __resetWebpackCommon, __stubMarkAsDm, __stubSetSelectedChannel,
+    FluxDispatcher, LocaleStore, shownToasts, stubMessages
 } from "./stubs/webpack-common";
 
 const CHANNEL = "c1";
@@ -30,9 +31,15 @@ const discordMessage = (id: string, content: string, authorId = "u1") => ({
     author: { id: authorId, username: "ana" }
 });
 
-/** Run every pending timer and let the resulting promise chain settle. */
+/**
+ * Run every pending timer and let the resulting promise chain settle.
+ *
+ * 5s, not 1s: the LLM engines now debounce for LLM_DEBOUNCE_MS (3s) to fit a
+ * day's worth of messages into a few dozen requests, so a 1s window would
+ * never flush a Claude/Gemini batch at all.
+ */
 async function settle() {
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(5000);
     for (let i = 0; i < 20; i++) await Promise.resolve();
 }
 
@@ -59,7 +66,16 @@ beforeEach(async () => {
     settings.store.engine = "google";
     settings.store.anthropicApiKey = "";
 
+    // The user is looking at CHANNEL. Live translation is now restricted to the
+    // focused channel, so without this every MESSAGE_CREATE below would be
+    // (correctly) ignored — see the "only the focused channel" suite.
+    __stubSetSelectedChannel(CHANNEL);
+
     await plugin.start!();
+    // start() kicks off the persisted-cache load and defers its initial
+    // catch-up until that resolves. Let those microtasks drain here so the
+    // deferred catch-up can't land in the middle of a test body.
+    for (let i = 0; i < 20; i++) await Promise.resolve();
 });
 
 afterEach(() => {
@@ -122,7 +138,7 @@ describe("deferred results — rate-limited, not failed", () => {
         expect(native.translateBatch).toHaveBeenCalledTimes(1);
 
         // A second message arrives while still inside the 30s pause window
-        // (only ~1s of fake time has elapsed). It must never reach
+        // (two settle() calls are ~10s of fake time). It must never reach
         // translateBatch at all, and must be marked deferred, not failed —
         // this is the paused-early-return path in onFlush, distinct from the
         // 429-response path exercised above.
@@ -194,17 +210,22 @@ describe("the rate gate — smooths a catch-up storm, never slows live chat", ()
         settings.store.geminiApiKey = "AIza-test";
         respondWith({ ok: true, results: [] });
 
-        // Simulate globalAuto catch-up firing across 8 channels at once, each
-        // with its own independent 700ms debounce window.
+        // Eight channels each get one message while the user is looking at
+        // them — i.e. the user cycling quickly through channels. (Before this
+        // phase the same shape came from globalAuto catch-up fanning out across
+        // every open channel at once; focus gating makes that impossible now,
+        // but the thing under test is unchanged: many independent batches
+        // becoming due at the same moment.)
         const channels = Array.from({ length: 8 }, (_, i) => `burst-${i}`);
         for (const c of channels) {
+            __stubSetSelectedChannel(c);
             FluxDispatcher.dispatch("MESSAGE_CREATE", {
                 message: { ...discordMessage(`m-${c}`, "hola"), channel_id: c }
             });
         }
 
         // Let every channel's debounce timer fire, but nothing beyond that.
-        await vi.advanceTimersByTimeAsync(700);
+        await vi.advanceTimersByTimeAsync(3_000);
         for (let i = 0; i < 20; i++) await Promise.resolve();
 
         // Only the burst capacity's worth of requests actually leave the
@@ -230,7 +251,7 @@ describe("the rate gate — smooths a catch-up storm, never slows live chat", ()
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         // Advance by exactly the debounce window, nothing more — a real
         // conversation's single flush must clear the gate with no extra wait.
-        await vi.advanceTimersByTimeAsync(700);
+        await vi.advanceTimersByTimeAsync(3_000);
         for (let i = 0; i < 20; i++) await Promise.resolve();
 
         expect(native.translateBatch).toHaveBeenCalledTimes(1);
@@ -570,6 +591,163 @@ describe("settings wiring", () => {
     });
 });
 
+describe("only the channel the user is actually looking at", () => {
+    it("does not translate a message in a channel that is not focused", async () => {
+        // THE waste this phase removes: globalAuto means "every channel", so
+        // messages in every open channel used to be translated whether or not
+        // the user had ever looked at them.
+        __stubSetSelectedChannel("other");
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(native.translateBatch).not.toHaveBeenCalled();
+    });
+
+    it("still translates a message in the focused channel", async () => {
+        // The other half of the same rule — without this, "focus" could be
+        // implemented as "never translate anything" and still pass above.
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not translate an edit in a channel that is not focused", async () => {
+        __stubSetSelectedChannel("other");
+
+        FluxDispatcher.dispatch("MESSAGE_UPDATE", { message: discordMessage("1", "adios") });
+        await settle();
+
+        expect(native.translateBatch).not.toHaveBeenCalled();
+    });
+
+    it("does not catch up a channel whose history loads while the user is elsewhere", async () => {
+        // LOAD_MESSAGES_SUCCESS also fires for background history fetches. If
+        // it ignored focus, a restart would still fan out across every channel
+        // Discord decides to hydrate.
+        stubMessages.set("other", [{ ...discordMessage("1", "hola"), channel_id: "other" }]);
+
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: "other" });
+        await settle();
+
+        expect(native.translateBatch).not.toHaveBeenCalled();
+    });
+
+    it("translates that same backlog as soon as the user opens the channel", async () => {
+        // Not-now is not never: the deferred work is exactly what catch-up on
+        // channel open already does.
+        stubMessages.set("other", [{ ...discordMessage("1", "hola"), channel_id: "other" }]);
+
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: "other" });
+        await settle();
+        expect(native.translateBatch).not.toHaveBeenCalled();
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: "other" });
+        await settle();
+
+        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+        expect(requestAt(0).messages.map((m: any) => m.id)).toEqual(["1"]);
+    });
+
+    it("catches up on CHANNEL_SELECT even before SelectedChannelStore has updated", async () => {
+        // Flux does not guarantee that Discord's own stores have processed
+        // CHANNEL_SELECT before our subscriber runs. If catch-up gated on the
+        // store here, cold-channel catch-up — the "tab back in after a game"
+        // feature — would silently never fire.
+        stubMessages.set("cold", [{ ...discordMessage("1", "hola"), channel_id: "cold" }]);
+        __stubSetSelectedChannel(CHANNEL);   // store still reports the OLD channel
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: "cold" });
+        await settle();
+
+        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe("locally detected target-language messages never leave the client", () => {
+    it("does not spend a request on an English message when the target is English", async () => {
+        FluxDispatcher.dispatch("MESSAGE_CREATE", {
+            message: discordMessage("1", "we should have a fst mc server")
+        });
+        await settle();
+
+        expect(native.translateBatch).not.toHaveBeenCalled();
+    });
+
+    it("still sends a Spanish message", async () => {
+        FluxDispatcher.dispatch("MESSAGE_CREATE", {
+            message: discordMessage("1", "no puedo jugar hoy porque tengo que estudiar")
+        });
+        await settle();
+
+        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+    });
+
+    it("still sends a short ambiguous message rather than guessing", async () => {
+        // "THIS" contains an English function word and nothing else. Guessing
+        // English here would silently drop it if it were, say, a foreign
+        // proper noun — so it must be sent.
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "THIS") });
+        await settle();
+
+        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not apply the English heuristic to a non-English target language", async () => {
+        settings.store.targetLang = "es";
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", {
+            message: discordMessage("1", "we should have a fst mc server")
+        });
+        await settle();
+
+        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe("batch sizing follows the daily request budget", () => {
+    it("holds an LLM batch past the old 700ms window", async () => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+
+        // Nothing has left yet at the OLD 700ms window.
+        await vi.advanceTimersByTimeAsync(700);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        expect(native.translateBatch).not.toHaveBeenCalled();
+
+        await settle();
+
+        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+    });
+
+    it("packs 25 messages into a single LLM request", async () => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+
+        for (let i = 0; i < 25; i++) {
+            FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage(String(i), "hola") });
+        }
+        await settle();
+
+        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+        expect(requestAt(0).messages).toHaveLength(25);
+    });
+
+    it("keeps Google on its smaller, latency-tuned batch", async () => {
+        // Google is per-message with its own concurrency cap and was never the
+        // source of the 429s, so it must not inherit the LLM sizing.
+        for (let i = 0; i < 25; i++) {
+            FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage(String(i), "hola") });
+        }
+        await settle();
+
+        expect(requestAt(0).messages).toHaveLength(10);
+    });
+});
+
 describe("globalAuto does not reach private conversations", () => {
     it("translates a guild channel but never a DM", async () => {
         settings.store.globalAuto = true;
@@ -587,6 +765,10 @@ describe("globalAuto does not reach private conversations", () => {
         FluxDispatcher.dispatch("MESSAGE_CREATE", {
             message: { ...discordMessage("g1", "hola"), channel_id: CHANNEL }
         });
+        // Focus the DM before posting in it, so the DM is rejected by the
+        // guild_id check under test and not incidentally by the focus check —
+        // otherwise this assertion would pass for the wrong reason.
+        __stubSetSelectedChannel("dm1");
         FluxDispatcher.dispatch("MESSAGE_CREATE", {
             message: { ...discordMessage("d1", "hola"), channel_id: "dm1" }
         });

@@ -5,12 +5,13 @@ import type { Message } from "@vencord/discord-types";
 
 import { createBatcher, type Batcher } from "./batcher";
 import { isChannelEnabled, loadEnabledChannels, toggleChannel } from "./channels";
+import { isConfidentlyTargetLanguage } from "./detectLang";
 import { acquireSlot, resetRateGate } from "./rateGate";
 import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
 import {
-    getTranslation, invalidateMessage, makeKey,
+    getTranslation, invalidateMessage, loadPersistedTranslations, makeKey,
     setTranslation, subscribe, type StoredTranslation
 } from "./store";
 import { ENGINE_CAPS, type EngineId, type PendingMessage } from "./types";
@@ -55,6 +56,30 @@ const LLM_ENGINES = {
 
 type LlmEngineId = keyof typeof LLM_ENGINES;
 
+/**
+ * Batching, sized by the DAILY request budget rather than by latency.
+ *
+ * The Gemini free tier gives on the order of tens of successful requests a day
+ * (observed: ~40 successes against ~50 429s in one day). The old 700ms/10
+ * numbers were tuned for how fast a subtitle appears, which is the wrong thing
+ * to optimise when the constraint is requests-per-day: at 10 messages a
+ * request, 40 requests covers ~400 messages. At 25 it covers ~1,000 — roughly
+ * a full day of a busy channel.
+ *
+ * The cost is latency: up to 3s before a batch leaves, instead of 0.7s. That
+ * is the trade this phase is making deliberately — a subtitle two seconds
+ * later is strictly better than a subtitle that never arrives because the
+ * budget ran out at lunchtime.
+ *
+ * Google keeps the old numbers: it is per-message with its own concurrency cap
+ * (engines/google.ts), free, and was never the source of the 429s, so slowing
+ * it down would cost latency and buy nothing.
+ */
+const LLM_DEBOUNCE_MS = 3_000;
+const LLM_MAX_BATCH = 25;
+const GOOGLE_DEBOUNCE_MS = 700;
+const GOOGLE_MAX_BATCH = 10;
+
 function isLlmEngine(id: EngineId): id is LlmEngineId {
     return id === "claude" || id === "gemini";
 }
@@ -70,6 +95,32 @@ function effectiveEngine(): EngineId {
     if (!isLlmEngine(configured)) return configured;
     if (sessionFallback || apiKeyFor(configured).trim() === "") return "google";
     return configured;
+}
+
+/**
+ * Is this the channel the user is actually looking at?
+ *
+ * DEFINITION: "focused" means `SelectedChannelStore.getChannelId()` equals this
+ * channel id AT THE MOMENT THE MESSAGE ARRIVES. Nothing is remembered, nothing
+ * is debounced — a message that lands one tick after the user navigates away is
+ * simply not enqueued.
+ *
+ * NOT HANDLED, deliberately: popped-out channels and second Discord windows.
+ * SelectedChannelStore reports one id for the main window, so a message in a
+ * popped-out channel the user is genuinely reading reads as unfocused here.
+ * The cost of being wrong is bounded and small: that message is translated
+ * LATER (when the channel is next opened and catch-up runs over the backlog),
+ * never NEVER. Detecting popouts would mean depending on more Discord
+ * internals than this is worth.
+ *
+ * This is intentionally orthogonal to `channelActive`: globalAuto decides WHICH
+ * channels are eligible at all, focus decides which eligible channel is worth
+ * spending the day's budget on right now. A restart with globalAuto on used to
+ * fan catch-up out across every open channel before the user had read a single
+ * message — the single largest source of wasted requests.
+ */
+function isFocusedChannel(channelId: string): boolean {
+    return SelectedChannelStore.getChannelId() === channelId;
 }
 
 function channelActive(channelId: string): boolean {
@@ -156,9 +207,10 @@ function rebuildBatcher() {
         }
     };
 
+    const llm = isLlmEngine(engine);
     const newBatcher = createBatcher({
-        debounceMs: 700,
-        maxBatch: 10,
+        debounceMs: llm ? LLM_DEBOUNCE_MS : GOOGLE_DEBOUNCE_MS,
+        maxBatch: llm ? LLM_MAX_BATCH : GOOGLE_MAX_BATCH,
         contextSize: 8,
         supportsContext: ENGINE_CAPS[engine].supportsContext,
         targetLang: settings.store.targetLang,
@@ -315,8 +367,22 @@ function rebuildBatcher() {
  * particular has to do exactly what the created-message path does.
  */
 function enqueue(pending: PendingMessage, isOwn: boolean) {
-    // Skipped messages still shape the conversation, so they become context.
-    if (shouldSkip(pending.text, isOwn)) {
+    // Two flavours of local skip, handled identically: the structural one
+    // (own message, nothing translatable left after stripping emotes/links)
+    // and the linguistic one (we can tell locally that this is already in the
+    // target language — see detectLang.ts, which is heavily biased toward
+    // saying "no idea", i.e. toward spending the request).
+    //
+    // Both record context rather than writing a store entry, exactly as the
+    // structural skip always has. Nothing is written because nothing was
+    // decided by an ENGINE: re-examining the message on the next channel open
+    // is a pure local function call that returns the same answer for free, and
+    // not writing keeps a local guess out of the persisted cache, where a
+    // heuristic mistake would otherwise outlive the session.
+    if (
+        shouldSkip(pending.text, isOwn)
+        || isConfidentlyTargetLanguage(pending.text, settings.store.targetLang)
+    ) {
         batcher?.recordContext(pending);
         return;
     }
@@ -332,6 +398,9 @@ function enqueue(pending: PendingMessage, isOwn: boolean) {
 function onMessageCreate({ message, optimistic }: { message: Message; optimistic?: boolean; }) {
     if (optimistic || !message?.id) return;
     if (!channelActive(message.channel_id)) return;
+    // Not the channel on screen: don't spend a request on it now. It is not
+    // lost — opening that channel runs catch-up over its recent backlog.
+    if (!isFocusedChannel(message.channel_id)) return;
 
     enqueue(
         {
@@ -362,6 +431,10 @@ function onMessageUpdate({ message }: { message: Message; }) {
     if (typeof text !== "string" || text === "") return;
 
     if (!message.channel_id || !channelActive(message.channel_id)) return;
+    // Same focus rule as a new message: an edit in a channel nobody is looking
+    // at waits for that channel to be opened. The invalidation above already
+    // happened, so it is a cache miss when catch-up gets to it.
+    if (!isFocusedChannel(message.channel_id)) return;
 
     // Invalidating without re-queuing was the bug this replaces: the subtitle
     // vanished on edit and only came back on the next channel open. Goes
@@ -382,8 +455,20 @@ function onMessageUpdate({ message }: { message: Message; }) {
     );
 }
 
-function catchUp(channelId: string) {
+/**
+ * `becomingFocused` is for the one caller that KNOWS this channel is the one
+ * the user is now on, but cannot prove it through SelectedChannelStore:
+ * CHANNEL_SELECT. Flux hands that event to store handlers and plugin
+ * subscribers without a guaranteed order, so SelectedChannelStore may still be
+ * reporting the PREVIOUS channel when we run. Gating on the store there would
+ * mean cold-channel catch-up — the headline feature — silently never firing.
+ * The event's own payload is the authoritative statement of "this is now the
+ * selected channel", so that caller passes true and every other caller proves
+ * focus the normal way.
+ */
+function catchUp(channelId: string, becomingFocused = false) {
     if (!channelActive(channelId)) return;
+    if (!becomingFocused && !isFocusedChannel(channelId)) return;
 
     const count = settings.store.catchUpCount;
     if (count <= 0) return;
@@ -466,7 +551,9 @@ function catchUp(channelId: string) {
 }
 
 function onChannelSelect({ channelId }: { channelId: string; }) {
-    if (channelId) catchUp(channelId);
+    // This event IS the focus change, so it does not have to ask
+    // SelectedChannelStore whether it has caught up yet.
+    if (channelId) catchUp(channelId, true);
 }
 
 // CHANNEL_SELECT fires before Discord has necessarily fetched the backlog
@@ -496,6 +583,11 @@ function onMessagesLoaded(payload: any) {
         );
         return;
     }
+    // No `becomingFocused` here: by the time history has actually landed,
+    // SelectedChannelStore is settled, and this event also fires for a channel
+    // the user is NOT looking at (scrolling loads more history, background
+    // fetches). Requiring real focus is what keeps it from re-opening the
+    // fan-out this phase closed.
     catchUp(channelId);
 }
 
@@ -622,7 +714,13 @@ export default definePlugin({
                 onClick: async () => {
                     try {
                         const nowOn = await toggleChannel(message.channel_id);
-                        if (nowOn) catchUp(message.channel_id);
+                        // `becomingFocused: true` — the user just clicked a
+                        // button on a message in this channel and explicitly
+                        // asked for it to be translated. That click is a
+                        // stronger statement of intent than the focus check
+                        // exists to infer, and it is the one place where
+                        // spending the budget was directly requested.
+                        if (nowOn) catchUp(message.channel_id, true);
                     } catch {
                         // toggleChannel rethrows on persistence failure (memory
                         // already rolled back by then) -- surface it instead of
@@ -642,6 +740,13 @@ export default definePlugin({
 
     async start() {
         await loadEnabledChannels();
+
+        // Deliberately NOT awaited: a slow IndexedDB read must not hold up the
+        // Flux subscriptions below, and loadPersistedTranslations() never
+        // rejects — a failed read degrades to an empty cache (every message is
+        // a miss, exactly as before this phase), never to a broken plugin.
+        const cacheReady = loadPersistedTranslations();
+
         rebuildBatcher();
         onSettingsChanged(rebuildBatcher);
         FluxDispatcher.subscribe("MESSAGE_CREATE", onMessageCreate);
@@ -654,8 +759,20 @@ export default definePlugin({
         // enabling the plugin (or restarting Discord) while sitting in a
         // channel would otherwise translate nothing currently visible until
         // you navigated away and back.
-        const openChannelId = SelectedChannelStore.getChannelId();
-        if (openChannelId) catchUp(openChannelId);
+        //
+        // Sequenced after the cache load (rather than run immediately) so the
+        // restart case actually costs nothing: running first would treat every
+        // already-translated message on screen as a miss and re-request the
+        // whole visible backlog, which is the exact spend persistence exists to
+        // remove. start() still returns without waiting on it.
+        void cacheReady.then(() => {
+            // stop() may have run while the read was in flight; `batcher` is
+            // null exactly then, and enqueuing into a stopped plugin would
+            // strand those ids in `inFlight` for the next session.
+            if (batcher === null) return;
+            const openChannelId = SelectedChannelStore.getChannelId();
+            if (openChannelId) catchUp(openChannelId);
+        });
     },
 
     stop() {
