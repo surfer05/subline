@@ -1,6 +1,6 @@
 import { Logger } from "@utils/Logger";
 import definePlugin, { PluginNative } from "@utils/types";
-import { ChannelStore, FluxDispatcher, MessageStore, React, SelectedChannelStore, Toasts, UserStore } from "@webpack/common";
+import { ChannelStore, FluxDispatcher, LocaleStore, MessageStore, React, SelectedChannelStore, Toasts, UserStore } from "@webpack/common";
 import type { Message } from "@vencord/discord-types";
 
 import { createBatcher, type Batcher } from "./batcher";
@@ -14,7 +14,10 @@ import {
     getTranslation, invalidateMessage, loadPersistedTranslations, makeKey,
     setTranslation, subscribe, type StoredTranslation
 } from "./store";
-import { ENGINE_CAPS, type EngineId, type PendingMessage } from "./types";
+import {
+    ENGINE_CAPS, MIN_DETECT_CONFIDENCE, SHORT_TEXT_MAX,
+    type BatchRequest, type EngineId, type PendingMessage
+} from "./types";
 
 const Native = VencordNative.pluginHelpers.VcTranslate as PluginNative<typeof import("./native")>;
 const logger = new Logger("VcTranslate");
@@ -326,7 +329,7 @@ function rebuildBatcher() {
                     return await Native.translateBatch(
                         target,
                         isLlmEngine(target) ? apiKeyFor(target) : "",
-                        JSON.stringify(req)
+                        JSON.stringify(target === "google" ? withSourceLangs(req) : req)
                     );
                 } catch {
                     // onFlush is void-returning and invoked un-awaited, so an
@@ -461,7 +464,7 @@ function rebuildBatcher() {
                     // ≈ (Google, approximate) instead of claiming ✦.
                     setTranslation(
                         makeKey(r.id, req.targetLang),
-                        { lang: r.lang, text: r.text, via: runEngine }
+                        { lang: r.lang, text: r.text, via: runEngine, conf: r.conf }
                     );
                 }
             } finally {
@@ -516,6 +519,80 @@ function enqueue(pending: PendingMessage, isOwn: boolean) {
     batcher?.add(pending);
 }
 
+/**
+ * "de" -> "German", "ha" -> "Hausa".
+ *
+ * The two-letter code alone is not readable: a reader who sees "ha" has no way
+ * to know it means Hausa, and therefore no way to notice that a message in a
+ * German conversation was detected as a West African language — which is
+ * precisely the moment the translation should be distrusted.
+ *
+ * Intl.DisplayNames ships with the runtime, so this costs no table of our own.
+ * It throws on a malformed code and returns the input unchanged for a
+ * well-formed one it doesn't know, so both fall back to showing the raw code.
+ */
+function languageName(code: string): string {
+    try {
+        return new Intl.DisplayNames([LocaleStore.locale || "en"], { type: "language" })
+            .of(code) ?? code;
+    } catch {
+        return code;
+    }
+}
+
+/**
+ * Fill in `sourceLang` for the short messages Google cannot detect on their own.
+ *
+ * The motivating case, observed in a live German channel: "ne" replying to
+ * "sind die gruppenräume klimatisiert an der uni?". Under `sl=auto` Google
+ * reads "ne" as Hausa (confidence 0.217) and renders "it is" — the exact
+ * opposite of the German "no" that was meant, and perfectly readable as an
+ * answer, so nothing warns the reader. Pinning `sl=de` returns "no".
+ *
+ * Only SHORT texts borrow, and only from a parent that was itself detected
+ * confidently. Both limits matter in a multilingual channel: a long message is
+ * detected reliably on its own and must not be forced into its parent's
+ * language, and borrowing from an uncertain parent would spread one bad
+ * detection down a whole reply chain.
+ *
+ * Google-only by construction. The LLM engines already receive the surrounding
+ * conversation, which resolves "ne" far better than a language code can.
+ */
+function withSourceLangs(req: BatchRequest): BatchRequest {
+    const targetLang = req.targetLang;
+    return {
+        ...req,
+        messages: req.messages.map(m => {
+            if (m.sourceLang !== undefined) return m;
+            if (m.replyToId === undefined) return m;
+            if (m.text.trim().length > SHORT_TEXT_MAX) return m;
+
+            const parent = getTranslation(makeKey(m.replyToId, targetLang));
+            if (parent === undefined || !("lang" in parent)) return m;
+            // An undefined `conf` means the parent was itself pinned rather
+            // than detected, which is a borrow we already vouched for.
+            if (parent.conf !== undefined && parent.conf < MIN_DETECT_CONFIDENCE) return m;
+
+            return { ...m, sourceLang: parent.lang };
+        })
+    };
+}
+
+/**
+ * The id of the message a reply points at, or undefined for a normal message.
+ *
+ * Discord exposes this two ways depending on how the message reached us —
+ * `message_reference` on the Flux payload, `referenced_message` on a hydrated
+ * store object — so both are checked rather than assuming the shape of
+ * whichever path happened to be tested.
+ */
+function replyParentId(message: any): string | undefined {
+    const ref = message?.message_reference?.message_id;
+    if (typeof ref === "string") return ref;
+    const hydrated = message?.referenced_message?.id;
+    return typeof hydrated === "string" ? hydrated : undefined;
+}
+
 function onMessageCreate({ message, optimistic }: { message: Message; optimistic?: boolean; }) {
     if (optimistic || !message?.id) return;
     if (!channelActive(message.channel_id)) return;
@@ -528,7 +605,8 @@ function onMessageCreate({ message, optimistic }: { message: Message; optimistic
             id: message.id,
             author: message.author?.username ?? "unknown",
             text: message.content ?? "",
-            channelId: message.channel_id
+            channelId: message.channel_id,
+            replyToId: replyParentId(message)
         },
         message.author?.id === UserStore.getCurrentUser()?.id
     );
@@ -570,7 +648,8 @@ function onMessageUpdate({ message }: { message: Message; }) {
             id: message.id,
             author: message.author?.username ?? "unknown",
             text,
-            channelId: message.channel_id
+            channelId: message.channel_id,
+            replyToId: replyParentId(message)
         },
         message.author?.id === UserStore.getCurrentUser()?.id
     );
@@ -664,7 +743,8 @@ function catchUp(channelId: string, becomingFocused = false) {
                 id: message.id,
                 author: message.author?.username ?? "unknown",
                 text: message.content ?? "",
-                channelId
+                channelId,
+                replyToId: replyParentId(message)
             },
             message.author?.id === me
         );
@@ -797,13 +877,23 @@ function TranslationAccessory({ message }: { message: Message; }) {
     // the decorative ⤷. `title` spells the glyph out on hover, since a symbol
     // alone can't teach its own meaning.
     const provenance = ENGINE_PROVENANCE[entry.via];
+    // Google reports how sure it is about the language it detected, and on
+    // short replies it is often barely sure at all — "ne" came back as Hausa
+    // at 0.217 and was rendered as "it is", the opposite of the German "no"
+    // that was meant. A wrong translation reads exactly as fluently as a right
+    // one, so the only defence is to say which is which.
+    const unsure = entry.conf !== undefined && entry.conf < MIN_DETECT_CONFIDENCE;
+    const langName = languageName(entry.lang);
+    const title = unsure
+        ? `Translated by ${provenance.label}. ${langName} detected, but only `
+          + `${Math.round(entry.conf! * 100)}% confidently — short messages are `
+          + "often misread, so this may be wrong."
+        : `Translated by ${provenance.label} · ${langName}`;
+
     return (
         <div style={{ fontSize: "0.95rem", color: TEXT_COLOUR, fontStyle: "italic" }}>
-            <span
-                style={{ color: "var(--text-muted)" }}
-                title={`Translated by ${provenance.label}`}
-            >
-                {provenance.glyph} {entry.lang} ·{" "}
+            <span style={{ color: "var(--text-muted)" }} title={title}>
+                {provenance.glyph} {entry.lang}{unsure ? "?" : ""} ·{" "}
             </span>
             {entry.text}
         </div>

@@ -117,9 +117,45 @@ because that is no longer always the engine you have selected (see
 |---|---|
 | `✦ es · …` | Translated by a context-aware LLM engine (Claude or Gemini) — batched, with a rolling window of recent channel messages |
 | `≈ es · …` | Translated by Google — each message in isolation, no conversation context, so it is an approximation |
+| `≈ ha? · …` | The `?` means Google was **not confident** which language this was. Treat the line as unreliable — see below |
 
-Hovering the marker shows the engine's full name ("Translated by Gemini",
-"Translated by Google Translate").
+Hovering the marker shows the engine's full name and the language spelled out
+("Translated by Google Translate · Hausa"), because a bare `ha` tells you
+nothing about whether the detection was plausible.
+
+### The `?` marker, and why short replies are the dangerous ones
+
+Google reports how confident it is in the language it detected, and on very
+short messages it is often barely confident at all. Measured against the live
+endpoint:
+
+| Message | Detected | Confidence | Rendered | Actually means |
+|---|---|---|---|---|
+| `ne` | `ha` (Hausa) | 0.22 | "it is" | German **"no"** — the opposite |
+| `ja` | `et` | 0.45 | "and" | German **"yes"** |
+| `nö` | `et` | 0.61 | "so-called" | German **"nope"** |
+| `ok dann brauch ich net neidisch sein` | `de` | 0.99 | correct | — |
+| `hola que tal` | `es` | 1.00 | correct | — |
+
+Two things make this worse than an ordinary bad translation: the wrong answer
+reads just as fluently as a right one, and the failures cluster on yes/no
+replies, where being wrong **inverts** the meaning of the message.
+
+So two defences, both Google-only:
+
+- **Short replies borrow their parent's language.** If a message is a reply, is
+  short, and the message it replies to was detected confidently, that language
+  is pinned instead of auto-detected. Live, `ne` pinned to German returns "no"
+  rather than "it is". Long messages are excluded on purpose — they detect
+  reliably on their own, and forcing a long Spanish reply into its German
+  parent's language would create the very bug this prevents.
+- **Anything still under 0.85 confidence is marked `?`.** It is shown rather
+  than hidden — a rough translation you know to distrust beats a blank — with
+  the confidence spelled out on hover.
+
+Neither applies to Claude or Gemini: they receive the surrounding conversation,
+which resolves `ne` far better than any language code could. This is one of the
+concrete things you lose while falling back to Google.
 
 With Claude or Gemini selected, the marker doubles as a live quota readout:
 `✦` means the LLM engine served that line, `≈` means it could not and Google

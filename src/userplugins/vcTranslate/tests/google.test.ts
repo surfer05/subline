@@ -234,3 +234,50 @@ describe("translateWithGoogle — pass-through detection", () => {
         expect(result).toEqual({ id: "0", lang: "es", text: "let's go", skip: false });
     });
 });
+
+describe("source language and detection confidence", () => {
+    /** A real response carries the confidence at index 6. */
+    const withConfidence = (translated: string, detected: string, conf: number | null) => ({
+        ok: true,
+        json: async () => [[[translated, "orig", null, null, 3]], null, detected,
+            null, null, null, conf]
+    });
+
+    const urlOf = (fetchImpl: any) => String(fetchImpl.mock.calls[0][0]);
+
+    it("auto-detects when no source language was resolved", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue(withConfidence("no", "de", 1));
+        await translateWithGoogle(req(["ne"]), fetchImpl as any);
+        expect(urlOf(fetchImpl)).toContain("sl=auto");
+    });
+
+    it("pins sl to the resolved source language instead of auto-detecting", async () => {
+        // THE fix. Live, "ne" under sl=auto returns Hausa "it is"; under sl=de
+        // it returns "no". Same request, opposite meaning — so which `sl` goes
+        // on the wire is the whole behaviour worth asserting.
+        const fetchImpl = vi.fn().mockResolvedValue(withConfidence("no", "de", null));
+        const r: BatchRequest = {
+            messages: [{ id: "0", author: "a", text: "ne", sourceLang: "de" }],
+            context: [],
+            targetLang: "en"
+        };
+        await translateWithGoogle(r, fetchImpl as any);
+        expect(urlOf(fetchImpl)).toContain("sl=de");
+        expect(urlOf(fetchImpl)).not.toContain("sl=auto");
+    });
+
+    it("passes the detection confidence through so the renderer can flag a guess", async () => {
+        // 0.217 is the number the live endpoint actually returned for "ne".
+        const fetchImpl = vi.fn().mockResolvedValue(withConfidence("it is", "ha", 0.21705426));
+        const [result] = await translateWithGoogle(req(["ne"]), fetchImpl as any);
+        expect(result).toMatchObject({ lang: "ha", text: "it is", conf: 0.21705426 });
+    });
+
+    it("reports no confidence when the response carries none", async () => {
+        // A pinned request gets null here — nothing was detected, so there is
+        // nothing to be unsure about, and the renderer must not show a "?".
+        const fetchImpl = vi.fn().mockResolvedValue(withConfidence("no", "de", null));
+        const [result] = await translateWithGoogle(req(["ne"]), fetchImpl as any);
+        expect((result as any).conf).toBeUndefined();
+    });
+});

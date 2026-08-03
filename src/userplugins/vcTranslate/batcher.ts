@@ -71,7 +71,13 @@ export function createBatcher(opts: BatcherOptions): Batcher {
 
         opts.onFlush(
             {
-                messages: batch.map(m => ({ id: m.id, author: m.author, text: m.text })),
+                // replyToId is passed straight through, not resolved here: the
+                // batcher has no access to the translation store, and holding
+                // the resolution until flush time gives the parent the longest
+                // possible chance to have been translated already.
+                messages: batch.map(m => ({
+                    id: m.id, author: m.author, text: m.text, replyToId: m.replyToId
+                })),
                 context,
                 targetLang: opts.targetLang
             },

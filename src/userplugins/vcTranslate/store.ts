@@ -27,8 +27,14 @@ const logger = new Logger("VcTranslate");
 // the VALUE, not in the key (see makeKey), and it is what lets the accessory
 // tell the reader whether the line they are reading came from a
 // context-aware model or from Google's per-message approximation.
+//
+// `conf` is Google's detection confidence, kept for two jobs: the accessory
+// marks a low-confidence line so the reader knows not to trust it, and a short
+// reply borrowing this message's language only does so when this message was
+// itself detected confidently — otherwise one bad detection would propagate
+// down an entire reply chain.
 export type StoredTranslation =
-    | { lang: string; text: string; via: EngineId }
+    | { lang: string; text: string; via: EngineId; conf?: number }
     | { failed: true }
     | { skipped: true }
     | { deferred: true };

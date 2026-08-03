@@ -17,12 +17,17 @@ const CONCURRENCY = 4;
 class MessageError extends Error {}
 
 async function translateOne(
-    msg: { id: string; text: string },
+    msg: { id: string; text: string; sourceLang?: string },
     targetLang: string,
     fetchImpl: typeof fetch
 ): Promise<Result> {
+    // `auto` unless the caller resolved a language for us. Pinning is what
+    // rescues short replies: "ne" under `sl=auto` comes back as Hausa "it is",
+    // and under `sl=de` as "no" — opposite answers to the same question.
+    const sourceLang = msg.sourceLang ?? "auto";
     const url =
-        `${ENDPOINT}?client=gtx&sl=auto&tl=${encodeURIComponent(targetLang)}` +
+        `${ENDPOINT}?client=gtx&sl=${encodeURIComponent(sourceLang)}` +
+        `&tl=${encodeURIComponent(targetLang)}` +
         `&dt=t&q=${encodeURIComponent(msg.text)}`;
 
     const res = await fetchImpl(url);
@@ -35,6 +40,13 @@ async function translateOne(
     }
 
     const detected = body[2] as string;
+
+    // Index 6 carries the detection confidence — a number under `sl=auto`,
+    // and absent/null when we pinned the language (nothing was detected).
+    // Reading it costs nothing and is the only signal that separates a
+    // trustworthy translation from a guess; the endpoint has been telling us
+    // all along and we were discarding it.
+    const conf = typeof body[6] === "number" ? body[6] : undefined;
     if (detected === targetLang) return { id: msg.id, skip: true };
 
     const text = (body[0] as unknown[])
@@ -52,7 +64,7 @@ async function translateOne(
     // this we render a subtitle identical to the message it sits under.
     if (isSameText(text, msg.text)) return { id: msg.id, skip: true };
 
-    return { id: msg.id, lang: detected, text, skip: false };
+    return { id: msg.id, lang: detected, text, skip: false, conf };
 }
 
 export async function translateWithGoogle(

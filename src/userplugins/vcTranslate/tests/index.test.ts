@@ -565,15 +565,45 @@ describe("the subtitle accessory", () => {
         expect(text(render(discordMessage("1", "hola")))).toContain("es");
     });
 
-    it("names the engine in a title attribute so the glyph is explainable on hover", () => {
+    it("names the engine AND the language in a title attribute, so neither the glyph nor the code has to be decoded", () => {
+        // The language NAME, not just the code: "ha" in the badge tells a
+        // reader nothing, and "Hausa" appearing under a German conversation is
+        // what makes a misdetection noticeable at all.
         setTranslation(key("1"), { lang: "es", text: "a", via: "gemini" });
-        expect(titleOf(render(discordMessage("1", "hola")))).toBe("Translated by Gemini");
+        expect(titleOf(render(discordMessage("1", "hola")))).toBe("Translated by Gemini · Spanish");
 
         setTranslation(key("2"), { lang: "es", text: "b", via: "google" });
-        expect(titleOf(render(discordMessage("2", "hola")))).toBe("Translated by Google Translate");
+        expect(titleOf(render(discordMessage("2", "hola")))).toBe("Translated by Google Translate · Spanish");
 
         setTranslation(key("3"), { lang: "es", text: "c", via: "claude" });
-        expect(titleOf(render(discordMessage("3", "hola")))).toBe("Translated by Claude");
+        expect(titleOf(render(discordMessage("3", "hola")))).toBe("Translated by Claude · Spanish");
+
+        setTranslation(key("4"), { lang: "ha", text: "it is", via: "google" });
+        expect(titleOf(render(discordMessage("4", "ne")))).toBe("Translated by Google Translate · Hausa");
+    });
+
+    it("marks a low-confidence detection with ? so a wrong translation is not read as a right one", () => {
+        // The real case: "ne" in a German channel, detected as Hausa at 0.217
+        // and rendered "it is" — the opposite of the intended "no". Fluent and
+        // plausible, so the badge is the reader's only warning.
+        setTranslation(key("1"), { lang: "ha", text: "it is", via: "google", conf: 0.217 });
+        const node = render(discordMessage("1", "ne"));
+        expect(text(node)).toContain("ha?");
+        expect(titleOf(node)).toContain("Hausa");
+        expect(titleOf(node)).toContain("22%");
+        expect(titleOf(node)).toContain("may be wrong");
+    });
+
+    it("does not mark a confident detection, so ? keeps meaning something", () => {
+        setTranslation(key("1"), { lang: "de", text: "no", via: "google", conf: 0.99 });
+        const node = render(discordMessage("1", "ne"));
+        expect(text(node)).not.toContain("?");
+        expect(titleOf(node)).not.toContain("may be wrong");
+    });
+
+    it("does not mark an LLM translation, which reports no confidence at all", () => {
+        setTranslation(key("1"), { lang: "de", text: "no", via: "gemini" });
+        expect(text(render(discordMessage("1", "ne")))).not.toContain("?");
     });
 });
 
@@ -998,5 +1028,85 @@ describe("globalAuto does not reach private conversations", () => {
 
         expect(sent).toContain("g1");
         expect(sent).not.toContain("d1");
+    });
+});
+
+describe("a short reply borrows its parent's language instead of being guessed at", () => {
+    /** A message that Discord marks as a reply to `parentId`. */
+    const replyTo = (id: string, content: string, parentId: string) => ({
+        ...discordMessage(id, content),
+        message_reference: { message_id: parentId }
+    });
+
+    /** The sourceLang the Google engine was asked to pin, for message `id`. */
+    function sentSourceLang(id: string): string | undefined {
+        for (const call of native.translateBatch.mock.calls) {
+            if (call[0] !== "google") continue;
+            const m = JSON.parse(call[2] as string).messages.find((m: any) => m.id === id);
+            if (m) return m.sourceLang;
+        }
+        return undefined;
+    }
+
+    beforeEach(() => {
+        settings.store.engine = "google";
+    });
+
+    it("pins the parent's language for a short reply — the 'ne' case", async () => {
+        // Live: "ne" under sl=auto is Hausa "it is"; the German parent makes it
+        // sl=de, which returns "no". The parent here is the actual message that
+        // preceded it in the channel this was captured from.
+        setTranslation(makeKey("p", "en"), {
+            lang: "de", text: "Are the group rooms air-conditioned at the university?",
+            via: "google", conf: 1
+        });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: replyTo("1", "ne", "p") });
+        await settle();
+
+        expect(sentSourceLang("1")).toBe("de");
+    });
+
+    it("leaves a LONG reply to auto-detect, so a different language is not forced into the parent's", async () => {
+        // The multilingual-channel guard: someone answering a German message in
+        // Spanish at length must still be detected as Spanish. Length is what
+        // makes auto-detection trustworthy, so length is where borrowing stops.
+        setTranslation(makeKey("p", "en"), { lang: "de", text: "x", via: "google", conf: 1 });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", {
+            message: replyTo("1", "pues la verdad es que no tengo ni idea", "p")
+        });
+        await settle();
+
+        expect(sentSourceLang("1")).toBeUndefined();
+    });
+
+    it("does not borrow from a parent that was itself only guessed at", async () => {
+        // Otherwise one bad detection propagates down an entire reply chain,
+        // and every message in it looks equally confident.
+        setTranslation(makeKey("p", "en"), {
+            lang: "ha", text: "it is", via: "google", conf: 0.217
+        });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: replyTo("1", "ne", "p") });
+        await settle();
+
+        expect(sentSourceLang("1")).toBeUndefined();
+    });
+
+    it("does not borrow when the message is not a reply at all", async () => {
+        setTranslation(makeKey("p", "en"), { lang: "de", text: "x", via: "google", conf: 1 });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "ne") });
+        await settle();
+
+        expect(sentSourceLang("1")).toBeUndefined();
+    });
+
+    it("does not borrow from a parent that has no translation yet", async () => {
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: replyTo("1", "ne", "nope") });
+        await settle();
+
+        expect(sentSourceLang("1")).toBeUndefined();
     });
 });
