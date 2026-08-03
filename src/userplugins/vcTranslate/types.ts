@@ -1,4 +1,4 @@
-export type EngineId = "google" | "claude";
+export type EngineId = "google" | "claude" | "gemini";
 
 export interface PendingMessage {
     id: string;
@@ -26,7 +26,8 @@ export type Result =
 
 export const ENGINE_CAPS: Record<EngineId, { supportsContext: boolean }> = {
     google: { supportsContext: false },
-    claude: { supportsContext: true }
+    claude: { supportsContext: true },
+    gemini: { supportsContext: true }
 };
 
 /**

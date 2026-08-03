@@ -250,6 +250,66 @@ describe("missing Anthropic API key", () => {
     });
 });
 
+describe("missing Gemini API key — mirrors the Claude behaviour", () => {
+    it("shows exactly one toast per session, not one per message", async () => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "";
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+
+        const missingKeyToasts = shownToasts.filter(t => /no Gemini API key/i.test(t.message));
+        expect(missingKeyToasts).toHaveLength(1);
+    });
+
+    it("says nothing when a key is present", async () => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(shownToasts.filter(t => /no Gemini API key/i.test(t.message))).toHaveLength(0);
+    });
+
+    it("routes translateBatch to google (not gemini) while the key is missing", async () => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "";
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+        expect(native.translateBatch.mock.calls[0][0]).toBe("google");
+    });
+
+    it("falls back to google and announces once when gemini rejects the key", async () => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-bad";
+        respondWith({ ok: false, error: "gemini: HTTP 401" });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        const rejectedToasts = shownToasts.filter(t => /Gemini rejected the API key/i.test(t.message));
+        expect(rejectedToasts).toHaveLength(1);
+
+        // The session is now pinned to Google: a second message must not
+        // dispatch through gemini again. Assert on the calls AFTER this point —
+        // the earlier call necessarily went to gemini, because it is the very
+        // request that discovered the key was bad.
+        const before = native.translateBatch.mock.calls.length;
+        respondWith({ ok: true, results: [] });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+
+        const laterCalls = native.translateBatch.mock.calls.slice(before);
+        expect(laterCalls.length).toBeGreaterThan(0);
+        expect(laterCalls.every(c => c[0] === "google")).toBe(true);
+    });
+});
+
 describe("settings wiring", () => {
     it("hides the Anthropic key field unless Claude is selected", () => {
         const hidden = (settings as any).def.anthropicApiKey.hidden as (this: unknown) => boolean;
@@ -259,6 +319,20 @@ describe("settings wiring", () => {
         expect(hidden.call(settings)).toBe(true);
 
         settings.store.engine = "claude";
+        expect(hidden.call(settings)).toBe(false);
+    });
+
+    it("hides the Gemini key field unless Gemini is selected", () => {
+        const hidden = (settings as any).def.geminiApiKey.hidden as (this: unknown) => boolean;
+        expect(typeof hidden).toBe("function");
+
+        settings.store.engine = "google";
+        expect(hidden.call(settings)).toBe(true);
+
+        settings.store.engine = "claude";
+        expect(hidden.call(settings)).toBe(true);
+
+        settings.store.engine = "gemini";
         expect(hidden.call(settings)).toBe(false);
     });
 

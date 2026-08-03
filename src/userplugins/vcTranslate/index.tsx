@@ -19,7 +19,7 @@ const logger = new Logger("VcTranslate");
 
 let batcher: Batcher | null = null;
 let pausedUntil = 0;
-let sessionFallback = false;   // set when Claude is unusable this session
+let sessionFallback = false;   // set when the configured LLM engine (Claude/Gemini) is unusable this session
 let announcedMissingKey = false;   // one toast per session, never per batch
 
 // Ids currently queued in the batcher or awaiting a translateBatch response.
@@ -33,18 +33,42 @@ const inFlight = new Set<string>();
 
 // Bumped on every rebuildBatcher(). Each onFlush closure captures the
 // generation it was created under; if a response lands after a later
-// rebuild has already happened (settings changed mid-flight, or a Claude
-// auth failure triggered the Google fallback), the closure's `engine` is
-// stale and writing under it would land under a key nobody reads (or
-// clobber the new engine's cache with a translation from the old one).
+// rebuild has already happened (settings changed mid-flight, or an LLM
+// engine's auth failure triggered the Google fallback), the closure's
+// `engine` is stale and writing under it would land under a key nobody reads
+// (or clobber the new engine's cache with a translation from the old one).
 let batcherGeneration = 0;
+
+/**
+ * The two key-gated engines, keyed by the setting that holds their API key
+ * and the label used in the "no key set" / "rejected the key" toasts. A
+ * lookup table rather than an `engine === "claude" || engine === "gemini"`
+ * conditional in every function below — this is the one place that has to
+ * know both engines exist, so a third key-gated engine only means one new
+ * entry here rather than a growing tangle of per-function branches.
+ */
+const LLM_ENGINES = {
+    claude: { keySetting: "anthropicApiKey", label: "Anthropic" },
+    gemini: { keySetting: "geminiApiKey", label: "Gemini" }
+} as const satisfies Record<string, { keySetting: "anthropicApiKey" | "geminiApiKey"; label: string }>;
+
+type LlmEngineId = keyof typeof LLM_ENGINES;
+
+function isLlmEngine(id: EngineId): id is LlmEngineId {
+    return id === "claude" || id === "gemini";
+}
+
+/** The API key configured for a key-gated engine. */
+function apiKeyFor(engine: LlmEngineId): string {
+    return settings.store[LLM_ENGINES[engine].keySetting];
+}
 
 /** The engine actually in use — may differ from the configured one. */
 function effectiveEngine(): EngineId {
     const configured = settings.store.engine as EngineId;
-    if (configured !== "claude") return configured;
-    if (sessionFallback || settings.store.anthropicApiKey.trim() === "") return "google";
-    return "claude";
+    if (!isLlmEngine(configured)) return configured;
+    if (sessionFallback || apiKeyFor(configured).trim() === "") return "google";
+    return configured;
 }
 
 function channelActive(channelId: string): boolean {
@@ -73,15 +97,16 @@ function fallBackToGoogle(reason: string) {
 }
 
 /**
- * Claude is selected but no key has been entered, so effectiveEngine() is
- * quietly using Google. Say so — once.
+ * An LLM engine (Claude or Gemini) is selected but no key has been entered,
+ * so effectiveEngine() is quietly using Google. Say so — once.
  *
  * Deliberately NOT routed through fallBackToGoogle(): that sets
  * `sessionFallback`, which pins the session to Google until Discord restarts.
- * That is right for a key Claude REJECTED (retrying a wrong key every batch is
- * noise) and wrong for a key that simply has not been pasted yet — pasting one
- * mid-session must start using Claude immediately. So this shares the
- * announce-once shape but keeps its own flag and does not touch the engine.
+ * That is right for a key the engine REJECTED (retrying a wrong key every
+ * batch is noise) and wrong for a key that simply has not been pasted yet —
+ * pasting one mid-session must start using that engine immediately. So this
+ * shares the announce-once shape but keeps its own flag and does not touch
+ * the engine.
  *
  * Called from the enqueue path rather than from effectiveEngine(), because
  * effectiveEngine() also runs during render and a toast must not be a render
@@ -89,13 +114,15 @@ function fallBackToGoogle(reason: string) {
  */
 function announceMissingKeyOnce() {
     if (announcedMissingKey) return;
-    if (settings.store.engine !== "claude") return;
-    if (settings.store.anthropicApiKey.trim() !== "") return;
+    const configured = settings.store.engine as EngineId;
+    if (!isLlmEngine(configured)) return;
+    if (apiKeyFor(configured).trim() !== "") return;
     announcedMissingKey = true;
+    const { label } = LLM_ENGINES[configured];
     Toasts.show({
         id: Toasts.genId(),
         type: Toasts.Type.FAILURE,
-        message: "VcTranslate: no Anthropic API key set. Using Google until you add one."
+        message: `VcTranslate: no ${label} API key set. Using Google until you add one.`
     });
 }
 
@@ -153,7 +180,7 @@ function rebuildBatcher() {
             try {
                 res = await Native.translateBatch(
                     engine,
-                    settings.store.anthropicApiKey,
+                    isLlmEngine(engine) ? apiKeyFor(engine) : "",
                     JSON.stringify(req)
                 );
             } catch {
@@ -177,7 +204,7 @@ function rebuildBatcher() {
 
             // THE race this guard exists for: rebuildBatcher() can run WHILE
             // the line above is awaiting the network round trip (a settings
-            // change, or a Claude 401 triggering fallBackToGoogle mid-flight).
+            // change, or an LLM engine's 401 triggering fallBackToGoogle mid-flight).
             // The check above this await only catches a flush that was already
             // stale before it started — it cannot catch one that went stale
             // during the await, because it isn't re-evaluated after control
@@ -199,8 +226,8 @@ function rebuildBatcher() {
                 // blipped — retrying it every batch would be pure noise, so
                 // fall back to Google for the rest of the session IN ADDITION
                 // to (not instead of) marking this batch failed.
-                if (engine === "claude" && /\b40[13]\b/.test(res.error)) {
-                    fallBackToGoogle("Claude rejected the API key");
+                if (isLlmEngine(engine) && /\b40[13]\b/.test(res.error)) {
+                    fallBackToGoogle(`${LLM_ENGINES[engine].label} rejected the API key`);
                 }
                 return;
             }

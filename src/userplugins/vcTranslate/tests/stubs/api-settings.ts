@@ -37,6 +37,14 @@ export function definePluginSettings(def: any, checks?: any) {
         },
         set(target, key: string, value: unknown) {
             target[key] = value;
+            // Vencord's SettingsStore writes first and then notifies
+            // listeners, which is what fires a setting's onChange (Reflect.set
+            // precedes notifyListeners in SettingsStore.ts). Without this the
+            // stub silently makes EVERY settings-change path untestable: the
+            // plugin rebuilds its batcher from onChange, so a test that flips
+            // `engine` would leave the previous engine captured in the flush
+            // closure and quietly exercise the wrong one.
+            def[key]?.onChange?.(value);
             return true;
         }
     });

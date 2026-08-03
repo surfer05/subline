@@ -30,7 +30,8 @@ export const settings = definePluginSettings({
         description: "Translation engine",
         options: [
             { label: "Google (free, no key, lower quality)", value: "google", default: true },
-            { label: "Claude Haiku (needs API key, best quality)", value: "claude" }
+            { label: "Claude Haiku (needs API key, best quality)", value: "claude" },
+            { label: "Gemini Flash (needs free API key, context-aware)", value: "gemini" }
         ],
         // engine is captured by value when the batcher is built, so a change
         // here must rebuild it (see settingsBridge.ts / index.tsx).
@@ -43,6 +44,15 @@ export const settings = definePluginSettings({
         placeholder: "sk-ant-...",
         // Pasting a key (or clearing one) must be picked up by effectiveEngine()
         // immediately, not on next reload.
+        onChange: notifySettingsChanged
+    },
+    geminiApiKey: {
+        type: OptionType.STRING,
+        description: "Gemini API key (only used when the Gemini engine is selected)",
+        default: "",
+        placeholder: "AIza...",
+        // Same immediacy requirement as anthropicApiKey — effectiveEngine()
+        // must see a pasted/cleared key right away, not on next reload.
         onChange: notifySettingsChanged
     },
     targetLang: {
@@ -81,6 +91,10 @@ export const settings = definePluginSettings({
         // src/utils/types.ts, and src/plugins/translate/settings.tsx for the
         // same pattern applied to the DeepL/Kagi credentials).
         hidden() { return this.store.engine !== "claude"; }
+    },
+    geminiApiKey: {
+        // Same mechanism, same reasoning, gated on the Gemini engine instead.
+        hidden() { return this.store.engine !== "gemini"; }
     }
 });
 

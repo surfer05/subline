@@ -1,6 +1,7 @@
 import type { IpcMainInvokeEvent } from "electron";
 
 import { translateWithClaude, TRUNCATED_ERROR } from "./engines/claude";
+import { translateWithGemini } from "./engines/gemini";
 import { translateWithGoogle } from "./engines/google";
 import { withRetry } from "./retry";
 import type { BatchRequest, EngineId, Result } from "./types";
@@ -71,10 +72,11 @@ export async function translateBatch(
 
     try {
         const results = await withRetry(
-            () =>
-                engine === "claude"
-                    ? translateWithClaude(req, apiKey)
-                    : translateWithGoogle(req),
+            () => {
+                if (engine === "claude") return translateWithClaude(req, apiKey);
+                if (engine === "gemini") return translateWithGemini(req, apiKey);
+                return translateWithGoogle(req);
+            },
             { retries: 1, delayMs: 1000, shouldRetry: isRetryable }
         );
         return { ok: true, results };

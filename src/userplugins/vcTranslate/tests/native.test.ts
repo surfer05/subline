@@ -14,14 +14,20 @@ vi.mock("../engines/claude", async importOriginal => ({
     ...(await importOriginal() as typeof import("../engines/claude")),
     translateWithClaude: vi.fn()
 }));
+vi.mock("../engines/gemini", async importOriginal => ({
+    ...(await importOriginal() as typeof import("../engines/gemini")),
+    translateWithGemini: vi.fn()
+}));
 
 import { translateWithClaude, TRUNCATED_ERROR } from "../engines/claude";
+import { translateWithGemini } from "../engines/gemini";
 import { translateWithGoogle } from "../engines/google";
 import { translateBatch } from "../native";
 import type { BatchRequest, Result } from "../types";
 
 const google = vi.mocked(translateWithGoogle);
 const claude = vi.mocked(translateWithClaude);
+const gemini = vi.mocked(translateWithGemini);
 
 const req: BatchRequest = {
     messages: [{ id: "1", author: "ana", text: "hola" }],
@@ -38,7 +44,7 @@ const EV = {} as never;
  * Drive translateBatch to completion under fake timers so the 1000ms retry
  * backoff does not make every retry test take a real second.
  */
-async function run(engine: "google" | "claude", apiKey: string, json = reqJson) {
+async function run(engine: "google" | "claude" | "gemini", apiKey: string, json = reqJson) {
     const p = translateBatch(EV, engine, apiKey, json);
     const settled = Promise.allSettled([p]);
     await vi.runAllTimersAsync();
@@ -51,6 +57,7 @@ beforeEach(() => {
     vi.useFakeTimers();
     google.mockReset();
     claude.mockReset();
+    gemini.mockReset();
 });
 
 afterEach(() => {
@@ -92,6 +99,18 @@ describe("translateBatch — success", () => {
         expect(claude.mock.calls[0][1]).toBe("sk-test");
         expect(google).not.toHaveBeenCalled();
     });
+
+    it("dispatches to the gemini engine with the api key when selected", async () => {
+        gemini.mockResolvedValue([{ id: "1", skip: true }]);
+
+        const res = await run("gemini", "AIza-test");
+
+        expect(res).toEqual({ ok: true, results: [{ id: "1", skip: true }] });
+        expect(gemini).toHaveBeenCalledTimes(1);
+        expect(gemini.mock.calls[0][1]).toBe("AIza-test");
+        expect(google).not.toHaveBeenCalled();
+        expect(claude).not.toHaveBeenCalled();
+    });
 });
 
 describe("translateBatch — isRetryable classifier boundaries", () => {
@@ -119,6 +138,20 @@ describe("translateBatch — isRetryable classifier boundaries", () => {
         claude.mockRejectedValue(new Error("claude: HTTP 429"));
         await run("claude", "k");
         expect(claude).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not retry a gemini 401 — the same wrong key fails identically", async () => {
+        gemini.mockRejectedValue(new Error("gemini: HTTP 401"));
+        const res = await run("gemini", "bad");
+        expect(gemini).toHaveBeenCalledTimes(1);
+        expect(res).toEqual({ ok: false, error: "gemini: HTTP 401", retryAfterMs: undefined });
+    });
+
+    it("retries a gemini 429", async () => {
+        gemini.mockRejectedValue(new Error("gemini: HTTP 429"));
+        const res = await run("gemini", "k");
+        expect(gemini).toHaveBeenCalledTimes(2);
+        expect(res).toEqual({ ok: false, error: "gemini: HTTP 429", retryAfterMs: 30_000 });
     });
 
     it("retries a 500", async () => {
@@ -220,6 +253,16 @@ describe("translateBatch — api key safety", () => {
         claude.mockRejectedValue(new Error(`claude: HTTP 401 for key ${key}`));
 
         const res = await run("claude", key);
+
+        expect(res.ok).toBe(false);
+        expect((res as { error: string }).error).not.toContain(key);
+    });
+
+    it("never returns the gemini api key in the error string", async () => {
+        const key = "AIza-secret-value-do-not-leak";
+        gemini.mockRejectedValue(new Error(`gemini: HTTP 401 for key ${key}`));
+
+        const res = await run("gemini", key);
 
         expect(res.ok).toBe(false);
         expect((res as { error: string }).error).not.toContain(key);
