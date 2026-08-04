@@ -503,10 +503,7 @@ function enqueue(pending: PendingMessage, isOwn: boolean) {
     // is a pure local function call that returns the same answer for free, and
     // not writing keeps a local guess out of the persisted cache, where a
     // heuristic mistake would otherwise outlive the session.
-    if (
-        shouldSkip(pending.text, isOwn)
-        || isConfidentlyTargetLanguage(pending.text, settings.store.targetLang)
-    ) {
+    if (isLocallySkipped(pending.text, isOwn)) {
         batcher?.recordContext(pending);
         return;
     }
@@ -517,6 +514,19 @@ function enqueue(pending: PendingMessage, isOwn: boolean) {
     announceMissingKeyOnce();
     inFlight.add(pending.id);
     batcher?.add(pending);
+}
+
+/**
+ * Decided locally, for free, with no engine involved: either there is nothing
+ * translatable left in the text, or it is already in the target language.
+ *
+ * Shared by enqueue() and catchUp() ON PURPOSE. catch-up has to predict the
+ * same answer enqueue() will give, so that a message costing no request also
+ * costs no catch-up budget — see the budget comment in catchUp().
+ */
+function isLocallySkipped(text: string, isOwn: boolean): boolean {
+    return shouldSkip(text, isOwn)
+        || isConfidentlyTargetLanguage(text, settings.store.targetLang);
 }
 
 /**
@@ -695,7 +705,18 @@ function catchUp(channelId: string, becomingFocused = false) {
     // Select newest-first so the messages nearest the viewport win the budget,
     // then enqueue oldest-first.
     const candidates: any[] = [];
-    for (let i = all.length - 1; i >= 0 && candidates.length < count; i--) {
+    // `count` is a budget of REQUESTS, not of messages looked at.
+    //
+    // A locally-skipped message deliberately writes nothing to the store (see
+    // enqueue), so it never becomes "resolved" and turns up again on every
+    // single catch-up. Counting those against the budget meant that in an
+    // English-majority channel the newest ~20 English lines consumed catch-up
+    // entirely and the foreign message further up — the only one that needed
+    // translating, and the whole reason the plugin exists — was never reached.
+    // Scrolling back could not fix it either, because each re-run spent the
+    // budget on the same newest messages again.
+    let budget = 0;
+    for (let i = all.length - 1; i >= 0 && budget < count; i--) {
         const message = all[i];
 
         // A message already queued or awaiting a response is a cache miss
@@ -725,6 +746,10 @@ function catchUp(channelId: string, becomingFocused = false) {
         if (entry && !("failed" in entry) && !("deferred" in entry)) continue;
 
         candidates.push(message);
+        // Still enqueued above (a skipped message is real conversation and
+        // belongs in the context window), just not charged for: enqueue() will
+        // resolve it locally without ever reaching an engine.
+        if (!isLocallySkipped(message.content ?? "", message.author?.id === me)) budget++;
     }
     // Back to chronological order before enqueuing, so the batcher's rolling
     // context window sees the conversation the right way round.

@@ -1031,6 +1031,55 @@ describe("globalAuto does not reach private conversations", () => {
     });
 });
 
+describe("catch-up spends its budget on requests, not on messages it will skip locally", () => {
+    /** Confidently English by detectLang's rules, so it costs no request. */
+    const english = (id: string) =>
+        discordMessage(id, "i think that we should go to the server now");
+
+    it("reaches an older foreign message past a wall of English chatter", async () => {
+        // THE regression, reported from a live English-majority channel: French
+        // messages from the morning were still untranslated in the evening, and
+        // scrolling back never fixed them.
+        //
+        // catchUpCount is 20. A locally-skipped message writes NOTHING to the
+        // store (deliberately — see enqueue), so it is never "resolved", and
+        // counting it against the budget means 20 English lines exhaust catch-up
+        // before it ever reaches the message the user actually needed.
+        settings.store.engine = "google";
+        settings.store.catchUpCount = 20;
+
+        const backlog = [
+            discordMessage("fr", "je vais m'en aller incessamment sous peu"),
+            ...Array.from({ length: 25 }, (_, i) => english(`en${i}`))
+        ];
+        stubMessages.set(CHANNEL, backlog);
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+
+        const sent = native.translateBatch.mock.calls
+            .flatMap(c => JSON.parse(c[2] as string).messages.map((m: any) => m.id));
+        expect(sent).toContain("fr");
+    });
+
+    it("still bounds how many REQUESTS a single catch-up can spend", async () => {
+        // The budget must still exist — the fix is what it counts, not whether
+        // it counts. 25 foreign messages, budget 20, so 5 must be left behind.
+        settings.store.engine = "google";
+        settings.store.catchUpCount = 20;
+
+        stubMessages.set(CHANNEL, Array.from({ length: 25 },
+            (_, i) => discordMessage(`f${i}`, "je vais m'en aller incessamment sous peu")));
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+
+        const sent = native.translateBatch.mock.calls
+            .flatMap(c => JSON.parse(c[2] as string).messages.map((m: any) => m.id));
+        expect(sent).toHaveLength(20);
+    });
+});
+
 describe("a short reply borrows its parent's language instead of being guessed at", () => {
     /** A message that Discord marks as a reply to `parentId`. */
     const replyTo = (id: string, content: string, parentId: string) => ({
