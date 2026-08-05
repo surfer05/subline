@@ -927,6 +927,12 @@ function catchUp(channelId: string, becomingFocused = false) {
         // actually means "Google gave up"; only an LLM's own skip closes a
         // message. Each check folds in its own in-flight test, since a message
         // can legitimately be in flight on one tier and idle on the other.
+        //
+        // needsQuality() ALSO folds in the one-request-per-message ledger, and
+        // this loop is why: catch-up runs on every channel open and on every
+        // scroll-up (LOAD_MESSAGES_SUCCESS), so without it a quality failure —
+        // which writes nothing, by design — would be re-requested here for the
+        // rest of the session. See `qualityAttempted`.
         const fast = !inFlightFast.has(message.id) && needsFast(key);
         const quality = qualityBatcher !== null
             && !inFlightQuality.has(message.id)
