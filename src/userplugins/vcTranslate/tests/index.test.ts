@@ -14,8 +14,10 @@ const native = vi.hoisted(() => {
 import plugin from "../index";
 import { rateGateSettings, REFILL_MS } from "../rateGate";
 import { toggleChannel } from "../channels";
+import { cooldownUntil } from "../cooldownStore";
 import settings from "../settings";
 import { clearStore, getTranslation, makeKey, setTranslation } from "../store";
+import { QUALITY_DEBOUNCE_MS } from "../types";
 import type { NativeResponse } from "../native";
 import { __resetSettings } from "./stubs/api-settings";
 import { __reset as resetDataStore } from "./stubs/api-datastore";
@@ -325,46 +327,42 @@ describe("a rate-limited LLM falls back to Google rather than showing nothing", 
             .toEqual({ lang: "es", text: "from gemini", via: "gemini" });
     });
 
-    it("ignores a sub-second retry hint that would put us straight back on the wall", async () => {
+    it("floors a sub-second retry hint at the rate gate's refill interval, not the API's literal hint", async () => {
         // The numbers here are the ones a REAL Gemini 429 returned: retry in
         // 551ms, limit 20/min. Obeying 551ms literally means waking up, being
         // granted the single slot that just aged out of the rolling window,
         // and being rejected again on the very next batch — the 429 treadmill
         // this phase exists to stop. The cooldown is floored at the rate
         // gate's refill interval instead.
+        //
+        // This used to be observed indirectly, through whether a SECOND
+        // flush landed inside the cooldown window. That is no longer
+        // reachable: at QUALITY_DEBOUNCE_MS (20s) the next flush is never
+        // sooner than 20s, while the floor being tested here is only 4s wide.
+        // So this asserts the cooldown mark directly instead.
         useGemini();
         respondByEngine({
             gemini: {
                 ok: false, error: "gemini: HTTP 429",
                 retryAfterMs: 551, quotaLimitPerMinute: 20
             },
-            google: googleTranslated("2")
+            google: googleTranslated("1")
         });
 
-        // One LLM debounce window (3s) per step, NOT settle()'s 5s: the whole
-        // point is to land the second flush inside a cooldown that is longer
-        // than 551ms but shorter than 5s.
-        const tick = async () => {
-            await vi.advanceTimersByTimeAsync(3_000);
-            for (let i = 0; i < 20; i++) await Promise.resolve();
-        };
-
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
-        await tick();
+        await vi.advanceTimersByTimeAsync(QUALITY_DEBOUNCE_MS);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
         // The 429 retuned the gate to 75% of 20/min, i.e. one token per 4s —
         // which is what the floor is then read off.
         expect(rateGateSettings().refillMs).toBe(4_000);
-        const before = native.translateBatch.mock.calls.length;
 
-        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
-        await tick();
-
-        // ~6s in: well past the 551ms the API asked for, still inside the 4s
-        // floor. The gate has refilled, so a token IS available — the cooldown
-        // is the only thing that can be keeping this off Gemini.
-        const laterCalls = native.translateBatch.mock.calls.slice(before).map(c => c[0]);
-        expect(laterCalls).not.toContain("gemini");
-        expect(getTranslation(makeKey("2", "en"))).toMatchObject({ via: "google" });
+        // Floored at the gate's 4s refill interval, NOT the 551ms the API
+        // asked for — a small tolerance rather than an exact equality, since
+        // this is real (fake) elapsed time, not a single synchronous call.
+        const until = cooldownUntil("gemini");
+        expect(until).toBeGreaterThan(Date.now() + 3_500);
+        expect(until).toBeLessThanOrEqual(Date.now() + 4_500);
     });
 
     it("says so once per session, not once per batch", async () => {
@@ -839,6 +837,34 @@ describe("settings wiring", () => {
         __resetSettings();
         LocaleStore.locale = "ja";
         expect(settings.store.targetLang).toBe("ja");
+    });
+});
+
+describe("a settings change mid-debounce does not drop the message", () => {
+    it("still translates a message that was queued but not yet flushed when settings change", async () => {
+        // Regression: rebuildBatcher() hands orphaned (still-queued, not yet
+        // flushed) messages back through enqueue() so the fast/quality split
+        // can decide where they belong. But enqueue() early-returns for any
+        // id already marked in-flight — and an orphaned message IS still
+        // marked in-flight from its first pass, since its batch never
+        // flushed. Left unhandled, that silently drops every message caught
+        // mid-debounce by a settings change: no entry, no marker, no retry.
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+
+        // Still inside the fast tier's 700ms window — nothing has flushed.
+        await vi.advanceTimersByTimeAsync(200);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        expect(native.translateBatch).not.toHaveBeenCalled();
+
+        // Any setting with an onChange rebuilds both batchers and drains
+        // whatever is still pending — targetLang here, arbitrarily.
+        settings.store.targetLang = "de";
+
+        await settle();
+
+        const sent = native.translateBatch.mock.calls
+            .flatMap(c => JSON.parse(c[2] as string).messages.map((m: any) => m.id));
+        expect(sent).toContain("1");
     });
 });
 

@@ -513,6 +513,11 @@ function rebuildBatcher() {
         })
         : null;
 
+    // Orphans are still marked in flight from their first pass. enqueue()
+    // early-returns on that, which would silently drop every message caught
+    // mid-debounce by a settings change — no entry, no marker, no retry.
+    // Releasing the marks first is what makes the re-queue actually re-queue.
+    for (const m of orphaned) inFlight.delete(m.id);
     // Re-queue under the new settings rather than marking them failed —
     // nothing about these messages failed, the settings changed under them.
     for (const m of orphaned) enqueue(m, false);
