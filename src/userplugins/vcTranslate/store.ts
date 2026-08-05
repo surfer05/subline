@@ -103,9 +103,20 @@ function isStoredTranslation(value: unknown): value is StoredTranslation {
     if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
     const o = value as Record<string, unknown>;
 
-    // The three marker variants carry exactly one key and nothing else.
-    if (o.failed === true || o.skipped === true || o.deferred === true) {
+    // `failed` and `deferred` carry exactly one key and nothing else.
+    if (o.failed === true || o.deferred === true) {
         return Object.keys(o).length === 1;
+    }
+
+    // `skipped` carries one key on its own, or two when it also records which
+    // engine's skip closed the message — see the `via` comment on
+    // StoredTranslation. A stray extra key, or a `via` that fails the same
+    // isKnownEngine check a real translation's `via` does, is malformed and
+    // dropped rather than trusted.
+    if (o.skipped === true) {
+        const keys = Object.keys(o);
+        if (keys.length === 1) return true;
+        return keys.length === 2 && "via" in o && isKnownEngine(o.via);
     }
 
     return typeof o.lang === "string"

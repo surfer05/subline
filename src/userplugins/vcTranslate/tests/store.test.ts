@@ -165,6 +165,21 @@ describe("store", () => {
         expect(getTranslation(makeKey("2", "en"))).toEqual({ skipped: true });
     });
 
+    it("survives a restart with a skipped marker's provenance intact", async () => {
+        // The whole point of `via` on `skipped`: an LLM's skip must stay
+        // authoritative across a restart, not just for the rest of the
+        // session. If this variant were dropped on reload, the message would
+        // look like a cache miss again and re-enqueue into the fast tier,
+        // exactly the churn the field exists to prevent.
+        setTranslation(makeKey("1", "en"), { skipped: true, via: "gemini" });
+        await persistenceSettled();
+
+        clearStore();
+        await loadPersistedTranslations();
+
+        expect(getTranslation(makeKey("1", "en"))).toEqual({ skipped: true, via: "gemini" });
+    });
+
     it("does not resurrect a translation that was invalidated by an edit", async () => {
         setTranslation(makeKey("1", "en"), { lang: "es", text: "hello", via: "gemini" });
         await persistenceSettled();
@@ -214,6 +229,21 @@ describe("store", () => {
 
         expect(getTranslation("stale en")).toBeUndefined();
         expect(getTranslation("current en")).toBeDefined();
+    });
+
+    it("drops a skipped marker whose engine id is no longer known", async () => {
+        // Same reasoning as the real-translation case above, applied to
+        // `skipped`'s optional `via`: an unknown engine id must not be
+        // trusted just because the marker itself is otherwise well-formed.
+        await DataStore.set(PERSIST_KEY, [
+            ["stale en", { skipped: true, via: "not-an-engine" }],
+            ["current en", { skipped: true, via: "gemini" }]
+        ]);
+
+        await loadPersistedTranslations();
+
+        expect(getTranslation("stale en")).toBeUndefined();
+        expect(getTranslation("current en")).toEqual({ skipped: true, via: "gemini" });
     });
 
     it("does not throw or wipe the session when the stored value is not an array", async () => {
