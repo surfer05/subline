@@ -355,10 +355,31 @@ async function runTier(
     try {
         // Superseded by a later rebuild (settings changed, or a fallback
         // fired) before this flush even started — this closure's `engine` no
-        // longer matches reality, so just drop it rather than write under a
-        // stale key. The finally below still releases the ids: a batch
+        // longer matches reality, so drop it rather than send under a stale
+        // configuration. The finally below still releases the ids: a batch
         // stranded here that stayed "in flight" forever could never be
         // retried by catch-up.
+        //
+        // DEFENCE IN DEPTH, AND CURRENTLY UNREACHABLE — measured, not assumed.
+        // Instrumented and run against the whole suite plus five hand-built
+        // staleness scenarios (settings change mid-debounce, two channels at
+        // once, a 401 fallback rebuilding while a fast batch sits queued,
+        // stop()/start(), and a rebuild during a queued quality batch): this
+        // branch fired ZERO times, while the post-await guard below fired as
+        // expected. The reason is an invariant in rebuildBatcher(): every
+        // `batcherGeneration++` is bracketed by drainPending() — which clears
+        // each batcher's armed timer and empties its queue — and dispose(),
+        // with no await anywhere between, so no old-generation closure can
+        // still be INVOKED afterwards. Only a flush already past this line and
+        // awaiting the network can be superseded.
+        //
+        // KEEP IT ANYWAY. It costs one integer compare, and it becomes live
+        // and load-bearing the moment anyone adds an await inside
+        // rebuildBatcher, stops draining, or schedules onFlush through a
+        // microtask instead of calling it synchronously. Because it is
+        // unreachable, no behavioural test can pin it (removing it changes
+        // nothing observable); the invariant that keeps it unreachable is
+        // pinned instead, by "leaves no stale timer behind" in index.test.ts.
         if (myGeneration !== batcherGeneration) return;
 
         // Cooling down after a 429: do not spend a request to be told so

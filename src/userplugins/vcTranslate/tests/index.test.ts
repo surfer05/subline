@@ -973,6 +973,34 @@ describe("a settings change mid-debounce does not drop the message", () => {
         expect(sent).toContain("1");
     });
 
+    it("leaves no stale timer behind — the queued message is sent ONCE, under the NEW settings", async () => {
+        // The invariant that keeps runTier's PRE-await generation guard
+        // unreachable, and therefore the tripwire that fires first if it ever
+        // stops holding. rebuildBatcher() drains both batchers (which clears
+        // their armed timers AND empties their queues) and then disposes them,
+        // with no await between any of that and the generation bump — so an
+        // old-generation onFlush closure can never be INVOKED after the bump.
+        // Only a flush already awaiting the network can be superseded, and
+        // catching that is the post-await guard's job (next test).
+        //
+        // If a future change lets an old batcher keep an armed timer across a
+        // rebuild, this fails two ways at once: the message goes out twice,
+        // and the stale copy goes out under the OLD targetLang. Both are
+        // asserted, because "was it sent at all?" cannot see either.
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await vi.advanceTimersByTimeAsync(200);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        expect(native.translateBatch).not.toHaveBeenCalled();
+
+        settings.store.targetLang = "de";
+        await settle();
+
+        const forMessage1 = native.translateBatch.mock.calls
+            .filter(c => JSON.parse(c[2] as string).messages.some((m: any) => m.id === "1"));
+        expect(forMessage1).toHaveLength(1);
+        expect(JSON.parse(forMessage1[0][2] as string).targetLang).toBe("de");
+    });
+
     it("drops a response whose flush was superseded by a rebuild MID-REQUEST", async () => {
         // The generation guard that runs AFTER the network await, as distinct
         // from the one before it. A rebuild that happens WHILE the request is
