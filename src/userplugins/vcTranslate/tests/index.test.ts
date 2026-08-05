@@ -12,7 +12,7 @@ const native = vi.hoisted(() => {
 });
 
 import plugin from "../index";
-import { rateGateSettings, REFILL_MS } from "../rateGate";
+import { BURST_CAPACITY, LEARNED_QUOTA_KEY, rateGateSettings, REFILL_MS } from "../rateGate";
 import { toggleChannel } from "../channels";
 import { cooldownUntil } from "../cooldownStore";
 import settings from "../settings";
@@ -20,7 +20,7 @@ import { clearStore, getTranslation, makeKey, setTranslation } from "../store";
 import { QUALITY_DEBOUNCE_MS } from "../types";
 import type { NativeResponse } from "../native";
 import { __resetSettings } from "./stubs/api-settings";
-import { __reset as resetDataStore } from "./stubs/api-datastore";
+import * as DataStore from "./stubs/api-datastore";
 import {
     __resetWebpackCommon, __stubMarkAsDm, __stubSetSelectedChannel,
     FluxDispatcher, LocaleStore, shownToasts, stubMessages
@@ -85,7 +85,7 @@ beforeEach(async () => {
     clearStore();
     __resetSettings();
     __resetWebpackCommon();
-    resetDataStore();
+    DataStore.__reset();
 
     settings.store.globalAuto = true;
     settings.store.targetLang = "en";
@@ -586,6 +586,126 @@ describe("the rate gate — smooths a catch-up storm, never slows live chat", ()
         // independently flushes its own single batch now (dual dispatch),
         // which is not what this test is about.
         expect(native.translateBatch.mock.calls.filter(c => c[0] === "claude")).toHaveLength(1);
+    });
+});
+
+/**
+ * The restart defect. The gate learns the real quota from a 429 body, and used
+ * to throw that away on every stop() — so each Discord launch reopened at the
+ * untaught defaults, spent requests at a rate this project had already been
+ * proven not to allow, and bought the same 429 (and the same toast) again,
+ * seconds after starting. "I restarted Discord and instantly hit the rate
+ * limit" is that, verbatim.
+ */
+describe("the learned quota survives a restart", () => {
+    function useGemini() {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+    }
+
+    /** A 429 that states the quota it just enforced, as a real Gemini one does. */
+    function rateLimitedReporting(limitPerMinute: number) {
+        native.translateBatch.mockImplementation(async (engine: string) => (
+            engine === "gemini"
+                ? {
+                    ok: false, error: "gemini: HTTP 429",
+                    retryAfterMs: 2_000, quotaLimitPerMinute: limitPerMinute
+                }
+                : { ok: true, results: [] }
+        ));
+    }
+
+    it("carries a learned quota through stop()/start() instead of relearning it with a fresh 429", async () => {
+        useGemini();
+        rateLimitedReporting(4);
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        // floor(4 * 0.5) = 2/minute, i.e. one token per 30s.
+        expect(rateGateSettings().refillMs).toBe(30_000);
+
+        // A Discord restart is exactly this pair of calls.
+        plugin.stop!();
+        // The in-memory lesson IS dropped — proving the assertion after start()
+        // is reading a value that came back off disk, not one that was simply
+        // never cleared.
+        expect(rateGateSettings().refillMs).toBe(REFILL_MS);
+
+        await plugin.start!();
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        // ...and the new session opens at the rate this project's quota
+        // actually allows, rather than at the untaught guess.
+        expect(rateGateSettings()).toEqual({ capacity: 2, refillMs: 30_000 });
+    });
+
+    it("start() does not return until the learned quota is in force, so nothing can flush ahead of it", async () => {
+        plugin.stop!();
+        native.translateBatch.mockClear();
+
+        // Hold the read open. Everything that could send a quality batch — the
+        // batchers, the Flux subscriptions, the initial catch-up — is built
+        // AFTER this await in start(), so "start() is still blocked" is the
+        // same statement as "no quality batch can have gone out yet".
+        let releaseRead!: () => void;
+        const readBlocked = new Promise<void>(resolve => { releaseRead = resolve; });
+        const get = vi.spyOn(DataStore, "get").mockImplementation(async (key: string) => {
+            if (key !== LEARNED_QUOTA_KEY) return undefined;
+            await readBlocked;
+            return 4 as any;
+        });
+
+        let started = false;
+        const starting = plugin.start!().then(() => { started = true; });
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        expect(started).toBe(false);
+        expect(native.translateBatch).not.toHaveBeenCalled();
+
+        releaseRead();
+        await starting;
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        expect(started).toBe(true);
+        expect(rateGateSettings().refillMs).toBe(30_000);
+        get.mockRestore();
+    });
+
+    it("sends the session's FIRST quality request already at the learned rate", async () => {
+        plugin.stop!();
+        await DataStore.set(LEARNED_QUOTA_KEY, 4);
+        useGemini();
+
+        // Sampled inside the mock, i.e. at the instant the request leaves. A
+        // load that landed after the flush would still leave the right value
+        // readable at the end of the test, so reading it back afterwards would
+        // assert nothing about ordering; this does.
+        const gateWhenSent: Array<{ capacity: number; refillMs: number; }> = [];
+        native.translateBatch.mockImplementation(async (engine: string) => {
+            if (engine === "gemini") gateWhenSent.push(rateGateSettings());
+            return { ok: true, results: [] };
+        });
+
+        await plugin.start!();
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(gateWhenSent.length).toBeGreaterThan(0);
+        expect(gateWhenSent[0]).toEqual({ capacity: 2, refillMs: 30_000 });
+    });
+
+    it("starts at the untaught defaults when nothing has ever been learned", async () => {
+        // The first-ever-run path, and the control for the three above: with an
+        // empty store the same start() must land on the compiled-in guess.
+        plugin.stop!();
+        DataStore.__reset();
+
+        await plugin.start!();
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        expect(rateGateSettings()).toEqual({ capacity: BURST_CAPACITY, refillMs: REFILL_MS });
     });
 });
 

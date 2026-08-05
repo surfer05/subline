@@ -1,3 +1,5 @@
+import * as DataStore from "@api/DataStore";
+
 /**
  * Token-bucket gate for the key-gated LLM engines (Claude, Gemini). `runTier`
  * in index.tsx awaits `acquireSlot()` before calling `Native.translateBatch`
@@ -71,6 +73,26 @@ export const REFILL_MS = 4_000;
  */
 export const SAFETY_FACTOR = 0.5;
 
+/**
+ * The quota the API last told us about, persisted.
+ *
+ * WHY IT HAS TO SURVIVE A RESTART — the same argument cooldownStore.ts makes
+ * for its cooldown mark, for the same reason. Without this the lesson lives
+ * only in module state, so every Discord launch reopens the gate at the
+ * untaught defaults above, spends requests at a rate this project's quota has
+ * already been proven not to allow, and buys the 429 (and the toast) all over
+ * again — on every single launch, learning nothing it did not already know.
+ * The reported quota is a fact about the API KEY and project, not about a
+ * plugin session, so a session boundary is not a reason to forget it.
+ *
+ * The REPORTED limit is stored, not the derived capacity/refillMs. It is the
+ * only part that is actually a fact; everything else is this file's arithmetic
+ * over it, so a later change to SAFETY_FACTOR (or to how the burst is sized)
+ * applies to an already-learned quota on the next start instead of being
+ * frozen into whatever the numbers were the day the 429 arrived.
+ */
+export const LEARNED_QUOTA_KEY = "VcTranslate_learnedQuota";
+
 // The LIVE values. Everything below reads these, never the constants above,
 // so a retune takes effect without restarting anything.
 let capacity = BURST_CAPACITY;
@@ -142,21 +164,26 @@ export function acquireSlot(): Promise<void> {
 }
 
 /**
- * Retune the gate from a quota the API actually reported, e.g. the "limit: 20"
- * in a real Gemini 429 body (see rateHint.ts). A parsed limit is treated as
- * AUTHORITATIVE over BURST_CAPACITY/REFILL_MS: those are a guess about someone
- * else's project, this is a statement about ours.
+ * Move the LIVE gate onto a quota the API actually reported, e.g. the
+ * "limit: 20" in a real Gemini 429 body (see rateHint.ts). A parsed limit is
+ * treated as AUTHORITATIVE over BURST_CAPACITY/REFILL_MS: those are a guess
+ * about someone else's project, this is a statement about ours.
  *
  * Only the sustained rate is derived; the burst is left at BURST_CAPACITY
  * unless the target rate is smaller than that, because the burst exists to
  * keep ordinary chat off the gate entirely and bursting above the per-minute
  * ceiling is exactly what a tiny quota cannot afford.
  *
- * Returns true when something actually changed, so the caller can log/announce
- * a real retune without doing so on every repeated 429 that reports the same
- * number.
+ * Returns true when something actually changed. This is also the SOLE validator
+ * of the number: a non-finite or non-positive limit is rejected here, so a
+ * garbage value out of a 429 body and a garbage value out of IndexedDB are
+ * refused by the same code path rather than by two guards that could drift.
+ *
+ * Private because it does not persist. Both callers below are the two ways a
+ * limit legitimately arrives: freshly reported (persist it) and read back off
+ * disk (do not write it straight back).
  */
-export function tuneRateGateToObservedLimit(limitPerMinute: number): boolean {
+function applyObservedLimit(limitPerMinute: number): boolean {
     if (!Number.isFinite(limitPerMinute) || limitPerMinute <= 0) return false;
 
     // At least 1/minute: a quota so small that SAFETY_FACTOR of it rounds to
@@ -175,6 +202,58 @@ export function tuneRateGateToObservedLimit(limitPerMinute: number): boolean {
     return true;
 }
 
+/**
+ * Retune from a freshly reported quota AND remember it, so the next session
+ * does not have to buy another 429 to learn the same thing. Called from
+ * enterCooldown() in index.tsx. Returns true when the tuning actually moved,
+ * so the caller can log/announce a real retune without doing so on every
+ * repeated 429 that reports the same number.
+ */
+export function tuneRateGateToObservedLimit(limitPerMinute: number): boolean {
+    if (!applyObservedLimit(limitPerMinute)) return false;
+
+    // Persisted only when the tuning ACTUALLY moved — a 429 storm reports the
+    // same quota over and over, and a write per 429 would be a write per
+    // rejected batch for no new information.
+    //
+    // Deliberately not awaited, exactly as cooldownStore.setCooldown() is not:
+    // a flush must never block on IndexedDB, and losing the write costs one
+    // relearned 429 next launch — precisely today's behaviour, so there is no
+    // failure mode here worse than not having persisted at all.
+    void DataStore.set(LEARNED_QUOTA_KEY, limitPerMinute).catch(() => {
+        // Best effort. See above.
+    });
+    return true;
+}
+
+/**
+ * Apply the persisted quota, if there is one. Called (and awaited) from the
+ * plugin's `start()` BEFORE any batcher exists, so the first quality batch of
+ * the session already goes out under the learned rate rather than under the
+ * untaught defaults.
+ *
+ * Anything malformed is discarded rather than thrown — same reasoning as
+ * loadCooldowns(): a corrupt entry must not stop the plugin starting, and
+ * degrading to the (deliberately conservative) defaults costs at most a
+ * relearned 429, whereas refusing to start costs the user everything. A read
+ * that REJECTS is the same story, and start() awaits this, so letting the
+ * rejection out would cost the user the whole plugin to save one request.
+ */
+export async function loadRateGateTuning(): Promise<void> {
+    let stored: unknown;
+    try {
+        stored = await DataStore.get<unknown>(LEARNED_QUOTA_KEY);
+    } catch {
+        return;
+    }
+    // Narrows `unknown`; the VALUE guard is applyObservedLimit()'s, which is
+    // why a stored 0, -1, NaN or Infinity falls back to the defaults too
+    // rather than being trusted for having the right type. Nothing is coerced:
+    // a stored "20" is a corrupt entry, not a quota.
+    if (typeof stored !== "number") return;
+    applyObservedLimit(stored);
+}
+
 /** The live gate settings. Exists so tests (and only tests) can observe a retune. */
 export function rateGateSettings(): { capacity: number; refillMs: number; } {
     return { capacity, refillMs };
@@ -185,10 +264,12 @@ export function rateGateSettings(): { capacity: number; refillMs: number; } {
  * module state (the in-flight sets, the quality-attempt ledger,
  * batcherGeneration, sessionFallback, cooldowns).
  *
- * This also discards anything learned from tuneRateGateToObservedLimit(): the
- * user may have changed key, project or plan between sessions, and the cost of
- * re-learning is one 429 — which costs the reader nothing, since the fast
- * tier's Google line for those messages is already on screen.
+ * This drops the IN-MEMORY result of tuneRateGateToObservedLimit() back to the
+ * untaught defaults. The PERSISTED quota deliberately survives: it is a fact
+ * about the API key and project, not about a plugin session, and start() reads
+ * it back before anything can flush (see loadRateGateTuning()). Re-learning it
+ * instead would mean buying a 429 on every launch, which is the defect this
+ * key exists to close.
  *
  * Resolves every currently-queued waiter IMMEDIATELY rather than leaving them
  * to time out naturally on the next refill tick (up to REFILL_MS away). A

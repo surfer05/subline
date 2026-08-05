@@ -1,15 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-    acquireSlot, BURST_CAPACITY, rateGateSettings, REFILL_MS, resetRateGate, SAFETY_FACTOR,
-    tuneRateGateToObservedLimit
+    acquireSlot, BURST_CAPACITY, LEARNED_QUOTA_KEY, loadRateGateTuning, rateGateSettings, REFILL_MS,
+    resetRateGate, SAFETY_FACTOR, tuneRateGateToObservedLimit
 } from "../rateGate";
+import * as DataStore from "./stubs/api-datastore";
 
 beforeEach(() => {
     vi.useFakeTimers();
+    DataStore.__reset();
     resetRateGate();
 });
 
 afterEach(() => {
+    vi.restoreAllMocks();
     resetRateGate();
     vi.useRealTimers();
 });
@@ -227,5 +230,94 @@ describe("rateGate — retuning from a quota the API actually reported", () => {
         tuneRateGateToObservedLimit(4);
         resetRateGate();
         expect(rateGateSettings()).toEqual({ capacity: BURST_CAPACITY, refillMs: REFILL_MS });
+    });
+});
+
+describe("rateGate — the learned quota is persisted across restarts", () => {
+    it("writes the REPORTED limit when the tuning actually moves", async () => {
+        expect(tuneRateGateToObservedLimit(20)).toBe(true);
+        await Promise.resolve();   // the write is deliberately not awaited
+
+        // The reported quota, not the derived refillMs: it is the only part
+        // that is a fact, so SAFETY_FACTOR is re-applied on the next load
+        // rather than frozen in.
+        expect(await DataStore.get(LEARNED_QUOTA_KEY)).toBe(20);
+    });
+
+    it("does not rewrite on every repeat of the same 429", async () => {
+        expect(tuneRateGateToObservedLimit(20)).toBe(true);
+        await Promise.resolve();
+
+        const set = vi.spyOn(DataStore, "set");
+        // A 429 storm reports the same quota over and over; a write per 429
+        // would be a write per rejected batch for no new information.
+        expect(tuneRateGateToObservedLimit(20)).toBe(false);
+        expect(set).not.toHaveBeenCalled();
+    });
+
+    it("re-applies the persisted quota after resetRateGate() dropped the in-memory one", async () => {
+        tuneRateGateToObservedLimit(4);
+        const tuned = rateGateSettings();
+        await Promise.resolve();
+
+        // stop() — the in-memory lesson goes...
+        resetRateGate();
+        expect(rateGateSettings()).toEqual({ capacity: BURST_CAPACITY, refillMs: REFILL_MS });
+
+        // ...and start() reads it straight back off disk.
+        await loadRateGateTuning();
+        expect(rateGateSettings()).toEqual(tuned);
+        expect(rateGateSettings().refillMs).not.toBe(REFILL_MS);
+    });
+
+    it("falls back to the defaults, without throwing, on a corrupt stored value", async () => {
+        // Every shape a hand-edited or half-written IndexedDB entry could take.
+        // NaN/0/-5 are rejected by the same guard that rejects a nonsensical
+        // 429; the rest never reach it.
+        for (const junk of ["20", { limit: 20 }, null, [4], true, Number.NaN, 0, -5, Infinity]) {
+            resetRateGate();
+            await DataStore.set(LEARNED_QUOTA_KEY, junk);
+
+            await expect(loadRateGateTuning()).resolves.toBeUndefined();
+            expect(rateGateSettings()).toEqual({ capacity: BURST_CAPACITY, refillMs: REFILL_MS });
+        }
+    });
+
+    it("falls back to the defaults when nothing has ever been stored", async () => {
+        await expect(loadRateGateTuning()).resolves.toBeUndefined();
+        expect(rateGateSettings()).toEqual({ capacity: BURST_CAPACITY, refillMs: REFILL_MS });
+    });
+
+    it("does not let a failed read stop the plugin starting", async () => {
+        vi.spyOn(DataStore, "get").mockRejectedValueOnce(new Error("IndexedDB is having a day"));
+
+        // start() awaits this. A rejection escaping here would reject start()
+        // itself, which costs the user the whole plugin to save one 429.
+        await expect(loadRateGateTuning()).resolves.toBeUndefined();
+        expect(rateGateSettings()).toEqual({ capacity: BURST_CAPACITY, refillMs: REFILL_MS });
+    });
+
+    it("handles a failed WRITE itself rather than leaving it to reject unhandled", async () => {
+        const rejected = Promise.reject(new Error("disk full"));
+        // Counts rejection handlers attached to the write, however they are
+        // attached — `.catch(fn)` and `await` in a try/catch both land here.
+        // Zero means the fire-and-forget write was left to reject into the
+        // void, which in the renderer is an unhandled-rejection report about
+        // a failure the plugin had already decided it could live without.
+        let handlersAttached = 0;
+        const probe = {
+            then(onOk: any, onErr: any) { handlersAttached++; return rejected.then(onOk, onErr); },
+            catch(onErr: any) { handlersAttached++; return rejected.catch(onErr); }
+        };
+        vi.spyOn(DataStore, "set").mockReturnValueOnce(probe as any);
+
+        // The in-memory gate is retuned regardless. Losing the write costs one
+        // relearned 429 next launch — exactly the behaviour before this key
+        // existed, so there is nothing to roll back and nothing to report.
+        expect(tuneRateGateToObservedLimit(4)).toBe(true);
+        expect(rateGateSettings().refillMs).toBe(30_000);
+        expect(handlersAttached).toBeGreaterThan(0);
+
+        await rejected.catch(() => { /* keep the fixture itself from leaking */ });
     });
 });

@@ -294,18 +294,26 @@ channel-hopping burst above that it smooths out, spacing 10 clumped requests
 into the steady rate instead of firing them all at once and getting several
 back as 429s.
 
-**The gate re-tunes itself from the API's own reported limit.** Those 5-and-4
-seconds numbers are only a starting guess. A Gemini 429 body states the quota
-it just enforced — literally `limit: 20` in the middle of the error message —
-and when it does, the gate throws away the guess and aims at **half** the real
-number: 20/minute becomes 10/minute (one request every 6 seconds), and a
-project limited to 4/minute becomes 2/minute (one every 30 seconds). This is
-deliberately adaptive rather than a compiled-in constant: free-tier quotas
-differ per project, per model, and get changed by the provider without notice,
-so any number hardcoded here is guaranteed to be wrong for someone — and being
-wrong in the generous direction is exactly what produced the 429 storm. The
-learned value lasts for the session and is re-learned after a restart, at the
-cost of one 429 whose batch Google serves anyway.
+**The gate re-tunes itself from the API's own reported limit, and remembers
+it.** A Gemini 429 body states the quota it just enforced — literally
+`limit: 20` in the middle of the error message — and when it does, the gate
+throws away its starting guess and aims at **half** the real number: 20/minute
+becomes 10/minute (one request every 6 seconds), and a project limited to
+4/minute becomes 2/minute (one every 30 seconds). This is deliberately adaptive
+rather than a compiled-in constant: free-tier quotas differ per project, per
+model, and get changed by the provider without notice, so any number hardcoded
+here is guaranteed to be wrong for someone — and being wrong in the generous
+direction is exactly what produced the 429 storm.
+
+**The learned quota is persisted** (in Vencord's DataStore, alongside the
+cooldown mark) and re-read before the first quality-tier batch of the next
+session. It used to live only in memory, which meant every Discord launch
+reopened the gate at the untaught guess, spent requests at a rate the project
+had already been proven not to allow, and bought the same 429 — and the same
+toast — over again, seconds after starting. It is a fact about the API key and
+the project, not about a plugin session, so a restart (or toggling the plugin
+off and on) is not a reason to forget it. A corrupt or missing entry simply
+falls back to the starting guess.
 
 **Why half and not three-quarters** (this was 75%, and 75% was wrong). The
 provider counts a *rolling* 60-second window; the gate is a token bucket. The

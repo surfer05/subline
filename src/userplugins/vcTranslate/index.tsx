@@ -7,7 +7,9 @@ import { createBatcher, type Batcher } from "./batcher";
 import { isChannelEnabled, loadEnabledChannels, toggleChannel } from "./channels";
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
 import { isConfidentlyTargetLanguage } from "./detectLang";
-import { acquireSlot, rateGateSettings, resetRateGate, tuneRateGateToObservedLimit } from "./rateGate";
+import {
+    acquireSlot, loadRateGateTuning, rateGateSettings, resetRateGate, tuneRateGateToObservedLimit
+} from "./rateGate";
 import { isRomanizedGuess } from "./romanized";
 import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
@@ -1300,6 +1302,15 @@ export default definePlugin({
         // we already know is exhausted — the exact wasted request, and the
         // unwanted rate-limit toast, that persisting the mark exists to stop.
         await loadCooldowns();
+        // AWAITED for the same reason, one step further on: this decides at
+        // what RATE the first batches of the session are allowed to go out.
+        // Reading it late would let the session's opening burst leave under the
+        // untaught defaults at a rate this project's quota has already been
+        // proven not to allow — the 429 (and the toast) seconds after every
+        // restart that persisting the learned quota exists to stop. Nothing
+        // below this line can flush before it resolves: the batchers and the
+        // Flux subscriptions are both built after it.
+        await loadRateGateTuning();
 
         // Deliberately NOT awaited: a slow IndexedDB read must not hold up the
         // Flux subscriptions below, and loadPersistedTranslations() never
@@ -1387,7 +1398,10 @@ export default definePlugin({
         announcedCooldown = false;
         // Wakes anything still queued behind the rate gate immediately
         // (rather than leaving it to time out on the next refill tick) and
-        // refills it to full capacity for the next start().
+        // refills it to full capacity for the next start(). Only the in-memory
+        // tuning is dropped — like the cooldown mark above, the learned quota
+        // is persisted and start() reads it back, so the next session does not
+        // reopen the gate at the untaught defaults and buy a fresh 429.
         resetRateGate();
     }
 });
