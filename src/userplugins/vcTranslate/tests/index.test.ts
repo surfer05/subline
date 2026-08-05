@@ -1666,6 +1666,135 @@ describe("a failing quality tier never takes anything away from the reader", () 
     });
 });
 
+describe("a failed quality attempt is not re-requested forever", () => {
+    /** How many requests the quality tier has actually spent. */
+    const geminiCalls = () =>
+        native.translateBatch.mock.calls.filter(c => c[0] === "gemini").length;
+
+    /**
+     * Google answers whatever it is sent; Gemini answers every id with the
+     * per-message failure llmShared.ts emits for any id the model omitted from
+     * a batch (`{ id, failed: true }`). That is the routine case, not an exotic
+     * one, and it is invisible by design: the quality tier writes NOTHING, so
+     * the store still holds the fast tier's Google line and looks exactly as it
+     * did before the request was spent.
+     */
+    function llmOmitsEveryId() {
+        native.translateBatch.mockImplementation(
+            async (engine: string, _k: string, payload: string) =>
+                engine === "google"
+                    ? googleAnswers(payload, "rough", "de")
+                    : {
+                        ok: true,
+                        results: JSON.parse(payload).messages.map(
+                            (m: { id: string; }) => ({ id: m.id, failed: true })
+                        )
+                    }
+        );
+    }
+
+    beforeEach(() => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+        stubMessages.set(CHANNEL, [discordMessage("1", "hola")]);
+    });
+
+    it("does not spend a new LLM request on every channel open", async () => {
+        // The probe that found this: four CHANNEL_SELECTs produced four Gemini
+        // requests for ONE message, with the store entry unchanged throughout.
+        // Every channel open — and every scroll-up, since LOAD_MESSAGES_SUCCESS
+        // drives catch-up too — re-spent the quota the two-tier split exists to
+        // conserve.
+        llmOmitsEveryId();
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        expect(geminiCalls()).toBe(1);
+
+        for (let i = 0; i < 3; i++) {
+            FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+            await settle();
+        }
+
+        expect(geminiCalls()).toBe(1);
+        // ...and the constraint that must survive the fix: the reader still has
+        // the readable Google line. The attempt is remembered OUTSIDE the store,
+        // so nothing was written over it — no marker, no downgrade.
+        expect(getTranslation(key("1"))).toMatchObject({ via: "google", text: "rough" });
+    });
+
+    it("does not spend a new LLM request when the whole batch failed either", async () => {
+        // A non-429, non-401 batch failure enters no cooldown, so nothing else
+        // in the plugin would have slowed this loop down.
+        native.translateBatch.mockImplementation(
+            async (engine: string, _k: string, payload: string) =>
+                engine === "google"
+                    ? googleAnswers(payload, "rough", "de")
+                    : { ok: false, error: "gemini: HTTP 500" }
+        );
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        expect(geminiCalls()).toBe(1);
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+
+        expect(geminiCalls()).toBe(1);
+        expect(getTranslation(key("1"))).toMatchObject({ via: "google", text: "rough" });
+    });
+
+    it("gives an EDITED message a fresh quality attempt", async () => {
+        // The attempt was spent on text that no longer exists, so the budget
+        // must not carry over — otherwise editing a message the quality tier
+        // had already tried would pin it to the fast tier's line forever.
+        llmOmitsEveryId();
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        expect(geminiCalls()).toBe(1);
+
+        FluxDispatcher.dispatch("MESSAGE_UPDATE", { message: discordMessage("1", "que tal") });
+        await settle();
+
+        expect(geminiCalls()).toBe(2);
+    });
+
+    it("leaves a message the quality tier never actually got to still upgradable", async () => {
+        // The distinction the ledger is written at SEND time for: a flush that
+        // returned early because the engine was cooling down cost nothing, so
+        // that message must still be picked up once the cooldown lapses.
+        // (A 600s cooldown is entered by message 1's own batch; message 2
+        // arrives inside it, is enqueued for the quality tier, and its flush
+        // returns before sending anything.)
+        native.translateBatch.mockImplementation(
+            async (engine: string, _k: string, payload: string) =>
+                engine === "google"
+                    ? googleAnswers(payload, "rough", "de")
+                    : { ok: false, error: "gemini: HTTP 429", retryAfterMs: 600_000 }
+        );
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        const spentOnMessage1 = geminiCalls();
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+        expect(geminiCalls()).toBe(spentOnMessage1);   // cooling down: nothing sent
+
+        // Cooldown lapses. Message 2 was never charged an attempt, so reopening
+        // the channel picks it back up.
+        await vi.advanceTimersByTimeAsync(600_000);
+        stubMessages.set(CHANNEL, [discordMessage("1", "hola"), discordMessage("2", "que tal")]);
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+
+        expect(geminiCalls()).toBe(spentOnMessage1 + 1);
+        expect(requestAt(native.translateBatch.mock.calls.length - 1).messages.map((m: any) => m.id))
+            .toEqual(["2"]);
+    });
+});
+
 describe("marker writes never clobber a real translation from the other tier", () => {
     it("a failed marker from one tier does not erase a real translation already stored by the other", async () => {
         // The regression this guards: before marker writes were routed

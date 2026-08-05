@@ -33,12 +33,13 @@ let fastBatcher: Batcher | null = null;
 let qualityBatcher: Batcher | null = null;
 let sessionFallback = false;   // set when the configured LLM engine (Claude/Gemini) is unusable this session
 let announcedMissingKey = false;   // one toast per session, never per batch
-let announcedCooldown = false;     // ditto, for the rate-limit-to-Google fallback
+let announcedCooldown = false;     // ditto, for a rate-limited quality tier
 
 // Ids currently queued in a batcher or awaiting a translateBatch response.
 // getTranslation() alone can't tell "in flight" apart from "never
-// requested" -- a message is a cache miss for the WHOLE round trip (700ms
-// debounce plus several seconds of network for Claude), not just briefly.
+// requested" -- a message is a cache miss for the WHOLE round trip (its
+// tier's debounce window, 700ms fast / 20s quality, plus several seconds of
+// network for an LLM), not just briefly.
 // Populated wherever a message is handed to batcher.add(), and drained in
 // runTier once that request settles (success, failure, or stranded by a
 // rebuild) so it becomes retryable again.
@@ -48,6 +49,74 @@ let announcedCooldown = false;     // ditto, for the rate-limit-to-Google fallba
 // the other — the quality tier would simply never run.
 const inFlightFast = new Set<string>();
 const inFlightQuality = new Set<string>();
+
+/**
+ * Store keys the quality tier has already SPENT A REQUEST on this session.
+ *
+ * THE BUG THIS EXISTS FOR: a quality-tier failure deliberately writes nothing
+ * (see runTier) so the reader keeps their Google line. But that means the store
+ * looks exactly as it did before the request — a `via: "google"` entry, which
+ * needsQuality() correctly reads as "still upgradable". Nothing else remembered
+ * the attempt, so every later catch-up offered the same message to the LLM
+ * again: four CHANNEL_SELECTs produced four Gemini requests for one message,
+ * and scrolling up (LOAD_MESSAGES_SUCCESS also drives catch-up) did the same.
+ * A message the model routinely omits from a 25-message batch — llmShared.ts
+ * marks those `failed` per id — could be re-requested forever, spending exactly
+ * the quota the two-tier split exists to conserve.
+ *
+ * THE RULE: the quality tier gets ONE request per message per session. The
+ * ledger is written at the moment the request is actually sent (not when it
+ * fails), because the thing being bounded is REQUESTS SPENT — a flush that
+ * returns early for a cooldown, a stale generation or the rate gate has cost
+ * nothing and must stay retryable. A success needs no ledger entry to stop
+ * repeating (its store write closes the message on its own), but marking it
+ * anyway keeps the invariant one sentence long instead of two.
+ *
+ * THE TRADE-OFF, taken deliberately: a message whose one attempt failed
+ * transiently never gets its ✦ this session. That costs the reader an
+ * occasional missed upgrade, which is invisible — the readable ≈ line is still
+ * there. Retrying instead costs the quota, which is not invisible: it takes the
+ * quality tier down for every OTHER message too. A restart, or an edit (see
+ * forgetQualityAttempts), is the natural retry point.
+ *
+ * In memory only, and deliberately not persisted: the store entry it qualifies
+ * is what persists, and a new session is exactly the kind of natural retry
+ * boundary a spent attempt should be forgotten at.
+ */
+const qualityAttempted = new Set<string>();
+
+/**
+ * Same order of magnitude as the store's own 500-entry LRU, and for the same
+ * reason: an id evicted from here is one the translation cache has almost
+ * certainly forgotten too, so it reads as "never requested" on both sides at
+ * once rather than as a half-remembered message that can never be upgraded.
+ */
+const QUALITY_ATTEMPT_MEMORY = 500;
+
+function markQualityAttempted(key: string): void {
+    // Re-insert to refresh recency, exactly as store.ts's LRU does.
+    qualityAttempted.delete(key);
+    qualityAttempted.add(key);
+    while (qualityAttempted.size > QUALITY_ATTEMPT_MEMORY) {
+        qualityAttempted.delete(qualityAttempted.values().next().value as string);
+    }
+}
+
+/**
+ * Forget every attempt recorded for a message id, across target languages.
+ *
+ * Called next to invalidateMessage() — an edited message is a DIFFERENT text,
+ * so the request already spent was spent on something that no longer exists.
+ * Without this, editing a message the quality tier had already attempted would
+ * leave it pinned to the fast tier's line forever. Same `"<id> "` prefix
+ * discipline as invalidateMessage(), so message 7 does not match message 70.
+ */
+function forgetQualityAttempts(messageId: string): void {
+    const prefix = `${messageId} `;
+    for (const key of [...qualityAttempted]) {
+        if (key.startsWith(prefix)) qualityAttempted.delete(key);
+    }
+}
 
 // Bumped on every rebuildBatcher(). Each onFlush closure captures the
 // generation it was created under; if a response lands after a later
@@ -308,8 +377,16 @@ function needsFast(key: string): boolean {
  * the target language" for short messages it merely failed to identify (it
  * returns "ne" unchanged, which isSameText reads as a skip), and those are
  * exactly the messages the quality tier is best at.
+ *
+ * ...but only while the tier has not already had its one go at this message.
+ * The store alone cannot answer that, because a failed quality attempt writes
+ * NOTHING to it by design (see runTier): the entry is left exactly as the fast
+ * tier wrote it, so every question below still answers "yes, upgradable" and
+ * every channel open re-spends a request on the same message. The ledger is
+ * what closes that loop — see `qualityAttempted`.
  */
 function needsQuality(key: string): boolean {
+    if (qualityAttempted.has(key)) return false;
     const e = getTranslation(key);
     if (e === undefined) return true;
     if (isRealTranslation(e)) return ENGINE_RANK[e.via] < 1;
@@ -339,6 +416,11 @@ function needsQuality(key: string): boolean {
  * what additionally protects the entries mayReplace considers replaceable —
  * a Google `skipped` marker most of all, since relabelling an
  * already-in-the-target-language message as failed is a pure regression.)
+ *
+ * Writing nothing is why the `qualityAttempted` ledger has to exist: an
+ * invisible failure leaves no trace in the store, so the ledger is the only
+ * record that the request was spent. It is written below at the moment the
+ * request actually goes out.
  *
  * Everything else is unchanged and load-bearing: the generation guard runs
  * both before and after the network await, `enterCooldown` still parks the
@@ -399,6 +481,18 @@ async function runTier(
             // next refill tick). Re-check before spending a real request on a
             // batch nothing will ever read the result of.
             if (myGeneration !== batcherGeneration) return;
+        }
+
+        // The request is about to be SPENT, so record it before it can fail in
+        // any of the ways below. This is the one place that knows a quality
+        // request actually left the client — every earlier `return` above
+        // (stale generation, cooldown, rate gate) cost nothing and must leave
+        // the message retryable. A quality failure writes nothing to the store,
+        // so without this ledger entry there is no record anywhere that the
+        // attempt happened and catch-up re-requests it forever. See
+        // `qualityAttempted`.
+        if (isQuality) {
+            for (const m of req.messages) markQualityAttempted(makeKey(m.id, req.targetLang));
         }
 
         // `null` means the IPC call itself rejected — distinct from an
@@ -716,8 +810,11 @@ function onMessageUpdate({ message }: { message: Message; }) {
     if (!message?.id) return;
 
     // Whatever we had cached describes the pre-edit text, so it is wrong now
-    // regardless of what kind of update this is.
+    // regardless of what kind of update this is. The quality tier's spent
+    // attempt is discarded with it, for the same reason: it was spent on text
+    // that no longer exists, so the edited message is entitled to its own.
     invalidateMessage(message.id);
+    forgetQualityAttempts(message.id);
 
     // MESSAGE_UPDATE is not only fired for user edits: it also fires for embed
     // hydration (a link preview resolving, an attachment finishing processing)
@@ -1136,6 +1233,10 @@ export default definePlugin({
         // permanently unretryable across a stop/start cycle.
         inFlightFast.clear();
         inFlightQuality.clear();
+        // Toggling the plugin off and on is an explicit user action and a
+        // natural retry boundary — the same one a restart provides — so the
+        // quality tier's one-attempt-per-message budget resets with it.
+        qualityAttempted.clear();
         // Bump the generation so an in-flight request from before stop()
         // (e.g. a Claude call awaiting its response) fails its post-await
         // guard check in runTier and returns before ever reaching
