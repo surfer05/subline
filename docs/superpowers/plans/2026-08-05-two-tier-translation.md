@@ -30,6 +30,32 @@ Expected steady state in a busy channel (60 messages/min): the quality tier
 flushes when 25 messages accumulate, i.e. **~2-3 requests/min against a limit
 of 20** — while the reader sees a subtitle in under a second.
 
+### What a burst actually does (measured, not assumed)
+
+Feeding 50 messages into a 20s/25-message batcher produces **two flushes of
+25, both fired before the timer** — forced by the batch cap. The queue never
+exceeds `maxBatch`, nothing is dropped, and no request ever carries more than
+25 messages (which is what claude.ts's `max_tokens: 24000` was sized for).
+
+So the cap makes a busy channel flush *sooner*, never later:
+
+```
+requests/min  ≈  max(3, messages_per_min / 25)     per channel
+```
+
+150 messages/min is 6 requests/min. Reaching 20 would take ~500 messages per
+minute in a single channel.
+
+**The burst that DOES matter is channel switching, not chat volume.** Each
+channel keeps its own queue and its own timer. Live translation is
+focused-channel-only, but catch-up runs for every channel visited, so hopping
+through 10 channels leaves 10 independent pending batches that fire ~20s
+later — up to 10 requests in one clump. That stays under 20 and the rate gate
+(15/min) smooths it, but it is the one realistic route to the ceiling and the
+reason the rate gate must NOT be removed as "no longer needed". If the ceiling
+is ever hit in practice, the fix is a global (not per-channel) quality-tier
+flush budget, not a longer window.
+
 ## Global Constraints
 
 - **Run tests from the plugin directory**: `cd /Users/surfer/dev/discord-translate/src/userplugins/vcTranslate && npx vitest run`. From the repo root the aliases silently do not load and `tests/index.test.ts` is omitted while still reporting a pass.
