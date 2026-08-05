@@ -1866,3 +1866,223 @@ describe("marker writes never clobber a real translation from the other tier", (
         expect(getTranslation(key("1"))).toMatchObject({ via: "gemini", text: "good" });
     });
 });
+
+describe("scrolling back through history does not spend the quality tier's quota", () => {
+    /**
+     * THE DEFECT: catch-up's budget (catchUpCount, 20) is per INVOCATION, and
+     * Discord re-fires LOAD_MESSAGES_SUCCESS for every chunk of history a
+     * scroll loads. Every scroll therefore got a fresh 20-message allowance
+     * and produced another quality-tier batch — of legitimately NEW messages,
+     * so the qualityAttempted ledger (which bounds re-attempts of the same
+     * message) never applied. Measured ceiling: 20 Gemini requests per ROLLING
+     * minute, so a few hundred messages of scroll-back empties it in seconds.
+     */
+    const foreign = (id: string) =>
+        discordMessage(id, "je vais m'en aller incessamment sous peu");
+
+    const geminiCalls = () =>
+        native.translateBatch.mock.calls.filter(c => c[0] === "gemini").length;
+
+    /** Every message id the FAST tier actually sent to Google. */
+    const googleIds = () =>
+        native.translateBatch.mock.calls
+            .filter(c => c[0] === "google")
+            .flatMap(c => JSON.parse(c[2] as string).messages.map((m: any) => m.id));
+
+    /** Ids handed to the quality tier, across every batch it sent. */
+    const geminiIds = () =>
+        native.translateBatch.mock.calls
+            .filter(c => c[0] === "gemini")
+            .flatMap(c => JSON.parse(c[2] as string).messages.map((m: any) => m.id));
+
+    beforeEach(() => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+        // Google answers whatever it is sent; Gemini answers nothing, so no
+        // store write of its own can mask whether it was ASKED. What is being
+        // counted here is requests spent, not results.
+        native.translateBatch.mockImplementation(
+            async (engine: string, _k: string, payload: string) =>
+                engine === "google"
+                    ? googleAnswers(payload, "rough", "fr")
+                    : { ok: true, results: [] }
+        );
+    });
+
+    /** One scroll-up: `count` never-before-seen OLDER messages, then the event. */
+    async function scrollBackLoading(count: number, tag: string) {
+        const older = Array.from({ length: count }, (_, i) => foreign(`${tag}-${i}`));
+        stubMessages.set(CHANNEL, [...older, ...(stubMessages.get(CHANNEL) ?? [])]);
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
+        await settle();
+        return older.map(m => m.id);
+    }
+
+    it("sends no quality request per scroll, however much new history is loaded", async () => {
+        stubMessages.set(CHANNEL, [foreign("open-0")]);
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        // The channel open itself IS worth a quality request — that is the case
+        // this fix deliberately preserves.
+        const spentOnOpen = geminiCalls();
+        expect(spentOnOpen).toBeGreaterThan(0);
+
+        // The first history load after the open is still that open's own
+        // backlog (CHANNEL_SELECT can fire before Discord has fetched it).
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
+        await settle();
+        const spentOnOpenAndItsBacklog = geminiCalls();
+
+        // Now the user scrolls: three more loads, 10 new messages each. Before
+        // the fix each of these produced its own Gemini batch.
+        const scrolled: string[] = [];
+        for (const tag of ["s1", "s2", "s3"]) {
+            scrolled.push(...await scrollBackLoading(10, tag));
+        }
+
+        expect(geminiCalls()).toBe(spentOnOpenAndItsBacklog);
+        for (const id of scrolled) expect(geminiIds()).not.toContain(id);
+
+        // ...and the reader loses NOTHING visible: every scrolled-past message
+        // still went to the fast tier and has its ≈ Google subtitle.
+        const fastIds = googleIds();
+        for (const id of scrolled) expect(fastIds).toContain(id);
+        expect(getTranslation(key("s3-9"))).toMatchObject({ via: "google", text: "rough" });
+    });
+
+    it("does not spend the scroll-back budget on upgrades it is not going to request", async () => {
+        // catchUpCount is a budget of REQUESTS, and on a scroll-back pass a
+        // message whose only outstanding work is a ✦ upgrade is not going to
+        // produce one. Counting it anyway would let a screenful of
+        // already-Google-translated history exhaust the budget before the walk
+        // reaches the genuinely untranslated message further up — i.e. the fix
+        // would cost the reader a ≈ line, which is exactly what it promises
+        // not to do.
+        settings.store.catchUpCount = 20;
+
+        // Get past the channel-open load, so the next one is scrolling.
+        stubMessages.set(CHANNEL, [foreign("open-0")]);
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
+        await settle();
+        native.translateBatch.mockClear();
+
+        // The scroll loads 20 messages that already have a Google line (still
+        // upgradable, so needsQuality says yes) and, older than all of them,
+        // one that has nothing at all.
+        const upgradable = Array.from({ length: 20 }, (_, i) => foreign(`up-${i}`));
+        for (const m of upgradable) {
+            setTranslation(key(m.id), { lang: "fr", text: "rough", via: "google" });
+        }
+        stubMessages.set(CHANNEL, [
+            foreign("deep"), ...upgradable, ...(stubMessages.get(CHANNEL) as any[])
+        ]);
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
+        await settle();
+
+        expect(googleIds()).toContain("deep");
+        expect(geminiCalls()).toBe(0);
+    });
+
+    it("keeps scrolled-past history out of the quality tier's context window", async () => {
+        // The context ring is a window on the conversation being READ. An hour
+        // of history the user scrolled past is not that, and the ring is only 8
+        // slots wide — filling it with scroll-back would evict exactly the
+        // recent messages that make the next live batch worth its request.
+        stubMessages.set(CHANNEL, [foreign("open-0")]);
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
+        await settle();
+
+        // Confidently English, so it costs no request either way and reaches
+        // enqueue()'s context-only path — the one branch that could still leak
+        // scroll-back into the quality tier.
+        const ancient = discordMessage("old-1", "i think that we should go to the server now");
+        stubMessages.set(CHANNEL, [ancient, ...(stubMessages.get(CHANNEL) as any[])]);
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
+        await settle();
+
+        native.translateBatch.mockClear();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: foreign("live-3") });
+        await settle();
+
+        const quality = native.translateBatch.mock.calls.filter(c => c[0] === "gemini");
+        expect(quality).toHaveLength(1);
+        const { context } = JSON.parse(quality[0][2] as string);
+        expect(context.map((c: any) => c.text)).not.toContain(ancient.content);
+    });
+
+    it("still gives the opened channel's backlog to the quality tier", async () => {
+        // The burst must not be fixed by disabling the feature: opening a
+        // channel is exactly where the LLM's conversation context is worth
+        // spending a request on.
+        stubMessages.set("cold", [
+            { ...foreign("c1"), channel_id: "cold" },
+            { ...foreign("c2"), channel_id: "cold" }
+        ]);
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: "cold" });
+        await settle();
+
+        expect(geminiCalls()).toBe(1);
+        expect(geminiIds()).toEqual(["c1", "c2"]);
+    });
+
+    it("still gives a cold channel's backlog to the quality tier when it lands AFTER the select", async () => {
+        // The "tab back in after a game" case: CHANNEL_SELECT fires before
+        // Discord has fetched the history, so the FIRST LOAD_MESSAGES_SUCCESS
+        // after an open is that open's catch-up, not scrolling. Demoting it
+        // would silently take the quality tier away from every cold channel.
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        expect(geminiCalls()).toBe(0);   // nothing loaded yet, so nothing to send
+
+        stubMessages.set(CHANNEL, [foreign("late-1")]);
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
+        await settle();
+
+        expect(geminiIds()).toEqual(["late-1"]);
+    });
+
+    it("still gives the quality tier the backlog that lands after a RESTART", async () => {
+        // start() catches up whatever channel is already on screen, and on a
+        // restart the history is usually still being fetched at that moment —
+        // so the load that follows is that open's backlog and must keep the
+        // quality tier. No CHANNEL_SELECT here on purpose: a restart does not
+        // replay one.
+        stubMessages.set(CHANNEL, [foreign("restart-1")]);
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
+        await settle();
+
+        expect(geminiIds()).toEqual(["restart-1"]);
+    });
+
+    it("still sends a live message in the focused channel to the quality tier", async () => {
+        // Live chat is the other half of what the quality tier is for, and it
+        // does not go through catch-up at all.
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: foreign("live-1") });
+        await settle();
+
+        expect(geminiIds()).toContain("live-1");
+    });
+
+    it("still sends a live message that arrives AFTER a scroll-back", async () => {
+        // The demotion is per catch-up invocation, not a mode the channel gets
+        // stuck in: a scroll must not disable the quality tier for what comes
+        // next.
+        stubMessages.set(CHANNEL, [foreign("open-0")]);
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
+        await settle();
+        await scrollBackLoading(10, "s1");
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: foreign("live-2") });
+        await settle();
+
+        expect(geminiIds()).toContain("live-2");
+    });
+});

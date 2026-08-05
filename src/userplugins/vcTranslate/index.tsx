@@ -86,6 +86,59 @@ const inFlightQuality = new Set<string>();
 const qualityAttempted = new Set<string>();
 
 /**
+ * The channel whose NEXT `LOAD_MESSAGES_SUCCESS` is still the initial backlog
+ * landing rather than scroll-back. Armed by every entry point that means "the
+ * user just opened this channel" (CHANNEL_SELECT, and start() for whatever is
+ * already on screen); consumed by the first history load that follows.
+ *
+ * THE DEFECT THIS EXISTS FOR: `catchUp()`'s budget (`catchUpCount`, 20) is per
+ * INVOCATION, and catch-up runs on every `LOAD_MESSAGES_SUCCESS` — which
+ * Discord fires again and again as the user scrolls back through history. Each
+ * scroll therefore got a fresh 20-message allowance and produced another
+ * quality-tier batch of legitimately-new backlog. The `qualityAttempted` ledger
+ * cannot help: it bounds re-attempts of the SAME message, and every one of
+ * these is a different message. Measured against the live Gemini free tier the
+ * ceiling is 20 requests per ROLLING MINUTE (probes returned retry hints of
+ * 29.5s, then 56.7s, then 11.2s as the window drained), so a few hundred
+ * messages of scroll-back spends the whole minute's quota in seconds — the
+ * rate-limit toast reported right after a restart.
+ *
+ * THE RULE: the quality tier serves the LIVE conversation and the CHANNEL-OPEN
+ * backlog; deep scroll-back is fast-tier only. That is where the LLM's context
+ * advantage is worth quota and where it is not — history being skimmed still
+ * gets its Google `≈` subtitle within a second, it simply never flips to `✦`.
+ * Bounding it here rather than by lowering `catchUpCount` is deliberate: the
+ * budget is what makes opening a channel useful, and that is the case worth
+ * spending on.
+ *
+ * Holds at most one channel: only one channel is ever focused, and catch-up is
+ * focus-gated, so a token for anything else could never be redeemed anyway.
+ * Clearing on each arm is what keeps it that way rather than accumulating one
+ * dead entry per channel visited this session.
+ */
+const initialHistoryPending = new Set<string>();
+
+/**
+ * "The user just opened this channel; the history that lands next is its
+ * opening backlog, not scroll-back." See `initialHistoryPending`.
+ */
+function armInitialHistory(channelId: string): void {
+    // Only one channel can be focused, so only one token can ever be redeemed.
+    initialHistoryPending.clear();
+    initialHistoryPending.add(channelId);
+}
+
+/**
+ * True at most ONCE per channel open — the first history load after it was
+ * armed. `CHANNEL_SELECT` fires before Discord has necessarily fetched a cold
+ * channel's backlog, so that first load IS the channel-open catch-up (the "tab
+ * back in after a game" case); every load after it is the user scrolling.
+ */
+function takeInitialHistory(channelId: string): boolean {
+    return initialHistoryPending.delete(channelId);
+}
+
+/**
  * Same order of magnitude as the store's own 500-entry LRU, and for the same
  * reason: an id evicted from here is one the translation cache has almost
  * certainly forgotten too, so it reads as "never requested" on both sides at
@@ -660,8 +713,18 @@ function rebuildBatcher() {
  * stops the skip rule, the in-flight guard and the context bookkeeping from
  * drifting apart between the three callers — the edited-message path in
  * particular has to do exactly what the created-message path does.
+ *
+ * `allowQuality` is false for exactly one caller: catch-up driven by a
+ * scroll-back `LOAD_MESSAGES_SUCCESS` (see `initialHistoryPending`). Those
+ * messages go to the fast tier only, so the reader still gets a `≈` line
+ * within a second while the quality tier's 20-requests-per-rolling-minute
+ * budget stays available for the live conversation. They are deliberately not
+ * recorded as quality CONTEXT either: the context ring is a window on the
+ * conversation being read, and filling it with an hour-old stretch of history
+ * the user happened to scroll past would evict exactly the recent messages that
+ * make the next live batch worth its request.
  */
-function enqueue(pending: PendingMessage, isOwn: boolean) {
+function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true) {
     // Two flavours of local skip, handled identically: the structural one
     // (own message, nothing translatable left after stripping emotes/links)
     // and the linguistic one (we can tell locally that this is already in the
@@ -680,7 +743,7 @@ function enqueue(pending: PendingMessage, isOwn: boolean) {
         // qualityBatcher may be null (Google-only). Whichever tier(s) end up
         // consuming context see a coherent conversation either way.
         fastBatcher?.recordContext(pending);
-        qualityBatcher?.recordContext(pending);
+        if (allowQuality) qualityBatcher?.recordContext(pending);
         return;
     }
 
@@ -697,15 +760,16 @@ function enqueue(pending: PendingMessage, isOwn: boolean) {
         fastBatcher?.add(pending);
     }
 
-    if (qualityBatcher && !inFlightQuality.has(pending.id) && needsQuality(key)) {
+    if (allowQuality && qualityBatcher && !inFlightQuality.has(pending.id) && needsQuality(key)) {
         inFlightQuality.add(pending.id);
         qualityBatcher.add(pending);
     }
-    // No `else`: when qualityBatcher is null (no LLM configured), there is no
-    // second ring to feed — fastBatcher never reads its own context (it does
-    // not support it), so there is nothing useful to record here. (TS proves
-    // this too: in this branch qualityBatcher is narrowed to exactly `null`,
-    // so calling through it — even via `?.` — would be provably unreachable.)
+    // No `else`. Two ways to reach one: qualityBatcher is null (no LLM
+    // configured), in which case there is no second ring to feed at all —
+    // fastBatcher never reads its own context (it does not support it), so
+    // there is nothing useful to record; or allowQuality is false, i.e.
+    // scroll-back, which must NOT be recorded as context for the reasons in
+    // this function's doc comment.
 }
 
 /**
@@ -860,18 +924,40 @@ function onMessageUpdate({ message }: { message: Message; }) {
     );
 }
 
-/**
- * `becomingFocused` is for the one caller that KNOWS this channel is the one
- * the user is now on, but cannot prove it through SelectedChannelStore:
- * CHANNEL_SELECT. Flux hands that event to store handlers and plugin
- * subscribers without a guaranteed order, so SelectedChannelStore may still be
- * reporting the PREVIOUS channel when we run. Gating on the store there would
- * mean cold-channel catch-up — the headline feature — silently never firing.
- * The event's own payload is the authoritative statement of "this is now the
- * selected channel", so that caller passes true and every other caller proves
- * focus the normal way.
- */
-function catchUp(channelId: string, becomingFocused = false) {
+interface CatchUpOptions {
+    /**
+     * For the one caller that KNOWS this channel is the one the user is now on,
+     * but cannot prove it through SelectedChannelStore: CHANNEL_SELECT. Flux
+     * hands that event to store handlers and plugin subscribers without a
+     * guaranteed order, so SelectedChannelStore may still be reporting the
+     * PREVIOUS channel when we run. Gating on the store there would mean
+     * cold-channel catch-up — the headline feature — silently never firing.
+     * The event's own payload is the authoritative statement of "this is now
+     * the selected channel", so that caller passes true and every other caller
+     * proves focus the normal way.
+     */
+    becomingFocused?: boolean;
+    /**
+     * False for scroll-back only: a `LOAD_MESSAGES_SUCCESS` that is not the
+     * initial backlog landing for a channel the user just opened. Those
+     * messages are enqueued for the FAST tier alone.
+     *
+     * WHY, precisely: this catch-up's budget (`catchUpCount`, 20) is per
+     * invocation, and Discord re-fires LOAD_MESSAGES_SUCCESS for every chunk of
+     * history a scroll loads — so scrolling hands the quality tier an unbounded
+     * stream of fresh, never-before-seen messages, each batch legitimately new
+     * and therefore untouched by the `qualityAttempted` ledger. Against the
+     * measured Gemini free-tier ceiling of 20 requests per ROLLING minute that
+     * empties the quota in seconds. Live chat and channel-open backlog are what
+     * the LLM's conversation context is actually worth spending on; history
+     * being skimmed past is not. See `initialHistoryPending`.
+     */
+    allowQuality?: boolean;
+}
+
+function catchUp(channelId: string, opts: CatchUpOptions = {}) {
+    const { becomingFocused = false, allowQuality = true } = opts;
+
     if (!channelActive(channelId)) return;
     if (!becomingFocused && !isFocusedChannel(channelId)) return;
 
@@ -934,7 +1020,11 @@ function catchUp(channelId: string, becomingFocused = false) {
         // which writes nothing, by design — would be re-requested here for the
         // rest of the session. See `qualityAttempted`.
         const fast = !inFlightFast.has(message.id) && needsFast(key);
-        const quality = qualityBatcher !== null
+        // `allowQuality` first, so a scroll-back pass does not even SELECT a
+        // message whose only outstanding work is a quality upgrade: it would
+        // consume budget and then be enqueued for a tier that will not take it.
+        const quality = allowQuality
+            && qualityBatcher !== null
             && !inFlightQuality.has(message.id)
             && needsQuality(key);
         if (!fast && !quality) continue;
@@ -965,15 +1055,22 @@ function catchUp(channelId: string, becomingFocused = false) {
                 channelId,
                 replyToId: replyParentId(message)
             },
-            message.author?.id === me
+            message.author?.id === me,
+            allowQuality
         );
     }
 }
 
 function onChannelSelect({ channelId }: { channelId: string; }) {
+    if (!channelId) return;
+    // The backlog may not be fetched yet for a channel not visited this
+    // session, so the history load that follows is still part of THIS open and
+    // is entitled to the quality tier. Armed before catch-up runs, so a
+    // synchronous LOAD_MESSAGES_SUCCESS could not outrun it.
+    armInitialHistory(channelId);
     // This event IS the focus change, so it does not have to ask
     // SelectedChannelStore whether it has caught up yet.
-    if (channelId) catchUp(channelId, true);
+    catchUp(channelId, { becomingFocused: true });
 }
 
 // CHANNEL_SELECT fires before Discord has necessarily fetched the backlog
@@ -1008,7 +1105,16 @@ function onMessagesLoaded(payload: any) {
     // the user is NOT looking at (scrolling loads more history, background
     // fetches). Requiring real focus is what keeps it from re-opening the
     // fan-out this phase closed.
-    catchUp(channelId);
+    //
+    // The FIRST load after a channel open is that open's own backlog — the
+    // "tab back in after a game" case CHANNEL_SELECT was too early to serve —
+    // so it gets the quality tier. Every load after it is the user scrolling
+    // back through history, and gets the fast tier only: each such load hands
+    // catch-up a fresh budget of never-before-seen messages, so nothing else in
+    // the plugin bounds how much of the 20-requests-per-rolling-minute quota a
+    // long scroll can spend. Those messages still get their Google `≈`
+    // subtitle; they just do not get upgraded to `✦`.
+    catchUp(channelId, { allowQuality: takeInitialHistory(channelId) });
 }
 
 const TEXT_COLOUR = "var(--text-default, var(--text-normal, #dbdee1))";
@@ -1168,7 +1274,7 @@ export default definePlugin({
                         // stronger statement of intent than the focus check
                         // exists to infer, and it is the one place where
                         // spending the budget was directly requested.
-                        if (nowOn) catchUp(message.channel_id, true);
+                        if (nowOn) catchUp(message.channel_id, { becomingFocused: true });
                     } catch {
                         // toggleChannel rethrows on persistence failure (memory
                         // already rolled back by then) -- surface it instead of
@@ -1228,7 +1334,13 @@ export default definePlugin({
             // reliable check.
             if (fastBatcher === null) return;
             const openChannelId = SelectedChannelStore.getChannelId();
-            if (openChannelId) catchUp(openChannelId);
+            if (!openChannelId) return;
+            // Same standing as a CHANNEL_SELECT: this IS the channel being
+            // opened, as far as the plugin is concerned, so the history load
+            // that follows a restart still counts as this open's backlog and
+            // keeps the quality tier. Only the SCROLLING after that is demoted.
+            armInitialHistory(openChannelId);
+            catchUp(openChannelId);
         });
     },
 
@@ -1251,6 +1363,10 @@ export default definePlugin({
         // natural retry boundary — the same one a restart provides — so the
         // quality tier's one-attempt-per-message budget resets with it.
         qualityAttempted.clear();
+        // start() arms this again for whatever channel is on screen, so a
+        // token left over from the previous session would only ever be a stale
+        // claim on the quality tier.
+        initialHistoryPending.clear();
         // Bump the generation so an in-flight request from before stop()
         // (e.g. a Claude call awaiting its response) fails its post-await
         // guard check in runTier and returns before ever reaching
