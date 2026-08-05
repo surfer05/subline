@@ -208,11 +208,29 @@ describe("deferred results — rate-limited, not failed", () => {
         expect(native.translateBatch).not.toHaveBeenCalled();
     });
 
-    it("does not re-request a Google translation just because an LLM engine is now selected", async () => {
-        // The deliberate consequence of dropping the engine from the cache
-        // key. Switching engines must not re-spend budget upgrading messages
-        // the user has already read — a real translation is resolved,
-        // whichever engine produced it.
+    it("re-requests a Google translation for the LLM tier, but not for the fast tier", async () => {
+        // This REVERSES the earlier "engine-agnostic resolution" rule (the old
+        // name of this test was "does not re-request a Google translation just
+        // because an LLM engine is now selected"). That rule was correct when
+        // it was written: the LLM quota was effectively a few dozen requests a
+        // day, so re-spending any of it upgrading something already on screen
+        // was the worst possible use of it. A Google line was treated as a
+        // finished answer no matter which engine got selected next.
+        //
+        // That constraint no longer holds. The measured limit is 20 requests
+        // per rolling minute, and the two-tier design keeps the quality tier
+        // an order of magnitude under it. Per the user's own call: "gemini on
+        // everything, i accept it running further behind, cause if we are not
+        // hitting the limit, then why to limit ourselves." A Google line is a
+        // CANDIDATE for upgrade, not a finished answer — that is the two-tier
+        // feature's whole point — so catch-up must pick it back up for the
+        // quality tier.
+        //
+        // The fast tier's job on this message IS done, though: needsFast()
+        // returns false once any real translation exists, so Google must NOT
+        // be asked again. Both halves are asserted, not just "something was
+        // called" — this is the constraint the old test's bare
+        // not.toHaveBeenCalled() couldn't express.
         setTranslation(makeKey("1", "en"), { lang: "es", text: "hola", via: "google" });
         settings.store.engine = "gemini";
         settings.store.geminiApiKey = "AIza-test";
@@ -221,7 +239,9 @@ describe("deferred results — rate-limited, not failed", () => {
         FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
         await settle();
 
-        expect(native.translateBatch).not.toHaveBeenCalled();
+        const engines = native.translateBatch.mock.calls.map(c => c[0]);
+        expect(engines).toContain("gemini");     // the quality tier picks up the upgrade
+        expect(engines).not.toContain("google");  // the fast tier's work here is already done
     });
 
     it("still retries a failure recorded under one engine when another is selected", async () => {
@@ -1251,6 +1271,65 @@ describe("catch-up spends its budget on requests, not on messages it will skip l
         const sent = native.translateBatch.mock.calls
             .flatMap(c => JSON.parse(c[2] as string).messages.map((m: any) => m.id));
         expect(sent).toHaveLength(20);
+    });
+});
+
+describe("catch-up upgrades messages Google already translated", () => {
+    it("re-enqueues a Google line for the LLM on channel open", async () => {
+        // The silent-no-op guard. Every message has a Google subtitle within a
+        // second, so a resolved-check that only asks "is there an entry?" would
+        // consider the whole backlog finished and never upgrade any of it.
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+        setTranslation(key("1"), { lang: "de", text: "rough", via: "google" });
+        stubMessages.set(CHANNEL, [discordMessage("1", "hola")]);
+        respondWith({ ok: true, results: [] });
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await vi.advanceTimersByTimeAsync(30_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        const engines = native.translateBatch.mock.calls.map(c => c[0]);
+        expect(engines).toContain("gemini");
+        expect(engines).not.toContain("google");   // Google's work is already done
+    });
+
+    it("leaves a message the LLM already translated completely alone", async () => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+        setTranslation(key("1"), { lang: "de", text: "good", via: "gemini" });
+        stubMessages.set(CHANNEL, [discordMessage("1", "hola")]);
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await vi.advanceTimersByTimeAsync(30_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        expect(native.translateBatch).not.toHaveBeenCalled();
+    });
+
+    it("still sends a Google skip to the LLM — a Google skip is not authoritative", async () => {
+        // Carried forward from Task 3's review: the coarse pre-filter used to
+        // discard any `skipped` entry before needsQuality ever ran, which
+        // defeated needsQuality's whole point. A GOOGLE skip means "Google gave
+        // up" (it echoes short/romanized text back unchanged — measured on
+        // Moroccan Arabic in Latin letters, e.g. "salam khouya kifach" — and
+        // isSameText reads that echo as 'already in the target language'), not
+        // "this message is done". Only an LLM's OWN skip should close it.
+        //
+        // Nothing writes `via` on a skip yet (that's Task 5), so this state is
+        // constructed directly rather than driven through an engine.
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+        setTranslation(key("1"), { skipped: true, via: "google" });
+        stubMessages.set(CHANNEL, [discordMessage("1", "salam khouya kifach")]);
+        respondWith({ ok: true, results: [] });
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await vi.advanceTimersByTimeAsync(30_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        const engines = native.translateBatch.mock.calls.map(c => c[0]);
+        expect(engines).toContain("gemini");
     });
 });
 

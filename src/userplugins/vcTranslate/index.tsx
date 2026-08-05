@@ -826,33 +826,24 @@ function catchUp(channelId: string, becomingFocused = false) {
     for (let i = all.length - 1; i >= 0 && budget < count; i--) {
         const message = all[i];
 
-        // A message already queued or awaiting a response is a cache miss
-        // in getTranslation() for the whole round trip, not just briefly --
-        // so a duplicate catch-up trigger (rapid channel reselection, or
-        // CHANNEL_SELECT followed by LOAD_MESSAGES_SUCCESS for the same
-        // channel) must not treat "no cache entry yet" as "never requested".
-        // Either set: enqueue() below re-checks per tier anyway, this is only
-        // the budget pre-filter. (Full per-tier catch-up budgeting is Task 4.)
-        if (inFlightFast.has(message.id) || inFlightQuality.has(message.id)) continue;
-
         const key = makeKey(message.id, settings.store.targetLang);
-        const entry = getTranslation(key);
-        // Four resolved states, two of which are worth retrying. A real
-        // translation is done — whichever engine produced it. That is the
-        // deliberate consequence of dropping the engine from the key: a
-        // message Google already translated is NOT re-requested just because
-        // Gemini is now selected. Re-translating what the user has already
-        // read would spend the LLM budget on the one thing it is least needed
-        // for. A `{ skipped: true }` marker means the engine already told us
-        // the message is in the target language — also done, and re-asking
-        // would produce the same answer at the same cost.
-        // `{ failed: true }` (a genuine attempt that came back broken) and
-        // `{ deferred: true }` (never attempted, or rate-limited before the
-        // model saw it) both get another attempt — a deferred message that
-        // catch-up never retries is worse than the failed-forever bug this
-        // whole scheme replaces. Both are engine-agnostic too: a failure
-        // recorded under Google is retried under Gemini and vice versa.
-        if (entry && !("failed" in entry) && !("deferred" in entry)) continue;
+
+        // A message is finished only when NEITHER tier has anything left to do.
+        // Asking "is there an entry?" is no longer enough: the fast tier writes
+        // one within a second of every message arriving, so that question now
+        // answers "yes" for the entire backlog and the quality tier would never
+        // run again. Delegating to needsFast/needsQuality (rather than a coarse
+        // pre-filter on entry shape) is also what lets a GOOGLE skip stay open
+        // to the quality tier — Google echoes short/romanized text back
+        // unchanged and that reads as "already in the target language" when it
+        // actually means "Google gave up"; only an LLM's own skip closes a
+        // message. Each check folds in its own in-flight test, since a message
+        // can legitimately be in flight on one tier and idle on the other.
+        const fast = !inFlightFast.has(message.id) && needsFast(key);
+        const quality = qualityBatcher !== null
+            && !inFlightQuality.has(message.id)
+            && needsQuality(key);
+        if (!fast && !quality) continue;
 
         candidates.push(message);
         // Still enqueued above (a skipped message is real conversation and
