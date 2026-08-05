@@ -53,7 +53,15 @@ function isRetryable(err: unknown): boolean {
     if (msg === TRUNCATED_ERROR) return false;
     const status = httpStatus(msg);
     if (status === undefined) return true; // network/parse error — one retry is worthwhile
-    if (status === 429) return true;       // rate limited — backoff then retry
+    // A 429 is NOT retried here, for the same reason as TRUNCATED_ERROR above:
+    // it is a guaranteed second failure at double the cost. The API states how
+    // long to wait and it is far longer than any delay worth blocking an IPC
+    // call for — 33s in one captured response, against this retry's 1s — so the
+    // second attempt is rejected too, having consumed another request from the
+    // very quota that is exhausted. Rate limiting is handled where it can be
+    // handled properly: the renderer parks the engine for the interval the API
+    // asked for and serves the batch from Google meanwhile.
+    if (status === 429) return false;
     return status < 400 || status >= 500;  // retry 5xx, never other 4xx
 }
 

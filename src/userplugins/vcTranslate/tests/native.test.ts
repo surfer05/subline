@@ -134,10 +134,15 @@ describe("translateBatch — isRetryable classifier boundaries", () => {
         expect(claude).toHaveBeenCalledTimes(1);
     });
 
-    it("retries a 429", async () => {
+    it("does NOT retry a 429 — the retry is a guaranteed second failure at double the cost", async () => {
+        // Reversed deliberately, and measured: a real Gemini 429 asked for 33s.
+        // This retry waits 1s, so the second attempt is rejected too — having
+        // spent another request from the very quota that is already exhausted.
+        // Rate limiting is handled by the renderer instead (park the engine for
+        // the interval the API asked for, serve the batch from Google).
         claude.mockRejectedValue(new Error("claude: HTTP 429"));
         await run("claude", "k");
-        expect(claude).toHaveBeenCalledTimes(2);
+        expect(claude).toHaveBeenCalledTimes(1);
     });
 
     it("does not retry a gemini 401 — the same wrong key fails identically", async () => {
@@ -147,10 +152,12 @@ describe("translateBatch — isRetryable classifier boundaries", () => {
         expect(res).toEqual({ ok: false, error: "gemini: HTTP 401", retryAfterMs: undefined });
     });
 
-    it("retries a gemini 429", async () => {
+    it("does not retry a gemini 429, but still reports the pause hint", async () => {
+        // Not retrying must not cost us the retryAfterMs the renderer needs to
+        // size its cooldown — the two are independent.
         gemini.mockRejectedValue(new Error("gemini: HTTP 429"));
         const res = await run("gemini", "k");
-        expect(gemini).toHaveBeenCalledTimes(2);
+        expect(gemini).toHaveBeenCalledTimes(1);
         expect(res).toEqual({ ok: false, error: "gemini: HTTP 429", retryAfterMs: 30_000 });
     });
 
@@ -292,18 +299,21 @@ describe("translateBatch — retryAfterMs", () => {
     });
 
     it("reads the status from the RAW message, so scrubbing cannot desync it from isRetryable", async () => {
-        // A degenerate key that happens to contain the status text. isRetryable
-        // classifies the raw message (rate limited → retry), so if the pause
-        // signal were read off the SCRUBBED string it would see "[redacted]",
-        // find no status, and skip the pause — the queue would keep hammering
+        // A degenerate key that happens to contain the status text. Both
+        // decisions must classify the RAW message: read off the SCRUBBED string
+        // they would see "[redacted]", find no status, and then (a) skip the
+        // pause hint and (b) fall into the "no status → retry" default, hammering
         // an endpoint that just rate-limited us. The api key is arbitrary user
         // input; nothing stops it looking like this.
+        //
+        // The call count is the sharper signal now that a 429 is NOT retried:
+        // raw-read → 429 → 1 call, scrubbed-read → no status → 2 calls.
         const key = "HTTP 429";
         claude.mockRejectedValue(new Error("claude: HTTP 429"));
 
         const res = await run("claude", key);
 
-        expect(claude).toHaveBeenCalledTimes(2);            // isRetryable saw the 429
+        expect(claude).toHaveBeenCalledTimes(1);            // isRetryable saw the 429
         expect((res as { retryAfterMs?: number }).retryAfterMs).toBe(30_000);   // and so did this
         // ...while the value that crosses IPC is still scrubbed.
         expect((res as { error: string }).error).toBe("claude: [redacted]");

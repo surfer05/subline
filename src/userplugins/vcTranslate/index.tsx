@@ -5,6 +5,7 @@ import type { Message } from "@vencord/discord-types";
 
 import { createBatcher, type Batcher } from "./batcher";
 import { isChannelEnabled, loadEnabledChannels, toggleChannel } from "./channels";
+import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
 import { isConfidentlyTargetLanguage } from "./detectLang";
 import { acquireSlot, rateGateSettings, resetRateGate, tuneRateGateToObservedLimit } from "./rateGate";
 import settings from "./settings";
@@ -121,11 +122,14 @@ const DEFAULT_COOLDOWN_MS = 60_000;
  * Per engine rather than global because switching Gemini → Claude mid-cooldown
  * should use Claude immediately; Claude's quota has nothing to do with
  * Gemini's.
+ *
+ * PERSISTED (see cooldownStore.ts) rather than held only in module state: a
+ * restart used to clear the mark, so every Discord launch inside a rate-limit
+ * window spent a request rediscovering the limit and greeted the user with a
+ * rate-limit toast before showing them anything.
  */
-const llmCooldownUntil: Partial<Record<LlmEngineId, number>> = {};
-
 function isCoolingDown(engine: LlmEngineId): boolean {
-    return Date.now() < (llmCooldownUntil[engine] ?? 0);
+    return Date.now() < cooldownUntil(engine);
 }
 
 /** "45s" / "2m" — deliberately coarse; this is a toast, not a countdown. */
@@ -180,7 +184,7 @@ function enterCooldown(
     // retune is still what fixes the steady state; this only stops us
     // spending requests to relearn that during the transient.
     const cooldownMs = Math.max(asked, rateGateSettings().refillMs);
-    llmCooldownUntil[engine] = Date.now() + cooldownMs;
+    setCooldown(engine, Date.now() + cooldownMs);
 
     announceCooldownOnce(engine, cooldownMs);
 }
@@ -978,6 +982,12 @@ export default definePlugin({
 
     async start() {
         await loadEnabledChannels();
+        // AWAITED, unlike the translation cache below: this decides whether the
+        // very first batch of the session is even allowed to touch the LLM
+        // engine. Reading it late would let that batch go out against a quota
+        // we already know is exhausted — the exact wasted request, and the
+        // unwanted rate-limit toast, that persisting the mark exists to stop.
+        await loadCooldowns();
 
         // Deliberately NOT awaited: a slow IndexedDB read must not hold up the
         // Flux subscriptions below, and loadPersistedTranslations() never
@@ -1034,12 +1044,13 @@ export default definePlugin({
         // point can never match again.
         batcherGeneration++;
         // So toggling the plugin off/on after fixing a bad key retries
-        // Claude instead of staying pinned to Google, and a stale cooldown
-        // window doesn't carry over into the next session.
+        // Claude instead of staying pinned to Google.
         sessionFallback = false;
-        for (const id of Object.keys(llmCooldownUntil) as LlmEngineId[]) {
-            delete llmCooldownUntil[id];
-        }
+        // Only the in-memory mirror. The persisted mark deliberately SURVIVES:
+        // an exhausted quota is a fact about the API key, not about this
+        // plugin session, so restarting Discord (or toggling the plugin off
+        // and on) must not buy a fresh probe request. start() reads it back.
+        __resetCooldowns();
         announcedMissingKey = false;
         announcedCooldown = false;
         // Wakes anything still queued behind the rate gate immediately

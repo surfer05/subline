@@ -998,6 +998,66 @@ describe("batch sizing follows the daily request budget", () => {
     });
 });
 
+describe("a rate-limit cooldown survives a restart", () => {
+    /** Stop and start the plugin, exactly as quitting and reopening Discord does. */
+    async function restart() {
+        plugin.stop!();
+        await plugin.start!();
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+    }
+
+    it("does not spend a probe request on an engine still known to be rate limited", async () => {
+        // Reported live: "whenever I open Discord and enter a channel I see a
+        // Gemini rate-limit error". The cooldown lived only in module state, so
+        // every launch inside a rate-limit window paid one request to
+        // rediscover the limit — the single worst request to spend when the
+        // quota is already gone — and greeted the user with a toast.
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "gemini"
+                ? { ok: false, error: "gemini: HTTP 429", retryAfterMs: 600_000 }
+                : { ok: true, results: [{ id: "2", lang: "es", text: "hi", skip: false }] });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        expect(native.translateBatch.mock.calls.map(c => c[0])).toContain("gemini");
+
+        await restart();
+        native.translateBatch.mockClear();
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+
+        const engines = native.translateBatch.mock.calls.map(c => c[0]);
+        expect(engines).not.toContain("gemini");
+        expect(engines).toContain("google");
+    });
+
+    it("uses the LLM again after a restart once the cooldown has expired", async () => {
+        // The mark must not become a permanent ban: it is a timestamp, so a
+        // window that closed while Discord was shut counts as closed.
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "gemini"
+                ? { ok: false, error: "gemini: HTTP 429", retryAfterMs: 1_000 }
+                : { ok: true, results: [] });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();   // 5s of fake time — well past the 1s cooldown
+
+        await restart();
+        native.translateBatch.mockClear();
+        native.translateBatch.mockResolvedValue({ ok: true, results: [] });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+
+        expect(native.translateBatch.mock.calls.map(c => c[0])).toContain("gemini");
+    });
+});
+
 describe("globalAuto does not reach private conversations", () => {
     it("DOES translate a DM the user explicitly enabled, even with globalAuto off", async () => {
         // The other half of the rule, and the one that was never covered:
