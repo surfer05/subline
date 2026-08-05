@@ -36,7 +36,12 @@ const logger = new Logger("VcTranslate");
 export type StoredTranslation =
     | { lang: string; text: string; via: EngineId; conf?: number }
     | { failed: true }
-    | { skipped: true }
+    // `via` matters here: Google reports "already in the target language" for
+    // short messages it simply failed to identify — it returns "ne" unchanged,
+    // which isSameText reads as a skip. Treating THAT as final would deny the
+    // quality tier the exact messages it is best at. Only an LLM's skip is
+    // authoritative enough to close a message for good.
+    | { skipped: true; via?: EngineId }
     | { deferred: true };
 
 const MAX_ENTRIES = 500;
