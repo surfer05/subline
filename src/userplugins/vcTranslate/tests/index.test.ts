@@ -57,6 +57,27 @@ function requestAt(n: number) {
     return JSON.parse(native.translateBatch.mock.calls[n][2]);
 }
 
+/**
+ * A Google response that answers for the ids it was actually SENT, rather than
+ * for one hard-coded id.
+ *
+ * Necessary now that the fast tier sends every message to Google on its own
+ * schedule. A mock pinned to a single id answers that id on some OTHER
+ * message's flush, which writes an entry for a message nobody asked about —
+ * and that entry then makes needsFast() report "already resolved" when the
+ * real message arrives, silently suppressing the very request the test is
+ * watching for. Answering the request that was made keeps the fixture out of
+ * the behaviour under test.
+ */
+function googleAnswers(payload: string, text = "hello there", lang = "es"): NativeResponse {
+    return {
+        ok: true,
+        results: JSON.parse(payload).messages.map(
+            (m: { id: string; }) => ({ id: m.id, lang, text, skip: false })
+        )
+    };
+}
+
 beforeEach(async () => {
     vi.useFakeTimers();
     native.translateBatch.mockReset();
@@ -92,12 +113,18 @@ afterEach(() => {
 const key = (id: string) => makeKey(id, "en");
 
 describe("skip results are written as a resolved marker", () => {
-    it("stores { skipped: true } for a message the engine reported as already in the target language", async () => {
+    it("records WHICH engine skipped, not just that something did", async () => {
+        // `via` is not decoration: needsQuality() reads it to decide whether a
+        // skip closes the message. A Google skip is not authoritative (Google
+        // echoes short and romanized text back unchanged, which reads as
+        // "already in the target language" when it means "Google gave up"),
+        // an LLM skip is. Without `via` written here that rule is unreachable
+        // and every skip looks equally final.
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         respondWith({ ok: true, results: [{ id: "1", skip: true }] });
         await settle();
 
-        expect(getTranslation(key("1"))).toEqual({ skipped: true });
+        expect(getTranslation(key("1"))).toEqual({ skipped: true, via: "google" });
     });
 
     it("stops catch-up re-enqueueing an already-target-language backlog on every channel open", async () => {
@@ -130,55 +157,43 @@ describe("skip results are written as a resolved marker", () => {
     });
 });
 
-describe("deferred results — rate-limited, not failed", () => {
-    it("marks a batch deferred (not failed) only when the Google fallback fails too", async () => {
+// `deferred` is no longer WRITTEN by anything (a rate-limited quality tier
+// leaves the Google line alone instead of marking it), but it is still READ:
+// entries persisted by an earlier version come back on the next launch, and
+// catch-up must keep treating them as retryable rather than finished.
+describe("markers — who writes them, and which ones catch-up picks back up", () => {
+    it("marks a batch from the fast tier's own verdict, never from the quality tier's", async () => {
+        // WAS: "marks a batch deferred (not failed) only when the Google
+        // fallback fails too". Same question — what does the reader end up
+        // with when the LLM refuses? — against the mechanism that answers it
+        // now. `deferred` used to be produced by the quality tier's in-flush
+        // Google retry failing as well; that retry is gone (the fast tier
+        // already sent these messages to Google before the LLM was asked), so
+        // the quality tier writes NOTHING when it cannot answer and whatever
+        // the reader sees is the fast tier's verdict alone.
         settings.store.engine = "gemini";
         settings.store.geminiApiKey = "AIza-test";
-        // Blanket 429: Gemini is rate limited AND the Google fallback comes
-        // back empty-handed. This is now the ONLY route to `deferred` — the
-        // reader is shown a pending marker only when there is genuinely no
-        // translation to be had from anywhere.
-        //
-        // Logged with a timestamp per call rather than via the plain
-        // respondWith() blanket mock: the fast tier now independently sends
-        // its OWN Google request for this same message (dual dispatch), and
-        // that call is observably indistinguishable from the quality tier's
-        // in-flush Google retry (index.tsx's `rateLimitedToGoogle` branch) by
-        // engine name alone — both are "google". What DOES distinguish them
-        // is timing: the in-flush retry is a synchronous continuation of the
-        // very flush that got the 429 (no timer advance in between, so it
-        // shares the failed gemini call's exact fake-clock instant), while
-        // the fast tier's call is independently scheduled at its own 700ms
-        // debounce mark.
-        const callLog: { engine: string; at: number }[] = [];
-        native.translateBatch.mockImplementation(async (engine: string) => {
-            callLog.push({ engine, at: Date.now() });
-            return { ok: false, error: "gemini: HTTP 429", retryAfterMs: 30_000 };
-        });
+        // Blanket 429: Gemini is rate limited AND Google fails too, so there
+        // is genuinely nothing to be had from anywhere. That is a real
+        // attempt that came back broken — `failed` — and it must come from
+        // the fast tier. No `deferred`, from either tier.
+        native.translateBatch.mockImplementation(async () =>
+            ({ ok: false, error: "gemini: HTTP 429", retryAfterMs: 30_000 }));
 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
 
-        expect(getTranslation(makeKey("1", "en"))).toEqual({ deferred: true });
-        // Gemini refused, so the batch was immediately re-run through Google
-        // rather than abandoned — asserted as a Google call sharing gemini's
-        // exact timestamp, which only the in-flush retry produces.
-        const geminiCall1 = callLog.find(c => c.engine === "gemini");
-        expect(geminiCall1).toBeDefined();
-        const immediateGoogleRetry1 = callLog.find(
-            c => c.engine === "google" && c.at === geminiCall1!.at
-        );
-        expect(immediateGoogleRetry1).toBeDefined();
+        expect(getTranslation(makeKey("1", "en"))).toEqual({ failed: true });
+        expect(getTranslation(makeKey("1", "en"))).not.toHaveProperty("deferred");
 
-        // A second message arrives while still inside the 30s cooldown window
-        // (two settle() calls are ~10s of fake time). It must not touch Gemini
-        // again — but it must still be ATTEMPTED, via Google — and with Google
-        // also failing it is deferred, not failed.
+        // A second message arrives while still inside the 30s cooldown window.
+        // The LLM must not be touched again — but the message must still be
+        // ATTEMPTED, because the fast tier does not share the LLM's cooldown.
         const before = native.translateBatch.mock.calls.length;
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
         await settle();
 
-        expect(getTranslation(makeKey("2", "en"))).toEqual({ deferred: true });
+        expect(getTranslation(makeKey("2", "en"))).toEqual({ failed: true });
         const laterCalls = native.translateBatch.mock.calls.slice(before).map(c => c[0]);
         expect(laterCalls.length).toBeGreaterThan(0);
         expect(laterCalls).not.toContain("gemini");
@@ -298,24 +313,23 @@ describe("a rate-limited LLM falls back to Google rather than showing nothing", 
         settings.store.geminiApiKey = "AIza-test";
     }
 
-    it("re-runs the rate-limited batch through Google instead of deferring it", async () => {
-        // THE point of this phase. A mediocre Google translation is strictly
-        // better than "⏳ retrying" forever.
+    it("leaves the reader a Google line when the LLM is rate limited — without spending a second Google request", async () => {
+        // WAS: "re-runs the rate-limited batch through Google instead of
+        // deferring it". The guarantee it protected — a mediocre Google
+        // translation beats "⏳ retrying" forever — is unchanged and still
+        // asserted below. What changed is who delivers it: the fast tier
+        // already sent this message to Google ~19s before Gemini was asked,
+        // so re-running the batch in-flush would buy a line that is ALREADY
+        // ON SCREEN, at the price of a duplicate request.
+        //
+        // So the count is the point. Exactly one Google call, at the fast
+        // tier's own 700ms mark — a second one would be the deleted in-flush
+        // retry come back, and a zero would mean the reader got nothing.
         useGemini();
-        // Logged with a timestamp per call rather than plain respondByEngine():
-        // the fast tier now independently sends its OWN Google request for
-        // this same message (dual dispatch), and engine name alone cannot
-        // tell that call apart from the quality tier's in-flush Google retry
-        // (index.tsx's `rateLimitedToGoogle` branch) — both show up as
-        // "google". Timing does distinguish them: the in-flush retry is a
-        // synchronous continuation of the very flush that got the 429 (no
-        // timer advance in between, so it shares the failed gemini call's
-        // exact fake-clock instant), while the fast tier's call is
-        // independently scheduled at its own 700ms debounce mark.
         const callLog: { engine: string; at: number }[] = [];
-        native.translateBatch.mockImplementation(async (engine: string) => {
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) => {
             callLog.push({ engine, at: Date.now() });
-            return engine === "gemini" ? RATE_LIMITED : googleTranslated("1");
+            return engine === "gemini" ? RATE_LIMITED : googleAnswers(payload);
         });
 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
@@ -323,14 +337,19 @@ describe("a rate-limited LLM falls back to Google rather than showing nothing", 
 
         const geminiCall = callLog.find(c => c.engine === "gemini");
         expect(geminiCall).toBeDefined();
-        const immediateGoogleRetry = callLog.find(
-            c => c.engine === "google" && c.at === geminiCall!.at
-        );
-        expect(immediateGoogleRetry).toBeDefined();
+        const googleCalls = callLog.filter(c => c.engine === "google");
+        expect(googleCalls).toHaveLength(1);
+        // The fast tier's own scheduled call, not a synchronous continuation
+        // of the flush that got the 429 (which would share gemini's exact
+        // fake-clock instant, since no timer advances in between).
+        expect(googleCalls[0].at).not.toBe(geminiCall!.at);
 
+        // What the reader is actually left with: a readable line, labelled
+        // Google, and neither of the two "nothing to show" markers.
         const entry = getTranslation(makeKey("1", "en"));
         expect(entry).toEqual({ lang: "es", text: "hello there", via: "google" });
         expect(entry).not.toHaveProperty("deferred");
+        expect(entry).not.toHaveProperty("failed");
     });
 
     it("labels the fallback line as Google (≈), never as the configured LLM (✦)", async () => {
@@ -351,8 +370,17 @@ describe("a rate-limited LLM falls back to Google rather than showing nothing", 
     it("sends every batch during the cooldown straight to Google, without retrying the LLM", async () => {
         // Not retrying into the wall is the other half: roughly half the
         // observed API traffic was 429s we asked for.
+        //
+        // Google answers whatever it is asked (googleAnswers) rather than one
+        // pinned id: with the fast tier sending each message independently, a
+        // pinned mock would answer for message 2 during message 1's flush and
+        // leave message 2 looking already-resolved, so the very call this test
+        // asserts is still made would never be made.
         useGemini();
-        respondByEngine({ gemini: RATE_LIMITED, google: googleTranslated("2") });
+        native.translateBatch.mockImplementation(
+            async (engine: string, _k: string, payload: string) =>
+                engine === "gemini" ? RATE_LIMITED : googleAnswers(payload)
+        );
 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
@@ -944,6 +972,35 @@ describe("a settings change mid-debounce does not drop the message", () => {
             .flatMap(c => JSON.parse(c[2] as string).messages.map((m: any) => m.id));
         expect(sent).toContain("1");
     });
+
+    it("drops a response whose flush was superseded by a rebuild MID-REQUEST", async () => {
+        // The generation guard that runs AFTER the network await, as distinct
+        // from the one before it. A rebuild that happens WHILE the request is
+        // in flight (a settings change, or a 401 falling the session back to
+        // Google) leaves this flush holding a stale engine and a stale target
+        // language, so its response would land under a key nobody reads — and
+        // could clobber what the new generation is producing. The pre-await
+        // check cannot catch this: the flush was perfectly current when it
+        // started.
+        let release: ((r: NativeResponse) => void) | undefined;
+        native.translateBatch.mockImplementation(
+            () => new Promise<NativeResponse>(resolve => { release = resolve; })
+        );
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        // Past the fast window, so the request is genuinely out and waiting.
+        await vi.advanceTimersByTimeAsync(1_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        expect(release).toBeDefined();
+
+        // The rebuild lands while that request is still in flight.
+        settings.store.targetLang = "de";
+
+        release!({ ok: true, results: [{ id: "1", lang: "es", text: "stale", skip: false }] });
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        expect(getTranslation(makeKey("1", "en"))).toBeUndefined();
+    });
 });
 
 describe("only the channel the user is actually looking at", () => {
@@ -1126,10 +1183,15 @@ describe("a rate-limit cooldown survives a restart", () => {
         // quota is already gone — and greeted the user with a toast.
         settings.store.engine = "gemini";
         settings.store.geminiApiKey = "AIza-test";
-        native.translateBatch.mockImplementation(async (engine: string) =>
-            engine === "gemini"
-                ? { ok: false, error: "gemini: HTTP 429", retryAfterMs: 600_000 }
-                : { ok: true, results: [{ id: "2", lang: "es", text: "hi", skip: false }] });
+        // Google answers the ids it was actually sent — see googleAnswers. A
+        // mock pinned to id "2" would answer for message 2 during message 1's
+        // fast flush, leaving message 2 already-resolved and suppressing the
+        // Google call this test asserts still happens after the restart.
+        native.translateBatch.mockImplementation(
+            async (engine: string, _k: string, payload: string) =>
+                engine === "gemini"
+                    ? { ok: false, error: "gemini: HTTP 429", retryAfterMs: 600_000 }
+                    : googleAnswers(payload, "hi"));
 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
@@ -1480,6 +1542,73 @@ describe("every message goes to both tiers", () => {
         // fast tier — Google already spoke on this message.
         expect(native.translateBatch.mock.calls.map(c => c[0])).toEqual(["gemini"]);
         expect(getTranslation(key("1"))).toMatchObject({ via: "gemini", text: "good" });
+    });
+});
+
+describe("a failing quality tier never takes anything away from the reader", () => {
+    beforeEach(() => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+    });
+
+    it("keeps the Google line when the LLM is rate limited", async () => {
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "google"
+                ? { ok: true, results: [{ id: "1", lang: "de", text: "rough", skip: false }] }
+                : { ok: false, error: "gemini: HTTP 429", retryAfterMs: 30_000 });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        await vi.advanceTimersByTimeAsync(30_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        // Still readable, still marked Google. NOT failed, NOT deferred.
+        expect(getTranslation(key("1"))).toMatchObject({ via: "google", text: "rough" });
+        expect(getTranslation(key("1"))).not.toHaveProperty("deferred");
+        expect(getTranslation(key("1"))).not.toHaveProperty("failed");
+    });
+
+    it("does not relabel a Google skip as a failure when the LLM is rate limited", async () => {
+        // The case mayReplace() does NOT cover, and therefore the one the
+        // `if (!isQuality)` guard in runTier exists for. A marker cannot
+        // replace a real translation, but a `skipped` entry is not a real
+        // translation — so without that guard a rate-limited quality tier
+        // would overwrite it with { failed: true }, and a message that is
+        // simply already in the target language (nothing to show, and
+        // nothing wrong) would start rendering "⚠ translation failed".
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "google"
+                ? { ok: true, results: [{ id: "1", skip: true }] }
+                : { ok: false, error: "gemini: HTTP 429", retryAfterMs: 30_000 });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        await vi.advanceTimersByTimeAsync(30_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        expect(getTranslation(key("1"))).toEqual({ skipped: true, via: "google" });
+    });
+
+    it("does not send a quality request at all while the engine is cooling down", async () => {
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "google"
+                ? { ok: true, results: [{ id: "9", lang: "de", text: "rough", skip: false }] }
+                : { ok: false, error: "gemini: HTTP 429", retryAfterMs: 600_000 });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        await vi.advanceTimersByTimeAsync(30_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        const before = native.translateBatch.mock.calls.length;
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+        await vi.advanceTimersByTimeAsync(30_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        const later = native.translateBatch.mock.calls.slice(before).map(c => c[0]);
+        expect(later).not.toContain("gemini");
+        expect(later).toContain("google");
     });
 });
 

@@ -139,8 +139,10 @@ function formatDuration(ms: number): string {
  *     not enough to be worth waking up for.
  *  3. The user is told, at most once per session.
  *
- * The batch that triggered this is NOT lost: the caller re-runs it through
- * Google immediately.
+ * The batch that triggered this is NOT lost, and nothing has to re-send it:
+ * the fast tier already translated these same messages through Google before
+ * the LLM was ever asked. A rate-limited quality tier costs the reader
+ * nothing but the upgrade.
  */
 function enterCooldown(
     engine: LlmEngineId,
@@ -315,201 +317,160 @@ function needsQuality(key: string): boolean {
 }
 
 /**
- * Sends one flushed batch to `engine` and writes whatever comes back.
+ * One flush, for either tier. The tier is entirely described by which engine
+ * it was built with — the fast tier is Google by construction and the quality
+ * tier is only ever built for an LLM (see rebuildBatcher) — so there is one
+ * implementation rather than two, and `engine` no longer changes mid-flush.
  *
- * This is exactly today's single onFlush body, just parameterised over which
- * engine (and which batcherGeneration) the flush belongs to, so both the fast
- * and the quality batcher can share it. The fallback shape — cooldown
- * diversion, 401 handling, deferred-vs-failed — is untouched; Task 5 owns
- * rewriting that. A real translation result is written through writeResult()
- * instead of a bare setTranslation(), since two tiers can now race for the
- * same key — and so are the failed/deferred/skipped markers below, for the
- * same reason: a marker from one tier landing after the other tier already
- * wrote a real translation must not erase it. mayReplace() already refuses a
- * marker over a real translation; routing through writeResult() is what
- * actually consults that rule instead of overwriting unconditionally.
+ * WHAT IS DELIBERATELY ABSENT: the old "429 → immediately re-run this batch
+ * through Google" retry, and with it the `deferred` marker it produced. Both
+ * existed because a rate-limited LLM used to be the reader's only translator.
+ * It no longer is: the fast tier already sent these exact messages to Google
+ * ~19s earlier, so the fallback has ALREADY run and re-sending would spend a
+ * second request to obtain a line that is on screen. A quality tier that
+ * cannot answer simply stays quiet and the Google line stands.
  *
- * `inFlightSet` is the in-flight set belonging to WHICHEVER tier this flush is
- * for (inFlightFast for the fastBatcher's onFlush, inFlightQuality for the
- * qualityBatcher's) — passed in rather than looked up from `engine`, because
- * `engine` can change mid-flush (the cooldown fallback re-sends as "google")
- * while the tier this flush belongs to never does.
+ * That is also why only the FAST tier writes failure markers. A quality
+ * failure is invisible by design — replacing a readable Google subtitle with
+ * "⚠ translation failed" would take something away from the reader in
+ * exchange for information they can do nothing with. (writeResult/mayReplace
+ * already refuses a marker over a REAL translation; the `isQuality` guard is
+ * what additionally protects the entries mayReplace considers replaceable —
+ * a Google `skipped` marker most of all, since relabelling an
+ * already-in-the-target-language message as failed is a pure regression.)
+ *
+ * Everything else is unchanged and load-bearing: the generation guard runs
+ * both before and after the network await, `enterCooldown` still parks the
+ * engine on a 429, a 401/403 still falls the session back to Google, and the
+ * `finally` still releases this tier's in-flight ids however the flush ended.
  */
 async function runTier(
-    engine: EngineId, req: BatchRequest, myGeneration: number, inFlightSet: Set<string>
+    engine: EngineId, req: BatchRequest, myGeneration: number
 ): Promise<void> {
-    const markAllFailed = (r: { messages: { id: string }[]; targetLang: string; }) => {
-        for (const m of r.messages) {
-            writeResult(makeKey(m.id, r.targetLang), { failed: true });
-        }
-    };
-
-    // For a batch that was never attempted, or was rejected before the model
-    // ever saw it (rate-limited). Not a translation failure — nothing about
-    // the translation itself went wrong — so it must render and retry
-    // differently from `failed`. See store.ts's StoredTranslation comment.
-    const markAllDeferred = (r: { messages: { id: string }[]; targetLang: string; }) => {
-        for (const m of r.messages) {
-            writeResult(makeKey(m.id, r.targetLang), { deferred: true });
-        }
-    };
-
-    // `null` means the IPC call itself rejected — distinct from an
-    // `ok: false` response, which is an engine-level failure the
-    // native side successfully reported.
-    const send = async (target: EngineId) => {
-        try {
-            return await Native.translateBatch(
-                target,
-                isLlmEngine(target) ? apiKeyFor(target) : "",
-                JSON.stringify(target === "google" ? withSourceLangs(req) : req)
-            );
-        } catch {
-            // onFlush is void-returning and invoked un-awaited, so an
-            // unhandled rejection here would otherwise just vanish the
-            // batch with no marker.
-            return null;
-        }
-    };
+    const isQuality = engine !== "google";
+    // The in-flight set belonging to THIS tier. The other tier's request for
+    // the same id (if any) is a separate round trip and settles on its own.
+    const inFlightSet = isQuality ? inFlightQuality : inFlightFast;
 
     try {
-        // Superseded by a later rebuild (settings changed, or a
-        // fallback fired) before this flush even started — this
-        // closure's `engine` no longer matches reality, so just drop
-        // it rather than write under a stale key. The finally below
-        // still releases the ids: a batch stranded here that stayed
-        // "in flight" forever could never be retried by catch-up.
+        // Superseded by a later rebuild (settings changed, or a fallback
+        // fired) before this flush even started — this closure's `engine` no
+        // longer matches reality, so just drop it rather than write under a
+        // stale key. The finally below still releases the ids: a batch
+        // stranded here that stayed "in flight" forever could never be
+        // retried by catch-up.
         if (myGeneration !== batcherGeneration) return;
 
-        // THE fallback decision. An LLM engine that cannot serve this
-        // batch — cooling down after a 429, or with no key — is not a
-        // reason to show the user nothing. Google is worse; nothing is
-        // worse still. `runEngine` is what the request is ACTUALLY sent
-        // to and what gets recorded as `via`, so the ≈/✦ glyph stays
-        // honest about which engine produced the line.
-        //
-        // (The no-key case already resolves to "google" in
-        // effectiveEngine(), so `engine` is google here and this
-        // condition simply doesn't fire.)
-        let runEngine: EngineId = engine;
-        if (isLlmEngine(engine) && isCoolingDown(engine)) runEngine = "google";
+        // Cooling down after a 429: do not spend a request to be told so
+        // again. Nothing is marked and nothing is diverted — the fast tier's
+        // Google line for these same messages is already on screen.
+        if (isQuality && isLlmEngine(engine) && isCoolingDown(engine)) return;
 
-        // Only the two key-gated LLM engines are rate-gated — Google is
-        // per-message with its own concurrency cap (engines/google.ts)
-        // and was never the source of the 429 storm this gate exists
-        // for. Gated on runEngine, not engine: a batch being diverted
-        // to Google must not also burn an LLM token.
-        if (isLlmEngine(runEngine)) {
+        // Only the LLM engines are rate-gated — Google is per-message with its
+        // own concurrency cap (engines/google.ts) and was never the source of
+        // the 429 storm this gate exists for.
+        if (isQuality) {
             await acquireSlot();
-            // stop()/rebuild may have happened while this flush sat
-            // behind the gate (resetRateGate() wakes queued waiters
-            // immediately for exactly that reason, rather than leaving
-            // them to time out on the next refill tick). Re-check
-            // before spending a real request on a batch nothing will
-            // ever read the result of.
+            // stop()/rebuild may have happened while this flush sat behind the
+            // gate (resetRateGate() wakes queued waiters immediately for
+            // exactly that reason, rather than leaving them to time out on the
+            // next refill tick). Re-check before spending a real request on a
+            // batch nothing will ever read the result of.
             if (myGeneration !== batcherGeneration) return;
         }
 
-        let res = await send(runEngine);
+        // `null` means the IPC call itself rejected — distinct from an
+        // `ok: false` response, which is an engine-level failure the native
+        // side successfully reported. onFlush is void-returning and invoked
+        // un-awaited, so an unhandled rejection here would otherwise just
+        // vanish the batch with no marker.
+        let res: Awaited<ReturnType<typeof Native.translateBatch>> | null;
+        try {
+            res = await Native.translateBatch(
+                engine,
+                isLlmEngine(engine) ? apiKeyFor(engine) : "",
+                JSON.stringify(engine === "google" ? withSourceLangs(req) : req)
+            );
+        } catch {
+            res = null;
+        }
 
-        // THE race this guard exists for: rebuildBatcher() can run
-        // WHILE the line above is awaiting the network round trip (a
-        // settings change, or an LLM engine's 401 triggering
-        // fallBackToGoogle mid-flight). The check before the await
-        // only catches a flush that was already stale when it started
-        // — it cannot catch one that went stale during the await.
-        // Re-check before any write, so a superseded response is
-        // dropped instead of landing under the old engine's key (or
-        // worse, clobbering the new engine's in-progress results).
+        // THE race this second guard exists for: rebuildBatcher() can run
+        // WHILE the line above is awaiting the network round trip (a settings
+        // change, or an LLM engine's 401 triggering fallBackToGoogle
+        // mid-flight). The check before the await only catches a flush that
+        // was already stale when it started — it cannot catch one that went
+        // stale during the await. Re-check before any write, so a superseded
+        // response is dropped instead of landing under the old engine's key.
         if (myGeneration !== batcherGeneration) return;
 
-        // The LLM engine just told us it is rate limited. Park it (see
-        // enterCooldown) and serve THIS batch from Google rather than
-        // handing the reader a pending marker: a mediocre translation
-        // now beats a good one that never arrives.
-        let rateLimitedToGoogle = false;
-        if (res !== null && !res.ok && isLlmEngine(runEngine) && res.retryAfterMs) {
-            enterCooldown(runEngine, res.retryAfterMs, res.quotaLimitPerMinute);
-            rateLimitedToGoogle = true;
-            runEngine = "google";
-            res = await send(runEngine);
-            if (myGeneration !== batcherGeneration) return;
-        }
-
-        if (res === null) {
-            markAllFailed(req);
-            return;
-        }
-
-        if (!res.ok) {
-            // Always mark this batch's messages as resolved on a
-            // request-level error, regardless of cause — an auth
-            // failure must not leave them silently unresolved just
-            // because it ALSO triggers a session fallback.
-            //
-            // `deferred` is now the narrow case it was always meant to
-            // be: the message was never given a fair attempt. That is
-            // true when the request was rate-limited (`retryAfterMs` is
-            // only ever set for a 429, see native.ts) and when the
-            // Google fallback above ALSO failed. Anything else is a
-            // genuine attempt that came back broken, i.e. `failed`.
-            if (rateLimitedToGoogle || res.retryAfterMs) {
-                markAllDeferred(req);
-            } else {
-                markAllFailed(req);
+        if (res === null || !res.ok) {
+            if (res !== null) {
+                // Park the engine for as long as the API asked for. Still the
+                // whole point of the cooldown: retrying into a wall that just
+                // rejected us is how half the observed traffic became 429s.
+                // (`retryAfterMs` is only ever set for a 429 — see native.ts.)
+                if (isLlmEngine(engine) && res.retryAfterMs) {
+                    enterCooldown(engine, res.retryAfterMs, res.quotaLimitPerMinute);
+                }
+                // An auth failure means the key is wrong, not that the network
+                // blipped — retrying it every batch would be pure noise, so
+                // fall back to Google for the rest of the session. Worth
+                // telling the user about exactly once.
+                if (isLlmEngine(engine) && /\b40[13]\b/.test(res.error)) {
+                    fallBackToGoogle(`${LLM_ENGINES[engine].label} rejected the API key`);
+                }
             }
 
-            // An auth failure means the key is wrong, not that the
-            // network blipped — retrying it every batch would be pure
-            // noise, so fall back to Google for the rest of the session
-            // IN ADDITION to (not instead of) marking this batch failed.
-            if (isLlmEngine(runEngine) && /\b40[13]\b/.test(res.error)) {
-                fallBackToGoogle(`${LLM_ENGINES[runEngine].label} rejected the API key`);
+            // Markers only from the FAST tier — and writeResult still refuses
+            // to put one over a real line. An id with no entry at all is
+            // indistinguishable from one that was never requested, so the fast
+            // tier must leave SOMETHING resolved or catch-up re-requests it
+            // forever.
+            if (!isQuality) {
+                for (const m of req.messages) {
+                    writeResult(makeKey(m.id, req.targetLang), { failed: true });
+                }
             }
             return;
         }
 
         for (const r of res.results) {
+            const key = makeKey(r.id, req.targetLang);
             if ("failed" in r) {
-                writeResult(makeKey(r.id, req.targetLang), { failed: true });
+                if (!isQuality) writeResult(key, { failed: true });
                 continue;
             }
             if (r.skip) {
-                // A skip has nothing to DISPLAY, but something must
-                // still be WRITTEN. An id with no entry is
-                // indistinguishable from one that was never requested,
-                // so leaving it blank made every
-                // already-in-the-target-language message a permanent
-                // cache miss: catch-up re-enqueued the entire backlog
-                // on every single channel open, forever. In a
-                // mixed-language chat most messages ARE already in the
-                // target language, so that was the common case, not the
-                // edge case — free on Google, real recurring spend on
-                // Claude.
-                writeResult(makeKey(r.id, req.targetLang), { skipped: true });
+                // A skip has nothing to DISPLAY, but something must still be
+                // WRITTEN, for the same "no entry looks like never requested"
+                // reason as above — in a mixed-language chat most messages ARE
+                // already in the target language, so this is the common case.
+                //
+                // `via` is what makes the skip interpretable later: a GOOGLE
+                // skip is not authoritative (Google echoes short and romanized
+                // text back unchanged — "salam khouya kifach" comes back
+                // byte-identical — which isSameText reads as "already in the
+                // target language" when it actually means "Google gave up"),
+                // while an LLM skip closes the message. needsQuality() reads
+                // exactly that distinction. Written through writeResult so it
+                // still cannot replace a real translation: a Google skip must
+                // never erase an LLM line.
+                writeResult(key, { skipped: true, via: engine });
                 continue;
             }
-            // `runEngine`, NOT the configured engine: the one the
-            // request was actually sent to, already re-validated
-            // against batcherGeneration above. Recording it in the
-            // value is what survives the engine no longer being part of
-            // the key — and it is what makes a fallback line render as
-            // ≈ (Google, approximate) instead of claiming ✦. Routed
-            // through writeResult(): the fast and quality tiers write the
-            // same key from different latencies, so this one write has to
-            // ask whether it is actually an improvement.
-            writeResult(
-                makeKey(r.id, req.targetLang),
-                { lang: r.lang, text: r.text, via: runEngine, conf: r.conf }
-            );
+            // `engine` is recorded in the value because it is no longer part
+            // of the key — and it is what makes a Google line render as ≈
+            // (approximate) instead of claiming ✦. Routed through
+            // writeResult(): the two tiers write the same key from different
+            // latencies, so this write has to ask whether it is an improvement.
+            writeResult(key, { lang: r.lang, text: r.text, via: engine, conf: r.conf });
         }
     } finally {
-        // Fires once this flush has fully settled, whichever way it
-        // went (sent, diverted, stranded by a rebuild, rejected). That
-        // is the earliest point these ids are safe to retry — not when
-        // they were queued, and not only on the happy path. Only THIS
-        // tier's set: the other tier's request for the same id (if any)
-        // is a separate in-flight round trip and settles on its own.
+        // Fires once this flush has fully settled, whichever way it went
+        // (sent, skipped for cooldown, stranded by a rebuild, rejected). That
+        // is the earliest point these ids are safe to retry — not when they
+        // were queued, and not only on the happy path.
         for (const m of req.messages) inFlightSet.delete(m.id);
     }
 }
@@ -534,7 +495,7 @@ function rebuildBatcher() {
         contextSize: 8,
         supportsContext: false,          // Google is per-message; context is wasted on it
         targetLang: settings.store.targetLang,
-        onFlush: req => runTier("google", req, myGeneration, inFlightFast)
+        onFlush: req => runTier("google", req, myGeneration)
     });
 
     // Only when an LLM is actually configured AND usable. With engine=google
@@ -547,7 +508,7 @@ function rebuildBatcher() {
             contextSize: 8,
             supportsContext: true,
             targetLang: settings.store.targetLang,
-            onFlush: req => runTier(quality, req, myGeneration, inFlightQuality)
+            onFlush: req => runTier(quality, req, myGeneration)
         })
         : null;
 
@@ -980,14 +941,15 @@ function TranslationAccessory({ message }: { message: Message; }) {
         );
     }
 
-    // A deferred message was never given a fair attempt: the LLM engine was
-    // rate limited AND the Google fallback did not come through either. It
-    // will be retried, so it must NOT read as broken the way `failed` does.
-    // Same muted token as the failure marker (this is still a "nothing to show
-    // yet" line, not a real subtitle), different wording and glyph so a
-    // rate-limited catch-up storm doesn't look like the plugin failing on
-    // every message in it. Since the Google fallback landed this is now the
-    // rare case rather than the routine one.
+    // A deferred message was never given a fair attempt. NOTHING WRITES THIS
+    // ANY MORE: with a fast tier, a rate-limited quality tier leaves the
+    // Google line in place rather than marking anything (see runTier), so the
+    // only way one reaches the store today is a persisted cache written by an
+    // earlier version. The branch stays because those entries are still read
+    // back on the next launch and must not fall through to "⚠ translation
+    // failed" — a message awaiting a retry is not a broken one. Same muted
+    // token as the failure marker (this is still a "nothing to show yet"
+    // line), different wording and glyph.
     if ("deferred" in entry) {
         return (
             <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
@@ -1139,7 +1101,7 @@ export default definePlugin({
         inFlightQuality.clear();
         // Bump the generation so an in-flight request from before stop()
         // (e.g. a Claude call awaiting its response) fails its post-await
-        // guard check in onFlush and returns before ever reaching
+        // guard check in runTier and returns before ever reaching
         // fallBackToGoogle()/rebuildBatcher() — otherwise it could resurrect
         // a batcher (and re-set sessionFallback) on an already-stopped
         // plugin. Must happen so any myGeneration captured before this
