@@ -17,19 +17,37 @@ import * as DataStore from "@api/DataStore";
  * channels in a few seconds produces exactly the same shape of burst one
  * channel at a time. The gate stays.
  *
- * BURST_CAPACITY / REFILL_MS reasoning (free-tier shaped): a burst of 5 tokens
- * available immediately, refilling one per 4 seconds. The quality tier flushes
- * at most one batch per 20s window per channel (QUALITY_DEBOUNCE_MS, see
- * types.ts), so ordinary chat in one channel NEVER waits on this gate, and a
- * hop across many channels is smoothed into a steady rate instead of
- * front-loaded into a second and rejected wholesale.
+ * BURST_CAPACITY / REFILL_MS reasoning — THE UNTAUGHT DEFAULTS, and why they
+ * are deliberately timid. These two numbers are in force exactly once in an
+ * install's life: on a first-ever run, before any 429 has stated a real quota
+ * (and, since that lesson is now persisted — see LEARNED_QUOTA_KEY below —
+ * never again after it). So the only question they have to answer is "what is
+ * safe to guess when we have been told nothing?", and the answer is not
+ * "whatever the one tier we happen to have measured allows".
  *
- * Those two numbers apply only until a 429 states a real quota — see
- * SAFETY_FACTOR below, which is where the arithmetic against the MEASURED
- * ceiling (Gemini free tier: 20 requests per rolling minute) is done. They are
- * deliberately not tuned to that measurement themselves: they are the guess
- * that stands in for a quota this install has not been told yet, and the
- * install it is wrong for is someone else's.
+ * THE ARITHMETIC. The provider counts a ROLLING 60-second window; this is a
+ * token BUCKET, and the most a bucket can put into one such window is its
+ * sustained rate PLUS a full burst released at the window's start:
+ *
+ *     worst minute = 60_000 / REFILL_MS + BURST_CAPACITY
+ *                  = 60_000 / 15_000   + 3
+ *                  = 4 + 3 = 7 requests
+ *
+ * against a MEASURED Gemini free-tier ceiling of 20 per rolling minute — about
+ * a third of it, and still comfortably under a hypothetical 10/minute tier we
+ * have never seen. The previous defaults (5 and 4_000) gave 15 + 5 = 20: the
+ * measured ceiling EXACTLY, on an install that had been told nothing at all.
+ * That is the wrong direction to be wrong in, and it is what produced a
+ * rate-limit toast seconds after every fresh start.
+ *
+ * WHAT THE TIMIDITY COSTS. Nothing a reader notices. The quality tier flushes
+ * at most one batch per 20s window per channel (QUALITY_DEBOUNCE_MS, see
+ * types.ts) and a live conversation needs only ~2-3 quality requests a minute,
+ * which is under the sustained rate of 4 — so ordinary chat still NEVER waits
+ * on this gate. The only thing 3-and-15s slows is the initial channel-hopping
+ * burst, once, on a first-ever run, and what it delays there is a `✦` upgrade
+ * of a line Google has already put on screen. Being too fast, by contrast,
+ * costs the quota outright and takes the quality tier down for everything.
  *
  * Those two constants are only the STARTING GUESS. A 429 body sometimes states
  * the quota it just enforced ("limit: 20" — see rateHint.ts), and when it does,
@@ -40,8 +58,8 @@ import * as DataStore from "@api/DataStore";
  * wrong for someone — and being wrong in the generous direction is what
  * produced the 429 storm in the first place.
  */
-export const BURST_CAPACITY = 5;
-export const REFILL_MS = 4_000;
+export const BURST_CAPACITY = 3;
+export const REFILL_MS = 15_000;
 
 /**
  * How much of the observed ceiling to actually aim at.
@@ -54,12 +72,14 @@ export const REFILL_MS = 4_000;
  * 60-second window is the sustained rate PLUS a full burst released at the
  * window's start, i.e. `targetPerMinute + capacity`.
  *
- * At 0.75 that is 15 + 5 = 20 for a reported limit of 20 — exactly the ceiling,
- * with nothing left for the provider's own window boundaries, requests already
- * in flight when the window turns over, or another client on the same key. A
- * gate tuned to sit precisely on a hard limit is a gate that 429s.
+ * At 0.75 that is 15/minute sustained for a reported limit of 20, and 15 plus
+ * any burst at all is AT OR OVER the ceiling — nothing left for the provider's
+ * own window boundaries, for requests already in flight when the window turns
+ * over, or for another client on the same key. A gate tuned to sit precisely on
+ * a hard limit is a gate that 429s.
  *
- * At 0.5 it is 10 + 5 = 15 against the same ceiling: a quarter of the quota
+ * At 0.5 it is 10/minute sustained, i.e. 10 + 3 = 13 against the same ceiling
+ * (the burst is capped at BURST_CAPACITY): better than a third of the quota
  * held back for exactly those three. The cost is throughput this plugin does
  * not need — the quality tier flushes at most one batch per channel per 20s
  * window, so a live conversation still never waits on this gate at all, and

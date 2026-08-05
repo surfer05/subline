@@ -5,6 +5,17 @@ import {
 } from "../rateGate";
 import * as DataStore from "./stubs/api-datastore";
 
+/**
+ * The quota measured directly against the live Gemini free tier: 20 requests
+ * per ROLLING minute (probes were told to retry in 56.6s, 11.2s, 25.0s and
+ * 39.3s as the window drained — it never fully emptied under load).
+ */
+const MEASURED_CEILING_PER_MINUTE = 20;
+
+/** What a token bucket can put into one rolling window: sustained + a full burst. */
+const worstMinute = ({ capacity, refillMs }: { capacity: number; refillMs: number; }) =>
+    60_000 / refillMs + capacity;
+
 beforeEach(() => {
     vi.useFakeTimers();
     DataStore.__reset();
@@ -230,6 +241,32 @@ describe("rateGate — retuning from a quota the API actually reported", () => {
         tuneRateGateToObservedLimit(4);
         resetRateGate();
         expect(rateGateSettings()).toEqual({ capacity: BURST_CAPACITY, refillMs: REFILL_MS });
+    });
+});
+
+describe("rateGate — the untaught defaults are the conservative guess", () => {
+    it("keeps the WORST rolling minute (sustained + burst) well under the measured ceiling", () => {
+        // Asserted as a PROPERTY of the live untaught gate rather than against
+        // a spelled-out number, so raising either constant is caught here even
+        // if the other is left alone. The previous defaults (5 and 4_000) gave
+        // 15 + 5 = 20 — the measured ceiling exactly, on an install that had
+        // been told nothing at all — which is the 429 seconds after a fresh
+        // start that this bound exists to make unreachable.
+        expect(worstMinute(rateGateSettings())).toBeLessThan(MEASURED_CEILING_PER_MINUTE);
+        // Not merely a hair under it either: an untaught guess has to clear
+        // tiers we have never measured, not just the one we have.
+        expect(worstMinute(rateGateSettings()))
+            .toBeLessThanOrEqual(MEASURED_CEILING_PER_MINUTE / 2);
+    });
+
+    it("is still fast enough that live chat never queues behind it", () => {
+        // The other side of the bound, so "make it safe" cannot be answered by
+        // making it useless. A busy single channel flushes the quality tier at
+        // ~2-3 requests/minute (QUALITY_DEBOUNCE_MS is 20s), so the sustained
+        // rate has to clear that — otherwise ordinary reading starts waiting on
+        // a gate that exists only to smooth bursts.
+        const sustainedPerMinute = 60_000 / rateGateSettings().refillMs;
+        expect(sustainedPerMinute).toBeGreaterThanOrEqual(3);
     });
 });
 

@@ -445,7 +445,7 @@ describe("a rate-limited LLM leaves the reader the fast tier's Google line", () 
         // This used to be observed indirectly, through whether a SECOND
         // flush landed inside the cooldown window. That is no longer
         // reachable: at QUALITY_DEBOUNCE_MS (20s) the next flush is never
-        // sooner than 20s, while the floor being tested here is only 4s wide.
+        // sooner than 20s, while the floor being tested here is only 6s wide.
         // So this asserts the cooldown mark directly instead.
         useGemini();
         respondByEngine({
@@ -564,8 +564,11 @@ describe("the rate gate — smooths a catch-up storm, never slows live chat", ()
         expect(geminiAfterBurst).toBeLessThan(8);
 
         // The remainder drains steadily rather than being dropped or stuck
-        // forever: enough refill time gets every one of them through.
-        await vi.advanceTimersByTimeAsync(4_000 * 8);
+        // forever: enough refill time gets every one of them through. Derived
+        // from REFILL_MS rather than spelled out, so tightening the untaught
+        // defaults keeps testing "they all drain eventually" instead of
+        // silently becoming "they all drain within a fixed 32 seconds".
+        await vi.advanceTimersByTimeAsync(REFILL_MS * 8);
         for (let i = 0; i < 20; i++) await Promise.resolve();
 
         expect(native.translateBatch.mock.calls.filter(c => c[0] === "gemini")).toHaveLength(8);

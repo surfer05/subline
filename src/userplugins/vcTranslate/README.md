@@ -286,13 +286,11 @@ live conversation and channel opens" above). The channel-hopping burst is
 what the client-side token-bucket gate below still exists for.
 
 A small client-side token-bucket gate (`rateGate.ts`) sits in front of every
-Claude/Gemini request: a burst of 5 requests is always available immediately,
-refilling at 1 every 4 seconds until a 429 teaches it the real quota. A single
-live conversation's quality tier never needs more than one token at a time, so
-**normal chat is never throttled** by this gate at all — it is the
-channel-hopping burst above that it smooths out, spacing 10 clumped requests
-into the steady rate instead of firing them all at once and getting several
-back as 429s.
+Claude/Gemini request. A single live conversation's quality tier never needs
+more than one token at a time, so **normal chat is never throttled** by this
+gate at all — it is the channel-hopping burst above that it smooths out,
+spacing 10 clumped requests into the steady rate instead of firing them all at
+once and getting several back as 429s.
 
 **The gate re-tunes itself from the API's own reported limit, and remembers
 it.** A Gemini 429 body states the quota it just enforced — literally
@@ -315,17 +313,30 @@ the project, not about a plugin session, so a restart (or toggling the plugin
 off and on) is not a reason to forget it. A corrupt or missing entry simply
 falls back to the starting guess.
 
+**A first-ever run starts deliberately slow.** Before anything has been
+learned, the gate allows a burst of **3** requests and refills 1 every **15
+seconds**. Worst case inside a single rolling minute is therefore the sustained
+rate plus a full burst — 4 + 3 = **7 requests, about a third of the measured
+20/minute ceiling** — and comfortably under free tiers we have never measured
+either. (The previous starting guess was a burst of 5 refilling every 4
+seconds: 15 + 5 = 20, the measured ceiling *exactly*, on an install that had
+been told nothing at all.) The timidity costs nothing a reader notices: a busy
+channel only needs ~2-3 quality requests a minute, which is under the sustained
+rate of 4, so ordinary chat still never waits. The only thing it slows is the
+first channel-hopping burst, once, before the first 429 — and what it delays
+there is a `✦` upgrade of a line Google has already put on screen.
+
 **Why half and not three-quarters** (this was 75%, and 75% was wrong). The
 provider counts a *rolling* 60-second window; the gate is a token bucket. The
 most a bucket can put into any one such window is its sustained rate **plus a
 full burst released at the window's start** — not the sustained rate alone. At
-75% of a reported 20/minute that is 15 + 5 = **20 requests inside one rolling
-minute: exactly the ceiling**, leaving nothing for requests still in flight,
-for another client on the same key, or for the provider's window boundary not
-lining up with ours. At 50% it is 10 + 5 = 15 against the same ceiling, a
-quarter of the quota held in reserve. The throughput given up costs nothing
-here: the quality tier flushes at most one batch per channel per 20 seconds,
-so a live conversation still never reaches the gate.
+75% of a reported 20/minute that is 15/minute sustained, and 15 plus a burst of
+any size at all is **at or over the ceiling**, leaving nothing for requests
+still in flight, for another client on the same key, or for the provider's
+window boundary not lining up with ours. At 50% it is 10 + 3 = 13 against the
+same ceiling, better than a third of the quota held in reserve. The throughput
+given up costs nothing here: the quality tier flushes at most one batch per
+channel per 20 seconds, so a live conversation still never reaches the gate.
 
 ### When the LLM engine is rate limited, nothing happens — and that is the point
 
