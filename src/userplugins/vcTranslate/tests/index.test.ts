@@ -138,20 +138,37 @@ describe("deferred results — rate-limited, not failed", () => {
         // back empty-handed. This is now the ONLY route to `deferred` — the
         // reader is shown a pending marker only when there is genuinely no
         // translation to be had from anywhere.
-        respondWith({ ok: false, error: "gemini: HTTP 429", retryAfterMs: 30_000 });
+        //
+        // Logged with a timestamp per call rather than via the plain
+        // respondWith() blanket mock: the fast tier now independently sends
+        // its OWN Google request for this same message (dual dispatch), and
+        // that call is observably indistinguishable from the quality tier's
+        // in-flush Google retry (index.tsx's `rateLimitedToGoogle` branch) by
+        // engine name alone — both are "google". What DOES distinguish them
+        // is timing: the in-flush retry is a synchronous continuation of the
+        // very flush that got the 429 (no timer advance in between, so it
+        // shares the failed gemini call's exact fake-clock instant), while
+        // the fast tier's call is independently scheduled at its own 700ms
+        // debounce mark.
+        const callLog: { engine: string; at: number }[] = [];
+        native.translateBatch.mockImplementation(async (engine: string) => {
+            callLog.push({ engine, at: Date.now() });
+            return { ok: false, error: "gemini: HTTP 429", retryAfterMs: 30_000 };
+        });
 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
 
         expect(getTranslation(makeKey("1", "en"))).toEqual({ deferred: true });
         // Gemini refused, so the batch was immediately re-run through Google
-        // rather than abandoned. (The fast tier also independently attempts
-        // Google for this same message now — dual dispatch — so gemini is
-        // checked for exactly one attempt rather than asserting the full raw
-        // call sequence.)
-        const engines1 = native.translateBatch.mock.calls.map(c => c[0]);
-        expect(engines1.filter(e => e === "gemini")).toHaveLength(1);
-        expect(engines1).toContain("google");
+        // rather than abandoned — asserted as a Google call sharing gemini's
+        // exact timestamp, which only the in-flush retry produces.
+        const geminiCall1 = callLog.find(c => c.engine === "gemini");
+        expect(geminiCall1).toBeDefined();
+        const immediateGoogleRetry1 = callLog.find(
+            c => c.engine === "google" && c.at === geminiCall1!.at
+        );
+        expect(immediateGoogleRetry1).toBeDefined();
 
         // A second message arrives while still inside the 30s cooldown window
         // (two settle() calls are ~10s of fake time). It must not touch Gemini
@@ -265,18 +282,32 @@ describe("a rate-limited LLM falls back to Google rather than showing nothing", 
         // THE point of this phase. A mediocre Google translation is strictly
         // better than "⏳ retrying" forever.
         useGemini();
-        respondByEngine({ gemini: RATE_LIMITED, google: googleTranslated("1") });
+        // Logged with a timestamp per call rather than plain respondByEngine():
+        // the fast tier now independently sends its OWN Google request for
+        // this same message (dual dispatch), and engine name alone cannot
+        // tell that call apart from the quality tier's in-flush Google retry
+        // (index.tsx's `rateLimitedToGoogle` branch) — both show up as
+        // "google". Timing does distinguish them: the in-flush retry is a
+        // synchronous continuation of the very flush that got the 429 (no
+        // timer advance in between, so it shares the failed gemini call's
+        // exact fake-clock instant), while the fast tier's call is
+        // independently scheduled at its own 700ms debounce mark.
+        const callLog: { engine: string; at: number }[] = [];
+        native.translateBatch.mockImplementation(async (engine: string) => {
+            callLog.push({ engine, at: Date.now() });
+            return engine === "gemini" ? RATE_LIMITED : googleTranslated("1");
+        });
 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
 
-        // The fast tier also independently attempts Google for this same
-        // message now — dual dispatch — so gemini is checked for exactly one
-        // attempt, followed by at least one Google call, rather than
-        // asserting the full raw call sequence.
-        const engines = native.translateBatch.mock.calls.map(c => c[0]);
-        expect(engines.filter(e => e === "gemini")).toHaveLength(1);
-        expect(engines).toContain("google");
+        const geminiCall = callLog.find(c => c.engine === "gemini");
+        expect(geminiCall).toBeDefined();
+        const immediateGoogleRetry = callLog.find(
+            c => c.engine === "google" && c.at === geminiCall!.at
+        );
+        expect(immediateGoogleRetry).toBeDefined();
+
         const entry = getTranslation(makeKey("1", "en"));
         expect(entry).toEqual({ lang: "es", text: "hello there", via: "google" });
         expect(entry).not.toHaveProperty("deferred");
