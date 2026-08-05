@@ -36,12 +36,13 @@ const discordMessage = (id: string, content: string, authorId = "u1") => ({
 /**
  * Run every pending timer and let the resulting promise chain settle.
  *
- * 5s, not 1s: the LLM engines now debounce for LLM_DEBOUNCE_MS (3s) to fit a
- * day's worth of messages into a few dozen requests, so a 1s window would
- * never flush a Claude/Gemini batch at all.
+ * 21s, not 5s: the quality tier now debounces for QUALITY_DEBOUNCE_MS (20s) so
+ * a busy channel sits an order of magnitude under the measured rate-limit
+ * ceiling (see types.ts), so anything shorter would never flush a
+ * Claude/Gemini batch at all.
  */
 async function settle() {
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(21_000);
     for (let i = 0; i < 20; i++) await Promise.resolve();
 }
 
@@ -445,7 +446,7 @@ describe("the rate gate — smooths a catch-up storm, never slows live chat", ()
         }
 
         // Let every channel's debounce timer fire, but nothing beyond that.
-        await vi.advanceTimersByTimeAsync(3_000);
+        await vi.advanceTimersByTimeAsync(20_000);
         for (let i = 0; i < 20; i++) await Promise.resolve();
 
         // Only the burst capacity's worth of requests actually leave the
@@ -471,7 +472,7 @@ describe("the rate gate — smooths a catch-up storm, never slows live chat", ()
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         // Advance by exactly the debounce window, nothing more — a real
         // conversation's single flush must clear the gate with no extra wait.
-        await vi.advanceTimersByTimeAsync(3_000);
+        await vi.advanceTimersByTimeAsync(20_000);
         for (let i = 0; i < 20; i++) await Promise.resolve();
 
         expect(native.translateBatch).toHaveBeenCalledTimes(1);
