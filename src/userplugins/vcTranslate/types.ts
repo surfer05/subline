@@ -75,6 +75,15 @@ export type Result =
     | { id: string; skip: true }
     | { id: string; failed: true };
 
+/**
+ * What each engine can do, and — via `hasOwnProperty` in store.ts's
+ * isKnownEngine — the single runtime list of which engine ids exist at all.
+ *
+ * `supportsContext` is READ, by rebuildBatcher() in index.tsx, for both tiers.
+ * That matters: a capability table nothing consults is a comment pretending to
+ * be code, and the two tiers hardcoding their own values is exactly how this
+ * table would come to disagree with the batchers it describes.
+ */
 export const ENGINE_CAPS: Record<EngineId, { supportsContext: boolean }> = {
     google: { supportsContext: false },
     claude: { supportsContext: true },

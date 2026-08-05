@@ -11,14 +11,19 @@ const logger = new Logger("VcTranslate");
 // entire already-target-language backlog on every channel open, forever. In a
 // mixed-language chat that is most of the backlog.
 //
-// `deferred` exists for the same "don't leave it blank" reason, but for the
-// opposite situation: the request was never attempted at all, or was
-// rejected by the API before it ever reached the model (most commonly a 429
-// rate-limit from a catch-up burst against Claude/Gemini's free/low tiers).
-// That is not a translation failure — the model never got a chance to be
-// wrong — so it must not render or count as one. `failed` is reserved for a
-// genuine attempt that came back broken (bad response shape, an id the model
-// never returned a usable row for, a non-retryable transport error).
+// `deferred` is HISTORICAL — nothing writes it any more. It existed for the
+// same "don't leave it blank" reason but for the opposite situation: the
+// request was never attempted at all, or was rejected by the API before it
+// ever reached the model (most commonly a 429 from a catch-up burst against
+// Claude/Gemini's free/low tiers), which is not a translation failure and must
+// not render as one. That marker made sense while an LLM was the reader's only
+// translator; with a fast tier there is always a Google line in place instead,
+// so a rate-limited quality tier now writes nothing at all (see index.tsx's
+// runTier, and the `deferred` branch in TranslationAccessory). The variant
+// stays because entries persisted by an earlier version are still read back on
+// launch and must keep rendering sensibly. `failed` is reserved for a genuine
+// attempt that came back broken (bad response shape, an id the model never
+// returned a usable row for, a non-retryable transport error).
 //
 // All four are "resolved" in the sense that catch-up's cache-hit check must
 // see an entry at all; `failed` and `deferred` are the two worth retrying.

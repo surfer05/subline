@@ -60,8 +60,8 @@ export async function translateWithClaude(
         body: JSON.stringify({
             model: MODEL,
             // A full batch is 25 Discord messages (raised from 10 to fit a
-            // day's chat into a few dozen requests — see LLM_MAX_BATCH in
-            // index.tsx). Each translation carries the original id and lang
+            // day's chat into a few dozen requests — see QUALITY_MAX_BATCH in
+            // types.ts). Each translation carries the original id and lang
             // alongside the text, and JSON-encoded CJK expands badly: a single
             // escaped CJK character is `\uXXXX`, several tokens for one glyph.
             // 8000 was sized for 10 messages and a 2.5x larger batch could

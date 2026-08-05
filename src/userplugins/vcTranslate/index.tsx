@@ -17,7 +17,7 @@ import {
     setTranslation, subscribe, type StoredTranslation
 } from "./store";
 import {
-    FAST_DEBOUNCE_MS, FAST_MAX_BATCH, MIN_DETECT_CONFIDENCE,
+    ENGINE_CAPS, FAST_DEBOUNCE_MS, FAST_MAX_BATCH, MIN_DETECT_CONFIDENCE,
     QUALITY_DEBOUNCE_MS, QUALITY_MAX_BATCH, SHORT_TEXT_MAX,
     type BatchRequest, type EngineId, type PendingMessage
 } from "./types";
@@ -609,7 +609,11 @@ function rebuildBatcher() {
         debounceMs: FAST_DEBOUNCE_MS,
         maxBatch: FAST_MAX_BATCH,
         contextSize: 8,
-        supportsContext: false,          // Google is per-message; context is wasted on it
+        // Read from the engine table rather than hardcoded per tier: whether an
+        // engine can use conversation context is a fact about the ENGINE, and
+        // duplicating it here is how the table and the code that depends on it
+        // drift apart. (Google is per-message; context is wasted on it.)
+        supportsContext: ENGINE_CAPS.google.supportsContext,
         targetLang: settings.store.targetLang,
         onFlush: req => runTier("google", req, myGeneration)
     });
@@ -622,7 +626,11 @@ function rebuildBatcher() {
             debounceMs: QUALITY_DEBOUNCE_MS,
             maxBatch: QUALITY_MAX_BATCH,
             contextSize: 8,
-            supportsContext: true,
+            // Same table, same reason. `quality` is narrowed to an LLM engine
+            // here, so this is `true` today — but it is true BECAUSE the engine
+            // says so, which is what makes adding a fourth engine one row in
+            // types.ts rather than a second place to remember.
+            supportsContext: ENGINE_CAPS[quality].supportsContext,
             targetLang: settings.store.targetLang,
             onFlush: req => runTier(quality, req, myGeneration)
         })

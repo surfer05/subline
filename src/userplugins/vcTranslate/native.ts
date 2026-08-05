@@ -60,7 +60,9 @@ function isRetryable(err: unknown): boolean {
     // second attempt is rejected too, having consumed another request from the
     // very quota that is exhausted. Rate limiting is handled where it can be
     // handled properly: the renderer parks the engine for the interval the API
-    // asked for and serves the batch from Google meanwhile.
+    // asked for. Nothing is re-sent or diverted — the fast tier put a Google
+    // line on screen for these exact messages before the LLM was ever asked,
+    // so a rate-limited batch costs the reader only the upgrade.
     if (status === 429) return false;
     return status < 400 || status >= 500;  // retry 5xx, never other 4xx
 }

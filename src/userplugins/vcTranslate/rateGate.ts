@@ -1,25 +1,27 @@
 /**
- * Token-bucket gate for the key-gated LLM engines (Claude, Gemini). `onFlush`
+ * Token-bucket gate for the key-gated LLM engines (Claude, Gemini). `runTier`
  * in index.tsx awaits `acquireSlot()` before calling `Native.translateBatch`
- * for those two engines — Google is per-message with its own concurrency cap
- * (see engines/google.ts's CONCURRENCY) and does not go through this gate.
+ * for the quality tier — the fast tier is Google, which is per-message with
+ * its own concurrency cap (see engines/google.ts's CONCURRENCY) and does not
+ * go through this gate.
  *
- * Why this exists: with `globalAuto` on, a Discord restart fires catch-up for
- * every open server channel within seconds of each other. Each channel's
- * batcher flushes independently, so nothing previously limited how many
- * `translateBatch` calls left the client in that first burst — easily enough
- * to blow through Gemini's free-tier requests-per-minute ceiling and get
- * every one of those batches back as a 429.
+ * Why this exists — CORRECTED. It was written for a restart fan-out: with
+ * `globalAuto` on, catch-up used to fire for every open server channel at
+ * once. That is no longer possible — catch-up is focus-gated, so only the
+ * channel actually on screen is ever caught up. The burst it still has to
+ * smooth is CHANNEL HOPPING: each channel opened queues its own quality batch,
+ * and a user clicking through half a dozen channels in a few seconds produces
+ * exactly the same shape of burst one channel at a time. The gate stays.
  *
  * BURST_CAPACITY / REFILL_MS reasoning (free-tier shaped): Gemini's free tier
  * allows on the order of 15 requests/minute; a low/free Anthropic tier is
- * comparably tight. A single live conversation flushes at most one batch per
- * debounce window (700ms, see batcher.ts) — a burst of 5 tokens available
- * immediately means ordinary chat NEVER waits on this gate. Refilling at one
- * token per 4 seconds caps steady-state throughput at 15/minute, which is
- * exactly the class of ceiling the free tiers impose — so a catch-up storm
- * across many channels is smoothed into that rate instead of front-loaded
- * into the first second and rejected wholesale.
+ * comparably tight. The quality tier flushes at most one batch per 20s window
+ * per channel (QUALITY_DEBOUNCE_MS, see types.ts) — so a burst of 5 tokens
+ * available immediately means ordinary chat, in one channel, NEVER waits on
+ * this gate. Refilling at one token per 4 seconds caps steady-state throughput
+ * at 15/minute, which is exactly the class of ceiling the free tiers impose —
+ * so a hop across many channels is smoothed into that rate instead of
+ * front-loaded into a second and rejected wholesale.
  *
  * Those two constants are only the STARTING GUESS. A 429 body sometimes states
  * the quota it just enforced ("limit: 20" — see rateHint.ts), and when it does,
@@ -155,16 +157,18 @@ export function rateGateSettings(): { capacity: number; refillMs: number; } {
 
 /**
  * Reset the gate — called from the plugin's `stop()` alongside its other
- * module state (inFlight, batcherGeneration, sessionFallback, cooldowns).
+ * module state (the in-flight sets, the quality-attempt ledger,
+ * batcherGeneration, sessionFallback, cooldowns).
  *
  * This also discards anything learned from tuneRateGateToObservedLimit(): the
  * user may have changed key, project or plan between sessions, and the cost of
- * re-learning is one 429 whose batch is served by Google anyway.
+ * re-learning is one 429 — which costs the reader nothing, since the fast
+ * tier's Google line for those messages is already on screen.
  *
  * Resolves every currently-queued waiter IMMEDIATELY rather than leaving them
  * to time out naturally on the next refill tick (up to REFILL_MS away). A
  * flush blocked in `acquireSlot()` during `stop()` must be cheap to abandon —
- * the generation guard in onFlush is what actually stops it from writing
+ * the generation guard in runTier is what actually stops it from writing
  * under a stale generation once it resumes, but that guard can only run once
  * the await returns, so the await itself must not be left hanging.
  */

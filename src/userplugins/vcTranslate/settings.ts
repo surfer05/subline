@@ -27,9 +27,13 @@ function defaultTargetLang(): string {
 export const settings = definePluginSettings({
     engine: {
         type: OptionType.SELECT,
-        description: "Translation engine",
+        // Not "the translator" any more: Google always runs first on every
+        // message and is what puts the ≈ line on screen in about a second,
+        // whatever is picked here. This setting only chooses what re-translates
+        // that line with conversation context afterwards (✦).
+        description: "Quality engine — Google always translates first (≈); this re-translates it with context (✦)",
         options: [
-            { label: "Google (free, no key, lower quality)", value: "google", default: true },
+            { label: "Google only (free, no key — no ✦ upgrade)", value: "google", default: true },
             { label: "Claude Haiku (needs API key, best quality)", value: "claude" },
             { label: "Gemini Flash (needs free API key, context-aware)", value: "gemini" }
         ],
