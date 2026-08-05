@@ -8,6 +8,7 @@ import { isChannelEnabled, loadEnabledChannels, toggleChannel } from "./channels
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
 import { isConfidentlyTargetLanguage } from "./detectLang";
 import { acquireSlot, rateGateSettings, resetRateGate, tuneRateGateToObservedLimit } from "./rateGate";
+import { isRomanizedGuess } from "./romanized";
 import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
@@ -990,13 +991,28 @@ function TranslationAccessory({ message }: { message: Message; }) {
     // at 0.217 and was rendered as "it is", the opposite of the German "no"
     // that was meant. A wrong translation reads exactly as fluently as a right
     // one, so the only defence is to say which is which.
-    const unsure = entry.conf !== undefined && entry.conf < MIN_DETECT_CONFIDENCE;
+    //
+    // Confidence alone misses the worst case: Google reported 1.00 confidence
+    // on romanized Moroccan Darija ("ana bghit nmchi l dar") while inverting a
+    // negation. Script mismatch — a normally non-Latin language detected from
+    // Latin-only text — is an independent signal that catches exactly that,
+    // regardless of what confidence was reported. Only Google's own lines are
+    // a script GUESS in the first place; an LLM result is never checked here.
+    const romanized = isRomanizedGuess(entry.lang, message.content ?? "");
+    const unsure = ENGINE_RANK[entry.via] === 0 && (
+        (entry.conf !== undefined && entry.conf < MIN_DETECT_CONFIDENCE)
+        || romanized
+    );
     const langName = languageName(entry.lang);
-    const title = unsure
-        ? `Translated by ${provenance.label}. ${langName} detected, but only `
-          + `${Math.round(entry.conf! * 100)}% confidently — short messages are `
-          + "often misread, so this may be wrong."
-        : `Translated by ${provenance.label} · ${langName}`;
+    const title = !unsure
+        ? `Translated by ${provenance.label} · ${langName}`
+        : romanized
+            ? `Translated by ${provenance.label}. This looks like ${langName} `
+              + "written in Latin letters, which Google translates badly — "
+              + "often confidently and wrongly. Wait for the ✦ line."
+            : `Translated by ${provenance.label}. ${langName} detected, but only `
+              + `${Math.round(entry.conf! * 100)}% confidently — short messages are `
+              + "often misread, so this may be wrong.";
 
     return (
         <div style={{ fontSize: "0.95rem", color: TEXT_COLOUR, fontStyle: "italic" }}>

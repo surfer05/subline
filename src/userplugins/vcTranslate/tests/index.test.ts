@@ -707,6 +707,22 @@ describe("the subtitle accessory", () => {
         setTranslation(key("1"), { lang: "de", text: "no", via: "gemini" });
         expect(text(render(discordMessage("1", "ne")))).not.toContain("?");
     });
+
+    it("marks a romanized Google line unsure even at full confidence", () => {
+        // The measured case: ar detected at 1.00 from Latin text, negation
+        // inverted. Confidence alone would let this through unmarked.
+        setTranslation(key("1"), {
+            lang: "ar", text: "I don't want to go home", via: "google", conf: 1
+        });
+        const node = render(discordMessage("1", "ana bghit nmchi l dar"));
+        expect(text(node)).toContain("ar?");
+        expect(titleOf(node)).toContain("Latin letters");
+    });
+
+    it("does not mark an LLM line as a romanization guess", () => {
+        setTranslation(key("1"), { lang: "ar", text: "I want to go home", via: "gemini" });
+        expect(text(render(discordMessage("1", "ana bghit nmchi l dar")))).not.toContain("?");
+    });
 });
 
 describe("provenance is recorded from the engine that actually ran", () => {
