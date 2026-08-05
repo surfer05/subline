@@ -196,6 +196,18 @@ and a failure marker can never overwrite a real translation from either
 tier. So a slow or failed tier never degrades what the other already
 produced — the worst it can do is leave the message where it already was.
 
+**The quality tier spends at most one request per message, per session.**
+A quality-tier failure writes nothing at all — that is what keeps your `≈`
+line readable instead of turning it into an error — which means the cache
+looks identical whether the LLM was asked and failed or was never asked. So
+the attempt is remembered separately, in memory. Without that, every channel
+open and every scroll-up would re-offer the same message to the LLM forever,
+spending exactly the quota this two-tier split exists to conserve. The cost
+is an occasional missed `✦` where the failure was transient; the `≈` line is
+still there, and the reader sees nothing wrong. Editing the message,
+restarting Discord, or toggling the plugin off and on each buy a fresh
+attempt.
+
 **Setting the engine to Google disables the quality tier entirely.** There is
 then only the fast tier, and `≈` is simply the final answer, exactly as if
 the second tier did not exist.
@@ -206,7 +218,7 @@ the second tier did not exist.
 | Claude Haiku (`claude-haiku-4-5`) or Gemini (quality tier, when configured) | Roughly $2-3/month at typical chat volume for Claude; Gemini has a usable free tier | Noticeably better on slang and code-mixed text; batches multiple messages per request and includes a rolling window of recent channel context, so it can disambiguate short or ambiguous lines the way a person following the conversation would |
 
 To use Claude: create a key at console.anthropic.com, switch the
-**"Translation engine"** dropdown to Claude Haiku — the **"Anthropic API
+**"Quality engine"** dropdown to Claude Haiku — the **"Anthropic API
 key"** field is hidden until you do, since it is meaningless for Google — then
 paste the key into it. **Scope the key to a dedicated project with a spend
 limit** — it is stored in plaintext in Vencord's settings file, like every
@@ -435,6 +447,14 @@ restart anything. If it never comes back, the cause is a *rejected* key
 rather than a rate limit — that one does pin the session to Google-only, see
 the two items above.
 
+One caveat on "comes back on its own", and it applies per message rather than
+globally: the messages whose single quality attempt was actually *spent*
+while the engine was failing are not asked again this session (see "one
+request per message, per session" under "Engines"), so those specific lines
+stay `≈` until you edit them or restart. Everything the tier never got to —
+new messages, and anything that was still queued when the cooldown took hold
+— upgrades normally once the engine recovers.
+
 **A message shows a dim "⏳ translation delayed — retrying" instead of ≈ or ⚠.**
 This should now be rare to the point of not happening at all in a fresh
 session: nothing in the current code writes this marker any more (see "When
@@ -475,7 +495,7 @@ tier.
 
 | State | Meaning | Rendered as | Retried on next catch-up? |
 |---|---|---|---|
-| `{ lang, text, via }` | A real translation, plus the engine that produced it. Two tiers can both write this key over a message's life — first the fast tier, then the quality tier upgrading it in place | The dimmed subtitle, prefixed `✦` (Claude/Gemini) or `≈` (Google) | No — already done, whichever engine did it (though a Google-authored entry still leaves the *quality* tier free to upgrade it — see `needsQuality` below) |
+| `{ lang, text, via }` | A real translation, plus the engine that produced it. Two tiers can both write this key over a message's life — first the fast tier, then the quality tier upgrading it in place | The dimmed subtitle, prefixed `✦` (Claude/Gemini) or `≈` (Google) | No — already done, whichever engine did it. A Google-authored entry does still leave the *quality* tier free to upgrade it (see `needsQuality` below), but only until that tier has actually spent its one request on this message — see "one request per message, per session" under "Engines" |
 | `{ skipped: true, via? }` | The engine reported the message is already in your target language. `via` matters: a Google skip is not authoritative — Google echoes short or romanized text back unchanged when it has simply given up, which looks identical to "already translated" — so only an *LLM* skip (`via` set to `claude`/`gemini`) actually closes the message. A Google skip stays open to the quality tier | Nothing (no subtitle) | Only if an LLM hasn't confirmed it yet |
 | `{ failed: true }` | A genuine attempt came back broken. Only ever written by the fast tier — see "⚠ translation failed" above | "⚠ translation failed" | Yes |
 | `{ deferred: true }` | Historical only — **nothing writes this state any more.** It dates from a design where the LLM engine was the reader's only translator and a 429 left them with genuinely nothing. Kept in the type and in the renderer purely so a cache entry persisted by an earlier version of the plugin still renders sensibly instead of falling through to "⚠ translation failed" | "⏳ translation delayed — retrying" | Yes |
@@ -491,13 +511,19 @@ still sitting in your persisted cache.
 
 ## Privacy
 
-Message text is sent to whichever provider is selected — Google's free,
-unofficial translation endpoint (no data-processing agreement exists for it)
-or Anthropic's API. This includes the text of other people's messages in the
-channel, not just your own, since the whole point of the plugin is
-translating incoming messages. If you're running this in a channel with
-people who haven't opted into that, that's worth knowing plainly, as a fact
-about what the plugin does — not a recommendation either way.
+Message text is sent to **two** providers, not one. Every message goes to
+Google's free, unofficial translation endpoint
+(`translate.googleapis.com`) — always, whatever engine is selected, because
+that is the fast tier — and no data-processing agreement exists for that
+endpoint. If you have also configured an LLM engine, that *same* message
+text is sent, independently, to Anthropic's API (`api.anthropic.com`) or to
+Google's Gemini API (`generativelanguage.googleapis.com`), whichever you
+selected. Selecting an engine adds a second recipient; it does not replace
+the first. This includes the text of other people's messages in the channel,
+not just your own, since the whole point of the plugin is translating
+incoming messages. If you're running this in a channel with people who
+haven't opted into that, that's worth knowing plainly, as a fact about what
+the plugin does — not a recommendation either way.
 
 **Translations are now stored on disk, not just in memory.** Up to 2,000
 entries (message id, target language, translated text, and which engine
@@ -521,7 +547,7 @@ per-channel toggles).
   app only (it uses `pnpm inject`'s desktop patch target and Node-side IPC for
   the network calls; there is no browser-userscript equivalent of the native
   bridge).
-- `index.tsx` is currently ~1,160 lines, against this project's own 200-line
+- `index.tsx` is currently ~1,270 lines, against this project's own 200-line
   per-file convention. It grew past that budget across several correctness
   fixes (catch-up de-duplication, cold-channel handling, session fallback,
   edit re-translation), again with the budget work (focused-channel gating,
@@ -547,7 +573,7 @@ reports a *smaller* pass count that still looks like success.
 `vitest` is not saved as a dependency; in a fresh clone run `npm i -D vitest`
 first.
 
-322 tests across 14 suites (`batcher`, `claude`, `detectLang`, `gemini`,
+327 tests across 14 suites (`batcher`, `claude`, `detectLang`, `gemini`,
 `google`, `index`, `native`, `rateGate`, `rateHint`, `retry`, `romanized`,
 `skip`, `store`, `upgrade` — see `tests/`). `tests/fixtures/` holds shared
 non-test data, notably the verbatim bytes of a real Gemini 429 captured
@@ -589,7 +615,7 @@ of results.
 | 3 | Post an emote-only message, a link-only message, or your own message | No subtitle, no API call | ☐ |
 | 4 | Have three people post at once in three different languages | All three translate, in one batch | ☐ |
 | 5 | Edit a message that already has a translated subtitle | Subtitle re-translates to match the edit (the old one clears, the new one appears within ~1s) | ☐ |
-| 6 | Scroll far up in a channel, then back down | Subtitles persist; nothing is re-requested | ☐ |
+| 6 | Scroll far up in a channel, then back down, then scroll the same stretch again | Subtitles persist. Scrolling up loads older history, which re-runs catch-up: newly-loaded untranslated messages translate (expected), and any `≈` line an LLM has not been asked about yet is offered to the quality tier **once**, so some may flip to `✦`. The check is the *second* pass over the same stretch — that must send nothing at all, for either tier. Repeated scrolling that keeps producing new Claude/Gemini requests for messages you have already scrolled past is the bug (see "one request per message, per session" under "Engines") | ☐ |
 | 7 | **Cold channel:** open a channel not visited yet this session | Its backlog translates without needing a second channel selection. If it does not, check the console for the `VcTranslate` warning listing `Payload keys:` — see Troubleshooting | ☐ |
 | 8 | Count how many times `LOAD_MESSAGES_SUCCESS` fires for one channel open (scrolling up to load more history also dispatches it) | Confirm no duplicate API spend from repeated catch-up triggers for the same channel open | ☐ |
 | 9 | Re-select a channel roughly 3s into a pending translation | No second request is sent (check Anthropic usage dashboard or the native-side log) | ☐ |
