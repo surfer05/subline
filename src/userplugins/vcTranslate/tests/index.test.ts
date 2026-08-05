@@ -723,6 +723,16 @@ describe("the subtitle accessory", () => {
         setTranslation(key("1"), { lang: "ar", text: "I want to go home", via: "gemini" });
         expect(text(render(discordMessage("1", "ana bghit nmchi l dar")))).not.toContain("?");
     });
+
+    it("drops the low-confidence ? once the LLM has upgraded the line", async () => {
+        // The ? means "Google was guessing at the language". Once the LLM has
+        // answered, that caveat is no longer true and must not linger.
+        setTranslation(key("1"), { lang: "ha", text: "it is", via: "google", conf: 0.217 });
+        expect(text(render(discordMessage("1", "ne")))).toContain("ha?");
+
+        setTranslation(key("1"), { lang: "de", text: "no", via: "gemini" });
+        expect(text(render(discordMessage("1", "ne")))).not.toContain("?");
+    });
 });
 
 describe("provenance is recorded from the engine that actually ran", () => {

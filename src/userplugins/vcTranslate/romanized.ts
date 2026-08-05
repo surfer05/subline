@@ -29,14 +29,24 @@ const LATIN_LETTER = /\p{Script=Latin}/u;
  * that class directly.
  *
  * A code that names its own script ("ber-Latn") is taken at its word.
+ *
+ * Requires at least one Latin LETTER before returning true. Without this,
+ * text with no letters at all (empty, digits-only, emoji-only) never hits
+ * the disqualifying `return false` below and falls through to `true` —
+ * "romanized" text that has no Latin letters in it either. Nothing upstream
+ * makes that unreachable in principle; `index.tsx` merely happens never to
+ * call this with empty content today.
  */
 export function isRomanizedGuess(detectedLang: string, originalText: string): boolean {
     const base = detectedLang.toLowerCase().split("-")[0];
     if (detectedLang.toLowerCase().includes("-latn")) return false;
     if (!NON_LATIN_SCRIPT.has(base)) return false;
 
+    let sawLatinLetter = false;
     for (const ch of originalText) {
-        if (LETTER.test(ch) && !LATIN_LETTER.test(ch)) return false;
+        if (!LETTER.test(ch)) continue;
+        if (!LATIN_LETTER.test(ch)) return false;
+        sawLatinLetter = true;
     }
-    return true;
+    return sawLatinLetter;
 }

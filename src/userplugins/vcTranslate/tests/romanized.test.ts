@@ -30,4 +30,16 @@ describe("isRomanizedGuess", () => {
         expect(isRomanizedGuess("ja", "konnichiwa")).toBe(true);
         expect(isRomanizedGuess("hi", "kya haal hai")).toBe(true);
     });
+
+    it("does not flag text with no letters at all", () => {
+        // The loop that looks for a disqualifying non-Latin letter simply
+        // never finds one in text with no letters at all, and used to fall
+        // through to `return true` — flagging "romanized" text that has no
+        // Latin letters in it either. Unreachable via index.tsx today only
+        // because it refuses to translate empty content; that is an accident
+        // of the caller, not a property of this function.
+        expect(isRomanizedGuess("ar", "")).toBe(false);
+        expect(isRomanizedGuess("ar", "1234567890")).toBe(false);
+        expect(isRomanizedGuess("ar", "😀🎉👍")).toBe(false);
+    });
 });
