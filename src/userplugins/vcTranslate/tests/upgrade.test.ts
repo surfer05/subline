@@ -29,6 +29,16 @@ describe("mayReplace", () => {
         expect(mayReplace(gemini, { failed: true })).toBe(false);
     });
 
+    it("never lets a Google SKIP erase an LLM line", () => {
+        // The claim runTier makes at the `skipped` write ("a Google skip must
+        // never erase an LLM line") and the one case the failure-marker test
+        // above does not cover: `skipped` is the marker Google produces for
+        // exactly the short/romanized messages the LLM is best at, so it is the
+        // one most likely to arrive late on top of a real ✦ line.
+        expect(mayReplace(gemini, { skipped: true, via: "google" })).toBe(false);
+        expect(mayReplace(gemini, { skipped: true })).toBe(false);
+    });
+
     it("lets a real translation replace any marker", () => {
         expect(mayReplace({ failed: true }, google)).toBe(true);
         expect(mayReplace({ deferred: true }, google)).toBe(true);

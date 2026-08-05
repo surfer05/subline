@@ -211,8 +211,15 @@ describe("markers — who writes them, and which ones catch-up picks back up", (
         expect(requestAt(0).messages.map((m: any) => m.id)).toEqual(["1"]);
     });
 
-    it("does NOT retry a skipped or a real translation the way it retries deferred", async () => {
+    it("does NOT retry a skipped or a real translation the way it retries deferred — engine = Google", async () => {
         // Guards against a catch-up check broad enough to retry everything.
+        //
+        // ENGINE = GOOGLE (from the outer beforeEach) is load-bearing, not
+        // incidental: with an LLM configured, a Google skip and a Google
+        // translation are BOTH still open to the quality tier (needsQuality),
+        // so this expectation would be wrong. What is pinned here is the fast
+        // tier's own rule — once something real is stored, Google is done —
+        // which with no second tier is the whole plugin's rule.
         setTranslation(makeKey("1", "en"), { skipped: true });
         setTranslation(makeKey("2", "en"), { lang: "es", text: "hola", via: "google" });
         stubMessages.set(CHANNEL, [discordMessage("1", "a"), discordMessage("2", "b")]);
@@ -279,7 +286,11 @@ describe("markers — who writes them, and which ones catch-up picks back up", (
     });
 });
 
-describe("a rate-limited LLM falls back to Google rather than showing nothing", () => {
+// WAS: "a rate-limited LLM falls back to Google rather than showing nothing".
+// There is no falling back any more — nothing is diverted anywhere, because
+// the fast tier sent these same messages to Google before the LLM was ever
+// asked. The reader keeps that line; the LLM's absence costs only the upgrade.
+describe("a rate-limited LLM leaves the reader the fast tier's Google line", () => {
     /** Per-engine canned responses; anything unlisted succeeds emptily. */
     function respondByEngine(map: Partial<Record<string, NativeResponse>>) {
         native.translateBatch.mockImplementation(
@@ -1561,11 +1572,36 @@ describe("every message goes to both tiers", () => {
     it("does not let a slow Google reply overwrite the LLM line", async () => {
         // Ordering between the tiers is not guaranteed. Without the upgrade
         // rule the reader watches a good line degrade into a worse one.
-        setTranslation(key("1"), { lang: "de", text: "good", via: "gemini" });
-        respondWith({ ok: true, results: [{ id: "1", lang: "de", text: "rough", skip: false }] });
+        //
+        // NOTHING IS PRE-SEEDED, deliberately. An earlier version of this test
+        // stored the Gemini line up front, which made needsFast() suppress the
+        // Google request altogether — so mayReplace was never consulted and the
+        // test passed with the rank rule deleted. Here both tiers genuinely
+        // run: Google's reply is held back past the quality tier's 20s window,
+        // so it arrives at a key that already holds a real LLM translation and
+        // is refused on the way in.
+        native.translateBatch.mockImplementation(
+            async (engine: string, _k: string, payload: string) => {
+                if (engine === "google") {
+                    await new Promise<void>(resolve => setTimeout(resolve, 30_000));
+                    return googleAnswers(payload, "rough", "de");
+                }
+                return { ok: true, results: [{ id: "1", lang: "de", text: "good", skip: false }] };
+            }
+        );
 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
-        await settle();
+
+        // 21s: the quality tier has flushed and written, Google has not replied.
+        await vi.advanceTimersByTimeAsync(21_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        const engines = native.translateBatch.mock.calls.map(c => c[0]);
+        expect(engines).toContain("google");   // the fast tier really was asked
+        expect(getTranslation(key("1"))).toMatchObject({ via: "gemini", text: "good" });
+
+        // Now Google's real translation lands, late, on top of the LLM line.
+        await vi.advanceTimersByTimeAsync(15_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
 
         expect(getTranslation(key("1"))).toMatchObject({ via: "gemini", text: "good" });
     });
