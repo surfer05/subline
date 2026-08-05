@@ -145,8 +145,13 @@ describe("deferred results — rate-limited, not failed", () => {
 
         expect(getTranslation(makeKey("1", "en"))).toEqual({ deferred: true });
         // Gemini refused, so the batch was immediately re-run through Google
-        // rather than abandoned.
-        expect(native.translateBatch.mock.calls.map(c => c[0])).toEqual(["gemini", "google"]);
+        // rather than abandoned. (The fast tier also independently attempts
+        // Google for this same message now — dual dispatch — so gemini is
+        // checked for exactly one attempt rather than asserting the full raw
+        // call sequence.)
+        const engines1 = native.translateBatch.mock.calls.map(c => c[0]);
+        expect(engines1.filter(e => e === "gemini")).toHaveLength(1);
+        expect(engines1).toContain("google");
 
         // A second message arrives while still inside the 30s cooldown window
         // (two settle() calls are ~10s of fake time). It must not touch Gemini
@@ -158,7 +163,9 @@ describe("deferred results — rate-limited, not failed", () => {
 
         expect(getTranslation(makeKey("2", "en"))).toEqual({ deferred: true });
         const laterCalls = native.translateBatch.mock.calls.slice(before).map(c => c[0]);
-        expect(laterCalls).toEqual(["google"]);
+        expect(laterCalls.length).toBeGreaterThan(0);
+        expect(laterCalls).not.toContain("gemini");
+        expect(laterCalls.every(e => e === "google")).toBe(true);
     });
 
     it("retries a deferred message on the next channel open, exactly like a failed one", async () => {
@@ -211,8 +218,12 @@ describe("deferred results — rate-limited, not failed", () => {
         FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
         await settle();
 
-        expect(native.translateBatch).toHaveBeenCalledTimes(1);
-        expect(requestAt(0).messages.map((m: any) => m.id)).toEqual(["1"]);
+        // Both tiers now get a fair shot at a failed message — dual dispatch
+        // means the retry is no longer confined to a single engine.
+        expect(native.translateBatch).toHaveBeenCalledTimes(2);
+        for (const call of native.translateBatch.mock.calls) {
+            expect(JSON.parse(call[2] as string).messages.map((m: any) => m.id)).toEqual(["1"]);
+        }
     });
 });
 
@@ -259,7 +270,13 @@ describe("a rate-limited LLM falls back to Google rather than showing nothing", 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
 
-        expect(native.translateBatch.mock.calls.map(c => c[0])).toEqual(["gemini", "google"]);
+        // The fast tier also independently attempts Google for this same
+        // message now — dual dispatch — so gemini is checked for exactly one
+        // attempt, followed by at least one Google call, rather than
+        // asserting the full raw call sequence.
+        const engines = native.translateBatch.mock.calls.map(c => c[0]);
+        expect(engines.filter(e => e === "gemini")).toHaveLength(1);
+        expect(engines).toContain("google");
         const entry = getTranslation(makeKey("1", "en"));
         expect(entry).toEqual({ lang: "es", text: "hello there", via: "google" });
         expect(entry).not.toHaveProperty("deferred");
@@ -449,17 +466,20 @@ describe("the rate gate — smooths a catch-up storm, never slows live chat", ()
 
         // Only the burst capacity's worth of requests actually leave the
         // client immediately — this is the whole point of the gate. If this
-        // is 8, nothing is throttling the storm at all.
-        const afterBurst = native.translateBatch.mock.calls.length;
-        expect(afterBurst).toBeGreaterThan(0);
-        expect(afterBurst).toBeLessThan(8);
+        // is 8, nothing is throttling the storm at all. Counted on gemini
+        // specifically: the fast (Google) tier also independently fires once
+        // per channel now (dual dispatch), but Google isn't rate-gated, so it
+        // would otherwise mask whether the gemini throttling is working.
+        const geminiAfterBurst = native.translateBatch.mock.calls.filter(c => c[0] === "gemini").length;
+        expect(geminiAfterBurst).toBeGreaterThan(0);
+        expect(geminiAfterBurst).toBeLessThan(8);
 
         // The remainder drains steadily rather than being dropped or stuck
         // forever: enough refill time gets every one of them through.
         await vi.advanceTimersByTimeAsync(4_000 * 8);
         for (let i = 0; i < 20; i++) await Promise.resolve();
 
-        expect(native.translateBatch).toHaveBeenCalledTimes(8);
+        expect(native.translateBatch.mock.calls.filter(c => c[0] === "gemini")).toHaveLength(8);
     });
 
     it("never makes a single live-chat batch wait", async () => {
@@ -473,7 +493,10 @@ describe("the rate gate — smooths a catch-up storm, never slows live chat", ()
         await vi.advanceTimersByTimeAsync(20_000);
         for (let i = 0; i < 20; i++) await Promise.resolve();
 
-        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+        // Checked on claude specifically — the fast (Google) tier also
+        // independently flushes its own single batch now (dual dispatch),
+        // which is not what this test is about.
+        expect(native.translateBatch.mock.calls.filter(c => c[0] === "claude")).toHaveLength(1);
     });
 });
 
@@ -616,7 +639,11 @@ describe("provenance is recorded from the engine that actually ran", () => {
         respondWith({ ok: true, results: [{ id: "1", lang: "es", text: "hello", skip: false }] });
         await settle();
 
-        expect(native.translateBatch.mock.calls[0][0]).toBe("gemini");
+        // The fast (Google) tier also independently fires now (dual
+        // dispatch) and would write via:"google" first; gemini's later,
+        // higher-ranked write is what must win and is what this test is
+        // actually about.
+        expect(native.translateBatch.mock.calls.map(c => c[0])).toContain("gemini");
         expect(getTranslation(makeKey("1", "en"))).toEqual({ lang: "es", text: "hello", via: "gemini" });
     });
 
@@ -990,14 +1017,16 @@ describe("batch sizing follows the daily request budget", () => {
 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
 
-        // Nothing has left yet at the OLD 700ms window.
+        // The fast (Google) tier fires within its own 700ms window now — that
+        // is dual dispatch working as intended — but the quality (LLM) tier
+        // must not: it holds its batch until QUALITY_DEBOUNCE_MS regardless.
         await vi.advanceTimersByTimeAsync(700);
         for (let i = 0; i < 20; i++) await Promise.resolve();
-        expect(native.translateBatch).not.toHaveBeenCalled();
+        expect(native.translateBatch.mock.calls.map(c => c[0])).not.toContain("gemini");
 
         await settle();
 
-        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+        expect(native.translateBatch.mock.calls.filter(c => c[0] === "gemini")).toHaveLength(1);
     });
 
     it("packs 25 messages into a single LLM request", async () => {
@@ -1009,8 +1038,13 @@ describe("batch sizing follows the daily request budget", () => {
         }
         await settle();
 
-        expect(native.translateBatch).toHaveBeenCalledTimes(1);
-        expect(requestAt(0).messages).toHaveLength(25);
+        // The fast (Google) tier also receives all 25 messages now (dual
+        // dispatch) and packs them into its own smaller batches — that is
+        // covered by "keeps Google on its smaller, latency-tuned batch"
+        // below. This test is specifically about the LLM's own batch.
+        const geminiCalls = native.translateBatch.mock.calls.filter(c => c[0] === "gemini");
+        expect(geminiCalls).toHaveLength(1);
+        expect(JSON.parse(geminiCalls[0][2] as string).messages).toHaveLength(25);
     });
 
     it("keeps Google on its smaller, latency-tuned batch", async () => {
@@ -1266,5 +1300,111 @@ describe("a short reply borrows its parent's language instead of being guessed a
         await settle();
 
         expect(sentSourceLang("1")).toBeUndefined();
+    });
+});
+
+describe("every message goes to both tiers", () => {
+    beforeEach(() => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+    });
+
+    it("translates with Google first and the LLM afterwards", async () => {
+        native.translateBatch.mockImplementation(async (engine: string) => ({
+            ok: true,
+            results: [{
+                id: "1", lang: "de",
+                text: engine === "google" ? "rough" : "good",
+                skip: false
+            }]
+        }));
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+
+        // The fast window is 700ms; the quality window is 20s. After ~1s the
+        // reader must already have something, and it must be Google's.
+        await vi.advanceTimersByTimeAsync(1_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        expect(getTranslation(key("1"))).toMatchObject({ via: "google", text: "rough" });
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        expect(getTranslation(key("1"))).toMatchObject({ via: "gemini", text: "good" });
+    });
+
+    it("does not let a slow Google reply overwrite the LLM line", async () => {
+        // Ordering between the tiers is not guaranteed. Without the upgrade
+        // rule the reader watches a good line degrade into a worse one.
+        setTranslation(key("1"), { lang: "de", text: "good", via: "gemini" });
+        respondWith({ ok: true, results: [{ id: "1", lang: "de", text: "rough", skip: false }] });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(getTranslation(key("1"))).toMatchObject({ via: "gemini", text: "good" });
+    });
+
+    it("uses only the fast tier when the configured engine is Google", async () => {
+        settings.store.engine = "google";
+        respondWith({ ok: true, results: [{ id: "1", lang: "de", text: "rough", skip: false }] });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        await vi.advanceTimersByTimeAsync(30_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        expect(native.translateBatch.mock.calls.map(c => c[0])).toEqual(["google"]);
+    });
+
+    it("does not let a Google skip close the message for the quality tier", async () => {
+        // needsQuality()'s "GOOGLE skip does not close it" rule: a skip
+        // recorded under Google means Google merely failed to identify a
+        // short message, not that the quality tier has nothing to add.
+        setTranslation(key("1"), { skipped: true, via: "google" });
+        respondWith({ ok: true, results: [{ id: "1", lang: "de", text: "good", skip: false }] });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        // needsFast() sees a resolved (skipped) entry and does not re-fire the
+        // fast tier — Google already spoke on this message.
+        expect(native.translateBatch.mock.calls.map(c => c[0])).toEqual(["gemini"]);
+        expect(getTranslation(key("1"))).toMatchObject({ via: "gemini", text: "good" });
+    });
+});
+
+describe("marker writes never clobber a real translation from the other tier", () => {
+    it("a failed marker from one tier does not erase a real translation already stored by the other", async () => {
+        // The regression this guards: before marker writes were routed
+        // through writeResult(), a bare setTranslation() for `failed` would
+        // unconditionally overwrite whatever was there — including a real
+        // translation the other tier had already produced.
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+
+        native.translateBatch.mockImplementation(async (engine: string) => {
+            if (engine === "google") {
+                // Deliberately slow: still in flight long after the quality
+                // tier's own (much later-queued) request has already come
+                // back and written a real translation.
+                await new Promise<void>(resolve => setTimeout(resolve, 30_000));
+                return { ok: false, error: "google: HTTP 500" };
+            }
+            return { ok: true, results: [{ id: "1", lang: "de", text: "good", skip: false }] };
+        });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+
+        // Quality tier's 20s window elapses well before Google's artificially
+        // delayed response, so the real translation lands first.
+        await vi.advanceTimersByTimeAsync(21_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        expect(getTranslation(key("1"))).toMatchObject({ via: "gemini", text: "good" });
+
+        // Now let Google's delayed failure land and try to write { failed: true }.
+        await vi.advanceTimersByTimeAsync(15_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        expect(getTranslation(key("1"))).toMatchObject({ via: "gemini", text: "good" });
     });
 });

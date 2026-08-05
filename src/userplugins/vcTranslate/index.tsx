@@ -20,7 +20,7 @@ import {
     QUALITY_DEBOUNCE_MS, QUALITY_MAX_BATCH, SHORT_TEXT_MAX,
     type BatchRequest, type EngineId, type PendingMessage
 } from "./types";
-import { mayReplace } from "./upgrade";
+import { ENGINE_RANK, isRealTranslation, mayReplace } from "./upgrade";
 
 const Native = VencordNative.pluginHelpers.VcTranslate as PluginNative<typeof import("./native")>;
 const logger = new Logger("VcTranslate");
@@ -34,14 +34,19 @@ let sessionFallback = false;   // set when the configured LLM engine (Claude/Gem
 let announcedMissingKey = false;   // one toast per session, never per batch
 let announcedCooldown = false;     // ditto, for the rate-limit-to-Google fallback
 
-// Ids currently queued in the batcher or awaiting a translateBatch response.
+// Ids currently queued in a batcher or awaiting a translateBatch response.
 // getTranslation() alone can't tell "in flight" apart from "never
 // requested" -- a message is a cache miss for the WHOLE round trip (700ms
 // debounce plus several seconds of network for Claude), not just briefly.
 // Populated wherever a message is handed to batcher.add(), and drained in
-// onFlush once that request settles (success, failure, or stranded by a
+// runTier once that request settles (success, failure, or stranded by a
 // rebuild) so it becomes retryable again.
-const inFlight = new Set<string>();
+//
+// Per tier, because a message is legitimately in flight on both at once. A
+// single shared set would let whichever tier queued first silently suppress
+// the other — the quality tier would simply never run.
+const inFlightFast = new Set<string>();
+const inFlightQuality = new Set<string>();
 
 // Bumped on every rebuildBatcher(). Each onFlush closure captures the
 // generation it was created under; if a response lands after a later
@@ -280,14 +285,33 @@ function writeResult(key: string, value: StoredTranslation): void {
 }
 
 /**
- * Where enqueue() and catch-up currently hand off messages. Both batchers
- * already exist side by side (see rebuildBatcher), but wiring every message
- * to BOTH at once — the actual two-tier behaviour — is Task 3's job. Until
- * then this reproduces today's single pipeline: the quality tier when one is
- * configured and usable, the fast (Google) tier otherwise.
+ * Has the fast tier still got something to contribute?
+ *
+ * Its whole job is "put SOMETHING readable on screen quickly". Once any real
+ * translation exists — from either tier — that job is done, and re-running it
+ * would only risk replacing a good line with a worse one.
  */
-function currentBatcher(): Batcher | null {
-    return qualityBatcher ?? fastBatcher;
+function needsFast(key: string): boolean {
+    const e = getTranslation(key);
+    return e === undefined || "failed" in e || "deferred" in e;
+}
+
+/**
+ * Has the quality tier still got something to contribute?
+ *
+ * A Google line is a candidate for upgrade, not a finished answer. Only an
+ * LLM's own verdict closes a message: an LLM translation, or an LLM skip.
+ * A GOOGLE skip deliberately does NOT close it — Google reports "already in
+ * the target language" for short messages it merely failed to identify (it
+ * returns "ne" unchanged, which isSameText reads as a skip), and those are
+ * exactly the messages the quality tier is best at.
+ */
+function needsQuality(key: string): boolean {
+    const e = getTranslation(key);
+    if (e === undefined) return true;
+    if (isRealTranslation(e)) return ENGINE_RANK[e.via] < 1;
+    if ("skipped" in e) return e.via === undefined || ENGINE_RANK[e.via] < 1;
+    return true;   // failed / deferred — both tiers get another go
 }
 
 /**
@@ -297,14 +321,26 @@ function currentBatcher(): Batcher | null {
  * engine (and which batcherGeneration) the flush belongs to, so both the fast
  * and the quality batcher can share it. The fallback shape — cooldown
  * diversion, 401 handling, deferred-vs-failed — is untouched; Task 5 owns
- * rewriting that. The one change here is that a real translation result is
- * now written through writeResult() instead of a bare setTranslation(), since
- * two tiers can now race for the same key.
+ * rewriting that. A real translation result is written through writeResult()
+ * instead of a bare setTranslation(), since two tiers can now race for the
+ * same key — and so are the failed/deferred/skipped markers below, for the
+ * same reason: a marker from one tier landing after the other tier already
+ * wrote a real translation must not erase it. mayReplace() already refuses a
+ * marker over a real translation; routing through writeResult() is what
+ * actually consults that rule instead of overwriting unconditionally.
+ *
+ * `inFlightSet` is the in-flight set belonging to WHICHEVER tier this flush is
+ * for (inFlightFast for the fastBatcher's onFlush, inFlightQuality for the
+ * qualityBatcher's) — passed in rather than looked up from `engine`, because
+ * `engine` can change mid-flush (the cooldown fallback re-sends as "google")
+ * while the tier this flush belongs to never does.
  */
-async function runTier(engine: EngineId, req: BatchRequest, myGeneration: number): Promise<void> {
+async function runTier(
+    engine: EngineId, req: BatchRequest, myGeneration: number, inFlightSet: Set<string>
+): Promise<void> {
     const markAllFailed = (r: { messages: { id: string }[]; targetLang: string; }) => {
         for (const m of r.messages) {
-            setTranslation(makeKey(m.id, r.targetLang), { failed: true });
+            writeResult(makeKey(m.id, r.targetLang), { failed: true });
         }
     };
 
@@ -314,7 +350,7 @@ async function runTier(engine: EngineId, req: BatchRequest, myGeneration: number
     // differently from `failed`. See store.ts's StoredTranslation comment.
     const markAllDeferred = (r: { messages: { id: string }[]; targetLang: string; }) => {
         for (const m of r.messages) {
-            setTranslation(makeKey(m.id, r.targetLang), { deferred: true });
+            writeResult(makeKey(m.id, r.targetLang), { deferred: true });
         }
     };
 
@@ -435,7 +471,7 @@ async function runTier(engine: EngineId, req: BatchRequest, myGeneration: number
 
         for (const r of res.results) {
             if ("failed" in r) {
-                setTranslation(makeKey(r.id, req.targetLang), { failed: true });
+                writeResult(makeKey(r.id, req.targetLang), { failed: true });
                 continue;
             }
             if (r.skip) {
@@ -450,7 +486,7 @@ async function runTier(engine: EngineId, req: BatchRequest, myGeneration: number
                 // target language, so that was the common case, not the
                 // edge case — free on Google, real recurring spend on
                 // Claude.
-                setTranslation(makeKey(r.id, req.targetLang), { skipped: true });
+                writeResult(makeKey(r.id, req.targetLang), { skipped: true });
                 continue;
             }
             // `runEngine`, NOT the configured engine: the one the
@@ -471,8 +507,10 @@ async function runTier(engine: EngineId, req: BatchRequest, myGeneration: number
         // Fires once this flush has fully settled, whichever way it
         // went (sent, diverted, stranded by a rebuild, rejected). That
         // is the earliest point these ids are safe to retry — not when
-        // they were queued, and not only on the happy path.
-        for (const m of req.messages) inFlight.delete(m.id);
+        // they were queued, and not only on the happy path. Only THIS
+        // tier's set: the other tier's request for the same id (if any)
+        // is a separate in-flight round trip and settles on its own.
+        for (const m of req.messages) inFlightSet.delete(m.id);
     }
 }
 
@@ -496,7 +534,7 @@ function rebuildBatcher() {
         contextSize: 8,
         supportsContext: false,          // Google is per-message; context is wasted on it
         targetLang: settings.store.targetLang,
-        onFlush: req => runTier("google", req, myGeneration)
+        onFlush: req => runTier("google", req, myGeneration, inFlightFast)
     });
 
     // Only when an LLM is actually configured AND usable. With engine=google
@@ -509,7 +547,7 @@ function rebuildBatcher() {
             contextSize: 8,
             supportsContext: true,
             targetLang: settings.store.targetLang,
-            onFlush: req => runTier(quality, req, myGeneration)
+            onFlush: req => runTier(quality, req, myGeneration, inFlightQuality)
         })
         : null;
 
@@ -517,7 +555,15 @@ function rebuildBatcher() {
     // early-returns on that, which would silently drop every message caught
     // mid-debounce by a settings change — no entry, no marker, no retry.
     // Releasing the marks first is what makes the re-queue actually re-queue.
-    for (const m of orphaned) inFlight.delete(m.id);
+    // Both sets, unconditionally: an orphan drained from fastBatcher's queue
+    // was only ever marked in inFlightFast and one from qualityBatcher's queue
+    // only in inFlightQuality, so releasing the set that was never set for a
+    // given id is simply a no-op — and a message queued in BOTH at once (fully
+    // legitimate under dual dispatch) needs both released anyway.
+    for (const m of orphaned) {
+        inFlightFast.delete(m.id);
+        inFlightQuality.delete(m.id);
+    }
     // Re-queue under the new settings rather than marking them failed —
     // nothing about these messages failed, the settings changed under them.
     for (const m of orphaned) enqueue(m, false);
@@ -544,16 +590,37 @@ function enqueue(pending: PendingMessage, isOwn: boolean) {
     // not writing keeps a local guess out of the persisted cache, where a
     // heuristic mistake would otherwise outlive the session.
     if (isLocallySkipped(pending.text, isOwn)) {
-        currentBatcher()?.recordContext(pending);
+        // Both rings: fastBatcher's is never actually read (it does not
+        // support context) but recording into it is harmless, and
+        // qualityBatcher may be null (Google-only). Whichever tier(s) end up
+        // consuming context see a coherent conversation either way.
+        fastBatcher?.recordContext(pending);
+        qualityBatcher?.recordContext(pending);
         return;
     }
-    // Already queued or awaiting a response: the store shows a miss for the
-    // whole round trip, so "no entry" must not be read as "never requested".
-    if (inFlight.has(pending.id)) return;
 
     announceMissingKeyOnce();
-    inFlight.add(pending.id);
-    currentBatcher()?.add(pending);
+
+    const key = makeKey(pending.id, settings.store.targetLang);
+
+    // Already queued or awaiting a response on that tier: the store shows a
+    // miss for the whole round trip, so "no entry" must not be read as
+    // "never requested". Checked and set per tier — a message is legitimately
+    // in flight on both at once.
+    if (!inFlightFast.has(pending.id) && needsFast(key)) {
+        inFlightFast.add(pending.id);
+        fastBatcher?.add(pending);
+    }
+
+    if (qualityBatcher && !inFlightQuality.has(pending.id) && needsQuality(key)) {
+        inFlightQuality.add(pending.id);
+        qualityBatcher.add(pending);
+    }
+    // No `else`: when qualityBatcher is null (no LLM configured), there is no
+    // second ring to feed — fastBatcher never reads its own context (it does
+    // not support it), so there is nothing useful to record here. (TS proves
+    // this too: in this branch qualityBatcher is narrowed to exactly `null`,
+    // so calling through it — even via `?.` — would be provably unreachable.)
 }
 
 /**
@@ -764,7 +831,9 @@ function catchUp(channelId: string, becomingFocused = false) {
         // so a duplicate catch-up trigger (rapid channel reselection, or
         // CHANNEL_SELECT followed by LOAD_MESSAGES_SUCCESS for the same
         // channel) must not treat "no cache entry yet" as "never requested".
-        if (inFlight.has(message.id)) continue;
+        // Either set: enqueue() below re-checks per tier anyway, this is only
+        // the budget pre-filter. (Full per-tier catch-up budgeting is Task 4.)
+        if (inFlightFast.has(message.id) || inFlightQuality.has(message.id)) continue;
 
         const key = makeKey(message.id, settings.store.targetLang);
         const entry = getTranslation(key);
@@ -1052,9 +1121,10 @@ export default definePlugin({
         void cacheReady.then(() => {
             // stop() may have run while the read was in flight; both batchers
             // are null exactly then, and enqueuing into a stopped plugin would
-            // strand those ids in `inFlight` for the next session. fastBatcher
-            // always exists whenever the plugin is running (rebuildBatcher()
-            // builds it unconditionally), so it alone is a reliable check.
+            // strand those ids in the in-flight sets for the next session.
+            // fastBatcher always exists whenever the plugin is running
+            // (rebuildBatcher() builds it unconditionally), so it alone is a
+            // reliable check.
             if (fastBatcher === null) return;
             const openChannelId = SelectedChannelStore.getChannelId();
             if (openChannelId) catchUp(openChannelId);
@@ -1074,7 +1144,8 @@ export default definePlugin({
         // Anything still marked in-flight belongs to a batcher that just got
         // disposed without flushing -- without this, those ids would stay
         // permanently unretryable across a stop/start cycle.
-        inFlight.clear();
+        inFlightFast.clear();
+        inFlightQuality.clear();
         // Bump the generation so an in-flight request from before stop()
         // (e.g. a Claude call awaiting its response) fails its post-await
         // guard check in onFlush and returns before ever reaching
