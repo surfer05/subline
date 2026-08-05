@@ -460,16 +460,16 @@ describe("a rate-limited LLM leaves the reader the fast tier's Google line", () 
         await vi.advanceTimersByTimeAsync(QUALITY_DEBOUNCE_MS);
         for (let i = 0; i < 20; i++) await Promise.resolve();
 
-        // The 429 retuned the gate to 75% of 20/min, i.e. one token per 4s —
+        // The 429 retuned the gate to half of 20/min, i.e. one token per 6s —
         // which is what the floor is then read off.
-        expect(rateGateSettings().refillMs).toBe(4_000);
+        expect(rateGateSettings().refillMs).toBe(6_000);
 
-        // Floored at the gate's 4s refill interval, NOT the 551ms the API
+        // Floored at the gate's 6s refill interval, NOT the 551ms the API
         // asked for — a small tolerance rather than an exact equality, since
         // this is real (fake) elapsed time, not a single synchronous call.
         const until = cooldownUntil("gemini");
-        expect(until).toBeGreaterThan(Date.now() + 3_500);
-        expect(until).toBeLessThanOrEqual(Date.now() + 4_500);
+        expect(until).toBeGreaterThan(Date.now() + 5_500);
+        expect(until).toBeLessThanOrEqual(Date.now() + 6_500);
     });
 
     it("says so once per session, not once per batch", async () => {
@@ -498,9 +498,8 @@ describe("a rate-limited LLM leaves the reader the fast tier's Google line", () 
     });
 
     it("retunes the rate gate from the quota the 429 reported", async () => {
-        // The compiled-in 15/minute guess is exactly that — a guess about
-        // someone else's project. A response that states the real ceiling
-        // wins.
+        // The compiled-in guess is exactly that — a guess about someone else's
+        // project. A response that states the real ceiling wins.
         expect(rateGateSettings().refillMs).toBe(REFILL_MS);
 
         useGemini();
@@ -514,8 +513,8 @@ describe("a rate-limited LLM leaves the reader the fast tier's Google line", () 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
 
-        // floor(4 * 0.75) = 3/minute.
-        expect(rateGateSettings().refillMs).toBe(20_000);
+        // floor(4 * 0.5) = 2/minute.
+        expect(rateGateSettings().refillMs).toBe(30_000);
         expect(rateGateSettings().refillMs).toBeGreaterThan(REFILL_MS);
     });
 

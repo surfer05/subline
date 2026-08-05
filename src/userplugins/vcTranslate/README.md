@@ -201,12 +201,32 @@ A quality-tier failure writes nothing at all — that is what keeps your `≈`
 line readable instead of turning it into an error — which means the cache
 looks identical whether the LLM was asked and failed or was never asked. So
 the attempt is remembered separately, in memory. Without that, every channel
-open and every scroll-up would re-offer the same message to the LLM forever,
-spending exactly the quota this two-tier split exists to conserve. The cost
+open would re-offer the same message to the LLM forever, spending exactly the
+quota this two-tier split exists to conserve. (This bounds *re-asking* about
+one message. What bounds how many *new* messages can be asked about is the
+next paragraph — the two problems are separate, and the ledger never solved
+the second one.) The cost
 is an occasional missed `✦` where the failure was transient; the `≈` line is
 still there, and the reader sees nothing wrong. Editing the message,
 restarting Discord, or toggling the plugin off and on each buy a fresh
 attempt.
+
+**The quality tier covers the live conversation and channel opens — not
+history you are scrolling past.** Every message you receive while looking at a
+channel, and the backlog catch-up runs when you open one (including the
+history that arrives a moment later for a channel you had not visited this
+session), goes to both tiers. Messages that arrive because you kept
+*scrolling up* go to the fast tier only: you still get a `≈` Google subtitle
+within a second, they simply never flip to `✦`. That is where the LLM's
+conversation context is worth spending a request and where it is not — and
+scrolling is the one source with no natural bound on it. Discord re-fires
+`LOAD_MESSAGES_SUCCESS` for every chunk of history a scroll loads, and each
+one is a fresh screenful of never-before-seen messages, so a few hundred
+messages of scroll-back would spend the whole per-minute quota (see
+"Free-tier rate limiting") in seconds — which is exactly what produced a
+rate-limit toast moments after starting Discord. Re-opening the channel
+later spends its catch-up budget newest-message-first, so a deep stretch you
+scrolled past is not what it reaches — the `≈` lines on it stand.
 
 **Setting the engine to Google disables the quality tier entirely.** There is
 then only the fast tier, and `≈` is simply the final answer, exactly as if
@@ -254,33 +274,50 @@ version of this plugin used a fixed 3-second window, which meant a
 continuously active channel flushed every 3 seconds — 20 requests/minute,
 exactly on the ceiling, which is where most of the 429s came from.)
 
-The one thing the debounce window does *not* smooth out is opening many
-channels in a row: catch-up gives each channel its own queue and its own
+Two things the debounce window does *not* smooth out. The first is opening
+many channels in a row: catch-up gives each channel its own queue and its own
 20-second timer, so hopping through 10 channels can still produce up to 10
-quality-tier requests clumped within the same few seconds. That is what the
-client-side token-bucket gate below still exists for.
+quality-tier requests clumped within the same few seconds. The second used to
+be scrolling — every chunk of history Discord loads re-ran catch-up with a
+fresh 20-message budget, so a long scroll-back turned into one quality-tier
+request after another until the quota was gone. That one is fixed at the
+source: scroll-back is fast-tier only now (see "The quality tier covers the
+live conversation and channel opens" above). The channel-hopping burst is
+what the client-side token-bucket gate below still exists for.
 
 A small client-side token-bucket gate (`rateGate.ts`) sits in front of every
 Claude/Gemini request: a burst of 5 requests is always available immediately,
-refilling at roughly 1 every 4 seconds (~15/minute — deliberately under the
-measured 20/minute ceiling). A single live conversation's quality tier never
-needs more than one token at a time, so **normal chat is never
-throttled** by this gate at all — it is the channel-hopping burst above that
-it smooths out, spacing 10 clumped requests into the steady rate instead of
-firing them all at once and getting several back as 429s.
+refilling at 1 every 4 seconds until a 429 teaches it the real quota. A single
+live conversation's quality tier never needs more than one token at a time, so
+**normal chat is never throttled** by this gate at all — it is the
+channel-hopping burst above that it smooths out, spacing 10 clumped requests
+into the steady rate instead of firing them all at once and getting several
+back as 429s.
 
 **The gate re-tunes itself from the API's own reported limit.** Those 5-and-4
 seconds numbers are only a starting guess. A Gemini 429 body states the quota
 it just enforced — literally `limit: 20` in the middle of the error message —
-and when it does, the gate throws away the guess and aims at 75% of the real
-number instead (20/minute becomes 15/minute; a project limited to 4/minute
-becomes 3/minute, one request every 20 seconds). This is deliberately adaptive
-rather than a compiled-in constant: free-tier quotas differ per project, per
-model, and get changed by the provider without notice, so any number hardcoded
-here is guaranteed to be wrong for someone — and being wrong in the generous
-direction is exactly what produced the 429 storm. The learned value lasts for
-the session and is re-learned after a restart, at the cost of one 429 whose
-batch Google serves anyway.
+and when it does, the gate throws away the guess and aims at **half** the real
+number: 20/minute becomes 10/minute (one request every 6 seconds), and a
+project limited to 4/minute becomes 2/minute (one every 30 seconds). This is
+deliberately adaptive rather than a compiled-in constant: free-tier quotas
+differ per project, per model, and get changed by the provider without notice,
+so any number hardcoded here is guaranteed to be wrong for someone — and being
+wrong in the generous direction is exactly what produced the 429 storm. The
+learned value lasts for the session and is re-learned after a restart, at the
+cost of one 429 whose batch Google serves anyway.
+
+**Why half and not three-quarters** (this was 75%, and 75% was wrong). The
+provider counts a *rolling* 60-second window; the gate is a token bucket. The
+most a bucket can put into any one such window is its sustained rate **plus a
+full burst released at the window's start** — not the sustained rate alone. At
+75% of a reported 20/minute that is 15 + 5 = **20 requests inside one rolling
+minute: exactly the ceiling**, leaving nothing for requests still in flight,
+for another client on the same key, or for the provider's window boundary not
+lining up with ours. At 50% it is 10 + 5 = 15 against the same ceiling, a
+quarter of the quota held in reserve. The throughput given up costs nothing
+here: the quality tier flushes at most one batch per channel per 20 seconds,
+so a live conversation still never reaches the gate.
 
 ### When the LLM engine is rate limited, nothing happens — and that is the point
 
@@ -615,9 +652,9 @@ of results.
 | 3 | Post an emote-only message, a link-only message, or your own message | No subtitle, no API call | ☐ |
 | 4 | Have three people post at once in three different languages | All three translate, in one batch | ☐ |
 | 5 | Edit a message that already has a translated subtitle | Subtitle re-translates to match the edit (the old one clears, the new one appears within ~1s) | ☐ |
-| 6 | Scroll far up in a channel, then back down, then scroll the same stretch again | Subtitles persist. Scrolling up loads older history, which re-runs catch-up: newly-loaded untranslated messages translate (expected), and any `≈` line an LLM has not been asked about yet is offered to the quality tier **once**, so some may flip to `✦`. The check is the *second* pass over the same stretch — that must send nothing at all, for either tier. Repeated scrolling that keeps producing new Claude/Gemini requests for messages you have already scrolled past is the bug (see "one request per message, per session" under "Engines") | ☐ |
+| 6 | Scroll far up in a channel, then back down, then scroll the same stretch again | Subtitles persist. Scrolling up loads older history, which re-runs catch-up **for the fast tier only**: newly-loaded untranslated messages get a `≈` Google line (expected), and *nothing at all* should go to Claude/Gemini, however far you scroll — watch the provider's usage dashboard while you do it. A `✦` appearing on a stretch you only ever scrolled past is the bug. The second pass over the same stretch must send nothing for either tier | ☐ |
 | 7 | **Cold channel:** open a channel not visited yet this session | Its backlog translates without needing a second channel selection. If it does not, check the console for the `VcTranslate` warning listing `Payload keys:` — see Troubleshooting | ☐ |
-| 8 | Count how many times `LOAD_MESSAGES_SUCCESS` fires for one channel open (scrolling up to load more history also dispatches it) | Confirm no duplicate API spend from repeated catch-up triggers for the same channel open | ☐ |
+| 8 | Count how many times `LOAD_MESSAGES_SUCCESS` fires for one channel open (scrolling up to load more history also dispatches it) | Confirm no duplicate API spend from repeated catch-up triggers for the same channel open. At most **one** of them may reach the quality tier — the first, which is the opened channel's own backlog | ☐ |
 | 9 | Re-select a channel roughly 3s into a pending translation | No second request is sent (check Anthropic usage dashboard or the native-side log) | ☐ |
 | 10 | Let a message fail (e.g. during a network blip), then reopen its channel | It retries on the next channel open and stops showing ⚠ once it succeeds | ☐ |
 | 11 | Open the 🌐 popover item on a message; toggle a channel off | Popover renders correctly; toggling off hides subtitles for that channel | ☐ |

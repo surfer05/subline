@@ -8,20 +8,26 @@
  * Why this exists — CORRECTED. It was written for a restart fan-out: with
  * `globalAuto` on, catch-up used to fire for every open server channel at
  * once. That is no longer possible — catch-up is focus-gated, so only the
- * channel actually on screen is ever caught up. The burst it still has to
- * smooth is CHANNEL HOPPING: each channel opened queues its own quality batch,
- * and a user clicking through half a dozen channels in a few seconds produces
- * exactly the same shape of burst one channel at a time. The gate stays.
+ * channel actually on screen is ever caught up, and deep scroll-back no longer
+ * reaches the quality tier at all (see `initialHistoryPending` in index.tsx).
+ * The burst it still has to smooth is CHANNEL HOPPING: each channel opened
+ * queues its own quality batch, and a user clicking through half a dozen
+ * channels in a few seconds produces exactly the same shape of burst one
+ * channel at a time. The gate stays.
  *
- * BURST_CAPACITY / REFILL_MS reasoning (free-tier shaped): Gemini's free tier
- * allows on the order of 15 requests/minute; a low/free Anthropic tier is
- * comparably tight. The quality tier flushes at most one batch per 20s window
- * per channel (QUALITY_DEBOUNCE_MS, see types.ts) — so a burst of 5 tokens
- * available immediately means ordinary chat, in one channel, NEVER waits on
- * this gate. Refilling at one token per 4 seconds caps steady-state throughput
- * at 15/minute, which is exactly the class of ceiling the free tiers impose —
- * so a hop across many channels is smoothed into that rate instead of
+ * BURST_CAPACITY / REFILL_MS reasoning (free-tier shaped): a burst of 5 tokens
+ * available immediately, refilling one per 4 seconds. The quality tier flushes
+ * at most one batch per 20s window per channel (QUALITY_DEBOUNCE_MS, see
+ * types.ts), so ordinary chat in one channel NEVER waits on this gate, and a
+ * hop across many channels is smoothed into a steady rate instead of
  * front-loaded into a second and rejected wholesale.
+ *
+ * Those two numbers apply only until a 429 states a real quota — see
+ * SAFETY_FACTOR below, which is where the arithmetic against the MEASURED
+ * ceiling (Gemini free tier: 20 requests per rolling minute) is done. They are
+ * deliberately not tuned to that measurement themselves: they are the guess
+ * that stands in for a quota this install has not been told yet, and the
+ * install it is wrong for is someone else's.
  *
  * Those two constants are only the STARTING GUESS. A 429 body sometimes states
  * the quota it just enforced ("limit: 20" — see rateHint.ts), and when it does,
@@ -36,15 +42,34 @@ export const BURST_CAPACITY = 5;
 export const REFILL_MS = 4_000;
 
 /**
- * How much of the observed ceiling to actually aim at. Deliberately well under
- * 1: the reported limit is the point at which requests START being rejected,
- * and our own accounting cannot see the provider's window boundaries, other
- * clients on the same key, or requests still in flight. Sitting at 75% leaves
- * room for all three. At the observed limit of 20/min that is 15/min — which
- * is exactly where the original guess sat, so the common case is unchanged and
- * only a project with a different quota actually moves.
+ * How much of the observed ceiling to actually aim at.
+ *
+ * WHY 0.5 AND NOT 0.75 (the arithmetic, against the measured numbers). The
+ * provider enforces a ROLLING WINDOW — Gemini's free tier allows 20 requests
+ * per rolling minute, confirmed live: successive probes were told to retry in
+ * 29.5s, then 56.7s, then 11.2s as the window drained. This gate is a token
+ * BUCKET, which is not the same shape: the most it can put into any single
+ * 60-second window is the sustained rate PLUS a full burst released at the
+ * window's start, i.e. `targetPerMinute + capacity`.
+ *
+ * At 0.75 that is 15 + 5 = 20 for a reported limit of 20 — exactly the ceiling,
+ * with nothing left for the provider's own window boundaries, requests already
+ * in flight when the window turns over, or another client on the same key. A
+ * gate tuned to sit precisely on a hard limit is a gate that 429s.
+ *
+ * At 0.5 it is 10 + 5 = 15 against the same ceiling: a quarter of the quota
+ * held back for exactly those three. The cost is throughput this plugin does
+ * not need — the quality tier flushes at most one batch per channel per 20s
+ * window, so a live conversation still never waits on this gate at all, and
+ * with deep scroll-back no longer routed through the quality tier (see
+ * `initialHistoryPending` in index.tsx) the only remaining burst is channel
+ * hopping, which is what a bucket smooths rather than blocks.
+ *
+ * A FRACTION of the reported limit, never a rate: what the number multiplies is
+ * whatever the API said its quota was, so a project on a different plan retunes
+ * to a different rate with the same headroom.
  */
-export const SAFETY_FACTOR = 0.75;
+export const SAFETY_FACTOR = 0.5;
 
 // The LIVE values. Everything below reads these, never the constants above,
 // so a retune takes effect without restarting anything.
@@ -134,8 +159,8 @@ export function acquireSlot(): Promise<void> {
 export function tuneRateGateToObservedLimit(limitPerMinute: number): boolean {
     if (!Number.isFinite(limitPerMinute) || limitPerMinute <= 0) return false;
 
-    // At least 1/minute: a quota so small that 75% of it rounds to zero still
-    // has to let SOMETHING through, or the gate becomes a deadlock.
+    // At least 1/minute: a quota so small that SAFETY_FACTOR of it rounds to
+    // zero still has to let SOMETHING through, or the gate becomes a deadlock.
     const targetPerMinute = Math.max(1, Math.floor(limitPerMinute * SAFETY_FACTOR));
     const nextRefillMs = Math.round(60_000 / targetPerMinute);
     const nextCapacity = Math.max(1, Math.min(BURST_CAPACITY, targetPerMinute));
