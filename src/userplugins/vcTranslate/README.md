@@ -583,9 +583,9 @@ of results.
 
 | # | What to do | Expected | Pass/Fail |
 |---|---|---|---|
-| 1 | Post a non-English message in an enabled channel | Dimmed italic subtitle appears within ~1s, prefixed with the engine marker (`≈` on Google, `✦` on Claude/Gemini); hovering the marker names the engine | ☐ |
-| 1b | With some messages already translated on Google, switch the engine to Claude or Gemini and reopen the channel | The existing subtitles stay visible and stay marked `≈`; no new API calls for them. Only untranslated messages use the new engine, and those show `✦` | ☐ |
-| 2 | Post a message already in your target language, then reopen the channel | No subtitle, and no second API call on reopen (the skip is cached as resolved) | ☐ |
+| 1 | Post a non-English message in an enabled channel | A dimmed italic subtitle appears within ~1s, marked `≈` (the fast tier, Google) — this is always the first line you see, regardless of which engine is configured. Hovering it names Google and the detected language. If Claude/Gemini is configured, it silently upgrades in place to `✦` afterwards, usually within ~20s (see row 32) | ☐ |
+| 1b | With some messages translated by Google only (no LLM configured yet), switch the engine to Claude or Gemini and reopen the channel | The existing `≈` subtitles stay visible while the channel loads. Because a Google line is never a finished answer once an LLM is configured, catch-up also re-offers those exact messages to the new quality tier — expect new Claude/Gemini requests, and some of those lines flipping to `✦` shortly after. Only messages an LLM had *already* translated before the switch are left untouched | ☐ |
+| 2 | Post a message already in your target language, then reopen the channel | No subtitle either time. If only the fast tier has judged it a skip so far (engine set to Google, or the quality tier hasn't gotten to it yet), reopening the channel may send ONE more quality-tier request to confirm the skip — a Google skip is not authoritative (see "The four-way resolved-state model"). Once an LLM has confirmed the skip, reopening again sends nothing further for that message | ☐ |
 | 3 | Post an emote-only message, a link-only message, or your own message | No subtitle, no API call | ☐ |
 | 4 | Have three people post at once in three different languages | All three translate, in one batch | ☐ |
 | 5 | Edit a message that already has a translated subtitle | Subtitle re-translates to match the edit (the old one clears, the new one appears within ~1s) | ☐ |
@@ -596,14 +596,14 @@ of results.
 | 10 | Let a message fail (e.g. during a network blip), then reopen its channel | It retries on the next channel open and stops showing ⚠ once it succeeds | ☐ |
 | 11 | Open the 🌐 popover item on a message; toggle a channel off | Popover renders correctly; toggling off hides subtitles for that channel | ☐ |
 | 12 | Simulate a persistence failure if you can (e.g. revoke write access to Vencord's settings/data directory) | A failure toast appears and the toggle does not stick | ☐ |
-| 13 | Switch engine Google → Claude mid-session | New messages use Claude; messages already cached under Google keep their Google result | ☐ |
+| 13 | Switch engine Google → Claude mid-session | New messages get a `≈` line from the fast tier and, up to ~20s later, a `✦` line from Claude. Messages already cached under Google keep their `≈` result until you next reopen that channel — reopening lets catch-up offer them to Claude too, same as row 1b | ☐ |
 | 14 | Paste a valid API key mid-session while engine is set to Claude | Translations start working without a restart (this was a Critical bug in an earlier round — confirm it stays fixed) | ☐ |
 | 15 | Set engine to Claude with an invalid API key | Exactly one toast, then Google is used for the rest of the session | ☐ |
 | 16 | Disconnect your network, then post a message | ⚠ marker appears, no popup dialog, no console spam | ☐ |
 | 17 | Reconnect the network, post again | Translation resumes normally | ☐ |
 | 18 | Disable the plugin mid-flight (a translation in progress), then re-enable it | The next channel-open catch-up still enqueues correctly | ☐ |
 | 19 | Restart Discord entirely | Previously enabled channels are remembered | ☐ |
-| 20 | Post a message containing a link, and let Discord's preview embed load | Exactly one translation request for that message — the embed's own `MESSAGE_UPDATE` must not trigger a second | ☐ |
+| 20 | Post a message containing a link, and let Discord's preview embed load | The embed's own `MESSAGE_UPDATE` must not trigger an extra translation request for that message — you should see the normal fast-tier request (plus one quality-tier request if an LLM is configured), not a duplicate of either from the embed loading | ☐ |
 | 21 | Open the plugin settings with engine = Google, then switch to Claude | The "Anthropic API key" field is absent for Google and appears for Claude | ☐ |
 | 22 | Select Claude while the key field is empty, then post a message | Exactly one "no Anthropic API key" toast; pasting a valid key afterwards starts using Claude with no restart | ☐ |
 | 23 | Check the "Target language code" setting on a fresh install with a non-English Discord client | It defaults to your client's language as a bare code (`pt`, not `pt-BR`) | ☐ |
@@ -611,9 +611,9 @@ of results.
 | 25 | **Focus, popout:** pop a channel out into its own window and post there while the main window is on another channel | Expected to *not* translate live — a known, documented simplification. It should still translate once that channel is opened in the main window | ☐ |
 | 26 | **Local English skip:** post a plain English sentence in an English-target channel | No subtitle **and no API request at all** (the dashboard count must not move) | ☐ |
 | 27 | **Local English skip, the timid half:** post `yess`, `THIS`, or a Spanish sentence | These are still sent (`yess`/`THIS` may return nothing to show; the Spanish one must get a subtitle). A missing Spanish subtitle here is a real bug — report it | ☐ |
-| 28 | **Persistence:** translate a channel, fully restart Discord, reopen the same channel | Subtitles are already there, and no new API requests are made for those messages | ☐ |
+| 28 | **Persistence:** translate a channel, fully restart Discord, reopen the same channel | Subtitles are already there immediately on reopen. If any of them were still Google-only (`≈`) when Discord closed and an LLM is configured, catch-up sends fresh quality-tier requests to upgrade those specific ones to `✦` — that is expected, not a bug. Messages already upgraded to `✦` before the restart generate no new requests | ☐ |
 | 29 | **Persistence, edited message:** edit a translated message, restart Discord, reopen the channel | The subtitle matches the *edited* text — the pre-edit translation must not come back from disk | ☐ |
-| 30 | **Batch size:** post 3-4 messages quickly in a channel with Claude/Gemini selected | Subtitles appear together after ~3s (not ~1s), in a single request | ☐ |
+| 30 | **Batch size:** post 3-4 messages quickly in a channel with Claude/Gemini selected | Each message still gets its own `≈` line within about a second (the fast tier is per-message, not delayed by batching). Then, up to ~20 seconds later, all of them upgrade to `✦` together, from a single quality-tier request carrying up to 25 messages (`QUALITY_MAX_BATCH`/`QUALITY_DEBOUNCE_MS`) | ☐ |
 | 31 | **Two-tier, happy path:** post a foreign message in a busy channel | A `≈` subtitle appears within ~1s | ☐ |
 | 32 | **Two-tier, upgrade:** keep watching that same message for ~30s | It changes to `✦` with a better translation | ☐ |
 | 33 | **Two-tier, backlog:** open a channel with a long untranslated backlog | `≈` lines appear immediately, `✦` follows in batches | ☐ |
