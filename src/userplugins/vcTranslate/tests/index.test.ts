@@ -13,6 +13,7 @@ const native = vi.hoisted(() => {
 
 import plugin from "../index";
 import { rateGateSettings, REFILL_MS } from "../rateGate";
+import { toggleChannel } from "../channels";
 import settings from "../settings";
 import { clearStore, getTranslation, makeKey, setTranslation } from "../store";
 import type { NativeResponse } from "../native";
@@ -998,6 +999,27 @@ describe("batch sizing follows the daily request budget", () => {
 });
 
 describe("globalAuto does not reach private conversations", () => {
+    it("DOES translate a DM the user explicitly enabled, even with globalAuto off", async () => {
+        // The other half of the rule, and the one that was never covered:
+        // globalAuto deliberately refuses DMs, but an explicit per-channel
+        // opt-in is a direct instruction about THIS conversation and overrides
+        // that refusal. Without this test, "the globe button works in DMs" was
+        // only ever an inference from reading channelActive.
+        settings.store.globalAuto = false;
+        __stubMarkAsDm("dm1");
+        __stubSetSelectedChannel("dm1");
+        await toggleChannel("dm1");
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", {
+            message: { ...discordMessage("d1", "hola"), channel_id: "dm1" }
+        });
+        await settle();
+
+        const sent = native.translateBatch.mock.calls
+            .flatMap(c => JSON.parse(c[2] as string).messages.map((m: any) => m.id));
+        expect(sent).toContain("d1");
+    });
+
     it("translates a guild channel but never a DM", async () => {
         settings.store.globalAuto = true;
 
