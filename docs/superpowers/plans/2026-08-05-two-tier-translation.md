@@ -56,6 +56,34 @@ reason the rate gate must NOT be removed as "no longer needed". If the ceiling
 is ever hit in practice, the fix is a global (not per-channel) quality-tier
 flush budget, not a longer window.
 
+### Romanized text: where Google is confidently wrong
+
+Measured against the live endpoint on 2026-08-05, Moroccan Darija written in
+Latin letters (Arabizi — "3" for ع, "7" for ح):
+
+| input | detected | conf | returned | actually means |
+|---|---|---|---|---|
+| `baraka 3lik mn dak monster` | ar | 0.94 | *unchanged* | "enough of that Monster" |
+| `salam khouya kifach` | ar | 0.98 | *unchanged* | "hi bro, how's it going" |
+| `3lach dayr hakka` | ar | **1.00** | "3 days ago hakka" | "why are you acting like that" |
+| `ana bghit nmchi l dar` | ar | **1.00** | "I don't want to go home" | "I **want** to go home" |
+
+Two things follow, and both contradict assumptions elsewhere in this codebase:
+
+1. **A pass-through is not a skip.** `isSameText` was written for English chat
+   slang, where text coming back unchanged means "already English". For
+   romanized Arabic it means "Google gave up" — and recording `{ skipped: true }`
+   marked the message permanently handled, so nothing ever retried it. That is
+   why a Darija message showed no subtitle at all. Task 1's `via` on the skip
+   marker plus `needsQuality` is what reopens it.
+
+2. **Detection confidence does not protect us here.** 1.00 while inverting a
+   negation. The `?` marker added earlier keys off LOW confidence and would stay
+   silent on exactly the most dangerous output. Task 6 adds the second,
+   independent signal: a language whose native script is non-Latin, detected
+   from text that is entirely Latin, is a romanization — and Google's answer for
+   it is untrustworthy no matter what confidence it reports.
+
 ## Global Constraints
 
 - **Run tests from the plugin directory**: `cd /Users/surfer/dev/discord-translate/src/userplugins/vcTranslate && npx vitest run`. From the repo root the aliases silently do not load and `tests/index.test.ts` is omitted while still reporting a pass.
@@ -870,7 +898,179 @@ git add -A && git commit -m "refactor(vcTranslate): a failing quality tier leave
 
 ---
 
-## Task 6: Rendering, docs and manual verification
+## Task 6: Never present a romanized guess as confident
+
+Confidence alone cannot flag Google's worst output. This adds the independent
+signal — see "Romanized text" above for the measurements this is built on.
+
+**Files:**
+- Create: `src/userplugins/vcTranslate/romanized.ts`
+- Create: `src/userplugins/vcTranslate/tests/romanized.test.ts`
+- Modify: `src/userplugins/vcTranslate/index.tsx` (`TranslationAccessory`)
+
+**Interfaces:**
+- Produces: `isRomanizedGuess(detectedLang: string, originalText: string): boolean`
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/romanized.test.ts`:
+
+```ts
+import { describe, expect, it } from "vitest";
+import { isRomanizedGuess } from "../romanized";
+
+describe("isRomanizedGuess", () => {
+    it("flags Arabic detected from Latin-only text", () => {
+        // Google reported ar at confidence 1.00 for this and inverted the
+        // negation — "I don't want to go home" for "I want to go home".
+        expect(isRomanizedGuess("ar", "ana bghit nmchi l dar")).toBe(true);
+        expect(isRomanizedGuess("ar", "baraka 3lik mn dak monster")).toBe(true);
+    });
+
+    it("does not flag Arabic written in Arabic script", () => {
+        // Google is good at this; flagging it would cry wolf on the common case.
+        expect(isRomanizedGuess("ar", "يعطيك العافية")).toBe(false);
+    });
+
+    it("does not flag languages that are natively Latin", () => {
+        expect(isRomanizedGuess("es", "hola que tal")).toBe(false);
+        expect(isRomanizedGuess("de", "sind die gruppenraume klimatisiert")).toBe(false);
+        expect(isRomanizedGuess("ha", "ne")).toBe(false);   // Hausa IS Latin-script
+    });
+
+    it("does not flag a script-tagged code that already says Latin", () => {
+        expect(isRomanizedGuess("ber-Latn", "wach nta labas")).toBe(false);
+    });
+
+    it("flags the other big non-Latin scripts", () => {
+        expect(isRomanizedGuess("ru", "privet kak dela")).toBe(true);
+        expect(isRomanizedGuess("ja", "konnichiwa")).toBe(true);
+        expect(isRomanizedGuess("hi", "kya haal hai")).toBe(true);
+    });
+});
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `npx vitest run tests/romanized.test.ts`
+Expected: FAIL — cannot resolve `../romanized`.
+
+- [ ] **Step 3: Implement**
+
+Create `romanized.ts`:
+
+```ts
+/**
+ * Languages normally written in a non-Latin script. If one of these is
+ * detected from text containing no non-Latin letters at all, the input was
+ * romanized — and Google's answer for it cannot be trusted.
+ *
+ * Not exhaustive, and does not need to be: a language missing from this list
+ * costs an unflagged line, exactly as today. Adding one is free.
+ */
+const NON_LATIN_SCRIPT = new Set([
+    "ar", "fa", "ur", "ps", "sd", "ug", "he", "yi",
+    "ru", "uk", "be", "bg", "sr", "mk", "kk", "ky", "mn", "tg",
+    "el", "hy", "ka", "am", "ti",
+    "hi", "bn", "pa", "gu", "or", "ta", "te", "kn", "ml", "si", "ne", "mr", "sa",
+    "th", "lo", "km", "my", "bo", "dv",
+    "zh", "ja", "ko", "yue"
+]);
+
+const LETTER = /\p{L}/u;
+const LATIN_LETTER = /\p{Script=Latin}/u;
+
+/**
+ * True when `detectedLang` is normally non-Latin but `originalText` is written
+ * entirely in Latin letters.
+ *
+ * This is the signal detection confidence cannot give us. Measured: Google
+ * reports 1.00 confidence on romanized Moroccan Darija while inverting a
+ * negation, so a low-confidence check stays silent on precisely the output most
+ * likely to mislead. Script mismatch is independent of confidence and catches
+ * that class directly.
+ *
+ * A code that names its own script ("ber-Latn") is taken at its word.
+ */
+export function isRomanizedGuess(detectedLang: string, originalText: string): boolean {
+    const base = detectedLang.toLowerCase().split("-")[0];
+    if (detectedLang.toLowerCase().includes("-latn")) return false;
+    if (!NON_LATIN_SCRIPT.has(base)) return false;
+
+    for (const ch of originalText) {
+        if (LETTER.test(ch) && !LATIN_LETTER.test(ch)) return false;
+    }
+    return true;
+}
+```
+
+- [ ] **Step 4: Use it in the accessory**
+
+In `TranslationAccessory`, extend the `unsure` condition. It must apply only to
+Google lines — an LLM result is not a script guess:
+
+```ts
+    const romanized = isRomanizedGuess(entry.lang, message.content ?? "");
+    const unsure = ENGINE_RANK[entry.via] === 0 && (
+        (entry.conf !== undefined && entry.conf < MIN_DETECT_CONFIDENCE)
+        || romanized
+    );
+```
+
+and give the romanized case its own tooltip, since "only 100% confident" would
+read as nonsense:
+
+```ts
+    const title = !unsure
+        ? `Translated by ${provenance.label} · ${langName}`
+        : romanized
+            ? `Translated by ${provenance.label}. This looks like ${langName} `
+              + "written in Latin letters, which Google translates badly — "
+              + "often confidently and wrongly. Wait for the ✦ line."
+            : `Translated by ${provenance.label}. ${langName} detected, but only `
+              + `${Math.round(entry.conf! * 100)}% confidently — short messages are `
+              + "often misread, so this may be wrong.";
+```
+
+- [ ] **Step 5: Add the integration test**
+
+```ts
+it("marks a romanized Google line unsure even at full confidence", () => {
+    // The measured case: ar detected at 1.00 from Latin text, negation
+    // inverted. Confidence alone would let this through unmarked.
+    setTranslation(key("1"), {
+        lang: "ar", text: "I don't want to go home", via: "google", conf: 1
+    });
+    const node = render(discordMessage("1", "ana bghit nmchi l dar"));
+    expect(text(node)).toContain("ar?");
+    expect(titleOf(node)).toContain("Latin letters");
+});
+
+it("does not mark an LLM line as a romanization guess", () => {
+    setTranslation(key("1"), { lang: "ar", text: "I want to go home", via: "gemini" });
+    expect(text(render(discordMessage("1", "ana bghit nmchi l dar")))).not.toContain("?");
+});
+```
+
+- [ ] **Step 6: Run and mutation-verify**
+
+Run: `npx vitest run` — Expected: PASS.
+
+Make `isRomanizedGuess` always return `false`.
+Expected: "marks a romanized Google line unsure even at full confidence" FAILS.
+
+Remove the `ENGINE_RANK[entry.via] === 0` guard.
+Expected: "does not mark an LLM line as a romanization guess" FAILS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add -A && git commit -m "feat(vcTranslate): flag romanized text Google mistranslates with full confidence"
+```
+
+---
+
+## Task 7: Rendering, docs and manual verification
 
 **Files:**
 - Modify: `src/userplugins/vcTranslate/index.tsx` (`TranslationAccessory`)
@@ -923,6 +1123,8 @@ Append to the manual checklist table:
 | 12 | Open a channel with a long untranslated backlog | `≈` lines appear immediately, `✦` follows in batches | ☐ |
 | 13 | Exhaust the Gemini quota, then post a message | `≈` still appears; no `⚠`, no `⏳`, no toast storm | ☐ |
 | 14 | Watch the AI Studio rate-limit dashboard for 10 min of normal use | Well under 20 requests/min | ☐ |
+| 15 | Post romanized Darija () | Either no ≈ line or one marked ; the ✦ line that follows is correct | ☐ |
+| 16 | Post  | Google passes it through unchanged, so no ≈ line — but a ✦ line still arrives | ☐ |
 
 - [ ] **Step 6: Full gates**
 
