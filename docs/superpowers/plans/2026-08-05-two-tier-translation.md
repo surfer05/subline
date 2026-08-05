@@ -1123,8 +1123,9 @@ Append to the manual checklist table:
 | 12 | Open a channel with a long untranslated backlog | `≈` lines appear immediately, `✦` follows in batches | ☐ |
 | 13 | Exhaust the Gemini quota, then post a message | `≈` still appears; no `⚠`, no `⏳`, no toast storm | ☐ |
 | 14 | Watch the AI Studio rate-limit dashboard for 10 min of normal use | Well under 20 requests/min | ☐ |
-| 15 | Post romanized Darija () | Either no ≈ line or one marked ; the ✦ line that follows is correct | ☐ |
-| 16 | Post  | Google passes it through unchanged, so no ≈ line — but a ✦ line still arrives | ☐ |
+| 15 | Post romanized Darija: `ana bghit nmchi l dar` | Either no ≈ line, or one marked `ar?`; the ✦ line that follows says "I want to go home" (NOT "don't want") | ☐ |
+| 16 | Post `baraka 3lik mn dak monster` | Google returns it unchanged so there may be no ≈ line at all — but a ✦ line still arrives and mentions the drink | ☐ |
+| 17 | Confirm the DM is enabled with the 🌐 button first | Rows 15-16 do nothing in a DM that was never enabled; `globalAuto` never covers DMs | ☐ |
 
 - [ ] **Step 6: Full gates**
 
