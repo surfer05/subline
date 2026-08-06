@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     acquireSlot, BURST_CAPACITY, LEARNED_QUOTA_KEY, loadRateGateTuning, rateGateAvailable,
-    rateGateSettings, REFILL_MS, resetRateGate, SAFETY_FACTOR, tuneRateGateToObservedLimit
+    rateGateSettings, REFILL_MS, resetRateGate, SAFETY_FACTOR, tuneRateGateToObservedLimit,
+    tuneRateGateToProviderBudget
 } from "../rateGate";
 import * as DataStore from "./stubs/api-datastore";
 
@@ -419,5 +420,102 @@ describe("rateGate — the learned quota is persisted across restarts", () => {
         expect(handlersAttached).toBeGreaterThan(0);
 
         await rejected.catch(() => { /* keep the fixture itself from leaking */ });
+    });
+});
+
+describe("tuneRateGateToProviderBudget — a provider's own remaining count", () => {
+    it("tightens the gate when the provider says very little is left", async () => {
+        // 4 requests left, window rolls over in a minute → 4/minute, halved by
+        // SAFETY_FACTOR to 2/minute, i.e. one every 30s. Slower than the
+        // untaught 15s default, so it takes effect.
+        expect(tuneRateGateToProviderBudget(4, 60_000)).toBe(true);
+        expect(rateGateSettings().refillMs).toBe(30_000);
+        expect(rateGateSettings().refillMs).toBeGreaterThan(REFILL_MS);
+    });
+
+    it("scales the count over the window the provider stated, not over a fixed minute", async () => {
+        // 6 left with 3 minutes to go is 2/minute, not 6/minute — the window
+        // is what makes a remaining count a rate at all.
+        expect(tuneRateGateToProviderBudget(6, 180_000)).toBe(true);
+        expect(rateGateSettings().refillMs).toBe(60_000);
+    });
+
+    it("NEVER loosens the gate, however generous the provider's number looks", () => {
+        // THE case this rule exists for: Groq's requests headers are a per-DAY
+        // budget, so "14,370 left, resets in 3 minutes" divides out to ~4,790
+        // per minute. Applied naively that is a gate wide enough to be no gate
+        // at all — and it says nothing whatsoever about the per-MINUTE ceiling
+        // this bucket exists to respect.
+        const before = rateGateSettings();
+        expect(tuneRateGateToProviderBudget(14_370, 179_560)).toBe(false);
+        expect(rateGateSettings()).toEqual(before);
+    });
+
+    it("does not loosen a gate a 429 already tightened", async () => {
+        // Order matters: a learned quota is a statement about the ceiling, a
+        // remaining count is a statement about right now. The ceiling wins.
+        tuneRateGateToObservedLimit(4);
+        const tightened = rateGateSettings();
+        expect(tightened.refillMs).toBe(30_000);
+
+        expect(tuneRateGateToProviderBudget(1_000, 60_000)).toBe(false);
+        expect(rateGateSettings()).toEqual(tightened);
+    });
+
+    it("treats a missing or unusable reset window as one minute — the most conservative reading", () => {
+        expect(tuneRateGateToProviderBudget(4)).toBe(true);
+        expect(rateGateSettings().refillMs).toBe(30_000);
+
+        resetRateGate();
+        expect(tuneRateGateToProviderBudget(4, Number.NaN)).toBe(true);
+        expect(rateGateSettings().refillMs).toBe(30_000);
+
+        resetRateGate();
+        expect(tuneRateGateToProviderBudget(4, -5)).toBe(true);
+        expect(rateGateSettings().refillMs).toBe(30_000);
+    });
+
+    it("changes nothing for a zero, negative or non-finite remaining count", () => {
+        // Zero is not ignored — it is handled where a zero can be represented
+        // (the cooldown and the indicator). A bucket cannot express "none at
+        // all" without deadlocking, so it must not try.
+        const before = rateGateSettings();
+        for (const bad of [0, -3, Number.NaN, Number.POSITIVE_INFINITY]) {
+            expect(tuneRateGateToProviderBudget(bad, 60_000)).toBe(false);
+        }
+        expect(rateGateSettings()).toEqual(before);
+    });
+
+    it("does NOT persist what it learned — this is a fact about one minute", async () => {
+        // tuneRateGateToObservedLimit persists because a quota outlives the
+        // session. How many requests are left in the current window does not:
+        // writing it would start the next session throttled by a window that
+        // closed hours ago.
+        expect(tuneRateGateToProviderBudget(4, 60_000)).toBe(true);
+        await Promise.resolve();
+        expect(await DataStore.get(LEARNED_QUOTA_KEY)).toBeUndefined();
+    });
+
+    it("actually slows real acquisitions, not just the reported settings", async () => {
+        // The settings object is a readout; this is the behaviour. Without it a
+        // retune that updated only `refillMs` and never reached the bucket
+        // would pass every assertion above.
+        tuneRateGateToProviderBudget(2, 60_000);   // → one every 60s, capacity 1
+        await acquireSlot();
+
+        let second = false;
+        void acquireSlot().then(() => { second = true; });
+        await vi.advanceTimersByTimeAsync(REFILL_MS);
+        expect(second).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(second).toBe(true);
+    });
+
+    it("is reset by resetRateGate, like every other in-memory tuning", () => {
+        tuneRateGateToProviderBudget(4, 60_000);
+        expect(rateGateSettings().refillMs).toBe(30_000);
+        resetRateGate();
+        expect(rateGateSettings()).toEqual({ capacity: BURST_CAPACITY, refillMs: REFILL_MS });
     });
 });

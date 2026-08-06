@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-    modelFromGeminiBody, quotaLimitFromGeminiBody, retryAfterFromGeminiBody, retryAfterFromHeader
+    modelFromGeminiBody, parseResetDuration, quotaLimitFromGeminiBody, rateLimitFromHeaders,
+    retryAfterFromGeminiBody, retryAfterFromHeader
 } from "../rateHint";
 import {
     REAL_GEMINI_429_BODY, REAL_GEMINI_429_LIMIT, REAL_GEMINI_429_RETRY_MS
@@ -167,5 +168,123 @@ describe("modelFromGeminiBody", () => {
         expect(modelFromGeminiBody({
             error: { message: "model: " + "a".repeat(500) }
         })!.length).toBeLessThanOrEqual(64);
+    });
+});
+
+describe("parseResetDuration — Go-style durations, the format OpenAI-compatible services send", () => {
+    it("parses the compound form a real Groq header uses", () => {
+        expect(parseResetDuration("2m59.56s")).toBe(179_560);
+    });
+
+    it("parses a bare seconds term with a fraction", () => {
+        expect(parseResetDuration("7.66s")).toBe(7_660);
+    });
+
+    it("reads ms as MILLIseconds, not as minutes", () => {
+        // Alternation is ordered, so a pattern listing `m` before `ms` reads
+        // "35ms" as 35 MINUTES and leaves a stray "s" — a 60,000x error, in
+        // the direction of parking the engine for over half an hour.
+        expect(parseResetDuration("35ms")).toBe(35);
+        expect(parseResetDuration("35m")).toBe(2_100_000);
+    });
+
+    it("parses hours and multi-term durations", () => {
+        expect(parseResetDuration("1h")).toBe(3_600_000);
+        expect(parseResetDuration("1h2m3s")).toBe(3_723_000);
+    });
+
+    it("accepts a bare number as seconds, matching Retry-After's own form", () => {
+        expect(parseResetDuration("60")).toBe(60_000);
+        expect(parseResetDuration("0.5")).toBe(500);
+    });
+
+    it("tolerates surrounding whitespace", () => {
+        expect(parseResetDuration("  7.66s \n")).toBe(7_660);
+    });
+
+    it("returns undefined rather than a PARTIAL reading of something it cannot fully read", () => {
+        // A half-understood duration is worse than none: it is silently wrong
+        // in a value that decides how long the engine is parked.
+        expect(parseResetDuration("5s later")).toBeUndefined();
+        expect(parseResetDuration("about 5s")).toBeUndefined();
+        expect(parseResetDuration("5d")).toBeUndefined();
+        expect(parseResetDuration("soon")).toBeUndefined();
+        expect(parseResetDuration("")).toBeUndefined();
+        expect(parseResetDuration("   ")).toBeUndefined();
+    });
+
+    it("does not carry state between calls", () => {
+        // The matcher is a module-level sticky regex; a leftover lastIndex
+        // would make the SECOND call of a pair silently wrong.
+        expect(parseResetDuration("2m59.56s")).toBe(179_560);
+        expect(parseResetDuration("2m59.56s")).toBe(179_560);
+        expect(parseResetDuration("nope")).toBeUndefined();
+        expect(parseResetDuration("7.66s")).toBe(7_660);
+    });
+});
+
+describe("rateLimitFromHeaders — what an OpenAI-compatible response says about itself", () => {
+    const headers = (map: Record<string, string>) => ({
+        headers: { get: (n: string) => map[n.toLowerCase()] ?? null }
+    });
+
+    it("reads the remaining count, the ceiling and the reset window", () => {
+        expect(rateLimitFromHeaders(headers({
+            "x-ratelimit-limit-requests": "14400",
+            "x-ratelimit-remaining-requests": "14370",
+            "x-ratelimit-reset-requests": "2m59.56s"
+        }))).toEqual({
+            remainingRequests: 14370,
+            limitRequests: 14400,
+            resetRequestsMs: 179_560
+        });
+    });
+
+    it("keeps a remaining count of ZERO — the most important thing it can report", () => {
+        const parsed = rateLimitFromHeaders(headers({
+            "x-ratelimit-remaining-requests": "0"
+        }));
+        expect(parsed).toBeDefined();
+        expect(parsed!.remainingRequests).toBe(0);
+    });
+
+    it("returns undefined when the response carries none of the headers", () => {
+        // Distinguishable from "zero remaining" on purpose: Gemini and Claude
+        // report nothing at all, and that must not read as an exhausted quota.
+        expect(rateLimitFromHeaders(headers({}))).toBeUndefined();
+        expect(rateLimitFromHeaders({})).toBeUndefined();
+        expect(rateLimitFromHeaders({ headers: null })).toBeUndefined();
+    });
+
+    it("reports the fields it could read and drops only the ones it could not", () => {
+        expect(rateLimitFromHeaders(headers({
+            "x-ratelimit-remaining-requests": "12",
+            "x-ratelimit-reset-requests": "gibberish"
+        }))).toEqual({
+            remainingRequests: 12,
+            limitRequests: undefined,
+            resetRequestsMs: undefined
+        });
+    });
+
+    it("refuses a count that is not a whole non-negative number", () => {
+        for (const bad of ["-1", "1.5", "lots", "", "   ", "NaN", "Infinity"]) {
+            const parsed = rateLimitFromHeaders(headers({
+                "x-ratelimit-remaining-requests": bad,
+                // A second, valid header so the result is defined and the
+                // assertion is about THIS field rather than about undefined.
+                "x-ratelimit-reset-requests": "10s"
+            }));
+            expect(parsed!.remainingRequests).toBeUndefined();
+        }
+    });
+
+    it("does not read the Gemini-only helpers' inputs, and they do not read its", () => {
+        // The two families are deliberately unrelated: prose parsing belongs to
+        // one vendor's error body, headers to another vendor's every response.
+        const geminiShaped = { error: { message: "limit: 20 Please retry in 2s." } };
+        expect(rateLimitFromHeaders(geminiShaped as never)).toBeUndefined();
+        expect(quotaLimitFromGeminiBody(headers({ "x-ratelimit-limit-requests": "30" })))
+            .toBeUndefined();
     });
 });

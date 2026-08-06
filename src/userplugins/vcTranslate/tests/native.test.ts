@@ -18,16 +18,22 @@ vi.mock("../engines/gemini", async importOriginal => ({
     ...(await importOriginal() as typeof import("../engines/gemini")),
     translateWithGemini: vi.fn()
 }));
+vi.mock("../engines/groq", async importOriginal => ({
+    ...(await importOriginal() as typeof import("../engines/groq")),
+    translateWithGroq: vi.fn()
+}));
 
 import { translateWithClaude, TRUNCATED_ERROR } from "../engines/claude";
 import { translateWithGemini } from "../engines/gemini";
 import { translateWithGoogle } from "../engines/google";
+import { translateWithGroq } from "../engines/groq";
 import { translateBatch } from "../native";
 import type { BatchRequest, Result } from "../types";
 
 const google = vi.mocked(translateWithGoogle);
 const claude = vi.mocked(translateWithClaude);
 const gemini = vi.mocked(translateWithGemini);
+const groq = vi.mocked(translateWithGroq);
 
 const req: BatchRequest = {
     messages: [{ id: "1", author: "ana", text: "hola" }],
@@ -45,7 +51,7 @@ const EV = {} as never;
  * backoff does not make every retry test take a real second.
  */
 async function run(
-    engine: "google" | "claude" | "gemini",
+    engine: "google" | "claude" | "gemini" | "groq",
     apiKey: string,
     json = reqJson,
     model?: string,
@@ -64,6 +70,7 @@ beforeEach(() => {
     google.mockReset();
     claude.mockReset();
     gemini.mockReset();
+    groq.mockReset();
 });
 
 afterEach(() => {
@@ -464,5 +471,121 @@ describe("translateBatch — api key safety", () => {
         const { error } = res as { error: string };
         expect(error).toBe("google: HTTP 500   three   spaces");
         expect(error).not.toContain("[redacted]");
+    });
+});
+
+describe("translateBatch — the groq engine", () => {
+    it("dispatches to groq with the api key when selected, and to nothing else", async () => {
+        groq.mockResolvedValue({ results: [{ id: "1", skip: true }] });
+
+        const res = await run("groq", "gsk-test");
+
+        expect(res).toEqual({ ok: true, results: [{ id: "1", skip: true }] });
+        expect(groq).toHaveBeenCalledTimes(1);
+        expect(groq.mock.calls[0][1]).toBe("gsk-test");
+        expect(google).not.toHaveBeenCalled();
+        expect(claude).not.toHaveBeenCalled();
+        expect(gemini).not.toHaveBeenCalled();
+    });
+
+    it("forwards the model across the IPC boundary", async () => {
+        // Settings live in the RENDERER. If the model is dropped here the
+        // setting is inert and a user stuck on a dead model has no way out
+        // short of a rebuild — the exact failure that cost this project a week
+        // on the previous engine.
+        groq.mockResolvedValue({ results: [] });
+
+        await run("groq", "gsk-test", reqJson, "llama-3.1-8b-instant");
+
+        expect(groq.mock.calls[0][3]).toBe("llama-3.1-8b-instant");
+    });
+
+    it("passes an unset model through as-is, leaving the fallback to the engine", async () => {
+        groq.mockResolvedValue({ results: [] });
+        await run("groq", "gsk-test");
+        expect(groq.mock.calls[0][3]).toBeUndefined();
+    });
+
+    it("forwards the debug flag", async () => {
+        groq.mockResolvedValue({ results: [] });
+        await run("groq", "gsk-test", reqJson, undefined, true);
+        expect(groq.mock.calls[0][4]).toBe(true);
+    });
+
+    it("carries the provider's reported rate limit across the IPC boundary", async () => {
+        // The renderer's quota indicator and rate gate both read this, and the
+        // engine is the ONLY code that ever sees a Response object — so if
+        // native.ts drops it here it is parsed and thrown away, and the
+        // indicator goes back to showing only the plugin's own guess.
+        groq.mockResolvedValue({
+            results: [{ id: "1", skip: true }],
+            rateLimit: { remainingRequests: 7, limitRequests: 14400, resetRequestsMs: 42_000 }
+        });
+
+        const res = await run("groq", "gsk-test");
+
+        expect(res).toEqual({
+            ok: true,
+            results: [{ id: "1", skip: true }],
+            providerRateLimit: { remainingRequests: 7, limitRequests: 14400, resetRequestsMs: 42_000 }
+        });
+    });
+
+    it("carries a remaining count of ZERO rather than dropping it as falsy", async () => {
+        groq.mockResolvedValue({
+            results: [],
+            rateLimit: { remainingRequests: 0, resetRequestsMs: 30_000 }
+        });
+
+        const res = await run("groq", "gsk-test");
+
+        expect((res as { providerRateLimit?: { remainingRequests?: number } })
+            .providerRateLimit!.remainingRequests).toBe(0);
+    });
+
+    it("does not retry a groq 429, but still reports the pause hint", async () => {
+        const err = new Error("groq: HTTP 429");
+        (err as { retryAfterMs?: number }).retryAfterMs = 13_000;
+        groq.mockRejectedValue(err);
+
+        const res = await run("groq", "gsk-test");
+
+        expect(groq).toHaveBeenCalledTimes(1);
+        expect(res).toEqual({ ok: false, error: "groq: HTTP 429", retryAfterMs: 13_000 });
+    });
+
+    it("does not retry a groq 401 — the same wrong key fails identically", async () => {
+        groq.mockRejectedValue(new Error("groq: HTTP 401"));
+        const res = await run("groq", "bad");
+        expect(groq).toHaveBeenCalledTimes(1);
+        expect(res).toEqual({ ok: false, error: "groq: HTTP 401", retryAfterMs: undefined });
+    });
+
+    it("never returns the groq api key in the error string", async () => {
+        const key = "gsk-secret-value-do-not-leak";
+        groq.mockRejectedValue(new Error(`groq: HTTP 401 for key ${key}`));
+
+        const res = await run("groq", key);
+
+        expect(res.ok).toBe(false);
+        expect((res as { error: string }).error).not.toContain(key);
+    });
+});
+
+describe("translateBatch — engines that report no rate limit are UNCHANGED", () => {
+    // The regression guard for the field added for Groq: an engine that
+    // reports nothing must produce exactly the response it always did, or
+    // every existing caller is now reading a field that means something else.
+    it("leaves providerRateLimit undefined for claude, gemini and google", async () => {
+        for (const [engine, mock] of [
+            ["claude", claude],
+            ["gemini", gemini],
+            ["google", google]
+        ] as const) {
+            mock.mockResolvedValue([{ id: "1", skip: true }] as never);
+            const res = await run(engine, "k");
+            expect(res).toEqual({ ok: true, results: [{ id: "1", skip: true }] });
+            expect((res as { providerRateLimit?: unknown }).providerRateLimit).toBeUndefined();
+        }
     });
 });

@@ -3141,3 +3141,296 @@ describe("the manual ⚡ in-flight indicator on the subtitle accessory", () => {
         expect(text(render(message))).toContain("translating");
     });
 });
+
+/**
+ * Groq is the third quality-tier engine, and everything that made the previous
+ * two work has to work for it too — routed through the SAME code paths rather
+ * than a parallel set, which is what these assert.
+ */
+describe("the Groq engine, end to end through the renderer", () => {
+    function useGroq() {
+        settings.store.engine = "groq";
+        settings.store.groqApiKey = "gsk-test";
+    }
+
+    it("routes the quality tier to groq while the fast tier stays Google", async () => {
+        useGroq();
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) =>
+            engine === "google" ? googleAnswers(payload) : { ok: true, results: [] }
+        );
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        const engines = native.translateBatch.mock.calls.map(c => c[0]);
+        expect(engines).toContain("google");
+        expect(engines).toContain("groq");
+    });
+
+    it("sends the configured model, and the default when the setting was never touched", async () => {
+        useGroq();
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        expect(native.translateBatch.mock.calls.find(c => c[0] === "groq")![3])
+            .toBe("llama-3.3-70b-versatile");
+
+        settings.store.groqModel = "llama-3.1-8b-instant";
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+
+        const groqCalls = native.translateBatch.mock.calls.filter(c => c[0] === "groq");
+        expect(groqCalls[groqCalls.length - 1][3]).toBe("llama-3.1-8b-instant");
+    });
+
+    it("stays on Google, and says so once, while the Groq key is missing", async () => {
+        settings.store.engine = "groq";
+        settings.store.groqApiKey = "";
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(native.translateBatch.mock.calls.map(c => c[0])).toEqual(["google"]);
+        expect(shownToasts.filter(t => t.message.includes("Groq"))).toHaveLength(1);
+    });
+
+    it("falls back to Google for the session on a 401, and says which engine rejected the key", async () => {
+        useGroq();
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) =>
+            engine === "google"
+                ? googleAnswers(payload)
+                : { ok: false, error: "groq: HTTP 401" }
+        );
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(shownToasts.some(t => t.message.includes("Groq rejected the API key"))).toBe(true);
+
+        native.translateBatch.mockClear();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+        expect(native.translateBatch.mock.calls.map(c => c[0])).not.toContain("groq");
+    });
+
+    it("enters a cooldown on a 429 with the retry hint the engine parsed", async () => {
+        useGroq();
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) =>
+            engine === "google"
+                ? googleAnswers(payload)
+                : { ok: false, error: "groq: HTTP 429", retryAfterMs: 45_000 }
+        );
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        // The Retry-After header said 45s, and that is what the engine is
+        // parked for — not the 30s default and not the 60s fallback.
+        expect(cooldownUntil("groq")).toBeGreaterThan(Date.now() + 40_000);
+        expect(cooldownUntil("groq")).toBeLessThanOrEqual(Date.now() + 45_000);
+    });
+
+    it("marks a groq translation as ✦, not ≈", async () => {
+        useGroq();
+        native.translateBatch.mockImplementation(async (engine: string) => (
+            engine === "groq"
+                ? { ok: true, results: [{ id: "1", lang: "es", text: "hello there", skip: false }] }
+                : { ok: true, results: [] }
+        ));
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(getTranslation(key("1"))).toMatchObject({ via: "groq", text: "hello there" });
+    });
+});
+
+/**
+ * The defect: the `✦ N` indicator showed the plugin's OWN token bucket and
+ * nothing else, so it could read `✦ 3` while the provider refused the very
+ * next request instantly. An engine that reports its remaining quota on every
+ * response makes the honest number available; these pin that it is used.
+ */
+describe("the quota indicator shows the PROVIDER's number when the provider reports one", () => {
+    function render(): any {
+        return plugin.chatBarButton!.render({ isMainChat: true, isAnyChat: true } as any);
+    }
+    function text(node: any): string {
+        if (node === null || node === undefined || node === false) return "";
+        if (typeof node === "string" || typeof node === "number") return String(node);
+        if (Array.isArray(node)) return node.map(text).join("");
+        return text(node.children);
+    }
+    function titleOf(node: any): string | undefined {
+        return node?.props?.title;
+    }
+    function useGroq() {
+        settings.store.engine = "groq";
+        settings.store.groqApiKey = "gsk-test";
+    }
+    /** Run one quality batch whose response reports `remaining` left. */
+    async function reportRemaining(remaining: number, resetRequestsMs = 60_000) {
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) =>
+            engine === "google"
+                ? googleAnswers(payload)
+                : { ok: true, results: [], providerRateLimit: { remainingRequests: remaining, resetRequestsMs } }
+        );
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+    }
+
+    it("shows ZERO when the provider says zero, even though the gate still holds tokens", async () => {
+        // THE defect, exactly: a token count alone says "3 available" here,
+        // and clicking ⚡ on the strength of it earns an instant 429.
+        useGroq();
+        await reportRemaining(0);
+
+        expect(rateGateAvailable()).toBeGreaterThan(0);
+        expect(text(render())).toBe("✦ 0");
+    });
+
+    it("shows the provider's number whenever it is the smaller of the two real limits", async () => {
+        useGroq();
+        await reportRemaining(1);
+        expect(text(render())).toBe("✦ 1");
+    });
+
+    it("keeps showing the gate's number when the gate is the binding limit", async () => {
+        // A generous provider figure must not be presented as headroom this
+        // plugin will actually let through — both limits are real and a
+        // request has to clear both.
+        useGroq();
+        await reportRemaining(9_999);
+        expect(text(render())).toBe(`✦ ${rateGateAvailable()}`);
+    });
+
+    it("says in the tooltip that the number is the provider's own, not the plugin's budget", async () => {
+        useGroq();
+        await reportRemaining(0);
+        const title = titleOf(render())!;
+        expect(title).toContain("Groq");
+        expect(title).toContain("OWN reported remaining quota");
+        // The old wording would be an outright lie about this number.
+        expect(title).not.toContain("not an estimate of");
+    });
+
+    it("keeps the plugin's-own-budget wording for an engine that reports nothing", async () => {
+        // Gemini and Claude say nothing on a success, and the honest thing to
+        // show for them is unchanged.
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+        const title = titleOf(render())!;
+        expect(title).toContain("the plugin's own budget");
+        expect(title).toContain("not an estimate of");
+    });
+
+    it("stops trusting the provider's number once its window has rolled over", async () => {
+        // A remaining count is a snapshot of one window. Past the reset it is a
+        // floor the provider has already moved past, and showing it would
+        // understate what is available — a confident wrong answer in the one
+        // place the user reads to decide whether to spend.
+        useGroq();
+        await reportRemaining(0, 30_000);
+        expect(text(render())).toBe("✦ 0");
+
+        await vi.advanceTimersByTimeAsync(31_000);
+        expect(text(render())).toBe(`✦ ${rateGateAvailable()}`);
+    });
+
+    it("stops trusting a reading older than a minute even if no reset was stated", async () => {
+        useGroq();
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) =>
+            engine === "google"
+                ? googleAnswers(payload)
+                : { ok: true, results: [], providerRateLimit: { remainingRequests: 0 } }
+        );
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        expect(text(render())).toBe("✦ 0");
+
+        await vi.advanceTimersByTimeAsync(61_000);
+        expect(text(render())).toBe(`✦ ${rateGateAvailable()}`);
+    });
+
+    it("does not show one engine's reading against another engine", async () => {
+        useGroq();
+        await reportRemaining(0);
+        expect(text(render())).toBe("✦ 0");
+
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+        expect(text(render())).toBe(`✦ ${rateGateAvailable()}`);
+    });
+
+    it("still lets the cooldown countdown outrank a provider count", async () => {
+        useGroq();
+        await reportRemaining(9_999);
+        setCooldown("groq", Date.now() + 45_000);
+        expect(text(render())).toBe("✦ 0:45");
+    });
+
+    it("gives the ⚡ label the same number the indicator shows", async () => {
+        // One source for both, so the two can never disagree about what
+        // pressing ⚡ is about to do.
+        useGroq();
+        await reportRemaining(0);
+        const registered = __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!;
+        const btn = registered.render(discordMessage("2", "que tal"))!;
+        expect(btn.label).toBe("Translate with Groq now (none available right now)");
+    });
+});
+
+describe("the rate gate retunes from the provider's own remaining count", () => {
+    function useGroq() {
+        settings.store.engine = "groq";
+        settings.store.groqApiKey = "gsk-test";
+    }
+
+    it("tightens when the provider says very little is left, without waiting for a 429", async () => {
+        // The whole point: the previous engines could only learn their limit by
+        // being rejected. This one states it on a SUCCESS.
+        useGroq();
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) =>
+            engine === "google"
+                ? googleAnswers(payload)
+                : { ok: true, results: [], providerRateLimit: { remainingRequests: 4, resetRequestsMs: 60_000 } }
+        );
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(rateGateSettings().refillMs).toBe(30_000);
+        expect(rateGateSettings().refillMs).toBeGreaterThan(REFILL_MS);
+    });
+
+    it("leaves the gate alone when the provider's figure is generous", async () => {
+        // Groq's requests headers are a per-DAY budget: taken as a rate they
+        // would open the gate to thousands per minute, which is no gate at all.
+        useGroq();
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) =>
+            engine === "google"
+                ? googleAnswers(payload)
+                : {
+                    ok: true,
+                    results: [],
+                    providerRateLimit: { remainingRequests: 14_370, resetRequestsMs: 179_560 }
+                }
+        );
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(rateGateSettings()).toEqual({ capacity: BURST_CAPACITY, refillMs: REFILL_MS });
+    });
+
+    it("leaves the gate alone for an engine that reports nothing", async () => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+        respondWith({ ok: true, results: [] });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(rateGateSettings()).toEqual({ capacity: BURST_CAPACITY, refillMs: REFILL_MS });
+    });
+});

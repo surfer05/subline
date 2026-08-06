@@ -250,15 +250,21 @@ export function parseResetDuration(value: string): number | undefined {
     DURATION_TERM_RE.lastIndex = 0;
     let total = 0;
     let terms = 0;
+    // Tracked here rather than read off `lastIndex` afterwards: a sticky regex
+    // RESETS lastIndex to 0 on the failed match that ends the loop, so reading
+    // it after the loop reports zero characters consumed for every input,
+    // valid or not.
+    let consumed = 0;
     let match: RegExpExecArray | null;
     while ((match = DURATION_TERM_RE.exec(text)) !== null) {
         total += Number(match[1]) * DURATION_UNIT_MS[match[2]];
+        consumed = match.index + match[0].length;
         terms++;
     }
-    // The sticky flag makes lastIndex the count of characters actually
-    // consumed, so this rejects both trailing garbage ("5s later") and a
-    // leading unit we do not know ("5d").
-    if (terms === 0 || DURATION_TERM_RE.lastIndex !== text.length) return undefined;
+    // Sticky matching starts at the previous end, so requiring the whole
+    // string to be consumed rejects both trailing garbage ("5s later") and a
+    // unit we do not know ("5d").
+    if (terms === 0 || consumed !== text.length) return undefined;
     if (!Number.isFinite(total) || total < 0) return undefined;
     return Math.round(total);
 }
