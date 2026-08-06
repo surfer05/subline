@@ -35,7 +35,8 @@ decision below is measured against that.
 | The ✦ quality tier | **Explained on the site and in the installer; the user chooses** | Google (`≈`) needs no key and works instantly. Gemini (`✦`) needs a per-user key and cannot be pooled (5 req/min). So it is presented as an informed choice, not forced and not hidden. |
 | Updates (both kinds) | **Silent** | Re-patch after a Discord update and self-update to new builds, both without prompting. Disclosed clearly at install. |
 | Diagnostics | **Local file, never message text, user-shareable** | This tool reads private messages including DMs. A plaintext log of other people's conversations on disk is a liability the moment a stranger installs this. |
-| Existing Vencord/BetterDiscord users | **Detect, explain, let them choose** | Silently patching over someone's setup can wipe their plugins. That ends a product's reputation early. |
+| Existing Vencord/Equicord users | **Detect, explain, let them choose** | Silently patching over someone's setup can wipe their plugins. That ends a product's reputation early. |
+| Existing **BetterDiscord** users | **Hard refusal — no override** | Not a policy choice, a technical one. See §3b. |
 | Uninstall | **One click, inside the app** | Being easy to remove is what makes people willing to try software that modifies Discord. |
 | Platforms | **Both — macOS and Windows** | All three interested users are probably on Windows. Shipping only macOS would be shipping to nobody who asked. |
 
@@ -119,6 +120,41 @@ does. Google is free and unmetered so there is no cost, and the `✦` budget is
 unaffected — but it means `≈` lines appear on a few more messages. Extending the
 check to another language means writing and testing its own evidence and veto
 word lists; do not generalise the English one.
+
+## 3b. BetterDiscord is a refusal, not a choice
+
+Discovered while building the patcher, and it corrects §3 step 4.
+
+BetterDiscord does not patch `app.asar`. It injects an **unpacked
+`resources/app/` directory**, and Electron loads an unpacked `app/` folder in
+**preference to** `app.asar`. So if we patch a BD install:
+
+1. Our write succeeds.
+2. Verification reads back byte-perfect and reports success.
+3. Discord launches, loads BD's `app/`, ignores our `app.asar` entirely.
+4. **Nothing translates, and every signal we have says the install worked.**
+
+That is the exact failure mode that cost this project a week: something
+installed, built, verified, and completely inert, with no visible error to
+diagnose. "Detect, explain, let them choose" cannot apply, because the choice
+we would be offering does not work — there is no version of proceeding that
+produces a functioning install.
+
+`patchInstall` therefore refuses a BetterDiscord install outright and ignores
+the `overwriteForeignMod` override. The UI must explain plainly: BetterDiscord
+must be uninstalled first, with a link to its own uninstaller. Do not offer a
+"proceed anyway" button for something that cannot work.
+
+## 3c. Proving the patch is ours
+
+Path-sniffing cannot establish ownership, because we bundle Vencord — a stub
+pointing at a Vencord build is indistinguishable from Vencord's own. Ownership
+is therefore recorded in a **`subline-patch.json` sidecar**, cross-checked
+against the stub's contents. A sidecar without a matching stub (or the reverse)
+is a broken state, not ours.
+
+**§8's uninstall must remove this sidecar**, or a subsequent install will
+misread a stale file as a live Subline patch.
 
 ## 4. macOS specifics
 
@@ -287,8 +323,10 @@ error state — not a generic failure:
 One click, from inside the app:
 
 1. Restore the original `app.asar` from backup
-2. Remove the helper (LaunchAgent / Scheduled Task)
-3. Remove the bundled mod
+2. Remove the `subline-patch.json` sidecar (see §3c) — a stale one makes the
+   next install misread a foreign or absent patch as ours
+3. Remove the helper (LaunchAgent / Scheduled Task)
+4. Remove the bundled mod
 4. Offer to keep or delete settings and the translation cache
 5. Confirm Discord launches clean
 
