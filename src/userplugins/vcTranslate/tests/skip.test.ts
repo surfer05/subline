@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { collapseElongation, shouldSkip } from "../skip";
+import { collapseElongation, collapseElongationToPair, shouldSkip } from "../skip";
 
 describe("shouldSkip", () => {
     it("skips your own messages", () => {
@@ -167,7 +167,32 @@ describe("collapseElongation", () => {
     });
 
     it("collapses a run in each of multiple words independently", () => {
+        // Collapse-to-one alone: "goooooood" comes out "god", not "good" —
+        // this function on its own gets a base word with a doubled letter
+        // wrong. See collapseElongationToPair below for the other half.
         expect(collapseElongation("goooooood morninggggg")).toBe("god morning");
+    });
+});
+
+describe("collapseElongationToPair", () => {
+    it("collapses a run of 3+ identical letters to exactly two", () => {
+        expect(collapseElongationToPair("goooooood")).toBe("good");
+        expect(collapseElongationToPair("coooool")).toBe("cool");
+    });
+
+    it("leaves a run of exactly two untouched, same as collapseElongation", () => {
+        expect(collapseElongationToPair("hello")).toBe("hello");
+    });
+
+    it("leaves a word with no elongation untouched", () => {
+        expect(collapseElongationToPair("wait")).toBe("wait");
+    });
+
+    it("gets the SINGLE-letter case wrong on its own — that is why both forms are needed", () => {
+        // "yess" is not "yes": collapsing to two is exactly as one-sided as
+        // collapsing to one, just for the opposite class of base word.
+        expect(collapseElongationToPair("yesssss")).toBe("yess");
+        expect(collapseElongationToPair("lmaoooooo")).toBe("lmaoo");
     });
 });
 
@@ -181,10 +206,33 @@ describe("shouldSkip — elongated chat interjections", () => {
         }
     });
 
+    it("skips a doubled-letter base word via the collapse-to-TWO form, with no dictionary artefact", () => {
+        // "goooooood" alone (no "morning" alongside it) only matches through
+        // collapseElongationToPair ("good") — collapseElongation alone would
+        // produce "god", which is not (and does not need to be) in
+        // CHAT_SHORTHAND. Proves the pair-form path, not the single-form one.
+        expect(shouldSkip("goooooood", false)).toBe(true);
+    });
+
+    it("does NOT skip a doubled-letter word that was never added to any list — proves the mechanism adds no words on its own", () => {
+        // collapseElongationToPair("coooool") is "cool" (see its own test
+        // above), a perfectly plausible chat word — but "cool" was never
+        // added to CHAT_SHORTHAND, so trying both forms must not skip this
+        // by itself. If this ever starts failing, something started matching
+        // words that were never deliberately added.
+        expect(shouldSkip("coooool", false)).toBe(false);
+    });
+
     it("does NOT skip an elongated foreign word", () => {
-        // "ceeeee" collapses to "ce", which is in no shorthand/evidence list,
-        // so it must still be sent for translation.
+        // "ceeeee" collapses to "ce" (one form) / "cee" (the other), neither
+        // in any shorthand/evidence list, so it must still be sent.
         expect(shouldSkip("ceeeee", false)).toBe(false);
+    });
+
+    it("does NOT skip another elongated Romanian word", () => {
+        // "waiii" collapses to "wai" / "waii" — neither is "wait" (4 letters,
+        // one "t"), so this must not collide with the "wait" entry.
+        expect(shouldSkip("waiii", false)).toBe(false);
     });
 
     it("does NOT skip elongated punctuation-only noise as if it were a word", () => {

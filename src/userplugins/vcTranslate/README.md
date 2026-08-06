@@ -167,19 +167,23 @@ daily budget:
   message that is nothing but shorthand/interjections (`gg`, `brb`, `hbu`,
   and about 80 more) is skipped without a request (`skip.ts`), and so is an
   *elongated* one — `yesssss`, `waiiiiiit`, `helloooooo`, `lmaoooooo`,
-  `goooooood morninggggg`, `shhhh` all skip, because any run of **three or
-  more** identical letters is first collapsed down to one (`yesssss` → `yes`,
-  `helloooooo` → `hello`) before the shorthand check runs. A run of exactly
-  two is left alone — `hello`'s own doubled `l` is untouched, only the
-  elongated `o` collapses — because English essentially never triples a
-  letter in ordinary spelling, so 3+ is a safe threshold and 2 would not be.
-  The same collapsing also feeds the English-sentence check just above, so an
-  elongated word buried inside a longer sentence (`"sooooo good to see you"`)
-  still counts as evidence. It cannot manufacture a false match on its own —
-  a foreign word like Romanian `ceeeee` collapses to `ce`, which is in
-  neither list and so still gets translated — only deliberately adding a
-  *collapsed* word to `CHAT_SHORTHAND` or `ENGLISH_WORDS` can do that, which
-  is why those additions stay short and deliberate rather than automatic.
+  `goooooood morninggggg`, `shhhh` all skip. Any run of **three or more**
+  identical letters is collapsed before the shorthand check runs — but to
+  exactly ONE letter *and* to exactly TWO, both tried, because one rule
+  cannot serve every word: `yesssss` only reconstructs as `yes` (its base word
+  has a single `s`) while `goooooood` only reconstructs as `good` (its base
+  word has a genuine doubled `o` — collapsing to one gives `god` instead). A
+  run of exactly two is left alone by both forms — `hello`'s own doubled `l`
+  never collapses, only the elongated `o` does — because English essentially
+  never triples a letter in ordinary spelling, so 3+ is a safe threshold.
+  The same two-forms collapsing also feeds the English-sentence check just
+  above, so an elongated word buried inside a longer sentence (`"sooooo good
+  to see you"`) still counts as evidence either way. It cannot manufacture a
+  false match on its own — a foreign word like Romanian `ceeeee` collapses to
+  `ce`/`cee`, neither of which is in any list, so it still gets translated —
+  only deliberately adding a *collapsed* word to `CHAT_SHORTHAND` or
+  `ENGLISH_WORDS` can do that, which is why those additions stay short and
+  deliberate rather than automatic.
 - **Translations are remembered across restarts.** Restarting Discord used to
   re-translate the whole visible backlog from scratch; now it costs nothing.
   See Privacy below for what that means for other people's messages.
@@ -875,7 +879,7 @@ reports a *smaller* pass count that still looks like success.
 `vitest` is not saved as a dependency; in a fresh clone run `npm i -D vitest`
 first.
 
-468 tests across 15 suites (`batcher`, `claude`, `detectLang`, `gemini`,
+478 tests across 15 suites (`batcher`, `claude`, `detectLang`, `gemini`,
 `google`, `index`, `llmShared`, `native`, `rateGate`, `rateHint`, `retry`,
 `romanized`, `skip`, `store`, `upgrade` — see `tests/`). `tests/fixtures/`
 holds shared non-test data, notably the verbatim bytes of a real Gemini 429

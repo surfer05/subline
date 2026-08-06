@@ -42,12 +42,22 @@ export function stripMarkup(text: string, replacement: string): string {
  * ENGLISH_WORDS), which is why entries are added there individually and
  * deliberately rather than as a side effect of this function existing.
  *
+ * ONE FORM IS NOT ENOUGH, and this function's own name says so: it only
+ * reconstructs a base word correctly when the elongated letter appears
+ * SINGLY in that word ("yes" -> one "s", "wait" -> one "i"). A base word with
+ * a genuine DOUBLED letter at the elongated spot ("good", "cool", "all")
+ * collapses to the wrong thing here — "goooooood" -> "god", not "good" — because
+ * collapsing to one cannot tell "a single letter mashed" from "an already-doubled
+ * letter mashed further"; both look identical once collapsed. See
+ * `collapseElongationToPair` for the other half of the fix: every caller of
+ * this function is expected to ALSO try that one and accept a match on
+ * either, never this one alone.
+ *
  * Exported (rather than kept private, like every other pattern here except
- * stripMarkup) because detectLang.ts's tokenizer has to apply the exact same
- * collapse before comparing a token against ENGLISH_WORDS/FOREIGN_WORDS — a
- * second private copy is precisely the "two copies of the same rule drift
- * apart" bug this project keeps hitting, the same reason stripMarkup is
- * shared.
+ * stripMarkup) because detectLang.ts has to apply the exact same collapse
+ * before comparing a token against ENGLISH_WORDS/FOREIGN_WORDS — a second
+ * private copy is precisely the "two copies of the same rule drift apart"
+ * bug this project keeps hitting, the same reason stripMarkup is shared.
  *
  * `\p{L}` rather than `[a-z]`: the same reasoning extends to any script this
  * plugin ever sees text in, not just the Latin one the examples happen to use.
@@ -57,6 +67,33 @@ export function stripMarkup(text: string, replacement: string): string {
  */
 export function collapseElongation(s: string): string {
     return s.replace(/(\p{L})\1{2,}/gu, "$1");
+}
+
+/**
+ * The other half of the fix `collapseElongation` alone cannot provide:
+ * collapse a run of 3-OR-MORE identical letters down to exactly TWO, so a
+ * base word with a genuine doubled letter at the elongated spot survives
+ * intact — "goooooood" -> "good", "coooool" -> "cool" — the case
+ * `collapseElongation` alone gets wrong ("goooooood" -> "god").
+ *
+ * NEITHER FORM IS RIGHT ON ITS OWN. A base word whose elongated letter is
+ * SINGLE ("yes", "wait", "hello", "lmao") is only reconstructed correctly by
+ * `collapseElongation`; a base word whose elongated letter is DOUBLED
+ * ("good", "cool") is only reconstructed correctly by this one — and nothing
+ * about a bare run of repeated letters in the MESSAGE says which case a
+ * given word is, since both look like the exact same run once elongated.
+ * The two-letter, three-letter, ... possibilities beyond that are not
+ * covered (there is no English word this plugin's evidence lists need with
+ * three genuine copies of a letter), so two forms is where this stops.
+ *
+ * EVERY caller that uses `collapseElongation` for word-list matching must
+ * also try this one and accept a match on EITHER — see its own doc comment.
+ * A token with no elongation at all (no run of 3+) is untouched by both, so
+ * checking both forms is always safe for ordinary text: it can only ever add
+ * a second candidate spelling, never remove the first.
+ */
+export function collapseElongationToPair(s: string): string {
+    return s.replace(/(\p{L})\1{2,}/gu, "$1$1");
 }
 
 /**
@@ -115,20 +152,14 @@ const CHAT_SHORTHAND = new Set([
     // and a standalone "no" is exactly the short, ambiguous case where that
     // collision could silently drop a foreign message.
     "yes", "wait", "hello", "hmm", "ah", "oh", "yay", "wow", "lmao", "sh",
-    // "good"/"morning" (and "god" — see below) so a plain or elongated
-    // "good morning" resolves entirely through this set: two tokens, both
-    // members, no non-shorthand word to keep it out.
-    "good", "morning",
-    // NOT a typo for "good": collapseElongation cannot tell an elongated
-    // SINGLE letter from an elongated ALREADY-DOUBLED one, so a heavily
-    // mashed "goooooood" (a long, single, unbroken run of "o") collapses all
-    // the way to "god", not "good" — the double-o in the real word is
-    // indistinguishable, after collapsing, from the same letter mashed once.
-    // Observed in real chat ("goooooood morninggggg"), and "god" alone is a
-    // common, unambiguous English chat interjection anyway, so treating it
-    // the same as "good" here is safe rather than a workaround with a hidden
-    // cost.
-    "god"
+    // "good"/"morning" so a plain or elongated "good morning" resolves
+    // entirely through this set: two tokens, both members, no non-shorthand
+    // word to keep it out. No "god" entry needed alongside "good": trying
+    // BOTH collapsed forms below (see collapseElongationToPair) already
+    // reconstructs "good" correctly from "goooooood" — a collapse-artefact
+    // entry that only existed to paper over trying one form was removed once
+    // the real fix landed.
+    "good", "morning"
 ]);
 
 function isChatShorthand(s: string): boolean {
@@ -136,10 +167,14 @@ function isChatShorthand(s: string): boolean {
     // carry no meaning of their own, so they neither qualify nor disqualify.
     const tokens = s.toLowerCase().split(/\s+/).filter(t => t && !/^\d+$/.test(t));
     if (tokens.length === 0 || tokens.length > 4) return false;
-    // Collapsed before the lookup so "yesssss"/"waiiiiiit"/etc. match the
-    // dictionary entries above without enumerating every possible elongation
-    // — see collapseElongation's own doc comment.
-    return tokens.every(t => CHAT_SHORTHAND.has(collapseElongation(t)));
+    // BOTH collapsed forms are tried, and a token counts if EITHER is a known
+    // word — see collapseElongation/collapseElongationToPair's own comments
+    // for why one form alone gets a base word with a doubled letter
+    // ("good", "cool") wrong. A token with no elongation is untouched by
+    // both, so this is exactly as strict as a plain lookup for ordinary text.
+    return tokens.every(t =>
+        CHAT_SHORTHAND.has(collapseElongation(t)) || CHAT_SHORTHAND.has(collapseElongationToPair(t))
+    );
 }
 
 export function shouldSkip(text: string, isOwnMessage: boolean): boolean {

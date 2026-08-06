@@ -1,4 +1,4 @@
-import { collapseElongation, stripMarkup } from "./skip";
+import { collapseElongation, collapseElongationToPair, stripMarkup } from "./skip";
 
 /**
  * A local, free "this message is already in the target language" check, run
@@ -151,20 +151,21 @@ function hasNonLatinLetter(text: string): boolean {
 }
 
 /**
- * Lowercased word tokens, with markup, punctuation and bare numbers removed,
- * and elongated letters collapsed — "sooooo good" tokenizes as ["so", "good"]
- * rather than ["sooooo", "good"], so an elongated word inside a longer
- * sentence still counts as ENGLISH_WORDS evidence. Applied AFTER lowercasing
- * (collapseElongation's backreference is exact-character, so a mixed-case run
- * would not collapse) and on the whole string rather than per-token: runs
- * never cross a token boundary anyway, since whatever separates two tokens is
- * itself not a letter. See collapseElongation's own doc comment for why 3+
- * is the safe threshold and why this cannot manufacture a false match on its
- * own — only ENGLISH_WORDS itself can do that, which is why nothing is added
- * there for this change (see the module doc comment's asymmetry).
+ * Lowercased word tokens, with markup, punctuation and bare numbers removed.
+ *
+ * Deliberately NOT elongation-collapsed here: the collapse has TWO valid
+ * outputs per token (see collapseElongation/collapseElongationToPair) and
+ * only the two membership checks below know which set they're asking about,
+ * so collapsing once at tokenize() time would have to commit to one form and
+ * silently lose the other. Tokens stay raw; `matchesWord` below tries both
+ * forms at each lookup instead. Token COUNT is unaffected either way — a run
+ * of repeated letters never crosses a token boundary, since whatever
+ * separates two tokens is itself not a letter — so `tokens.length`
+ * (MIN_TOKENS, the English ratio) means the same thing regardless.
  */
 function tokenize(text: string): string[] {
-    return collapseElongation(stripMarkup(text, " ").toLowerCase())
+    return stripMarkup(text, " ")
+        .toLowerCase()
         // Apostrophes are dropped rather than split on, so "don't" matches the
         // "dont" entry instead of becoming the junk tokens "don" and "t".
         .replace(/['’]/g, "")
@@ -172,6 +173,28 @@ function tokenize(text: string): string[] {
         // Bare numbers are neither evidence nor counter-evidence, and counting
         // them would drag the English ratio down on messages full of scores.
         .filter(t => t !== "" && !/^\d+$/.test(t));
+}
+
+/**
+ * Does `token` match a word in `set`, once elongation is accounted for?
+ *
+ * Tries the token AS-IS first (the common case — most tokens have no
+ * elongation at all, and both collapsed forms equal the raw token then
+ * anyway, so this is not strictly required for correctness but is the
+ * cheapest check and makes that common case explicit), then both collapsed
+ * forms — see collapseElongation/collapseElongationToPair for why a base
+ * word needs both tried: "yesssss" only matches via the collapse-to-one form
+ * ("yes"), "goooooood" only matches via the collapse-to-two form ("good").
+ *
+ * THE ASYMMETRY STILL APPLIES, and trying two forms instead of one widens
+ * the surface a foreign word could — in principle — collide with an English
+ * one on. Nothing is added to ENGLISH_WORDS/FOREIGN_WORDS for this change:
+ * the two forms only let a token find an entry that ALREADY exists, so a
+ * false positive here still requires an entry that was independently vetted
+ * against the veto languages when it was added.
+ */
+function matchesWord(token: string, set: Set<string>): boolean {
+    return set.has(token) || set.has(collapseElongation(token)) || set.has(collapseElongationToPair(token));
 }
 
 /**
@@ -200,10 +223,10 @@ export function isConfidentlyTargetLanguage(text: string, targetLang: string): b
     const tokens = tokenize(text);
     if (tokens.length < MIN_TOKENS) return false;
 
-    if (tokens.some(t => FOREIGN_WORDS.has(t))) return false;
+    if (tokens.some(t => matchesWord(t, FOREIGN_WORDS))) return false;
 
     let hits = 0;
-    for (const t of tokens) if (ENGLISH_WORDS.has(t)) hits++;
+    for (const t of tokens) if (matchesWord(t, ENGLISH_WORDS)) hits++;
 
     if (hits < MIN_ENGLISH_HITS) return false;
     return hits / tokens.length >= MIN_ENGLISH_RATIO;

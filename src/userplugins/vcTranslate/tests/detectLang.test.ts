@@ -135,4 +135,28 @@ describe("isConfidentlyTargetLanguage — elongated words inside a sentence", ()
         // veto must still fire post-collapse, not just the evidence count.
         expect(en("graciaaaas amigos bueno")).toBe(false);
     });
+
+    it("counts a DOUBLED-letter elongated word as evidence too — the collapse-to-two form", () => {
+        // "goooooood" only matches ENGLISH_WORDS's "good" via the
+        // collapse-to-TWO form (collapseElongationToPair) — the collapse-to-
+        // one form produces "god", which is not in ENGLISH_WORDS. "there" is
+        // the other hit. Without trying both forms this returns false.
+        expect(en("goooooood there friend")).toBe(true);
+    });
+
+    it("does not manufacture a hit for a doubled-letter word nobody added to ENGLISH_WORDS", () => {
+        // "coooool" collapses to "col" / "cool" — neither is in ENGLISH_WORDS
+        // (only "good" was already there), so — same shape as the "ceeeee"/
+        // "waiii" cases above — this has zero signal and must stay false.
+        // Proves trying both forms adds no evidence beyond what already
+        // exists in the list, even for a plausible-looking chat word.
+        expect(en("coooool bine multumesc")).toBe(false);
+    });
+
+    it("does not falsely veto or credit another elongated Romanian word", () => {
+        // "waiii" collapses to "wai" / "waii" — neither is in FOREIGN_WORDS
+        // or ENGLISH_WORDS, so this has zero signal either way, same as the
+        // "ceeeee" case above.
+        expect(en("waiii bine multumesc")).toBe(false);
+    });
 });
