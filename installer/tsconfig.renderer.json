@@ -1,0 +1,10 @@
+{
+    "//": "The only config carrying the DOM lib. The renderer is the only code allowed to touch a document; keeping this separate is what makes a stray `window` in the main process a compile error rather than a runtime one.",
+    "extends": "./tsconfig.json",
+    "//types": "Node types stay on: the renderer imports TYPES from src/app, and tsc follows those imports into modules that legitimately use node:fs. The separation that matters is the other direction — the base config has no DOM, so a `document` in the main process is still a compile error.",
+    "compilerOptions": {
+        "lib": ["ES2022", "DOM"]
+    },
+    "include": ["src/renderer/**/*.ts"],
+    "exclude": []
+}

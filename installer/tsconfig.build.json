@@ -1,0 +1,15 @@
+{
+    "//": "Emits the shipping app. The base tsconfig is noEmit and covers tests too; this one compiles only what the packaged app runs, so a test helper can never reach production.",
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "noEmit": false,
+        "outDir": "dist",
+        "rootDir": "src",
+        "module": "NodeNext",
+        "moduleResolution": "nodenext",
+        "sourceMap": true,
+        "lib": ["ES2022", "DOM"]
+    },
+    "include": ["src/**/*.ts", "src/**/*.cts"],
+    "exclude": ["tests/**/*"]
+}

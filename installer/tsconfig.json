@@ -15,5 +15,7 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "vitest.config.ts"]
+  "//exclude": "The renderer is checked by tsconfig.renderer.json, which is the only config with the DOM lib. Keeping DOM out of THIS one is what stops main-process code reaching for document or window by accident.",
+    "include": ["src/**/*.ts", "tests/**/*.ts", "vitest.config.ts"],
+    "exclude": ["src/renderer/**/*"]
 }

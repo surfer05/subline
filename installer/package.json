@@ -1,21 +1,69 @@
 {
   "name": "@subline/installer",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Subline installer — patcher core",
+  "description": "Subline — one-click Discord translation installer",
+  "main": "dist/main/main.js",
   "scripts": {
     "build:mod": "node scripts/buildMod.mjs",
+    "build:app": "tsc -p tsconfig.build.json && node scripts/copyRenderer.mjs",
+    "start": "pnpm build:app && electron .",
+    "//pack": "Packaging is a CONFIG step, not a rewrite: build:mod produces build/mod, build:app produces dist, and electron-builder copies both. Signing and notarization are configured separately and deliberately absent here.",
+    "pack": "pnpm build:mod && pnpm build:app && electron-builder --dir",
+    "dist": "pnpm build:mod && pnpm build:app && electron-builder",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.renderer.json"
   },
   "//engines": "buildMod.mjs imports src/bundle/spec.ts directly, so that the checks the build runs and the checks the installer runs are the same code. Node strips TypeScript types without a flag from 22.18 on.",
   "engines": {
     "node": ">=22.18"
   },
+  "build": {
+    "appId": "com.subline.installer",
+    "productName": "Subline",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "//extraResources": "The mod bundle ships in Contents/Resources/mod and is COPIED OUT to ~/Library/Application Support/Subline/mod on install. It must never be loaded from here: see src/app/modInstall.ts — App Translocation would make the path vanish and stop Discord starting.",
+    "extraResources": [
+      {
+        "from": "build/mod",
+        "to": "mod"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "hardenedRuntime": true,
+      "//entitlements": "A stable Team ID is what makes the App Management grant persist across our own updates (spec §4). Signing and notarization are a separate task and are intentionally not configured here.",
+      "extendInfo": {
+        "NSHumanReadableCopyright": "GPL-3.0"
+      }
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    }
+  },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "electron": "^33",
+    "electron-builder": "^25",
     "typescript": "^5.7.0",
     "vitest": "^4.1.10"
   }
