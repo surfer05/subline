@@ -110,13 +110,32 @@ function fail(message) {
     process.exit(1);
 }
 
-function run(command, args, cwd) {
+function run(command, args, cwd, { allowFailure = false } = {}) {
     log(`  $ ${command} ${args.join(" ")}`);
-    execFileSync(command, args, { cwd, stdio: "inherit" });
+    try {
+        execFileSync(command, args, { cwd, stdio: allowFailure ? "ignore" : "inherit" });
+    } catch (cause) {
+        if (!allowFailure) throw cause;
+    }
 }
 
 function capture(command, args, cwd) {
-    return execFileSync(command, args, { cwd, encoding: "utf8" }).trim();
+    // stderr is swallowed because the only caller probes for a HEAD that may
+    // legitimately not exist yet, and git is loud about that.
+    return execFileSync(command, args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+}
+
+/**
+ * Run pnpm through corepack, so the version is the one UPSTREAM pins in its
+ * `packageManager` field rather than whatever is on this machine's PATH.
+ *
+ * Not a nicety. Vencord pins pnpm 11; pnpm 9 reads `patchedDependencies` from
+ * `package.json` while pnpm 10+ reads it from `pnpm-workspace.yaml`, so a
+ * machine with pnpm 9 installed fails `--frozen-lockfile` outright. "Reproducible
+ * build" has to include the tool that resolves the dependency graph.
+ */
+function pnpm(args) {
+    run("corepack", ["pnpm", ...args], VENCORD_DIR);
 }
 
 function readPin() {
@@ -149,6 +168,13 @@ function prepareVencord(pin) {
         mkdirSync(VENCORD_DIR, { recursive: true });
         run("git", ["init", "--quiet"], VENCORD_DIR);
     }
+
+    // Vencord's build reads `git remote get-url origin` and bakes it into the
+    // user agent it sends. It is set to the CANONICAL repository even when the
+    // objects were fetched from a local mirror, so an offline build does not
+    // ship a bundle claiming to come from someone's home directory.
+    run("git", ["remote", "remove", "origin"], VENCORD_DIR, { allowFailure: true });
+    run("git", ["remote", "add", "origin", pin.repository], VENCORD_DIR);
 
     let head = "";
     try {
@@ -249,7 +275,7 @@ function main() {
     log(`     ${installPlugin()} files`);
 
     log("4/6  Installing Vencord's dependencies and building");
-    run("pnpm", ["install", "--frozen-lockfile"], VENCORD_DIR);
+    pnpm(["install", "--frozen-lockfile"]);
     // --standalone: the bundle must not assume it sits in a git checkout, which
     //   a local build does.
     // --disable-updater: spec §6 gives Subline's own helper the job of shipping
@@ -257,7 +283,7 @@ function main() {
     //   back, and the build id recorded in subline-patch.json would then name a
     //   build that is no longer installed — a healthy install reporting itself
     //   foreign, which is the exact failure the build id exists to prevent.
-    run("pnpm", ["build", "--standalone", "--disable-updater"], VENCORD_DIR);
+    pnpm(["build", "--standalone", "--disable-updater"]);
 
     log("5/6  Assembling the bundle");
     rmSync(OUT_DIR, { recursive: true, force: true });

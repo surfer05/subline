@@ -203,6 +203,45 @@ describe("removeModBundle", () => {
     });
 });
 
+/**
+ * The one test that runs against a REAL `pnpm build:mod` output rather than a
+ * fixture.
+ *
+ * Skipped when nothing has been built, because building Vencord takes minutes
+ * and needs the network — but when a bundle IS there, this is what proves the
+ * fixtures above are not merely self-consistent. Every check in this file is
+ * written against a shape we invented; this one holds that shape against the
+ * artefact esbuild actually produces.
+ */
+const REAL_BUNDLE = join(import.meta.dirname, "..", "build", "mod");
+
+describe.skipIf(!existsSync(manifestPathFor(REAL_BUNDLE)))("a real built bundle", () => {
+    it("passes the same inspection the installer runs", () => {
+        const result = inspectModBundle(REAL_BUNDLE);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+
+        expect(result.value.buildId).toMatch(/^[0-9a-f]{16}$/);
+        expect(result.value.vencordCommit).toMatch(/^[0-9a-f]{40}$/);
+        // The stamp is in the renderer and only in the renderer: the main
+        // process validates a beacon someone else wrote and states no identity.
+        expect(readFileSync(join(REAL_BUNDLE, STAMPED_ENTRY_NAME), "utf8")).toContain(result.value.buildId);
+        expect(readFileSync(join(REAL_BUNDLE, LOADER_ENTRY_NAME), "utf8")).not.toContain(result.value.buildId);
+    });
+
+    it("agrees with the build id checked into the plugin", () => {
+        // If these ever diverge, the bundle on disk is not the code in the repo.
+        const stamp = readFileSync(
+            join(import.meta.dirname, "..", "..", "src", "userplugins", "vcTranslate", "buildStamp.ts"),
+            "utf8"
+        );
+        const result = inspectModBundle(REAL_BUNDLE);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(stamp).toContain(`BUILD_ID = "${result.value.buildId}"`);
+    });
+});
+
 describe("where the bundle lives at runtime", () => {
     const env = { LOCALAPPDATA: "C:\\Users\\ada\\AppData\\Local" };
 
