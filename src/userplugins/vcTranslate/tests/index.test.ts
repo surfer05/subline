@@ -12,7 +12,7 @@ const native = vi.hoisted(() => {
 });
 
 import plugin, { FORCE_QUALITY_POPOVER_ID } from "../index";
-import { BURST_CAPACITY, LEARNED_QUOTA_KEY, rateGateSettings, REFILL_MS } from "../rateGate";
+import { acquireSlot, BURST_CAPACITY, LEARNED_QUOTA_KEY, rateGateAvailable, rateGateSettings, REFILL_MS } from "../rateGate";
 import { toggleChannel } from "../channels";
 import { cooldownUntil, setCooldown } from "../cooldownStore";
 import settings from "../settings";
@@ -2582,5 +2582,134 @@ describe("the force-quality popover action (⚡)", () => {
         await flush();
 
         expect(getTranslation(key("target"))).toEqual({ lang: "fr", text: "good", via: "gemini" });
+    });
+});
+
+describe("the quota indicator (chat-bar ✦)", () => {
+    /** Call the chat-bar button's render function directly, exactly as PluginManager would. */
+    function render(): any {
+        return plugin.chatBarButton!.render({ isMainChat: true, isAnyChat: true } as any);
+    }
+
+    /** Every string in the rendered tree, concatenated — same walk as the subtitle accessory's helper. */
+    function text(node: any): string {
+        if (node === null || node === undefined || node === false) return "";
+        if (typeof node === "string" || typeof node === "number") return String(node);
+        if (Array.isArray(node)) return node.map(text).join("");
+        return text(node.children);
+    }
+
+    function titleOf(node: any): string | undefined {
+        return node?.props?.title;
+    }
+
+    function useGemini() {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+    }
+
+    it("renders nothing when the configured engine is Google", () => {
+        settings.store.engine = "google";
+        expect(render()).toBeNull();
+    });
+
+    it("renders nothing when an LLM is selected but no API key is set", () => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "";
+        expect(render()).toBeNull();
+    });
+
+    it("renders nothing once the session has fallen back to Google after a rejected key", async () => {
+        // Not one of the two states named in the design brief, but the same
+        // underlying question: effectiveEngine() reports "google" here too,
+        // so there is equally no quality-tier budget left to report.
+        useGemini();
+        native.translateBatch.mockResolvedValue({ ok: false, error: "401 unauthorized" });
+        stubMessages.set(CHANNEL, [discordMessage("1", "hola")]);
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        expect(render()).toBeNull();
+    });
+
+    it("shows the plugin's own available token count when not cooling down", () => {
+        useGemini();
+        expect(text(render())).toBe(`✦ ${BURST_CAPACITY}`);
+    });
+
+    it("reflects tokens actually spent through the gate — the same read runTier's acquireSlot() drives", async () => {
+        useGemini();
+        await acquireSlot();
+        expect(rateGateAvailable()).toBe(BURST_CAPACITY - 1);
+        expect(text(render())).toBe(`✦ ${BURST_CAPACITY - 1}`);
+    });
+
+    it("shows the cooldown countdown, in PREFERENCE to a token count, while cooling down", () => {
+        useGemini();
+        // The gate itself is untouched — BURST_CAPACITY tokens are still
+        // sitting in it — so a naive token-count read alone would say "3
+        // available" here. The point of this test is that cooldown wins.
+        setCooldown("gemini", Date.now() + 45_000);
+        expect(text(render())).toBe("✦ 0:45");
+    });
+
+    it("names the engine and spells out what the number means, in a title attribute", () => {
+        useGemini();
+        const title = titleOf(render());
+        expect(title).toContain("Gemini");
+        expect(title).toContain(String(BURST_CAPACITY));
+        expect(title).toContain("available");
+    });
+
+    it("says COOLING DOWN, not just a bare number, in the title while cooling", () => {
+        useGemini();
+        setCooldown("gemini", Date.now() + 45_000);
+        const title = titleOf(render());
+        expect(title).toContain("cooling down");
+        expect(title).toContain("0:45");
+    });
+});
+
+describe("the ⚡ label reflects the plugin's own available budget", () => {
+    function forceButton(message: any) {
+        const registered = __getPopoverButton(FORCE_QUALITY_POPOVER_ID);
+        return registered ? registered.render(message) : null;
+    }
+    function useGemini() {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+    }
+
+    it("names how many requests are available right now", () => {
+        useGemini();
+        const btn = forceButton(discordMessage("1", "hola"))!;
+        expect(btn.label).toBe(`Translate with Gemini now (spends one of ${BURST_CAPACITY} available now)`);
+    });
+
+    it("says none are available once the gate is exhausted — never claims a spend it cannot make", async () => {
+        useGemini();
+        for (let i = 0; i < BURST_CAPACITY; i++) await acquireSlot();
+        const btn = forceButton(discordMessage("1", "hola"))!;
+        expect(btn.label).toBe("Translate with Gemini now (none available right now)");
+    });
+
+    it("shows the cooldown countdown instead of a token count while cooling down", () => {
+        useGemini();
+        setCooldown("gemini", Date.now() + 45_000);
+        const btn = forceButton(discordMessage("1", "hola"))!;
+        expect(btn.label).toBe("Translate with Gemini now (cooling down, 0:45 left)");
+    });
+
+    it("matches the chat-bar indicator's own number for the same state", () => {
+        useGemini();
+        const btn = forceButton(discordMessage("1", "hola"))!;
+        const indicator: any = plugin.chatBarButton!.render({ isMainChat: true, isAnyChat: true } as any);
+        function text(node: any): string {
+            if (node === null || node === undefined || node === false) return "";
+            if (typeof node === "string" || typeof node === "number") return String(node);
+            if (Array.isArray(node)) return node.map(text).join("");
+            return text(node.children);
+        }
+        expect(btn.label).toContain(String(BURST_CAPACITY));
+        expect(text(indicator)).toContain(String(BURST_CAPACITY));
     });
 });

@@ -99,7 +99,41 @@ an automatic upgrade.
 Only shown when it could actually do something: engine = Google has no
 quality tier to force a message into at all, and a message that already
 carries an LLM verdict (a `✦` translation, or a skip the LLM itself
-confirmed) has nothing left for another request to improve on.
+confirmed) has nothing left for another request to improve on. Its label
+also says how much budget is actually available right now — see the quota
+indicator below, which shows the exact same number.
+
+**A `✦ N` (or `✦ 0:45`) indicator sits in the chat bar itself**, next to the
+message box, so you don't have to guess before spending a scarce request. It
+answers exactly one question: *if you click ⚡ right now, will it actually
+send anything?*
+
+- **`✦ 3`** — the plugin's own gate would let 3 more quality-tier requests
+  through this instant. This is **not** an estimate of Gemini's or Claude's
+  remaining free-tier allowance (the plugin has no way to see that); it is
+  the number of tokens sitting in `rateGate.ts`'s own token bucket, which is
+  deliberately tuned to well under the provider's real ceiling (see "Free-tier
+  rate limiting" below). It is exactly the number `runTier` will check the
+  next time you (or the automatic pipeline) ask for a quality-tier
+  translation — the same read, not a parallel guess that could disagree with
+  it.
+- **`✦ 0:45`** — the engine is cooling down after a 429 (see "When the LLM
+  engine is rate limited" below); ⚡ will not send anything for another 45
+  seconds, however many tokens happen to be sitting in the gate. Cooldown
+  always takes priority over a token count in what's shown, because a token
+  count alone would say "ready" when clicking would do nothing.
+- **Nothing at all** — engine = Google, an LLM is selected but its API key
+  field is empty, or the key was rejected earlier this session (pinned to
+  Google until restart). There is no quality-tier budget to report in any of
+  these cases, and a permanently-zero indicator would be noise rather than
+  information.
+
+Hovering it spells out in words what the glyph and number mean, exactly like
+the subtitle's own `title` tooltips. It updates roughly once a second while
+mounted, purely by polling — neither the rate gate nor the cooldown store
+pushes updates, and the read behind it (`rateGateAvailable()`) is a pure
+read that never spends a token or otherwise changes what the gate will do
+next, so watching the indicator cannot itself affect your budget.
 
 **Only the channel you are looking at is translated as messages arrive.**
 `globalAuto` decides which channels are *eligible*; the channel currently on
@@ -738,17 +772,20 @@ per-channel toggles).
   app only (it uses `pnpm inject`'s desktop patch target and Node-side IPC for
   the network calls; there is no browser-userscript equivalent of the native
   bridge).
-- `index.tsx` is currently ~1,580 lines, against this project's own 200-line
+- `index.tsx` is currently ~1,720 lines, against this project's own 200-line
   per-file convention. It grew past that budget across several correctness
   fixes (catch-up de-duplication, cold-channel handling, session fallback,
   edit re-translation), again with the budget work (focused-channel gating,
   batch sizing, cache loading), again with the two-tier rework (a second
-  batcher, per-tier in-flight tracking, the upgrade-only write path), and
-  again with the force-quality popover action (a second popover registration,
-  its own click handler), where splitting mid-change would have made the
-  diffs harder to review than the size overrun was worth. Splitting it —
-  likely into the Flux handlers/catch-up logic, the two popover buttons, and
-  the accessory component — is planned as a follow-up task, not done here.
+  batcher, per-tier in-flight tracking, the upgrade-only write path), again
+  with the force-quality popover action (a second popover registration, its
+  own click handler), and again with the chat-bar quota indicator (a third
+  rendered UI surface, sharing its availability logic with the popover
+  label), where splitting mid-change would have made the diffs harder to
+  review than the size overrun was worth. Splitting it — likely into the
+  Flux handlers/catch-up logic, the popover buttons and chat-bar indicator,
+  and the accessory component — is planned as a follow-up task, not done
+  here.
 - The rate gate's untaught starting guess (`BURST_CAPACITY`/`REFILL_MS` in
   `rateGate.ts`) was sized against the 20-requests/minute figure this project
   originally measured, against an earlier model. The default model's real
@@ -775,7 +812,7 @@ reports a *smaller* pass count that still looks like success.
 `vitest` is not saved as a dependency; in a fresh clone run `npm i -D vitest`
 first.
 
-408 tests across 15 suites (`batcher`, `claude`, `detectLang`, `gemini`,
+427 tests across 15 suites (`batcher`, `claude`, `detectLang`, `gemini`,
 `google`, `index`, `llmShared`, `native`, `rateGate`, `rateHint`, `retry`,
 `romanized`, `skip`, `store`, `upgrade` — see `tests/`). `tests/fixtures/`
 holds shared non-test data, notably the verbatim bytes of a real Gemini 429
@@ -830,6 +867,10 @@ of results.
 | 11b | **Force-quality:** with Claude/Gemini configured, scroll back to an older `≈`-only message and click the ⚡ "Translate with \<engine\> now" popover item | A quality-tier request goes out for that one message right away, and the `≈` line upgrades to `✦` in place, without waiting for the normal 20s debounce or any channel reopen | ☐ |
 | 11c | **Force-quality, hidden cases:** with engine = Google, or on a message already showing `✦` | The ⚡ button does not appear in either case | ☐ |
 | 11d | **Force-quality, cooldown:** trigger a rate-limit cooldown (row 34), then click ⚡ on a different `≈` message while it is active | No new request goes out (check the provider dashboard); the existing rate-limit toast/behavior stands, nothing appears to silently fail | ☐ |
+| 11e | **Quota indicator, visible states:** with Claude/Gemini configured and a key set, look at the chat bar next to the message box | A `✦ N` indicator is present, N matching how many ⚡ clicks would actually go through right now. Hovering it explains the number in words | ☐ |
+| 11f | **Quota indicator, ticking:** click ⚡ a few times in a row (or wait through a channel-hop burst) and watch the indicator | The number drops as requests are spent and climbs back up roughly a second at a time as the gate refills, with no page reload needed | ☐ |
+| 11g | **Quota indicator, cooldown:** trigger a rate-limit cooldown (row 34) and watch the indicator | It switches to a `✦ M:SS` countdown in place of the token count, and counts down to zero | ☐ |
+| 11h | **Quota indicator, hidden cases:** with engine = Google, or an LLM selected with no key set | No indicator appears in the chat bar at all | ☐ |
 | 12 | Simulate a persistence failure if you can (e.g. revoke write access to Vencord's settings/data directory) | A failure toast appears and the toggle does not stick | ☐ |
 | 13 | Switch engine Google → Claude mid-session | New messages get a `≈` line from the fast tier and, up to ~20s later, a `✦` line from Claude. Messages already cached under Google keep their `≈` result until you next reopen that channel — reopening lets catch-up offer them to Claude too, same as row 1b | ☐ |
 | 14 | Paste a valid API key mid-session while engine is set to Claude | Translations start working without a restart (this was a Critical bug in an earlier round — confirm it stays fixed) | ☐ |

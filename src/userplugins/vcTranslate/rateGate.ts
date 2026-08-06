@@ -165,6 +165,36 @@ function wake(): void {
 }
 
 /**
+ * How many tokens the bucket would hand out RIGHT NOW — a PURE read. Does not
+ * spend a token and does not write `lastRefillAt` back, unlike `refill()`
+ * (which this deliberately does not call).
+ *
+ * WHY THIS EXISTS: the chat-bar quota indicator (index.tsx's `QuotaIndicator`)
+ * has to show the user "how many ⚡ clicks will actually go through right
+ * now", and that number has to BE the gate's own answer, not a parallel
+ * estimate that could drift from it. The only way to ask the gate that
+ * question without changing what it will do next is a read that mutates
+ * nothing — a UI polling this every second must not itself perturb the
+ * bucket `acquireSlot()` depends on for correctness.
+ *
+ * THE ARITHMETIC is `refill()`'s, duplicated rather than shared, because
+ * `refill()`'s whole contract is "bring `lastRefillAt` up to date as a side
+ * effect", and that write is exactly what a read-only caller must not
+ * trigger — two callers racing (a real `acquireSlot()` and this indicator)
+ * must see `lastRefillAt` change only when a request was actually spent or
+ * time actually advanced past a refill tick during a real gate operation,
+ * never as a side effect of someone merely asking how much is left.
+ */
+export function rateGateAvailable(): number {
+    if (tokens >= capacity) return tokens;
+    const elapsed = Date.now() - lastRefillAt;
+    if (elapsed <= 0) return tokens;
+    const gained = Math.floor(elapsed / refillMs);
+    if (gained <= 0) return tokens;
+    return Math.min(capacity, tokens + gained);
+}
+
+/**
  * Resolves immediately if a token is available, otherwise queues and
  * resolves once the bucket refills enough to reach the front of the queue.
  */

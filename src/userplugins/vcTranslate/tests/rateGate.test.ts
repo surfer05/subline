@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-    acquireSlot, BURST_CAPACITY, LEARNED_QUOTA_KEY, loadRateGateTuning, rateGateSettings, REFILL_MS,
-    resetRateGate, SAFETY_FACTOR, tuneRateGateToObservedLimit
+    acquireSlot, BURST_CAPACITY, LEARNED_QUOTA_KEY, loadRateGateTuning, rateGateAvailable,
+    rateGateSettings, REFILL_MS, resetRateGate, SAFETY_FACTOR, tuneRateGateToObservedLimit
 } from "../rateGate";
 import * as DataStore from "./stubs/api-datastore";
 
@@ -122,6 +122,69 @@ describe("rateGate — cancellation and concurrency", () => {
             Array.from({ length: BURST_CAPACITY }, () => acquireSlot().then(() => resolved++))
         );
         expect(resolved).toBe(BURST_CAPACITY);
+    });
+});
+
+describe("rateGate — rateGateAvailable() is a pure read", () => {
+    it("reports the full untaught burst before anything has been spent", () => {
+        expect(rateGateAvailable()).toBe(BURST_CAPACITY);
+    });
+
+    it("does not consume a token — repeated reads are stable", () => {
+        expect(rateGateAvailable()).toBe(BURST_CAPACITY);
+        expect(rateGateAvailable()).toBe(BURST_CAPACITY);
+        expect(rateGateAvailable()).toBe(BURST_CAPACITY);
+        expect(rateGateAvailable()).toBe(BURST_CAPACITY);
+    });
+
+    it("a read does not perturb the bucket — every real token is still grantable afterwards", async () => {
+        // Hammer the read far more than there are tokens, with no timer
+        // advance in between (so nothing could legitimately refill).
+        for (let i = 0; i < 50; i++) rateGateAvailable();
+
+        let resolved = 0;
+        await Promise.all(
+            Array.from({ length: BURST_CAPACITY }, () => acquireSlot().then(() => resolved++))
+        );
+        // If the read had consumed anything, fewer than BURST_CAPACITY of
+        // these would resolve without a timer advance.
+        expect(resolved).toBe(BURST_CAPACITY);
+    });
+
+    it("reflects tokens a real acquireSlot() actually spent", async () => {
+        await acquireSlot();
+        expect(rateGateAvailable()).toBe(BURST_CAPACITY - 1);
+        await acquireSlot();
+        expect(rateGateAvailable()).toBe(BURST_CAPACITY - 2);
+    });
+
+    it("drops to zero once the burst is exhausted, and stays zero with no timer advance", async () => {
+        for (let i = 0; i < BURST_CAPACITY; i++) await acquireSlot();
+        expect(rateGateAvailable()).toBe(0);
+        expect(rateGateAvailable()).toBe(0);
+    });
+
+    it("accrues over time exactly like a real refill — WITHOUT writing lastRefillAt back", async () => {
+        for (let i = 0; i < BURST_CAPACITY; i++) await acquireSlot();
+        expect(rateGateAvailable()).toBe(0);
+
+        // Advance past one refill tick without calling anything that would
+        // legitimately update lastRefillAt itself.
+        vi.advanceTimersByTime(REFILL_MS);
+        expect(rateGateAvailable()).toBe(1);
+        // Still a pure read: asking twice in a row must not double-count.
+        expect(rateGateAvailable()).toBe(1);
+
+        // If the read HAD written lastRefillAt back on the call above, a real
+        // acquireSlot() landing here would see an already-advanced clock and
+        // grant a second token it has not actually earned yet.
+        await acquireSlot();
+        expect(rateGateAvailable()).toBe(0);
+    });
+
+    it("caps at capacity — accrued time beyond a full bucket is not banked", async () => {
+        vi.advanceTimersByTime(REFILL_MS * 100);
+        expect(rateGateAvailable()).toBe(BURST_CAPACITY);
     });
 });
 

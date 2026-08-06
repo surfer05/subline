@@ -1,3 +1,4 @@
+import type { ChatBarProps } from "@api/ChatButtons";
 import { addMessagePopoverButton, removeMessagePopoverButton } from "@api/MessagePopover";
 import { Logger } from "@utils/Logger";
 import definePlugin, { PluginNative } from "@utils/types";
@@ -9,7 +10,8 @@ import { isChannelEnabled, loadEnabledChannels, toggleChannel } from "./channels
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
 import { isConfidentlyTargetLanguage } from "./detectLang";
 import {
-    acquireSlot, loadRateGateTuning, rateGateSettings, resetRateGate, tuneRateGateToObservedLimit
+    acquireSlot, loadRateGateTuning, rateGateAvailable, rateGateSettings, resetRateGate,
+    tuneRateGateToObservedLimit
 } from "./rateGate";
 import { isRomanizedGuess } from "./romanized";
 import settings from "./settings";
@@ -265,6 +267,45 @@ function isCoolingDown(engine: LlmEngineId): boolean {
 function formatDuration(ms: number): string {
     if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))}s`;
     return `${Math.max(1, Math.round(ms / 60_000))}m`;
+}
+
+/**
+ * "0:45" / "1:05" — a live countdown, unlike `formatDuration()`'s one-shot
+ * toast wording. The quota indicator (see `QuotaIndicator` below) ticks once
+ * a second while mounted, so this has to read as counting DOWN rather than
+ * as a coarse "about how long" estimate.
+ */
+function formatCountdown(ms: number): string {
+    const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+/**
+ * "How many ⚡ clicks would actually go through right now, for this engine" —
+ * the single source both the chat-bar quota indicator and the ⚡ popover
+ * label read from, so the two can never disagree about what pressing ⚡ is
+ * about to do.
+ *
+ * COOLDOWN TAKES PRIORITY over a token count on purpose: the rate gate can
+ * still be holding tokens while the engine itself is parked after a 429 (the
+ * two are independent — see `runTier`'s cooldown check, which runs BEFORE the
+ * gate is ever asked), and a token count would tell the user ⚡ is ready when
+ * clicking it would actually do nothing.
+ *
+ * The token count itself comes from `rateGateAvailable()` — a PURE read of
+ * the gate this engine's requests actually go through, never a parallel
+ * estimate of the provider's own remaining allowance. That is the whole
+ * point: the honest number is what THIS plugin will let through, which is
+ * exactly what ⚡ is about to spend.
+ */
+function describeQuotaState(
+    engine: LlmEngineId
+): { cooling: true; remainingMs: number } | { cooling: false; available: number } {
+    const remainingMs = cooldownUntil(engine) - Date.now();
+    if (remainingMs > 0) return { cooling: true, remainingMs };
+    return { cooling: false, available: rateGateAvailable() };
 }
 
 /**
@@ -1391,8 +1432,21 @@ function forceQualityPopoverRender(message: Message) {
     if (hasQualityVerdict(key)) return null;
 
     const { label } = LLM_ENGINES[engine];
+
+    // Say what pressing this would actually do — the user should not have to
+    // look away at the chat-bar indicator (see QuotaIndicator below) to
+    // decide whether ⚡ is worth clicking right now, and the wording has to
+    // stay honest when the answer is "nothing" (cooling down, or the gate is
+    // empty).
+    const quota = describeQuotaState(engine);
+    const spendDescription = quota.cooling
+        ? `cooling down, ${formatCountdown(quota.remainingMs)} left`
+        : quota.available > 0
+            ? `spends one of ${quota.available} available now`
+            : "none available right now";
+
     return {
-        label: `Translate with ${label} now (spends one request)`,
+        label: `Translate with ${label} now (${spendDescription})`,
         icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
         message,
         channel,
@@ -1400,6 +1454,86 @@ function forceQualityPopoverRender(message: Message) {
             void forceQualityTranslate(message);
         }
     };
+}
+
+/**
+ * The chat-bar quota indicator — "how much of THIS plugin's own budget is
+ * left for ⚡ right now", sitting next to the message input via Vencord's
+ * `@api/ChatButtons` (`chatBarButton` below; see `src/api/ChatButtons.tsx` in
+ * a Vencord checkout for the contract this implements).
+ *
+ * WHY THIS EXISTS: the ⚡ action above spends a scarce, per-minute request
+ * with no visible cost anywhere else in the UI — a user deciding whether to
+ * click it was previously blank on how much was left. This answers that,
+ * with the same number `runTier` will actually enforce, not an estimate of
+ * the provider's own remaining allowance (which this plugin cannot see and
+ * would be dishonest to guess at).
+ *
+ * PRIORITY ORDER, exactly `describeQuotaState()`'s: cooling down (⚡ will not
+ * work at all right now, however many tokens the gate happens to be holding)
+ * outranks a token count, which outranks nothing — rendering NOTHING is
+ * itself a state: no LLM engine is configured, or one is but has no key, so
+ * there is no quality-tier budget to report at all, and a permanently-zero
+ * indicator would be noise rather than information. `effectiveEngine()` is
+ * what decides that, so this also goes quiet for the third, less obvious
+ * case it already covers — a key an engine has rejected this session (see
+ * `sessionFallback`) — for the same reason: no request pressing ⚡ would send
+ * right now belongs to a "quality tier" that, this session, does not exist.
+ *
+ * LIVE: neither the rate gate nor the cooldown store notifies on change (see
+ * `rateGateAvailable()`'s and `cooldownUntil()`'s own docs — a read that
+ * pushed updates would have to mutate state to schedule them, which is
+ * exactly what a pure read must not do), so this component ticks itself,
+ * once a second, for as long as it stays mounted.
+ */
+function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat: boolean; }) {
+    const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
+    React.useEffect(() => {
+        const id = setInterval(forceUpdate, 1_000);
+        return () => clearInterval(id);
+    }, []);
+
+    const engine = effectiveEngine();
+    if (!isLlmEngine(engine)) return null;
+
+    const { label } = LLM_ENGINES[engine];
+    const quota = describeQuotaState(engine);
+
+    const indicatorStyle = {
+        fontSize: "0.85rem",
+        color: "var(--text-muted)",
+        padding: "0 4px",
+        whiteSpace: "nowrap"
+    } as const;
+
+    if (quota.cooling) {
+        const countdown = formatCountdown(quota.remainingMs);
+        return (
+            <div
+                style={indicatorStyle}
+                title={
+                    `VcTranslate: ${label} is cooling down after a rate limit — the ⚡ `
+                    + `force-translate action will not send anything for another ${countdown}.`
+                }
+            >
+                ✦ {countdown}
+            </div>
+        );
+    }
+
+    return (
+        <div
+            style={indicatorStyle}
+            title={
+                `VcTranslate: ${quota.available} request${quota.available === 1 ? "" : "s"} available `
+                + `for the ⚡ force-translate action right now. This is the plugin's own budget for `
+                + `${label} — deliberately kept under its free-tier limit — not an estimate of `
+                + `${label}'s own remaining quota.`
+            }
+        >
+            ✦ {quota.available}
+        </div>
+    );
 }
 
 export default definePlugin({
@@ -1413,6 +1547,16 @@ export default definePlugin({
     renderMessageAccessory: props => (
         <TranslationAccessory message={props.message} />
     ),
+
+    // Declarative — unlike the force-quality popover above, this is the ONLY
+    // chat-bar button this plugin registers, so it needs no second, manual
+    // registration through the lower-level `@api/ChatButtons` functions;
+    // PluginManager registers and unregisters this field itself, exactly as
+    // it does `messagePopoverButton` below.
+    chatBarButton: {
+        icon: () => <span style={{ fontSize: "1rem" }}>✦</span>,
+        render: QuotaIndicator
+    },
 
     messagePopoverButton: {
         icon: () => <span style={{ fontSize: "1rem" }}>🌐</span>,
