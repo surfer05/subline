@@ -250,12 +250,26 @@ describe("removePluginSettings", () => {
         expect(removePluginSettings(null)).toEqual({ ok: true, value: false });
     });
 
-    it("leaves a corrupt settings file alone instead of rewriting it", () => {
+    it("leaves an unparsable settings file alone instead of rewriting it", () => {
         mkdirSync(join(root, "Vencord", "settings"), { recursive: true });
         writeFileSync(settingsPath, "{ not json", "utf8");
         const result = removePluginSettings(settingsPath);
         expect(result.ok).toBe(false);
         expect(readFileSync(settingsPath, "utf8")).toBe("{ not json");
+    });
+
+    it("refuses a settings file that PARSES but is not an object", () => {
+        // JSON.parse succeeds here, so the try/catch never fires and only the
+        // shape check stands between us and rewriting somebody's file as
+        // `{"plugins":…}`. A mutation deleting that check survived until this
+        // test existed.
+        for (const contents of ["[1,2,3]", '"a string"', "42", "null"]) {
+            mkdirSync(join(root, "Vencord", "settings"), { recursive: true });
+            writeFileSync(settingsPath, contents, "utf8");
+            const result = removePluginSettings(settingsPath);
+            expect(result.ok).toBe(false);
+            expect(readFileSync(settingsPath, "utf8")).toBe(contents);
+        }
     });
 
     it("leaves no temp file behind", () => {

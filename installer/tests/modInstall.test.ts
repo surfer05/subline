@@ -4,7 +4,7 @@
  * that matter most are the ones about which path comes back.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -118,10 +118,69 @@ describe("installModBundle", () => {
         expect(existsSync(`${destDir}.subline-staging`)).toBe(false);
     });
 
-    it("leaves no staging directory behind on failure", () => {
+    it("leaves no staging directory behind when the source is rejected", () => {
         rmSync(join(source.dir, "preload.js"));
         installModBundle({ sourceDir: source.dir, destDir });
         expect(existsSync(`${destDir}.subline-staging`)).toBe(false);
+    });
+
+    describe("when the copy itself does not survive", () => {
+        // Reached only through the fault-injection hook: `cpSync` of a valid
+        // bundle always produces a valid bundle, so without a seam the staged
+        // check is unfalsifiable — which a surviving mutation proved.
+        it("refuses the install rather than promoting a damaged bundle", () => {
+            const result = installModBundle({
+                sourceDir: source.dir,
+                destDir,
+                hooks: { afterStage: staging => rmSync(join(staging, "renderer.js")) }
+            });
+            expect(result.ok).toBe(false);
+            if (!result.ok) {
+                expect(result.error.code).toBe("MOD_BUNDLE_INVALID");
+                expect(result.error.message).toContain("did not survive being copied");
+            }
+            expect(existsSync(destDir)).toBe(false);
+        });
+
+        it("cleans up the staging directory when the copy is rejected", () => {
+            installModBundle({
+                sourceDir: source.dir,
+                destDir,
+                hooks: { afterStage: staging => rmSync(join(staging, "renderer.js")) }
+            });
+            expect(existsSync(`${destDir}.subline-staging`)).toBe(false);
+        });
+
+        it("leaves a previously working install alone", () => {
+            installModBundle({ sourceDir: source.dir, destDir });
+            installModBundle({
+                sourceDir: source.dir,
+                destDir,
+                hooks: { afterStage: staging => rmSync(join(staging, "patcher.js")) }
+            });
+            // The live bundle is untouched: it is still complete and still loadable.
+            expect(existsSync(join(destDir, "patcher.js"))).toBe(true);
+            expect(existsSync(manifestPathFor(destDir))).toBe(true);
+        });
+
+        it("refuses a copy whose build id does not match the source", () => {
+            const result = installModBundle({
+                sourceDir: source.dir,
+                destDir,
+                hooks: {
+                    afterStage: staging => {
+                        // A manifest naming a different build than the one shipped.
+                        const manifest = JSON.parse(readFileSync(manifestPathFor(staging), "utf8"));
+                        manifest.buildId = "deadbeefdeadbeef";
+                        writeFileSync(manifestPathFor(staging), JSON.stringify(manifest, null, 4), "utf8");
+                    }
+                }
+            });
+            expect(result.ok).toBe(false);
+            if (!result.ok) expect(result.error.code).toBe("MOD_BUNDLE_INVALID");
+            expect(existsSync(`${destDir}.subline-staging`)).toBe(false);
+            expect(existsSync(destDir)).toBe(false);
+        });
     });
 
     it("clears a staging directory left by an interrupted earlier run", () => {

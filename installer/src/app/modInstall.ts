@@ -28,11 +28,26 @@ import { manifestPathFor } from "../bundle/spec.js";
 import type { Result } from "../patcher/result.js";
 import { err, fsError, ok } from "../patcher/result.js";
 
+/**
+ * Fault-injection seam, mirroring `PatchOptions.hooks.afterWrite`.
+ *
+ * The staged copy is checked before it is promoted, and a valid source copied by
+ * `cpSync` always produces a valid copy — so the failure the check exists for
+ * cannot be reached from outside. Without a seam, that check is unfalsifiable:
+ * a mutation deleting its cleanup left the suite green. Production callers never
+ * pass this.
+ */
+export interface InstallModBundleHooks {
+    /** Runs after the bundle is staged, immediately before it is inspected. */
+    afterStage?: (stagingDir: string) => void;
+}
+
 export interface InstallModBundleOptions {
     /** The bundle shipped inside the app — `Subline.app/Contents/Resources/mod`. */
     sourceDir: string;
     /** Where it must end up — `~/Library/Application Support/Subline/mod`. */
     destDir: string;
+    hooks?: InstallModBundleHooks;
 }
 
 export interface InstalledModBundle extends ModBundle {
@@ -66,17 +81,14 @@ export function installModBundle(options: InstallModBundleOptions): Result<Insta
         );
     }
 
-    // Refuse to replace a directory that is not one of ours, for the same
-    // reason `removeModBundle` does: this path comes from configuration and the
-    // operation is a recursive delete.
+    // A directory that is not one of ours is never replaced — but that guard
+    // lives in `removeModBundle` and is deliberately NOT duplicated here. An
+    // earlier version checked for the manifest first as a fail-fast; a mutation
+    // deleting that check left the whole suite green, because `removeModBundle`
+    // refuses the same directory a moment later with the same error code. A
+    // guard that cannot change an observable outcome is untested by definition
+    // and rots, so there is one reachable source of this refusal.
     const replaced = existsSync(destDir);
-    if (replaced && !existsSync(manifestPathFor(destDir))) {
-        return err<InstalledModBundle>(
-            "MOD_BUNDLE_INVALID",
-            `${destDir} already exists and is not a Subline mod bundle, so Subline will not replace it.`,
-            { path: destDir }
-        );
-    }
 
     const staging = `${destDir}${STAGING_SUFFIX}`;
     try {
@@ -87,6 +99,8 @@ export function installModBundle(options: InstallModBundleOptions): Result<Insta
         rmSync(staging, { recursive: true, force: true });
         return fsError<InstalledModBundle>(cause, destDir, "copy the Subline mod into place");
     }
+
+    options.hooks?.afterStage?.(staging);
 
     // Check the COPY, before it becomes the live bundle. A truncated copy that
     // reached the runtime location would be found only by the patch that then
