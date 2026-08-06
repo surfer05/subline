@@ -102,6 +102,16 @@ rather than a silent no-op that quietly burns a request you can't get back.
 The existing `≈` line stays on screen until the `✦` reply lands, exactly like
 an automatic upgrade.
 
+**While that request is out, the subtitle shows `⚡ translating…`** — either
+on its own, for a message that had no translation at all yet, or appended
+after the existing `≈` line, never in place of it. It clears the moment the
+request settles, however it settles (a real translation, a failure, a
+cooldown that stopped it before it was even sent, or the rate gate). A second
+click while one is already out for that message does nothing (same
+once-in-flight guard as the automatic paths) — the ⚡ button's own label says
+so too, switching to *"already translating…"* instead of a token count for
+as long as the request is running.
+
 Only shown when it could actually do something: engine = Google has no
 quality tier to force a message into at all, and a message that already
 carries an LLM verdict (a `✦` translation, or a skip the LLM itself
@@ -946,6 +956,8 @@ of results.
 | 11f | **Quota indicator, ticking:** click ⚡ a few times in a row (or wait through a channel-hop burst) and watch the indicator | The number drops as requests are spent and climbs back up roughly a second at a time as the gate refills, with no page reload needed | ☐ |
 | 11g | **Quota indicator, cooldown:** trigger a rate-limit cooldown (row 34) and watch the indicator | It switches to a `✦ M:SS` countdown in place of the token count, and counts down to zero | ☐ |
 | 11h | **Quota indicator, hidden cases:** with engine = Google, or an LLM selected with no key set | No indicator appears in the chat bar at all | ☐ |
+| 11i | **Force-quality, in-flight hint:** click ⚡ on a message and watch its subtitle immediately (before the response lands) | `⚡ translating…` appears right away — on its own for a message with no prior translation, or appended after the existing `≈` line without removing it — and disappears once the response lands (success, failure, or a cooldown that blocked it) | ☐ |
+| 11j | **Force-quality, in-flight label:** click ⚡, then reopen the popover on the same message before the request settles | The label now reads "...(already translating…)" instead of a token count, and clicking it again sends nothing new | ☐ |
 | 12 | Simulate a persistence failure if you can (e.g. revoke write access to Vencord's settings/data directory) | A failure toast appears and the toggle does not stick | ☐ |
 | 13 | Switch engine Google → Claude mid-session | New messages get a `≈` line from the fast tier and, up to ~20s later, a `✦` line from Claude. Messages already cached under Google keep their `≈` result until you next reopen that channel — reopening lets catch-up offer them to Claude too, same as row 1b | ☐ |
 | 14 | Paste a valid API key mid-session while engine is set to Claude | Translations start working without a restart (this was a Critical bug in an earlier round — confirm it stays fixed) | ☐ |

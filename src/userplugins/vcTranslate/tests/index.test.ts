@@ -2757,6 +2757,26 @@ describe("the ⚡ label reflects the plugin's own available budget", () => {
         expect(btn.label).toContain(String(BURST_CAPACITY));
         expect(text(indicator)).toContain(String(BURST_CAPACITY));
     });
+
+    it("says a request is already running once one is in flight for this message, so a second click reads as an obvious no-op", async () => {
+        // Never resolves within this test, so the first click's request stays
+        // in flight for the second forceButton() read to observe.
+        useGemini();
+        native.translateBatch.mockImplementation(() => new Promise(() => { }));
+        const message = discordMessage("1", "hola");
+
+        const before = forceButton(message)!;
+        expect(before.label).not.toContain("already translating");
+        expect(before.label).toBe(`Translate with Gemini now (spends one of ${BURST_CAPACITY} available now)`);
+
+        before.onClick!(undefined as any);
+
+        // Synchronous, deliberately no await: inFlightQuality is marked
+        // before forceQualityTranslate's first await, so a render right
+        // after the click already sees it.
+        const during = forceButton(message)!;
+        expect(during.label).toBe("Translate with Gemini now (already translating…)");
+    });
 });
 
 describe("the debugLogging setting", () => {
@@ -2952,5 +2972,172 @@ describe("the debugLogging setting", () => {
 
             expect(flatten()).toMatch(/\[force-quality\] 1: blocked — already in flight/);
         });
+    });
+});
+
+describe("the manual ⚡ in-flight indicator on the subtitle accessory", () => {
+    function forceButton(message: any) {
+        const registered = __getPopoverButton(FORCE_QUALITY_POPOVER_ID);
+        return registered ? registered.render(message) : null;
+    }
+
+    /**
+     * Flush the microtask queue without advancing any timer — same helper as
+     * the force-quality describe block above, and for the same reason: the
+     * force action bypasses the batcher's debounce entirely.
+     */
+    async function flush() {
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+    }
+
+    function useGemini() {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+    }
+
+    /** Call the accessory component directly and return what it rendered. */
+    const render = (message: unknown) => {
+        const el: any = plugin.renderMessageAccessory!({ message } as any);
+        return el.type(el.props);
+    };
+
+    /** Every string in the rendered tree, concatenated. */
+    const text = (node: any): string => {
+        if (node === null || node === undefined || node === false) return "";
+        if (typeof node === "string" || typeof node === "number") return String(node);
+        if (Array.isArray(node)) return node.map(text).join("");
+        return text(node.children);
+    };
+
+    it("shows a ⚡ translating… hint the instant the button is clicked, before any response has arrived", async () => {
+        useGemini();
+        // Never resolves within this test: the point is what the accessory
+        // shows WHILE the request is out, not what it shows once it lands.
+        native.translateBatch.mockImplementation(() => new Promise(() => { }));
+        const message = discordMessage("1", "hola");
+
+        expect(render(message)).toBeNull();
+
+        const btn = forceButton(message);
+        expect(btn).not.toBeNull();
+        btn!.onClick!(undefined as any);
+
+        // Deliberately no await/flush: forcedInFlight is marked before
+        // forceQualityTranslate's first await, so this must already be true
+        // the instant the synchronous part of the click handler returns.
+        const rendered = render(message);
+        expect(rendered).not.toBeNull();
+        expect(text(rendered)).toContain("⚡");
+        expect(text(rendered)).toContain("translating");
+    });
+
+    it("clears the indicator once the request resolves with a real translation", async () => {
+        useGemini();
+        native.translateBatch.mockResolvedValue(
+            { ok: true, results: [{ id: "1", lang: "de", text: "good", skip: false }] }
+        );
+        const message = discordMessage("1", "hola");
+
+        const btn = forceButton(message)!;
+        btn.onClick!(undefined as any);
+        expect(text(render(message))).toContain("translating");
+
+        await flush();
+
+        const rendered = render(message);
+        expect(text(rendered)).toContain("good");
+        expect(text(rendered)).not.toContain("translating");
+    });
+
+    it("clears the indicator when the request fails, leaving nothing behind (a quality failure writes no marker)", async () => {
+        useGemini();
+        native.translateBatch.mockResolvedValue({ ok: false, error: "500 upstream error" });
+        const message = discordMessage("1", "hola");
+
+        const btn = forceButton(message)!;
+        btn.onClick!(undefined as any);
+        expect(text(render(message))).toContain("translating");
+
+        await flush();
+
+        // Quality-tier failures deliberately write nothing to the store (see
+        // runTier), so with no prior entry there is nothing left to show at
+        // all once the indicator itself comes down.
+        expect(render(message)).toBeNull();
+    });
+
+    it("clears the indicator, and never sends a request, when the engine is cooling down", async () => {
+        useGemini();
+        setCooldown("gemini", Date.now() + 600_000);
+        native.translateBatch.mockClear();
+        const message = discordMessage("1", "hola");
+
+        const btn = forceButton(message)!;
+        btn.onClick!(undefined as any);
+        // Still shown right away: forceQualityTranslate marks it in flight
+        // before runTier gets a chance to check the cooldown.
+        expect(text(render(message))).toContain("translating");
+
+        await flush();
+
+        expect(native.translateBatch).not.toHaveBeenCalled();
+        expect(render(message)).toBeNull();
+    });
+
+    it("keeps an existing Google ≈ line visible while the indicator is showing — never replaces it", async () => {
+        useGemini();
+        setTranslation(key("1"), { lang: "es", text: "rough", via: "google" });
+        // Never resolves: the point is what stays on screen WHILE the
+        // request is out.
+        native.translateBatch.mockImplementation(() => new Promise(() => { }));
+        const message = discordMessage("1", "hola");
+
+        // Sanity: the ≈ line is really there before anything is clicked.
+        expect(text(render(message))).toContain("rough");
+
+        const btn = forceButton(message)!;
+        btn.onClick!(undefined as any);
+
+        const rendered = render(message);
+        expect(text(rendered)).toContain("rough");
+        expect(text(rendered)).toContain("translating");
+    });
+
+    it("a second click while the first is still in flight does not spawn a second request", async () => {
+        useGemini();
+        native.translateBatch.mockImplementation(() => new Promise(() => { }));
+        const message = discordMessage("1", "hola");
+
+        const btn = forceButton(message)!;
+        btn.onClick!(undefined as any);
+        await flush();
+        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+
+        btn.onClick!(undefined as any);
+        await flush();
+
+        expect(native.translateBatch).toHaveBeenCalledTimes(1);
+        // Still just the one hint, not a stacked/duplicated one.
+        expect(text(render(message))).toContain("translating");
+    });
+
+    it("shows the hint over a non-authoritative Google skip too — ⚡ is still offered on exactly that state", async () => {
+        // A Google skip (as opposed to an LLM skip) is not authoritative —
+        // hasQualityVerdict() still offers the ⚡ button on it (see its own
+        // comment), so a click here is a real, reachable path, not a dead
+        // one. Before the click it renders nothing (skipped messages have no
+        // subtitle at all).
+        useGemini();
+        setTranslation(key("1"), { skipped: true, via: "google" });
+        native.translateBatch.mockImplementation(() => new Promise(() => { }));
+        const message = discordMessage("1", "hola");
+
+        expect(render(message)).toBeNull();
+
+        const btn = forceButton(message);
+        expect(btn).not.toBeNull();
+        btn!.onClick!(undefined as any);
+
+        expect(text(render(message))).toContain("translating");
     });
 });

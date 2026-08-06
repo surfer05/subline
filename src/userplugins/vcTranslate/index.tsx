@@ -60,6 +60,43 @@ const inFlightFast = new Set<string>();
 const inFlightQuality = new Set<string>();
 
 /**
+ * Ids currently out on the MANUAL ⚡ force-quality path, purely so
+ * `TranslationAccessory` can show a `⚡ translating…` hint while one is
+ * outstanding. Deliberately NOT the same thing as `inFlightQuality` above:
+ * that set also covers the automatic quality tier (live chat, catch-up),
+ * and this indicator is scoped to the manual click only — the fast tier
+ * lands in about a second and an indicator under every incoming message
+ * would be noise, not help.
+ *
+ * Deliberately NOT written into the translation store either. store.ts's
+ * `StoredTranslation` union is four RESOLVED states that catch-up's
+ * cache-hit check depends on; a `{ translating: true }` entry would be a
+ * fifth, transient one that persistence, the upgrade rule and every reader
+ * of that union would have to be taught to ignore. This is UI-only, ephemeral
+ * state, so it gets its own set and its own listeners — mirroring store.ts's
+ * subscribe()/notify shape (a Set of no-arg callbacks, notified after every
+ * mutation) rather than reusing the store's own subscribe(), which is exactly
+ * what would put this inside the union it is being kept out of.
+ */
+const forcedInFlight = new Set<string>();
+const forcedInFlightListeners = new Set<() => void>();
+
+function notifyForcedInFlight(): void {
+    for (const fn of forcedInFlightListeners) fn();
+}
+
+/** Mirrors store.ts's subscribe(): add a listener, get back its unsubscribe. */
+function subscribeForcedInFlight(fn: () => void): () => void {
+    forcedInFlightListeners.add(fn);
+    return () => forcedInFlightListeners.delete(fn);
+}
+
+/** Whether THIS message has a manual ⚡ request outstanding right now. */
+function isForcedInFlight(messageId: string): boolean {
+    return forcedInFlight.has(messageId);
+}
+
+/**
  * Store keys the quality tier has already SPENT A REQUEST on this session.
  *
  * THE BUG THIS EXISTS FOR: a quality-tier failure deliberately writes nothing
@@ -896,6 +933,11 @@ async function forceQualityTranslate(message: Message): Promise<void> {
     }
     if (debug) logger.debug(`[force-quality] ${message.id}: passed guards, spending a ${engine} request`);
     inFlightQuality.add(message.id);
+    // Manual-path-only indicator for TranslationAccessory — see the comment
+    // on `forcedInFlight` above for why this is a second set rather than a
+    // second use of inFlightQuality.
+    forcedInFlight.add(message.id);
+    notifyForcedInFlight();
 
     const req: BatchRequest = {
         messages: [{
@@ -911,7 +953,18 @@ async function forceQualityTranslate(message: Message): Promise<void> {
         context: [],
         targetLang: settings.store.targetLang
     };
-    await runTier(engine, req, batcherGeneration);
+    // Whichever way runTier settles — success, failure, cooldown block, a
+    // stale-generation drop or a rate-gate rejection — the manual indicator
+    // must come down. runTier's OWN finally already releases inFlightQuality
+    // on every one of those paths (see runTier), so piggy-backing on the same
+    // await here releases forcedInFlight at exactly the same point, never
+    // stuck on a path runTier itself handles.
+    try {
+        await runTier(engine, req, batcherGeneration);
+    } finally {
+        forcedInFlight.delete(message.id);
+        notifyForcedInFlight();
+    }
 }
 
 function rebuildBatcher() {
@@ -1462,7 +1515,19 @@ const ENGINE_PROVENANCE: Record<EngineId, { glyph: string; label: string; }> = {
 function TranslationAccessory({ message }: { message: Message; }) {
     const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
 
-    React.useEffect(() => subscribe(forceUpdate), []);
+    React.useEffect(() => {
+        // Two independent publishers, same subscribe/notify shape: the
+        // translation store's own subscribe() for the four resolved states,
+        // and forcedInFlight's for the manual ⚡ click's transient "still
+        // running" state (see the comment on `forcedInFlight`). Either firing
+        // must re-render this message's accessory.
+        const unsubStore = subscribe(forceUpdate);
+        const unsubForced = subscribeForcedInFlight(forceUpdate);
+        return () => {
+            unsubStore();
+            unsubForced();
+        };
+    }, []);
 
     if (!channelActive(message.channel_id)) return null;
 
@@ -1471,14 +1536,42 @@ function TranslationAccessory({ message }: { message: Message; }) {
     // visible while an LLM engine is selected.
     const key = makeKey(message.id, settings.store.targetLang);
     const entry: StoredTranslation | undefined = getTranslation(key);
-    if (!entry) return null;
+
+    // A manual ⚡ click currently out for this message. Read AFTER the store
+    // lookup above but used throughout below — this is the one thing in this
+    // component that is not itself a StoredTranslation, so it is threaded
+    // through every branch rather than folded into `entry`.
+    const forcing = isForcedInFlight(message.id);
+
+    if (!entry) {
+        // Nothing to show yet — UNLESS a forced request is why: the reader
+        // clicked ⚡ on a message that had never been translated at all (no
+        // existing Google line to keep), and would otherwise see nothing
+        // happen until the response lands, possibly several seconds away.
+        if (!forcing) return null;
+        return (
+            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
+                ⚡ translating…
+            </div>
+        );
+    }
 
     // A skipped message is already in the target language: there is nothing to
     // subtitle. This MUST come before the failure branch — the marker exists so
     // catch-up can tell "resolved, nothing to show" from "never requested", and
     // falling through would label a perfectly fine message "translation
-    // failed".
-    if ("skipped" in entry) return null;
+    // failed". Same "nothing to show, but a forced click just changed that"
+    // exception as the no-entry branch above: `hasQualityVerdict()` still
+    // offers ⚡ on a Google-only skip (see forceQualityPopoverRender), so this
+    // is a real, reachable state, not a dead one.
+    if ("skipped" in entry) {
+        if (!forcing) return null;
+        return (
+            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
+                ⚡ translating…
+            </div>
+        );
+    }
 
     // Colours come from Discord's own theme tokens rather than a bare opacity:
     // the accessory container already renders muted, so stacking an opacity on
@@ -1493,7 +1586,7 @@ function TranslationAccessory({ message }: { message: Message; }) {
     if ("failed" in entry) {
         return (
             <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-                ⚠ translation failed
+                ⚠ translation failed{forcing ? " · ⚡ translating…" : ""}
             </div>
         );
     }
@@ -1510,7 +1603,7 @@ function TranslationAccessory({ message }: { message: Message; }) {
     if ("deferred" in entry) {
         return (
             <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-                ⏳ translation delayed — retrying
+                ⏳ translation delayed — retrying{forcing ? " · ⚡ translating…" : ""}
             </div>
         );
     }
@@ -1566,6 +1659,17 @@ function TranslationAccessory({ message }: { message: Message; }) {
                 {provenance.glyph} {entry.lang}{unsure ? "?" : ""} ·{" "}
             </span>
             {entry.text}
+            {/*
+              * ALONGSIDE the line above, never instead of it — a forced click
+              * on a message that already carries a Google ≈ line (the common
+              * case: ⚡ exists specifically to upgrade one) must not take that
+              * readable line away while the request is out. Same muted token
+              * as the provenance prefix, so this reads as a continuation of
+              * it rather than a second, competing style.
+              */}
+            {forcing && (
+                <span style={{ color: "var(--text-muted)" }}> · ⚡ translating…</span>
+            )}
         </div>
     );
 }
@@ -1618,12 +1722,22 @@ function forceQualityPopoverRender(message: Message) {
     // decide whether ⚡ is worth clicking right now, and the wording has to
     // stay honest when the answer is "nothing" (cooling down, or the gate is
     // empty).
+    //
+    // Checked FIRST, ahead of the quota description: a request already out
+    // for THIS message (the same inFlightQuality guard forceQualityTranslate
+    // itself checks — automatic or a previous manual click) means a click
+    // right now does nothing at all, which outranks how much quota happens
+    // to be sitting in the gate. Without this a second click on a slow
+    // request was a silent no-op; see TranslationAccessory's own
+    // `⚡ translating…` line for the same state reflected on the message.
     const quota = describeQuotaState(engine);
-    const spendDescription = quota.cooling
-        ? `cooling down, ${formatCountdown(quota.remainingMs)} left`
-        : quota.available > 0
-            ? `spends one of ${quota.available} available now`
-            : "none available right now";
+    const spendDescription = inFlightQuality.has(message.id)
+        ? "already translating…"
+        : quota.cooling
+            ? `cooling down, ${formatCountdown(quota.remainingMs)} left`
+            : quota.available > 0
+                ? `spends one of ${quota.available} available now`
+                : "none available right now";
 
     return {
         label: `Translate with ${label} now (${spendDescription})`,
@@ -1874,6 +1988,12 @@ export default definePlugin({
         // permanently unretryable across a stop/start cycle.
         inFlightFast.clear();
         inFlightQuality.clear();
+        // Same reasoning: a stop() mid-request must not leave a message
+        // stuck showing "⚡ translating…" forever across a stop/start cycle.
+        if (forcedInFlight.size > 0) {
+            forcedInFlight.clear();
+            notifyForcedInFlight();
+        }
         // Toggling the plugin off and on is an explicit user action and a
         // natural retry boundary — the same one a restart provides — so the
         // quality tier's one-attempt-per-message budget resets with it.
