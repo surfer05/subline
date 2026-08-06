@@ -1,4 +1,18 @@
-# One-Click Installer — Design Spec
+# Subline — One-Click Installer Design Spec
+
+**Product name:** **Subline** — *sub* (the line underneath) + *line*. Every
+`<Product>` placeholder below resolves to it.
+
+Chosen after checking seven candidates, all of which were taken. The bar that
+matters is **confusion within our own category**, not global uniqueness:
+trademark protection is class-based, and this is a free, GPL, non-commercial
+project. Rejected for real collisions: **Sotto** (voice-to-text macOS app —
+directly collides with the voice roadmap) and **Translayer** (overlay
+translation while gaming — functionally this product). Subline's collisions are
+a fashion app and fund-finance software; nobody will confuse either with a
+Discord translation plugin. Revisit only if this ever goes commercial.
+
+**Domain:** a `*.vercel.app` subdomain initially; a real domain deferred.
 
 **Status:** draft for review · **Date:** 2026-08-06
 
@@ -295,12 +309,43 @@ Because "restart Discord and see" is what cost this project days.
 
 ---
 
-## 10. Open questions
+## 10. Decisions closed
 
-1. **Product name** — blocks bundle identifier, certificate CN, site domain, and the uninstall entry. Nothing else can be finalised without it.
-2. **Source visibility** — Vencord is GPL-3.0. A distribution built on it inherits that: the source must be published, and anyone may fork it. Charging is still permitted; keeping it proprietary is not. This needs a deliberate decision before the first public release, not after.
-3. **Update channel** — GitHub Releases is the obvious default and is free. Confirm.
-4. **Discord branches** — support Stable only at first, or PTB/Canary too?
+| Question | Answer |
+|---|---|
+| Product name | **Subline**, on a `*.vercel.app` subdomain initially |
+| Source visibility | **Public.** The repo already is, so GPL-3.0's obligations cost nothing |
+| Update channel | **GitHub Releases** — free, works with `electron-updater`, gives signature verification and a download page |
+| Discord branches | **Stable only** for v1. Each extra branch is another install path and patch target to keep working |
+| Windows signing | **Unsigned for now.** EV needs a registered business and ~$500/yr — not justifiable pre-revenue |
+
+### The one thing that can still change the Windows plan
+
+Unsigned raises **antivirus quarantine** risk, not merely the SmartScreen
+warning — an unsigned binary that patches another application *and* installs a
+scheduled task is close to a textbook Defender heuristic.
+
+That distinction decides the platform: *"click More info → Run anyway"* is a
+fine thing to ask a friend, but **"add a Defender exclusion" is not** — that is
+where a non-technical user gives up, or worse, learns to disable protection to
+run software.
+
+**So the Defender result on the old Windows PC is a gating test, not a nice-to-
+have.** Run it before shipping to anyone. If Defender quarantines: either buy an
+OV certificate, or ship macOS first and tell the Windows users honestly that
+theirs is coming. Do not ship something that requires a security exclusion.
+
+## 11. First build
+
+The smallest artifact that proves the riskiest thing:
+
+> A signed, notarized **macOS** installer that patches Discord, installs the
+> helper, and **confirms a translation actually rendered** — not merely that a
+> file was written.
+
+Everything else (Windows, the site, auto-update, the language picker) is
+known-shaped work that can be scheduled. The unknown is entirely in that first
+build, and it is the only thing worth measuring before committing further.
 
 ---
 
