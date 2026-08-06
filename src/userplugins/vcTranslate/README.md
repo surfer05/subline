@@ -83,7 +83,7 @@ server channel translated automatically, Settings → VcTranslate has an
 turn it off and use the 🌐 button to opt individual channels in, the same way
 DMs already work.
 
-**A second, per-message button — ⚡ "Translate with Gemini/Claude now" — forces
+**A second, per-message button — ⚡ "Translate with Gemini/Claude/Groq now" — forces
 one specific message through the quality tier.** It sits next to the 🌐
 toggle in the same hover toolbar, with a different glyph so the two are never
 confused: 🌐 is a per-*channel* setting that spends nothing by itself; ⚡ is a
@@ -124,15 +124,21 @@ message box, so you don't have to guess before spending a scarce request. It
 answers exactly one question: *if you click ⚡ right now, will it actually
 send anything?*
 
-- **`✦ 3`** — the plugin's own gate would let 3 more quality-tier requests
-  through this instant. This is **not** an estimate of Gemini's or Claude's
-  remaining free-tier allowance (the plugin has no way to see that); it is
-  the number of tokens sitting in `rateGate.ts`'s own token bucket, which is
-  deliberately tuned to well under the provider's real ceiling (see "Free-tier
-  rate limiting" below). It is exactly the number `runTier` will check the
-  next time you (or the automatic pipeline) ask for a quality-tier
-  translation — the same read, not a parallel guess that could disagree with
-  it.
+- **`✦ 3`** — three more quality-tier requests would go through this instant.
+  **What that number describes depends on the engine, and the tooltip says
+  which.** For Claude and Gemini it is the plugin's own budget — the tokens
+  sitting in `rateGate.ts`'s token bucket, deliberately tuned to well under
+  the provider's real ceiling (see "Free-tier rate limiting" below) — because
+  those providers tell us nothing about their side and guessing would be
+  dishonest. For **Groq**, which reports `x-ratelimit-remaining-requests` on
+  every response including successful ones, the indicator shows the **smaller
+  of the two real limits**, and says in the tooltip when the provider's own
+  figure is the one doing the work. That fixes a real defect: the indicator
+  used to be able to read `✦ 3` while the provider refused the very next
+  request instantly, because it was only ever showing our side of the
+  arithmetic. A provider reading is discarded once its stated reset window
+  rolls over, or after a minute if none was stated, rather than being shown
+  stale.
 - **`✦ 0:45`** — the engine is cooling down after a 429 (see "When the LLM
   engine is rate limited" below); ⚡ will not send anything for another 45
   seconds, however many tokens happen to be sitting in the gate. Cooldown
@@ -144,12 +150,13 @@ send anything?*
   these cases, and a permanently-zero indicator would be noise rather than
   information.
 
-Hovering it spells out in words what the glyph and number mean, exactly like
-the subtitle's own `title` tooltips. It updates roughly once a second while
-mounted, purely by polling — neither the rate gate nor the cooldown store
-pushes updates, and the read behind it (`rateGateAvailable()`) is a pure
-read that never spends a token or otherwise changes what the gate will do
-next, so watching the indicator cannot itself affect your budget.
+Hovering it spells out in words what the glyph and number mean — including
+whether the number is the plugin's own budget or the provider's own reported
+quota — exactly like the subtitle's own `title` tooltips. It updates roughly
+once a second while mounted, purely by polling — neither the rate gate nor the
+cooldown store pushes updates, and the read behind it (`rateGateAvailable()`)
+is a pure read that never spends a token or otherwise changes what the gate
+will do next, so watching the indicator cannot itself affect your budget.
 
 **Only the channel you are looking at is translated as messages arrive.**
 `globalAuto` decides which channels are *eligible*; the channel currently on
@@ -206,7 +213,7 @@ daily budget:
 
 Every message is translated **twice, by design.** A subtitle marked `≈`
 appears within about a second — Google, translating that one message in
-isolation, no conversation context. If an LLM engine (Claude or Gemini) is
+isolation, no conversation context. If an LLM engine (Claude, Gemini or Groq) is
 configured, that same message is *also* sent to it with a rolling window of
 recent channel context, and when that answer comes back — typically some
 seconds later, up to about 20 — it silently replaces the `≈` line in place
@@ -215,7 +222,7 @@ under you.
 
 | Prefix | Meaning |
 |---|---|
-| `✦ es · …` | Translated by a context-aware LLM engine (Claude or Gemini) — batched, with a rolling window of recent channel messages. This is the final answer for this message |
+| `✦ es · …` | Translated by a context-aware LLM engine (Claude, Gemini or Groq) — batched, with a rolling window of recent channel messages. This is the final answer for this message |
 | `≈ es · …` | Translated by Google alone, each message in isolation, no conversation context. If an LLM is configured, this is a **placeholder that has not been upgraded yet** — wait a few seconds. If Google is the only engine configured, this is the final answer |
 | `≈ ha? · …` | The `?` means Google was **not confident** which language this was. Treat the line as unreliable — see below |
 
@@ -253,7 +260,7 @@ So two defences, both Google-only:
   than hidden — a rough translation you know to distrust beats a blank — with
   the confidence spelled out on hover.
 
-Neither applies to Claude or Gemini: they receive the surrounding conversation,
+Neither applies to the LLM engines: they receive the surrounding conversation,
 which resolves `ne` far better than any language code could. This is one of
 the concrete reasons the quality tier's upgrade is worth waiting the extra
 ~20 seconds for, and one of the things you lose for as long as only the fast
@@ -280,7 +287,7 @@ than the language your client is in.
 Google, always, regardless of what you have configured — this is the **fast
 tier**: a 700ms debounce, up to 10 messages per request, no conversation
 context, and it is what puts a `≈` subtitle on screen in about a second.
-If you have configured an LLM engine (Claude or Gemini), that *same* message
+If you have configured an LLM engine (Claude, Gemini or Groq), that *same* message
 is independently sent to it too — the **quality tier**: a 20-second debounce,
 up to 25 messages per request, with a rolling window of recent channel
 context. When the LLM answers, its result silently replaces the Google line
@@ -330,7 +337,7 @@ the second tier did not exist.
 | Engine | Cost | Quality |
 |---|---|---|
 | Google (fast tier, always on) | Free, no API key | Weaker on slang, mixed languages, and short fragments; each message is translated in isolation, with no conversation context |
-| Claude Haiku (`claude-haiku-4-5`) or Gemini (`gemini-2.5-flash` by default, and configurable) (quality tier, when configured) | Roughly $2-3/month at typical chat volume for Claude; Gemini has a usable free tier | Noticeably better on slang and code-mixed text; batches multiple messages per request and includes a rolling window of recent channel context, so it can disambiguate short or ambiguous lines the way a person following the conversation would |
+| Claude Haiku (`claude-haiku-4-5`), Gemini (`gemini-2.5-flash` by default, configurable) or Groq (`llama-3.3-70b-versatile` by default, configurable) (quality tier, when configured) | Roughly $2-3/month at typical chat volume for Claude; Gemini and Groq both have usable free tiers, and Groq's is by far the largest (see below) | Noticeably better on slang and code-mixed text; batches multiple messages per request and includes a rolling window of recent channel context, so it can disambiguate short or ambiguous lines the way a person following the conversation would |
 
 To use Claude: create a key at console.anthropic.com, switch the
 **"Quality engine"** dropdown to Claude Haiku — the **"Anthropic API
@@ -342,6 +349,69 @@ other Vencord plugin credential, not in your OS keychain.
 To use Gemini: create a key at aistudio.google.com, switch **"Quality
 engine"** to Gemini, and paste it into the **"Gemini API key"** field (also
 hidden until then). The same plaintext-storage caveat applies.
+
+To use Groq: create a key at console.groq.com (free, no credit card), switch
+**"Quality engine"** to Groq, and paste it into the **"Groq API key"** field
+(hidden until then, like the other two). The same plaintext-storage caveat
+applies.
+
+### Groq, and why it is here
+
+**Quota was the problem this engine exists to solve.** Gemini's free tier is
+5-20 requests per rolling minute depending on the model, which the automatic
+pipeline alone can consume essentially all of the time — so the manual ⚡
+button almost never had room, and clicking it produced an instant 429. Groq's
+free tier is **30 requests per minute**, with a daily cap between **1,000 and
+14,400 requests** depending on the model, and needs no credit card. That is an
+order of magnitude more headroom for the same job.
+
+Two other things are different about it, both consequences of it being an
+**OpenAI-compatible** service rather than a bespoke one:
+
+- **It states what is left, on every response, including successful ones.**
+  `x-ratelimit-remaining-requests`, `x-ratelimit-limit-requests` and
+  `x-ratelimit-reset-requests` come back with every 200. Gemini and Claude
+  report nothing at all unless they have already rejected you, which is why
+  the `✦ N` indicator could only ever show the plugin's own guess for them.
+  With Groq the indicator can show the truth (see "A `✦ N` … indicator" under
+  "Use"), and the rate gate re-tunes from the same numbers — but **only ever
+  downwards**. `x-ratelimit-limit-requests` on this provider is the per-*day*
+  figure, so "14,370 left, resets in 3 minutes" divides out to thousands per
+  minute, which says nothing about the per-*minute* ceiling the gate exists to
+  respect; a figure that would loosen the gate is ignored, and only one that
+  says "you are nearly out" is acted on. Unlike a quota learned from a 429,
+  this is not persisted: it describes one rate-limit window, not your key.
+- **A 429 uses the standard `Retry-After` header**, which is parsed directly.
+  Gemini's message-text parsing ("Please retry in 551.874307ms.") is Google's
+  own prose format and is deliberately *not* applied to Groq responses — a
+  coincidental match there would mean a fabricated cooldown, or a fabricated
+  `limit: N` retuning the rate gate from a number nobody stated.
+
+### The Groq model is a setting too, from the first release
+
+A **"Groq model"** field sits next to the key, defaulting to
+**`llama-3.3-70b-versatile`**. It is a setting for exactly the reason the
+Gemini one is (see the next section, which is worth reading even if you never
+use Gemini) — except that here the lesson was applied *before* the engine's
+first request rather than after a week of misdiagnosis. Which models a
+free-tier key may call moves under you on any provider, a model your key has
+no allowance for returns 429 to every request forever, and that is
+indistinguishable from ordinary throttling unless you can change the model
+without a rebuild.
+
+Unlike the Gemini default, this one has **not** been measured against a live
+key — there was no Groq key to hand when it was written. If `✦` upgrades never
+appear at all with a valid Groq key, that is the first thing to change: pick
+another model from console.groq.com's list and paste it in. The change applies
+to the next batch, with no restart.
+
+One deliberate consequence of that: the request sends **no `response_format`
+field**. JSON mode is per-model on OpenAI-compatible services, so asking for it
+on a model that does not support it would be a 400 on *every* request — and
+since the model is a field you can type into, that failure would be one paste
+away. The output schema is asked for in the prompt instead, where it cannot
+400, and the tolerant parser described under "The response shape is not what we
+asked for" handles the answer either way.
 
 ### The Gemini model is a setting, and this matters
 
@@ -388,13 +458,26 @@ be unavailable, and they recover differently:
 | Engine rejected the key (401/403) | Only after restarting Discord — the quality tier is disabled for the rest of the session |
 | Engine is rate limited (429) | Automatically, when the cooldown lapses (see below) |
 | The configured Gemini model has no free-tier allowance (a 429 that names the model) | Never on its own — change the **"Gemini model"** setting (see above). The toast names the model in this case |
+| The configured Groq model has no free-tier allowance | Never on its own — change the **"Groq model"** setting. Groq's 429s do not name a model, so the giveaway is `✦` *never* appearing rather than appearing intermittently |
 
 Each shows one toast, and only one per session — never one per batch.
 
 ### Free-tier rate limiting
 
-Claude and Gemini are both key-gated and both rate-limited on typical
-free/low tiers. Measured directly against the live Gemini API, for the
+All three quality engines are key-gated and rate-limited on typical free/low
+tiers, but not equally:
+
+| Engine | Free-tier request limit |
+|---|---|
+| Gemini (`gemini-2.5-flash`) | **5 per rolling minute**, measured live (see below) |
+| Groq | **30 per minute**, plus a daily cap of 1,000-14,400 depending on model. Not measured here — taken from Groq's published limits |
+| Claude | Not a free tier at all; limited by your account's spend |
+
+Groq's 30/minute is the reason it exists in this plugin: on the Gemini figure
+the automatic pipeline can consume the entire allowance, leaving the manual ⚡
+button with nothing to spend.
+
+Measured directly against the live Gemini API, for the
 default model (`gemini-2.5-flash`): the free-tier limit is **5 requests per
 rolling minute** — nine back-to-back requests succeeded, the tenth came back
 429 with `limit: 5` stated in the body. (An earlier measurement of 20/minute,
@@ -429,14 +512,18 @@ live conversation and channel opens" above). The channel-hopping burst is
 what the client-side token-bucket gate below still exists for.
 
 A small client-side token-bucket gate (`rateGate.ts`) sits in front of every
-Claude/Gemini request. A single live conversation's quality tier never needs
+quality-tier (Claude/Gemini/Groq) request. A single live conversation's quality tier never needs
 more than one token at a time, so **normal chat is never throttled** by this
 gate at all — it is the channel-hopping burst above that it smooths out,
 spacing 10 clumped requests into the steady rate instead of firing them all at
 once and getting several back as 429s.
 
 **The gate re-tunes itself from the API's own reported limit, and remembers
-it.** A Gemini 429 body states the quota it just enforced — literally
+it.** (Groq additionally re-tunes it *downwards* from the remaining count on
+every successful response, without waiting for a 429 — see "Groq, and why it
+is here" above. That reading is not remembered, because it describes one
+window rather than your key.) A Gemini 429 body states the quota it just
+enforced — literally
 `limit: 5` in the middle of the error message for the default model — and
 when it does, the gate throws away its starting guess and aims at **half**
 the real number: 5/minute becomes 2/minute (one request every 30 seconds),
@@ -509,7 +596,7 @@ before the quality tier was even asked. There is nothing to fall back to and
 nothing to retry: the fallback already ran, before the LLM engine was ever
 touched.
 
-Concretely, on a 429 from Claude or Gemini:
+Concretely, on a 429 from Claude, Gemini or Groq:
 
 1. That engine is put in a **cooldown** for exactly as long as the API asked
    for. The real captured Gemini 429 says "Please retry in 551.874307ms." in
@@ -819,9 +906,10 @@ Google's free, unofficial translation endpoint
 (`translate.googleapis.com`) — always, whatever engine is selected, because
 that is the fast tier — and no data-processing agreement exists for that
 endpoint. If you have also configured an LLM engine, that *same* message
-text is sent, independently, to Anthropic's API (`api.anthropic.com`) or to
-Google's Gemini API (`generativelanguage.googleapis.com`), whichever you
-selected. Selecting an engine adds a second recipient; it does not replace
+text is sent, independently, to Anthropic's API (`api.anthropic.com`), to
+Google's Gemini API (`generativelanguage.googleapis.com`), or to Groq
+(`api.groq.com`), whichever you selected. Selecting an engine adds a second
+recipient; it does not replace
 the first. This includes the text of other people's messages in the channel,
 not just your own, since the whole point of the plugin is translating
 incoming messages. If you're running this in a channel with people who
@@ -846,7 +934,7 @@ per-channel toggles).
 
 **The `debugLogging` setting (off by default) prints message text to your own
 local console.** Nothing about it changes what leaves your machine or where —
-Google/Claude/Gemini already receive the same text either way, described
+Google/Claude/Gemini/Groq already receive the same text either way, described
 above — it only controls whether that text (and the plugin's decision about
 it) is *also* printed to the Discord developer console for you to read. See
 "Diagnosing a specific message" under Troubleshooting for what it shows.
@@ -897,9 +985,10 @@ reports a *smaller* pass count that still looks like success.
 `vitest` is not saved as a dependency; in a fresh clone run `npm i -D vitest`
 first.
 
-478 tests across 15 suites (`batcher`, `claude`, `detectLang`, `gemini`,
-`google`, `index`, `llmShared`, `native`, `rateGate`, `rateHint`, `retry`,
-`romanized`, `skip`, `store`, `upgrade` — see `tests/`). `tests/fixtures/`
+660 tests across 21 suites (`batcher`, `beaconWiring`, `buildStamp`, `claude`,
+`detectLang`, `gemini`, `google`, `groq`, `index`, `llmShared`, `native`,
+`rateGate`, `rateHint`, `retry`, `romanized`, `skip`, `statusBeacon`,
+`statusFile`, `statusShape`, `store`, `upgrade` — see `tests/`). `tests/fixtures/`
 holds shared non-test data, notably the verbatim bytes of a real Gemini 429
 captured against the live API (which `rateHint.test.ts` and `gemini.test.ts`
 both assert against so they cannot drift apart from each other or from
@@ -907,7 +996,7 @@ reality) and the verbatim text of a real *successful* Gemini response — fenced
 a bare array, numeric ids — which `llmShared.test.ts` and `gemini.test.ts`
 share for the same reason.
 
-Fourteen of the fifteen target pure-logic modules with no Discord/Vencord
+Twenty of the twenty-one target pure-logic modules with no Discord/Vencord
 runtime dependency (`store.test.ts` is pure logic plus the `DataStore` stub,
 which its persistence cases drive directly; `upgrade.test.ts` and
 `romanized.test.ts` are the two-tier and script-mismatch modules, also pure
@@ -989,6 +1078,10 @@ of results.
 | 40 | **Model setting, the fix it exists for:** set "Gemini model" to `gemini-3.6-flash`, post a foreign message, and watch | A `≈` line still appears. One toast quotes `gemini-3.6-flash`, says it may have no free-tier availability, and points at the settings — *not* the generic "rate limited" wording. No `✦` arrives | ☐ |
 | 41 | **Model setting, recovery without a restart:** with row 40's toast on screen, set the model back to `gemini-2.5-flash` and post another message | The next quality batch uses the new model and the message upgrades to `✦`, with no Discord restart and no reinstall | ☐ |
 | 42 | **Model setting, blank:** clear the "Gemini model" field entirely, then post a message | Translation still works — a blank field means the default, and must never send an empty model (which would be a 400 on every request) | ☐ |
+| 43 | **Groq, first run:** create a free key at console.groq.com, set "Quality engine" to Groq, paste the key, post a foreign message | The "Groq API key" and "Groq model" fields appear only once Groq is selected, the model field pre-filled with `llama-3.3-70b-versatile`. A `≈` line appears within ~1s and upgrades to `✦` within ~20s. **This is the row nothing here could verify — there was no Groq key on the machine when this was written, so the default model and the live response shape are both unmeasured** | ☐ |
+| 44 | **Groq, model setting:** set "Groq model" to something that does not exist (`llama-nonsense-1b`) and post a message | The `≈` line stands and no `✦` arrives. Setting it back to the default makes the next batch work again, with no restart and no rebuild — that is the entire reason it is a setting | ☐ |
+| 45 | **Groq, the indicator tells the truth:** with Groq configured, watch the `✦ N` indicator and hover it | The number reflects Groq's own reported remaining quota whenever that is the tighter of the two limits, and the tooltip says so in those words. It must never show a comfortable number while ⚡ produces an instant 429 — that is the defect this replaces | ☐ |
+| 46 | **Groq, headroom:** run a normal session and watch console.groq.com's usage | Comfortably under 30 requests/minute, and the ⚡ button has room to spend when you click it — which was the whole point of adding this engine | ☐ |
 
 If you'd rather work from the brief's original phrasing, items 1-3 and 5-6
 above correspond to the brief's manual checklist 1-8 (minus a redundant
