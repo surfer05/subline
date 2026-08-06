@@ -18,6 +18,10 @@ import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
 import {
+    recordError, recordPluginLoaded, recordRendered, recordTranslation, resetStatusBeacon
+} from "./statusBeacon";
+import type { BeaconErrorCode } from "./statusShape";
+import {
     getTranslation, invalidateMessage, loadPersistedTranslations, makeKey,
     setTranslation, subscribe, type StoredTranslation
 } from "./store";
@@ -515,7 +519,16 @@ function writeResult(key: string, value: StoredTranslation): void {
                   + `${describeStoredForLog(existing)} — ${refuseReasonForLog(existing, value)}`
         );
     }
-    if (allowed) setTranslation(key, value);
+    if (allowed) {
+        setTranslation(key, value);
+        // The beacon counts translations that were actually ACCEPTED into the
+        // store the subtitle reads from — not results received, and not markers.
+        // A refused write produced nothing the reader will ever see, and
+        // counting it would let a dead install (every LLM result refused, or
+        // every batch a failure marker) still report translations. See
+        // statusBeacon.ts. Never the text, never the id: only which tier.
+        if (isRealTranslation(value)) recordTranslation(value.via);
+    }
 }
 
 /**
@@ -574,6 +587,23 @@ function hasQualityVerdict(key: string): boolean {
     if (isRealTranslation(e)) return ENGINE_RANK[e.via] >= 1;
     if ("skipped" in e) return e.via !== undefined && ENGINE_RANK[e.via] >= 1;
     return false;   // failed / deferred — still worth a forced attempt
+}
+
+/**
+ * Reduce a failed batch to one of the beacon's four error codes.
+ *
+ * A REDUCTION, not a summary: `res.error` is remote text (it has already been
+ * observed carrying a model name, and nothing structurally stops a future
+ * engine putting worse in it), so none of it reaches the beacon. The codes are
+ * chosen to separate the failures that mean materially different things to
+ * someone reading the diagnostics — a wrong key, an exhausted quota, and a
+ * native half that never answered all need different advice.
+ */
+function beaconErrorCode(res: { error: string } | null): BeaconErrorCode {
+    if (res === null) return "ipc-failed";
+    if (/\bHTTP 429\b/.test(res.error)) return "rate-limited";
+    if (/\bHTTP 40[13]\b/.test(res.error)) return "auth-rejected";
+    return "engine-error";
 }
 
 /**
@@ -743,6 +773,13 @@ async function runTier(
                     + (res === null ? "IPC call rejected" : res.error)
                 );
             }
+            // Tell the beacon THAT something failed and roughly what class of
+            // thing it was — never the engine's message, which is remote text
+            // (see BEACON_ERROR_CODES). This is what lets the installer report
+            // "loaded, but erroring" instead of the indistinguishable "loaded,
+            // nothing to translate yet".
+            recordError(beaconErrorCode(res));
+
             if (res !== null) {
                 // Park the engine for as long as the API asked for. Still the
                 // whole point of the cooldown: retrying into a wall that just
@@ -1512,6 +1549,17 @@ function TranslationAccessory({ message }: { message: Message; }) {
               + `${Math.round(entry.conf! * 100)}% confidently — short messages are `
               + "often misread, so this may be wrong.";
 
+    // SPEC §7 STEP 4, and the only thing this project accepts as proof the
+    // install works: a translation reached the screen. Everything else the
+    // installer can see — the patch, the load, even a translation sitting in
+    // the store — is also true of the install described in spec §6, where a
+    // Discord frontend change leaves the mod loading and rendering nothing.
+    //
+    // A timestamp assignment and nothing else, which is what makes it safe in a
+    // render body: no React state, no counter, so a StrictMode double render or
+    // a concurrent re-render produces exactly the same beacon as one render.
+    recordRendered();
+
     return (
         <div style={{ fontSize: "0.95rem", color: TEXT_COLOUR, fontStyle: "italic" }}>
             <span style={{ color: "var(--text-muted)" }} title={title}>
@@ -1741,6 +1789,15 @@ export default definePlugin({
             () => <span style={{ fontSize: "1rem" }}>⚡</span>
         );
 
+        // FIRST, before anything that can be slow or can fail. This is the
+        // installer's "the mod loaded" signal (spec §7 step 3) and it is the
+        // one thing that distinguishes a patched-but-inert Discord — spec §3b's
+        // BetterDiscord install, where our patch verifies byte-perfect and none
+        // of this code ever runs — from a live one. Recording it after the
+        // awaits below would make a slow IndexedDB read look like a dead
+        // install, and a failing one look like it forever.
+        recordPluginLoaded();
+
         await loadEnabledChannels();
         // AWAITED, unlike the translation cache below: this decides whether the
         // very first batch of the session is even allowed to touch the LLM
@@ -1850,5 +1907,11 @@ export default definePlugin({
         // is persisted and start() reads it back, so the next session does not
         // reopen the gate at the untaught defaults and buy a fresh 429.
         resetRateGate();
+        // Drops the session AND any armed coalescing timer, so a stopped plugin
+        // cannot write a beacon afterwards. That matters for more than
+        // tidiness: the beacon's `loadedAt` is what the installer compares
+        // against its own launch time, so a write from a stopped plugin would
+        // be vouching for a session that no longer exists.
+        resetStatusBeacon();
     }
 });

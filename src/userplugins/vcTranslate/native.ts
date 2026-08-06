@@ -4,6 +4,7 @@ import { translateWithClaude, TRUNCATED_ERROR } from "./engines/claude";
 import { translateWithGemini } from "./engines/gemini";
 import { translateWithGoogle } from "./engines/google";
 import { withRetry } from "./retry";
+import { writeStatusBeacon } from "./statusFile";
 import type { BatchRequest, EngineId, Result } from "./types";
 
 export type NativeResponse =
@@ -165,4 +166,26 @@ export async function translateBatch(
             quotaModel
         };
     }
+}
+
+/**
+ * Write the status beacon (see statusFile.ts / statusShape.ts).
+ *
+ * Here, and not in a module of its own, because THE RENDERER CANNOT WRITE
+ * FILES and this file is already the plugin's answer to that: Vencord exposes
+ * every export of `native.ts` on `VencordNative.pluginHelpers.VcTranslate`, so
+ * `translateBatch` and this share one mechanism, one lifetime and one
+ * permission story. A second channel (a preload, a stray ipcMain.handle) would
+ * be a second thing to keep working across Vencord updates for no gain.
+ *
+ * `json` is a serialised beacon and is treated as untrusted: `writeStatusBeacon`
+ * rebuilds it from whitelisted, type-checked fields before anything reaches
+ * disk. That is deliberate — it is what makes spec §7's "never message text"
+ * a property of the writer rather than a promise made by the caller.
+ *
+ * Returns whether the write landed, and never throws: a beacon is diagnostics,
+ * and diagnostics must not become a new way for translation to fail.
+ */
+export async function reportStatus(_: IpcMainInvokeEvent, json: string): Promise<boolean> {
+    return writeStatusBeacon(json);
 }
