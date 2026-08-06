@@ -77,6 +77,30 @@ If you'd rather not manage this per channel, Settings → VcTranslate has a
 **"Auto-translate every channel"** (`globalAuto`) toggle that turns
 translation on everywhere at once, overriding the per-channel list.
 
+**A second, per-message button — ⚡ "Translate with Gemini/Claude now" — forces
+one specific message through the quality tier.** It sits next to the 🌐
+toggle in the same hover toolbar, with a different glyph so the two are never
+confused: 🌐 is a per-*channel* setting that spends nothing by itself; ⚡ is a
+one-shot, per-*message* spend, and its label says so. It exists for the
+messages the automatic paths deliberately leave on `≈` — a message you scrolled
+back to (scroll-back is fast-tier only, see "Engines" below), or one whose
+one automatic quality attempt already failed and will not be retried
+automatically this session (see "at most one request per message, per
+session", also below). Clicking it asks the configured LLM for that one
+message by name, on the spot: it skips the scroll-back rule and the
+once-per-session ledger, because you naming a specific message outranks both.
+It does **not** skip the rate limit or an active cooldown — if the engine is
+currently rate limited, the click spends nothing and you get the same
+cooldown feedback as everyone else (see "Free-tier rate limiting" below),
+rather than a silent no-op that quietly burns a request you can't get back.
+The existing `≈` line stays on screen until the `✦` reply lands, exactly like
+an automatic upgrade.
+
+Only shown when it could actually do something: engine = Google has no
+quality tier to force a message into at all, and a message that already
+carries an LLM verdict (a `✦` translation, or a skip the LLM itself
+confirmed) has nothing left for another request to improve on.
+
 **Only the channel you are looking at is translated as messages arrive.**
 `globalAuto` decides which channels are *eligible*; the channel currently on
 screen is the one that actually gets spent on. A message that arrives in
@@ -299,18 +323,28 @@ Each shows one toast, and only one per session — never one per batch.
 ### Free-tier rate limiting
 
 Claude and Gemini are both key-gated and both rate-limited on typical
-free/low tiers. Measured directly against the live Gemini API: the free-tier
-limit is **20 requests per rolling minute** (not a daily cap — three separate
-probes each returned a sub-minute retry hint). Google is per-message with its
-own concurrency cap on the fast tier and is not affected by any of this.
+free/low tiers. Measured directly against the live Gemini API, for the
+default model (`gemini-2.5-flash`): the free-tier limit is **5 requests per
+rolling minute** — nine back-to-back requests succeeded, the tenth came back
+429 with `limit: 5` stated in the body. (An earlier measurement of 20/minute,
+which older notes in this file used to cite, was taken against a different
+model and does not apply to the current default — see "The Gemini model is a
+setting, and this matters" above for why that number moves under you at all.)
+Google is per-message with its own concurrency cap on the fast tier and is
+not affected by any of this.
 
 The quality tier's 20-second debounce and 25-message batch cap (see "Engines"
-above) are sized directly against that number: a single busy channel (60
-messages/minute of chat) flushes the quality tier at roughly **2-3 requests a
-minute — an order of magnitude under the 20/minute ceiling.** (An earlier
+above) are sized against the *previous* 20/minute figure: a single busy
+channel (60 messages/minute of chat) flushes the quality tier at roughly
+**2-3 requests a minute**, which was an order of magnitude under the old
+20/minute ceiling. Against the now-measured 5/minute ceiling for the default
+model that is a much thinner margin — comfortably under it, but no longer by
+an order of magnitude — and the debounce/batch sizing has not been re-tuned
+for it (that is left as follow-up work; see "Known limitations"). (An earlier
 version of this plugin used a fixed 3-second window, which meant a
 continuously active channel flushed every 3 seconds — 20 requests/minute,
-exactly on the ceiling, which is where most of the 429s came from.)
+exactly on the *old* ceiling and four times over the now-measured 5/minute
+one, which is where most of the 429s came from.)
 
 Two things the debounce window does *not* smooth out. The first is opening
 many channels in a row: catch-up gives each channel its own queue and its own
@@ -332,14 +366,16 @@ once and getting several back as 429s.
 
 **The gate re-tunes itself from the API's own reported limit, and remembers
 it.** A Gemini 429 body states the quota it just enforced — literally
-`limit: 20` in the middle of the error message — and when it does, the gate
-throws away its starting guess and aims at **half** the real number: 20/minute
-becomes 10/minute (one request every 6 seconds), and a project limited to
-4/minute becomes 2/minute (one every 30 seconds). This is deliberately adaptive
-rather than a compiled-in constant: free-tier quotas differ per project, per
-model, and get changed by the provider without notice, so any number hardcoded
-here is guaranteed to be wrong for someone — and being wrong in the generous
-direction is exactly what produced the 429 storm.
+`limit: 5` in the middle of the error message for the default model — and
+when it does, the gate throws away its starting guess and aims at **half**
+the real number: 5/minute becomes 2/minute (one request every 30 seconds),
+20/minute (an older model) becomes 10/minute (one every 6 seconds), and a
+project limited to 4/minute becomes 2/minute (one every 30 seconds). This is
+deliberately adaptive rather than a compiled-in constant: free-tier quotas
+differ per project, per model, and get changed by the provider without
+notice, so any number hardcoded here is guaranteed to be wrong for someone —
+and being wrong in the generous direction is exactly what produced the 429
+storm.
 
 **The learned quota is persisted** (in Vencord's DataStore, alongside the
 cooldown mark) and re-read before the first quality-tier batch of the next
@@ -351,30 +387,48 @@ the project, not about a plugin session, so a restart (or toggling the plugin
 off and on) is not a reason to forget it. A corrupt or missing entry simply
 falls back to the starting guess.
 
-**A first-ever run starts deliberately slow.** Before anything has been
-learned, the gate allows a burst of **3** requests and refills 1 every **15
-seconds**. Worst case inside a single rolling minute is therefore the sustained
-rate plus a full burst — 4 + 3 = **7 requests, about a third of the measured
-20/minute ceiling** — and comfortably under free tiers we have never measured
-either. (The previous starting guess was a burst of 5 refilling every 4
-seconds: 15 + 5 = 20, the measured ceiling *exactly*, on an install that had
-been told nothing at all.) The timidity costs nothing a reader notices: a busy
-channel only needs ~2-3 quality requests a minute, which is under the sustained
-rate of 4, so ordinary chat still never waits. The only thing it slows is the
-first channel-hopping burst, once, before the first 429 — and what it delays
-there is a `✦` upgrade of a line Google has already put on screen.
+**A first-ever run starts deliberately slow — though not slow enough for the
+now-measured ceiling.** Before anything has been learned, the gate allows a
+burst of **3** requests and refills 1 every **15 seconds**. Worst case inside
+a single rolling minute is therefore the sustained rate plus a full burst — 4
++ 3 = **7 requests**. Against the 20/minute figure this was originally sized
+for, that was about a third of the ceiling; against the now-measured
+5-requests-per-minute ceiling for the default model, 7 is *over* it, not
+under. These starting-guess constants (`BURST_CAPACITY`/`REFILL_MS` in
+`rateGate.ts`) have not been re-tuned for the corrected number — that is left
+as follow-up work (see "Known limitations"). What already closes most of the
+gap automatically is the self-tuning retune described above: the first 429 a
+fresh install receives states the real `limit: 5`, and the gate immediately
+retunes to a sustained rate that respects it, typically within the very first
+burst. (The previous starting guess, before this one, was a burst of 5
+refilling every 4 seconds: 15 + 5 = 20 — the *old* measured ceiling exactly,
+on an install that had been told nothing at all — which is the mistake this
+plugin's history keeps re-learning at a smaller and smaller scale as the
+measured ceiling itself keeps coming down.) The timidity still costs nothing a
+reader notices once retuned: a busy channel needs only ~2-3 quality requests a
+minute, and the only thing the untaught defaults slow is the first
+channel-hopping burst on a brand-new install, once, before the first 429 — and
+what they delay there is a `✦` upgrade of a line Google has already put on
+screen, not a lost message.
 
 **Why half and not three-quarters** (this was 75%, and 75% was wrong). The
 provider counts a *rolling* 60-second window; the gate is a token bucket. The
 most a bucket can put into any one such window is its sustained rate **plus a
-full burst released at the window's start** — not the sustained rate alone. At
-75% of a reported 20/minute that is 15/minute sustained, and 15 plus a burst of
-any size at all is **at or over the ceiling**, leaving nothing for requests
-still in flight, for another client on the same key, or for the provider's
-window boundary not lining up with ours. At 50% it is 10 + 3 = 13 against the
-same ceiling, better than a third of the quota held in reserve. The throughput
-given up costs nothing here: the quality tier flushes at most one batch per
-channel per 20 seconds, so a live conversation still never reaches the gate.
+full burst released at the window's start** — not the sustained rate alone.
+Against the now-measured 5/minute ceiling: at 75% that is `floor(5 × 0.75) =
+3`/minute sustained, and 3 plus a burst of up to 3 more is 6 — **over the
+ceiling**, leaving nothing for requests still in flight, for another client on
+the same key, or for the provider's window boundary not lining up with ours.
+At 50% it is `floor(5 × 0.5) = 2`/minute sustained, burst capped to match, so
+2 + 2 = 4 against the same ceiling — one request held in reserve. That margin
+is thinner than this reasoning was originally written against (a 20/minute
+ceiling left 7 in reserve at 50%, "better than a third of the quota"), but the
+conclusion is the same and, at a smaller ceiling, matters more, not less: 75%
+tips over, 50% does not. The throughput given up costs little here: the
+quality tier flushes at most one batch per channel per 20 seconds, so a live
+conversation on its own still never reaches the gate — it is specifically the
+channel-hopping burst (above) that now has only one request of headroom
+instead of several.
 
 ### When the LLM engine is rate limited, nothing happens — and that is the point
 
@@ -449,12 +503,15 @@ which is a good trade for a subtitle appearing in about a second.
 
 The quality tier exists to make that something *right*, without spending the
 free-tier budget doing it: **the configured LLM, 20-second debounce, up to 25
-messages per request.** Sized directly against the measured 20 requests/minute
-ceiling above — a busy channel flushes the quality tier at roughly 2-3
-requests a minute, an order of magnitude under it. (An earlier, single-tier
-version of this plugin used a 3-second debounce for the LLM engine directly,
-which sat exactly on the ceiling and produced the 429 storm this two-tier
-design exists to fix.)
+messages per request.** Sized against the 20-requests/minute figure this
+project measured for an earlier model — a busy channel flushes the quality
+tier at roughly 2-3 requests a minute, which was an order of magnitude under
+that ceiling. Against the now-measured 5/minute ceiling for the current
+default model it is a comfortable margin still, just not an order-of-magnitude
+one (see "Free-tier rate limiting" above for the corrected numbers and what
+they change). (An earlier, single-tier version of this plugin used a 3-second
+debounce for the LLM engine directly, which sat exactly on the old ceiling and
+produced the 429 storm this two-tier design exists to fix.)
 
 The reader never waits on the quality tier's window — the fast tier already
 gave them a line. The 20 seconds only decide how long that line stays
@@ -681,16 +738,27 @@ per-channel toggles).
   app only (it uses `pnpm inject`'s desktop patch target and Node-side IPC for
   the network calls; there is no browser-userscript equivalent of the native
   bridge).
-- `index.tsx` is currently ~1,270 lines, against this project's own 200-line
+- `index.tsx` is currently ~1,580 lines, against this project's own 200-line
   per-file convention. It grew past that budget across several correctness
   fixes (catch-up de-duplication, cold-channel handling, session fallback,
   edit re-translation), again with the budget work (focused-channel gating,
-  batch sizing, cache loading), and again with the two-tier rework (a second
-  batcher, per-tier in-flight tracking, the upgrade-only write path), where
-  splitting mid-change would have made the diffs harder to review than the
-  size overrun was worth. Splitting it — likely into the Flux handlers/catch-up
-  logic, the popover button, and the accessory component — is planned as a
-  follow-up task, not done here.
+  batch sizing, cache loading), again with the two-tier rework (a second
+  batcher, per-tier in-flight tracking, the upgrade-only write path), and
+  again with the force-quality popover action (a second popover registration,
+  its own click handler), where splitting mid-change would have made the
+  diffs harder to review than the size overrun was worth. Splitting it —
+  likely into the Flux handlers/catch-up logic, the two popover buttons, and
+  the accessory component — is planned as a follow-up task, not done here.
+- The rate gate's untaught starting guess (`BURST_CAPACITY`/`REFILL_MS` in
+  `rateGate.ts`) was sized against the 20-requests/minute figure this project
+  originally measured, against an earlier model. The default model's real
+  ceiling, now measured at 5/minute, is *tighter* than that guess allows for
+  on a brand-new install's first burst — see "A first-ever run starts
+  deliberately slow" under "Free-tier rate limiting". The gate's self-tuning
+  (also described there) closes most of the gap automatically, typically
+  within the first 429, but the compiled-in starting numbers themselves have
+  not been revisited for the corrected ceiling. Re-deriving them is follow-up
+  work, not done here.
 
 ## Tests
 
@@ -707,7 +775,7 @@ reports a *smaller* pass count that still looks like success.
 `vitest` is not saved as a dependency; in a fresh clone run `npm i -D vitest`
 first.
 
-398 tests across 15 suites (`batcher`, `claude`, `detectLang`, `gemini`,
+408 tests across 15 suites (`batcher`, `claude`, `detectLang`, `gemini`,
 `google`, `index`, `llmShared`, `native`, `rateGate`, `rateHint`, `retry`,
 `romanized`, `skip`, `store`, `upgrade` — see `tests/`). `tests/fixtures/`
 holds shared non-test data, notably the verbatim bytes of a real Gemini 429
@@ -722,9 +790,10 @@ runtime dependency (`store.test.ts` is pure logic plus the `DataStore` stub,
 which its persistence cases drive directly; `upgrade.test.ts` and
 `romanized.test.ts` are the two-tier and script-mismatch modules, also pure
 logic). `index.test.ts` covers `index.tsx` — the Flux wiring, the
-catch-up logic and the subtitle accessory — against the small set of Vencord
-stand-ins in `tests/stubs/` (`FluxDispatcher`, `MessageStore`, `UserStore`,
-`ChannelStore`, `Toasts`, `LocaleStore`, `DataStore`, the settings API, and
+catch-up logic, the subtitle accessory, and both popover buttons (including
+the force-quality action) — against the small set of Vencord stand-ins in
+`tests/stubs/` (`FluxDispatcher`, `MessageStore`, `UserStore`, `ChannelStore`,
+`Toasts`, `LocaleStore`, `DataStore`, `MessagePopover`, the settings API, and
 just enough of `React` to call a function component and inspect what it
 returned). `vitest.config.ts` aliases the `@api/*`, `@utils/*` and
 `@webpack/common` specifiers onto those stubs. What remains uncovered is the
@@ -758,6 +827,9 @@ of results.
 | 9 | Re-select a channel roughly 3s into a pending translation | No second request is sent (check Anthropic usage dashboard or the native-side log) | ☐ |
 | 10 | Let a message fail (e.g. during a network blip), then reopen its channel | It retries on the next channel open and stops showing ⚠ once it succeeds | ☐ |
 | 11 | Open the 🌐 popover item on a message; toggle a channel off | Popover renders correctly; toggling off hides subtitles for that channel | ☐ |
+| 11b | **Force-quality:** with Claude/Gemini configured, scroll back to an older `≈`-only message and click the ⚡ "Translate with \<engine\> now" popover item | A quality-tier request goes out for that one message right away, and the `≈` line upgrades to `✦` in place, without waiting for the normal 20s debounce or any channel reopen | ☐ |
+| 11c | **Force-quality, hidden cases:** with engine = Google, or on a message already showing `✦` | The ⚡ button does not appear in either case | ☐ |
+| 11d | **Force-quality, cooldown:** trigger a rate-limit cooldown (row 34), then click ⚡ on a different `≈` message while it is active | No new request goes out (check the provider dashboard); the existing rate-limit toast/behavior stands, nothing appears to silently fail | ☐ |
 | 12 | Simulate a persistence failure if you can (e.g. revoke write access to Vencord's settings/data directory) | A failure toast appears and the toggle does not stick | ☐ |
 | 13 | Switch engine Google → Claude mid-session | New messages get a `≈` line from the fast tier and, up to ~20s later, a `✦` line from Claude. Messages already cached under Google keep their `≈` result until you next reopen that channel — reopening lets catch-up offer them to Claude too, same as row 1b | ☐ |
 | 14 | Paste a valid API key mid-session while engine is set to Claude | Translations start working without a restart (this was a Critical bug in an earlier round — confirm it stays fixed) | ☐ |
@@ -781,7 +853,7 @@ of results.
 | 32 | **Two-tier, upgrade:** keep watching that same message for ~30s | It changes to `✦` with a better translation | ☐ |
 | 33 | **Two-tier, backlog:** open a channel with a long untranslated backlog | `≈` lines appear immediately, `✦` follows in batches | ☐ |
 | 34 | **Two-tier, quota exhausted:** exhaust the Gemini quota, then post a message | `≈` still appears; no `⚠`, no `⏳`, no toast storm | ☐ |
-| 35 | **Two-tier, quota headroom:** watch the AI Studio rate-limit dashboard for 10 min of normal use | Well under 20 requests/min | ☐ |
+| 35 | **Two-tier, quota headroom:** watch the AI Studio rate-limit dashboard for 10 min of normal use | Under 5 requests/min (the measured free-tier ceiling for `gemini-2.5-flash` — see "Free-tier rate limiting") | ☐ |
 | 36 | **Romanized text:** post romanized Darija: `ana bghit nmchi l dar` | Either no ≈ line, or one marked `ar?`; the ✦ line that follows says "I want to go home" (NOT "don't want") | ☐ |
 | 37 | **Romanized text, pass-through:** post `baraka 3lik mn dak monster` | Google returns it unchanged so there may be no ≈ line at all — but a ✦ line still arrives and mentions the drink | ☐ |
 | 38 | **Romanized text, DM prerequisite:** before rows 36-37, confirm the DM is enabled with the 🌐 button first | Rows 36-37 do nothing in a DM that was never enabled; `globalAuto` never covers DMs | ☐ |
