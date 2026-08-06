@@ -73,6 +73,15 @@ describe("inspectModBundle", () => {
         expect(message).toContain(BUILD_ID);
     });
 
+    it("refuses a bundle whose stamp merely SHARES A PREFIX with the manifest's id", () => {
+        // Two builds one commit apart can share leading hex by chance, and a
+        // digest compared loosely is not an identity at all — it would accept
+        // the neighbouring build it exists to tell apart. Found by mutation:
+        // comparing only the first two characters passed every other test here.
+        bundle = makeModBundleFixture({ buildId: "1f2e3d4c5b6a7980", stampedBuildId: "1f2e3d4c00000000" });
+        expect(refuses(bundle.dir)).toContain("1f2e3d4c5b6a7980");
+    });
+
     it("accepts the same bundle once the stamp and the manifest agree", () => {
         // The mirror of the case above, so that "refused" is attributable to the
         // disagreement and not to something else the fixture happens to do.
@@ -101,6 +110,24 @@ describe("inspectModBundle", () => {
         writeFileSync(join(bundle.dir, name), "");
         bundle.restamp();
         expect(refuses(bundle.dir)).toContain("too small to be a real build artefact");
+    });
+
+    it("names the byte counts when an artefact arrives short, rather than just 'wrong digest'", () => {
+        // A partially downloaded renderer.js is well over the minimum size, so
+        // only the manifest can catch it — and "702 KB became 66 KB" is a
+        // diagnosis someone can act on, where "the digest does not match" is
+        // indistinguishable from corruption. The size check earns its place by
+        // what it SAYS, so that is what is asserted.
+        bundle = makeModBundleFixture({ buildId: BUILD_ID });
+        const path = join(bundle.dir, STAMPED_ENTRY_NAME);
+        const full = readFileSync(path);
+        const truncated = 66_000;
+        expect(full.length).toBeGreaterThan(truncated);
+        // Written AFTER the manifest, so the manifest still records the full size.
+        writeFileSync(path, full.subarray(0, truncated));
+
+        const message = refuses(bundle.dir);
+        expect(message).toContain(`is ${truncated} bytes but the manifest records ${full.length}`);
     });
 
     it("refuses an artefact that was swapped for something else of the same length", () => {
@@ -138,7 +165,21 @@ describe("inspectModBundle", () => {
         // The marker's build id decides whether a running plugin counts as ours.
         // A value that is not a hex digest can match nothing, so accepting one
         // would guarantee every verification reads as foreign.
-        for (const buildId of ["", "unknown", "*", "1F2E3D4C5B6A7980", "1f2e3d4", 7, null]) {
+        for (const buildId of [
+            "",
+            "unknown",
+            "*",
+            "1F2E3D4C5B6A7980",
+            "1f2e3d4",
+            // Anchoring matters, not merely the alphabet: an id with a valid
+            // digest buried in it would be recorded verbatim into the marker and
+            // then compared, whole, against a beacon that can never carry it.
+            "build 1f2e3d4c5b6a7980",
+            "1f2e3d4c5b6a7980 (dev)",
+            "1f2e3d4c5b6a7980\n",
+            7,
+            null
+        ]) {
             bundle?.cleanup();
             bundle = makeModBundleFixture({ buildId: BUILD_ID });
             editManifest(bundle.dir, raw => { raw.buildId = buildId; });
