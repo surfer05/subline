@@ -27,6 +27,39 @@ export function stripMarkup(text: string, replacement: string): string {
 }
 
 /**
+ * Collapse a run of 3-OR-MORE identical letters down to exactly one:
+ * "yesssss" -> "yes", "waiiiiiit" -> "wait", "helloooooo" -> "hello".
+ *
+ * A run of exactly two is left alone on purpose — "hello"'s "ll" and
+ * "morning"'s none survive untouched — because English (and most of the other
+ * languages this plugin sees) doubles letters constantly in ordinary spelling
+ * (hello, better, all, will) but essentially never triples one, so 3+ is the
+ * threshold that catches chat elongation ("yesssss", "shhhh") without ever
+ * mangling a real word. Checked against a foreign word too: "ceeeee"
+ * (Romanian) collapses to "ce", which is not an English word either — the
+ * collapse on its own cannot manufacture a false match, only being ALSO added
+ * to an evidence list can (see CHAT_SHORTHAND and detectLang.ts's
+ * ENGLISH_WORDS), which is why entries are added there individually and
+ * deliberately rather than as a side effect of this function existing.
+ *
+ * Exported (rather than kept private, like every other pattern here except
+ * stripMarkup) because detectLang.ts's tokenizer has to apply the exact same
+ * collapse before comparing a token against ENGLISH_WORDS/FOREIGN_WORDS — a
+ * second private copy is precisely the "two copies of the same rule drift
+ * apart" bug this project keeps hitting, the same reason stripMarkup is
+ * shared.
+ *
+ * `\p{L}` rather than `[a-z]`: the same reasoning extends to any script this
+ * plugin ever sees text in, not just the Latin one the examples happen to use.
+ * The backreference is exact-character, not case-folded, so a run has to be
+ * the SAME case throughout to collapse — "SSS" and "sss" each collapse on
+ * their own, "SsS" (not a real elongation pattern) does not.
+ */
+export function collapseElongation(s: string): string {
+    return s.replace(/(\p{L})\1{2,}/gu, "$1");
+}
+
+/**
  * Laughter and keyboard mash, across the languages this is aimed at:
  * hahaha / ahaha (en), jajaja / jeje (es), kkkk (pt), wwww (ja), 555 (th),
  * xd / xddd, lol / lolol, rsrs (pt), ㅋㅋ / ㅎㅎ (ko).
@@ -67,7 +100,35 @@ const CHAT_SHORTHAND = new Set([
     "wtf", "omg", "omfg", "ikr", "smh", "irl", "rn", "atm", "asap", "btw",
     "gg", "ggwp", "wp", "gl", "hf", "glhf", "ez", "op", "nt", "n1", "sry",
     "pls", "plz", "thx", "ok", "okay", "k", "kk", "yh", "ye", "yep", "yup",
-    "nah", "nope", "yeet", "bruh", "bro", "sus", "af", "ffs", "istg", "tldr"
+    "nah", "nope", "yeet", "bruh", "bro", "sus", "af", "ffs", "istg", "tldr",
+    // Added alongside collapseElongation: these are the words a real
+    // elongated interjection ("yesssss", "waiiiiiit", "helloooooo", ...)
+    // collapses down to, matched below via `every` over the collapsed tokens.
+    // Every entry here is a plain English (or, for "sh"/"hmm"/"ah"/"oh",
+    // near-universal onomatopoeic) interjection, and only fires when the
+    // WHOLE short message is nothing but these — the same discipline as
+    // every other entry in this set.
+    //
+    // "no" is deliberately NOT here despite being an obvious-looking
+    // candidate: detectLang.ts excludes it from ENGLISH_WORDS/FOREIGN_WORDS
+    // for the same reason (Portuguese/Spanish also spell a real word "no"),
+    // and a standalone "no" is exactly the short, ambiguous case where that
+    // collision could silently drop a foreign message.
+    "yes", "wait", "hello", "hmm", "ah", "oh", "yay", "wow", "lmao", "sh",
+    // "good"/"morning" (and "god" — see below) so a plain or elongated
+    // "good morning" resolves entirely through this set: two tokens, both
+    // members, no non-shorthand word to keep it out.
+    "good", "morning",
+    // NOT a typo for "good": collapseElongation cannot tell an elongated
+    // SINGLE letter from an elongated ALREADY-DOUBLED one, so a heavily
+    // mashed "goooooood" (a long, single, unbroken run of "o") collapses all
+    // the way to "god", not "good" — the double-o in the real word is
+    // indistinguishable, after collapsing, from the same letter mashed once.
+    // Observed in real chat ("goooooood morninggggg"), and "god" alone is a
+    // common, unambiguous English chat interjection anyway, so treating it
+    // the same as "good" here is safe rather than a workaround with a hidden
+    // cost.
+    "god"
 ]);
 
 function isChatShorthand(s: string): boolean {
@@ -75,7 +136,10 @@ function isChatShorthand(s: string): boolean {
     // carry no meaning of their own, so they neither qualify nor disqualify.
     const tokens = s.toLowerCase().split(/\s+/).filter(t => t && !/^\d+$/.test(t));
     if (tokens.length === 0 || tokens.length > 4) return false;
-    return tokens.every(t => CHAT_SHORTHAND.has(t));
+    // Collapsed before the lookup so "yesssss"/"waiiiiiit"/etc. match the
+    // dictionary entries above without enumerating every possible elongation
+    // — see collapseElongation's own doc comment.
+    return tokens.every(t => CHAT_SHORTHAND.has(collapseElongation(t)));
 }
 
 export function shouldSkip(text: string, isOwnMessage: boolean): boolean {

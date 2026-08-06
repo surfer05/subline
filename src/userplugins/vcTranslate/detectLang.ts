@@ -1,4 +1,4 @@
-import { stripMarkup } from "./skip";
+import { collapseElongation, stripMarkup } from "./skip";
 
 /**
  * A local, free "this message is already in the target language" check, run
@@ -150,10 +150,21 @@ function hasNonLatinLetter(text: string): boolean {
     return false;
 }
 
-/** Lowercased word tokens, with markup, punctuation and bare numbers removed. */
+/**
+ * Lowercased word tokens, with markup, punctuation and bare numbers removed,
+ * and elongated letters collapsed — "sooooo good" tokenizes as ["so", "good"]
+ * rather than ["sooooo", "good"], so an elongated word inside a longer
+ * sentence still counts as ENGLISH_WORDS evidence. Applied AFTER lowercasing
+ * (collapseElongation's backreference is exact-character, so a mixed-case run
+ * would not collapse) and on the whole string rather than per-token: runs
+ * never cross a token boundary anyway, since whatever separates two tokens is
+ * itself not a letter. See collapseElongation's own doc comment for why 3+
+ * is the safe threshold and why this cannot manufacture a false match on its
+ * own — only ENGLISH_WORDS itself can do that, which is why nothing is added
+ * there for this change (see the module doc comment's asymmetry).
+ */
 function tokenize(text: string): string[] {
-    return stripMarkup(text, " ")
-        .toLowerCase()
+    return collapseElongation(stripMarkup(text, " ").toLowerCase())
         // Apostrophes are dropped rather than split on, so "don't" matches the
         // "dont" entry instead of becoming the junk tokens "don" and "t".
         .replace(/['’]/g, "")

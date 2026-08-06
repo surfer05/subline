@@ -112,3 +112,27 @@ describe("isConfidentlyTargetLanguage — only English is implemented", () => {
         expect(isConfidentlyTargetLanguage("hola como estan todos ustedes hoy", "es")).toBe(false);
     });
 });
+
+describe("isConfidentlyTargetLanguage — elongated words inside a sentence", () => {
+    it("counts an elongated English word as evidence, not just its neighbours", () => {
+        // "there" alone is one ENGLISH_WORDS hit — under MIN_ENGLISH_HITS (2).
+        // "hello" only becomes the second hit once "helloooo" is collapsed
+        // back to it; without the collapse this sentence returns false.
+        expect(en("helloooo there friend")).toBe(true);
+    });
+
+    it("still rejects a foreign message whose only elongated word is foreign", () => {
+        // "ceeeee" (Romanian) collapses to "ce" — not in ENGLISH_WORDS, not in
+        // FOREIGN_WORDS (Romanian has no veto list here) — so this has zero
+        // signal either way and must stay "false" under the asymmetry, exactly
+        // as an un-elongated Romanian sentence would. The collapse must not
+        // manufacture an English hit out of it.
+        expect(en("ceeeee bine multumesc")).toBe(false);
+    });
+
+    it("an elongated Spanish function word still trips the foreign veto", () => {
+        // "graciaaaas" collapses to "gracias", which IS in FOREIGN_WORDS — the
+        // veto must still fire post-collapse, not just the evidence count.
+        expect(en("graciaaaas amigos bueno")).toBe(false);
+    });
+});
