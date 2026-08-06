@@ -31,6 +31,7 @@
  * Usage:
  *   node scripts/stampBuild.mjs           rewrite buildStamp.ts
  *   node scripts/stampBuild.mjs --check   exit 1 if buildStamp.ts is stale
+ *   node scripts/stampBuild.mjs --print   print "<version> <buildId>", write nothing
  */
 
 import { createHash } from "node:crypto";
@@ -124,6 +125,15 @@ export const BUILD_ID = ${JSON.stringify(buildId)};
 
 function main(argv) {
     const stamp = computeStamp();
+
+    // Read-only. Exists so a test can ask what the generator WOULD compute for
+    // a given tree without writing anything — which is the only way to assert
+    // that two trees differing solely in a file's CONTENTS get different ids.
+    if (argv.includes("--print")) {
+        process.stdout.write(`${stamp.version} ${stamp.buildId}\n`);
+        return 0;
+    }
+
     const expected = renderStamp(stamp);
     const check = argv.includes("--check");
     const actual = existsSync(STAMP_PATH) ? readFileSync(STAMP_PATH, "utf8") : null;

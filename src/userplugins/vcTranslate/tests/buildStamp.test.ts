@@ -22,8 +22,12 @@ const SCRIPT = fileURLToPath(new URL("../../../../scripts/stampBuild.mjs", impor
 const PACKAGE_JSON = fileURLToPath(new URL("../../../../package.json", import.meta.url));
 /** A source file that does not exist yet, used to prove the id tracks the sources. */
 const PROBE = fileURLToPath(new URL("../__stampProbe.ts", import.meta.url));
+/** The same, one directory down: the walker has to recurse or it under-covers the bundle. */
+const NESTED_PROBE = fileURLToPath(new URL("../engines/__stampProbe.ts", import.meta.url));
 /** The same probe, but somewhere that is never shipped. Not collected: not `*.test.ts`. */
 const TEST_PROBE = fileURLToPath(new URL("./__stampProbe.ts", import.meta.url));
+
+const PROBES = [PROBE, NESTED_PROBE, TEST_PROBE];
 
 /** Runs the generator in check mode. Returns whether the stamp on disk is current. */
 function stampIsCurrent(): boolean {
@@ -35,11 +39,15 @@ function stampIsCurrent(): boolean {
     }
 }
 
+/** What the generator WOULD stamp for the tree as it stands. Writes nothing. */
+function computedStamp(): string {
+    return execFileSync(process.execPath, [SCRIPT, "--print"], { encoding: "utf8" }).trim();
+}
+
 afterEach(() => {
-    // Belt and braces: the probes below remove themselves, and a crashed
+    // Belt and braces: every test below removes its own probe, and a crashed
     // assertion must not leave a stray module in a directory Vencord compiles.
-    rmSync(PROBE, { force: true });
-    rmSync(TEST_PROBE, { force: true });
+    for (const probe of PROBES) rmSync(probe, { force: true });
 });
 
 describe("the build stamp is generated, not hand-maintained", () => {
@@ -65,6 +73,40 @@ describe("the build stamp is generated, not hand-maintained", () => {
         expect(stampIsCurrent()).toBe(true);
     });
 
+    it("changes when a file's CONTENTS change, not merely when files appear", () => {
+        // Asserted on what the generator computes, because "the stamp is stale"
+        // is also true of a generator that only hashes file NAMES — and that
+        // generator would give two builds of the same file list the same id,
+        // which is the identity failing at exactly the job it exists for.
+        const before = computedStamp();
+        try {
+            writeFileSync(PROBE, "export const STAMP_PROBE = 1;\n", "utf8");
+            const withOne = computedStamp();
+            writeFileSync(PROBE, "export const STAMP_PROBE = 2;\n", "utf8");
+            const withTwo = computedStamp();
+
+            expect(withOne).not.toBe(before);
+            expect(withTwo).not.toBe(withOne);   // same path, same file list, different bytes
+        } finally {
+            rmSync(PROBE, { force: true });
+        }
+        expect(computedStamp()).toBe(before);
+    });
+
+    it("walks subdirectories, so engines/ is part of the identity too", () => {
+        // A walker that only read the top level would leave every engine change
+        // invisible to the id, and the ✦ tier lives entirely down there.
+        const before = computedStamp();
+        try {
+            writeFileSync(NESTED_PROBE, "export const STAMP_PROBE = 1;\n", "utf8");
+            expect(computedStamp()).not.toBe(before);
+            expect(stampIsCurrent()).toBe(false);
+        } finally {
+            rmSync(NESTED_PROBE, { force: true });
+        }
+        expect(computedStamp()).toBe(before);
+    });
+
     it("does not include the test suite in the plugin's identity", () => {
         // Tests are not shipped, so editing one must not change which build is
         // running. Otherwise every test edit would invalidate an installed
@@ -80,9 +122,15 @@ describe("the build stamp is generated, not hand-maintained", () => {
     });
 
     it("takes the version from package.json rather than a literal in the source", () => {
+        // The half of this task that is about PLUGIN_VERSION: spec §6 needs
+        // "which build is actually running" to be observable, and a constant
+        // nobody remembers to bump answers that question wrongly and quietly.
         const pkg = JSON.parse(readFileSync(PACKAGE_JSON, "utf8")) as { version?: string };
         expect(pkg.version).toBeTypeOf("string");
         expect(PLUGIN_VERSION).toBe(pkg.version);
+        // And the generator agrees with the file it was generated from — so a
+        // stamper that started inventing versions fails here, not at a release.
+        expect(computedStamp().split(" ")[0]).toBe(pkg.version);
     });
 });
 
