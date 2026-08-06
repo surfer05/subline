@@ -10,8 +10,8 @@ import { isChannelEnabled, loadEnabledChannels, toggleChannel } from "./channels
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
 import { isConfidentlyTargetLanguage } from "./detectLang";
 import {
-    acquireSlot, loadRateGateTuning, rateGateAvailable, rateGateSettings, resetRateGate,
-    tuneRateGateToObservedLimit, tuneRateGateToProviderBudget
+    acquireSlot, loadRateGateTuning, rateGateAvailable, rateGateSettings, rateGateWaitMs,
+    resetRateGate, tuneRateGateToObservedLimit, tuneRateGateToProviderBudget
 } from "./rateGate";
 import { isRomanizedGuess } from "./romanized";
 import settings from "./settings";
@@ -491,58 +491,92 @@ function recordProviderQuota(engine: LlmEngineId, reported: unknown): void {
  * recently, and from a window that has not since rolled over — once the
  * provider's window resets, the count we hold is a floor the provider has
  * already moved past, and showing it would understate what is available.
+ *
+ * `resetInMs` rides alongside `remaining` because a `remaining` of zero is
+ * shown as a WAIT, not a bare zero (see `describeQuotaState`), and a wait
+ * needs a duration. When the provider stated a real reset time that duration
+ * IS the window closing. When it did not, the most honest duration this
+ * function can offer is how much longer THIS READING stays trusted at all —
+ * the distrust cutoff below — because past that point the reading is
+ * discarded anyway and whatever the gate itself says takes over.
  */
-function providerRemainingFor(engine: LlmEngineId): number | undefined {
+function providerRemainingFor(
+    engine: LlmEngineId
+): { remaining: number; resetInMs: number } | undefined {
     const reading = providerQuota;
     if (reading === null || reading.engine !== engine) return undefined;
     const now = Date.now();
-    if (reading.resetAt !== null && now >= reading.resetAt) return undefined;
-    if (now - reading.observedAt > PROVIDER_QUOTA_MAX_AGE_MS) return undefined;
-    return reading.remaining;
+    if (reading.resetAt !== null) {
+        if (now >= reading.resetAt) return undefined;
+        return { remaining: reading.remaining, resetInMs: reading.resetAt - now };
+    }
+    const age = now - reading.observedAt;
+    if (age > PROVIDER_QUOTA_MAX_AGE_MS) return undefined;
+    return { remaining: reading.remaining, resetInMs: PROVIDER_QUOTA_MAX_AGE_MS - age };
 }
 
 /**
- * "How many ⚡ clicks would actually go through right now, for this engine" —
- * the single source both the chat-bar quota indicator and the ⚡ popover
- * label read from, so the two can never disagree about what pressing ⚡ is
- * about to do.
+ * "Would an ⚡ click actually go through right now, for this engine — and if
+ * not, for how long?" The single source both the chat-bar quota indicator and
+ * the ⚡ popover label read from, so the two can never disagree about what
+ * pressing ⚡ is about to do.
  *
- * COOLDOWN TAKES PRIORITY over a count on purpose: the rate gate can still be
- * holding tokens while the engine itself is parked after a 429 (the two are
+ * WHAT CHANGED, AND WHY: this used to answer with a COUNT — how many requests
+ * the plugin's own rate gate happened to be holding. A reader who did not
+ * build this plugin has no way to know that number is an internal pacing
+ * budget rather than the provider's own quota, and read `✦ 3` as "3 calls
+ * remaining" — a reasonable reading of the glyph and number, and wrong. A
+ * count also implies rationing, and on a generous quota there is nothing to
+ * ration. What the reader can actually act on is READINESS: would ⚡ send
+ * right now, and if not, how long until it would. That is what this returns.
+ *
+ * COOLDOWN TAKES PRIORITY on purpose: the rate gate can still be holding
+ * tokens while the engine itself is parked after a 429 (the two are
  * independent — see `runTier`'s cooldown check, which runs BEFORE the gate is
- * ever asked), and a count would tell the user ⚡ is ready when clicking it
- * would actually do nothing.
+ * ever asked), and "ready" would tell the user ⚡ works when clicking it would
+ * actually do nothing.
  *
- * TWO LIMITS, AND THE ANSWER IS THE SMALLER. `rateGateAvailable()` is a PURE
- * read of the gate this engine's requests actually go through, and it used to
- * be the whole answer — with the honest caveat that it was the plugin's own
- * budget rather than the provider's, which the plugin could not see. For an
+ * TWO LIMITS, AND READY REQUIRES CLEARING BOTH. `rateGateAvailable()` is a
+ * PURE read of the gate this engine's requests actually go through. For an
  * engine that DOES report its own remaining count (see `providerRemainingFor`)
- * both limits are real and a request has to clear both, so the number that
- * answers the question asked is `min` of the two. That is what fixes the
- * defect: at gate 3, provider 0, this now says 0 — the truth — instead of 3.
- * When no provider figure is known, `min` of one number is that number, and
- * the previous behaviour is untouched by construction.
+ * both limits are real and a request has to clear both, so readiness is
+ * `gate > 0 && provider > 0`. That is what fixes the original defect: at gate
+ * 3, provider 0, this now reports "not ready" — the truth — instead of a
+ * count that implied otherwise. When no provider figure is known, only the
+ * gate's answer matters, and the previous behaviour is untouched by
+ * construction.
  *
- * `source` says which limit is binding, purely so the tooltip can explain a
- * number that would otherwise look wrong ("the gate has 3, why does it say
- * 0?"). Ties go to `provider` only when the provider figure is the smaller or
- * equal one, because that is when it is the number actually doing the work.
+ * `source` (only present when not ready, and not cooling) says WHICH limit is
+ * binding, so the wait shown is the right one: the provider's own reset time
+ * when the provider's figure is what is holding things up, the gate's own
+ * refill wait otherwise. Ties go to `provider` only when its figure is the
+ * smaller or equal one, because that is when it is the number actually doing
+ * the work.
  */
 function describeQuotaState(
     engine: LlmEngineId
 ): { cooling: true; remainingMs: number }
-    | { cooling: false; available: number; source: "gate" | "provider" } {
+    | { cooling: false; ready: true }
+    | { cooling: false; ready: false; remainingMs: number; source: "gate" | "provider" } {
     const remainingMs = cooldownUntil(engine) - Date.now();
     if (remainingMs > 0) return { cooling: true, remainingMs };
 
     const gate = rateGateAvailable();
     const provider = providerRemainingFor(engine);
-    if (provider === undefined) return { cooling: false, available: gate, source: "gate" };
+
+    if (provider === undefined) {
+        if (gate > 0) return { cooling: false, ready: true };
+        return { cooling: false, ready: false, remainingMs: rateGateWaitMs(), source: "gate" };
+    }
+
+    if (Math.min(gate, provider.remaining) > 0) return { cooling: false, ready: true };
+
+    const bindingIsProvider = provider.remaining <= gate;
     return {
         cooling: false,
-        available: Math.min(gate, provider),
-        source: provider <= gate ? "provider" : "gate"
+        ready: false,
+        remainingMs: bindingIsProvider ? provider.resetInMs : rateGateWaitMs(),
+        source: bindingIsProvider ? "provider" : "gate"
     };
 }
 
@@ -2073,24 +2107,28 @@ function forceQualityPopoverRender(message: Message) {
     // Say what pressing this would actually do — the user should not have to
     // look away at the chat-bar indicator (see QuotaIndicator below) to
     // decide whether ⚡ is worth clicking right now, and the wording has to
-    // stay honest when the answer is "nothing" (cooling down, or the gate is
-    // empty).
+    // stay honest when the answer is "nothing" (cooling down, or not ready).
     //
     // Checked FIRST, ahead of the quota description: a request already out
     // for THIS message (the same inFlightQuality guard forceQualityTranslate
     // itself checks — automatic or a previous manual click) means a click
-    // right now does nothing at all, which outranks how much quota happens
-    // to be sitting in the gate. Without this a second click on a slow
-    // request was a silent no-op; see TranslationAccessory's own
-    // `⚡ translating…` line for the same state reflected on the message.
+    // right now does nothing at all, which outranks readiness. Without this a
+    // second click on a slow request was a silent no-op; see
+    // TranslationAccessory's own `⚡ translating…` line for the same state
+    // reflected on the message.
+    //
+    // Matches QuotaIndicator's own wording for the same three states
+    // (ready / cooling / a wait) so the two can never disagree about what
+    // pressing ⚡ is about to do — see that component's docs for why a
+    // countdown, not a count, is the only number either of them shows.
     const quota = describeQuotaState(engine);
     const spendDescription = inFlightQuality.has(message.id)
         ? "already translating…"
         : quota.cooling
             ? `cooling down, ${formatCountdown(quota.remainingMs)} left`
-            : quota.available > 0
-                ? `spends one of ${quota.available} available now`
-                : "none available right now";
+            : quota.ready
+                ? "ready to send now"
+                : `not ready, ${formatCountdown(quota.remainingMs)} left`;
 
     return {
         label: `Translate with ${label} now (${spendDescription})`,
@@ -2104,40 +2142,49 @@ function forceQualityPopoverRender(message: Message) {
 }
 
 /**
- * The chat-bar quota indicator — "how much of THIS plugin's own budget is
- * left for ⚡ right now", sitting next to the message input via Vencord's
+ * The chat-bar quota indicator — "is ⚡ ready to send right now, and if not,
+ * how long" — sitting next to the message input via Vencord's
  * `@api/ChatButtons` (`chatBarButton` below; see `src/api/ChatButtons.tsx` in
  * a Vencord checkout for the contract this implements).
  *
- * WHY THIS EXISTS: the ⚡ action above spends a scarce, per-minute request
- * with no visible cost anywhere else in the UI — a user deciding whether to
- * click it was previously blank on how much was left. This answers that, with
- * a number `runTier` will actually enforce rather than a guess.
+ * WHY THIS SHOWS READINESS, NOT A COUNT. It used to show this plugin's own
+ * rate-gate token count — `✦ 3` — and a reader with no reason to know that
+ * number was an internal pacing budget read it as "3 API calls remaining". On
+ * a generous quota (Groq's free tier, 30 req/min) there is nothing to ration,
+ * so the number was meaningless at best and actively misleading at worst: it
+ * implied scarcity that was not real, from a figure the user could not spend
+ * against anyway (⚡ enforces the real limits itself; the number was never
+ * load-bearing for anything the user could do). A countdown is different —
+ * it is the one number a reader can actually act on ("wait" vs. "don't") —
+ * so that is the only number either this or the ⚡ label ever shows.
  *
- * WHICH LIMIT THE NUMBER DESCRIBES depends on the engine, and the tooltip says
- * which. For Claude and Gemini it is this plugin's own token bucket, because
- * those providers report nothing about their side and inventing a figure would
- * be dishonest. For an engine that DOES report its remaining quota on every
- * response (Groq — see `providerRemainingFor`), the smaller of the two real
- * limits is shown, so the indicator can no longer say `✦ 3` while the provider
- * is refusing instantly.
+ * WHAT DECIDES READY VS. WAIT still legitimately depends on the engine, and
+ * the tooltip says why. For Claude and Gemini, readiness depends only on this
+ * plugin's own pacing, because those providers report nothing about their
+ * side. For an engine that DOES report its remaining quota on every response
+ * (Groq — see `providerRemainingFor`), a request has to clear BOTH real
+ * limits, so the provider's own figure can still make this show "not ready"
+ * even while the internal pacing has room — the defect `describeQuotaState`'s
+ * docs describe, now expressed as readiness rather than as a count.
  *
  * PRIORITY ORDER, exactly `describeQuotaState()`'s: cooling down (⚡ will not
- * work at all right now, however many tokens the gate happens to be holding)
- * outranks a token count, which outranks nothing — rendering NOTHING is
- * itself a state: no LLM engine is configured, or one is but has no key, so
- * there is no quality-tier budget to report at all, and a permanently-zero
- * indicator would be noise rather than information. `effectiveEngine()` is
- * what decides that, so this also goes quiet for the third, less obvious
- * case it already covers — a key an engine has rejected this session (see
- * `sessionFallback`) — for the same reason: no request pressing ⚡ would send
- * right now belongs to a "quality tier" that, this session, does not exist.
+ * work at all right now, however ready the pacing itself would otherwise say)
+ * outranks a wait, which outranks nothing — rendering NOTHING is itself a
+ * state: no LLM engine is configured, or one is but has no key, so there is
+ * no quality tier to report readiness FOR at all, and a permanent indicator
+ * would be noise rather than information. `effectiveEngine()` is what decides
+ * that, so this also goes quiet for the third, less obvious case it already
+ * covers — a key an engine has rejected this session (see `sessionFallback`)
+ * — for the same reason: no request pressing ⚡ would send right now belongs
+ * to a "quality tier" that, this session, does not exist.
  *
  * LIVE: neither the rate gate nor the cooldown store notifies on change (see
  * `rateGateAvailable()`'s and `cooldownUntil()`'s own docs — a read that
  * pushed updates would have to mutate state to schedule them, which is
  * exactly what a pure read must not do), so this component ticks itself,
- * once a second, for as long as it stays mounted.
+ * once a second, for as long as it stays mounted — needed now more than ever,
+ * since a live countdown (unlike a static count) is wrong the instant it
+ * stops moving.
  */
 function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat: boolean; }) {
     const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
@@ -2174,29 +2221,41 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
         );
     }
 
-    // TWO SENTENCES, because the number can now mean two different things and
-    // the difference is exactly what the user needs to know. When the binding
-    // limit is the plugin's own gate the wording is unchanged and still says
-    // plainly that this is NOT the provider's remaining quota. When the
-    // provider itself reported the smaller number, that caveat would be a lie:
-    // the figure IS the provider's, which is the whole point of showing it —
-    // an indicator reading `✦ 3` while the provider refuses instantly is the
-    // defect this replaces.
-    const explanation = quota.source === "provider"
-        ? `This is ${label}'s OWN reported remaining quota, which is lower right now than this `
-          + "plugin's internal budget — so it is what will actually stop a request."
-        : `This is the plugin's own budget for ${label} — deliberately kept under its free-tier `
-          + `limit — not an estimate of ${label}'s own remaining quota.`;
+    if (quota.ready) {
+        return (
+            <div
+                style={indicatorStyle}
+                title={
+                    `VcTranslate: ${label} is ready — the ⚡ force-translate action will send `
+                    + "immediately."
+                }
+            >
+                ✦
+            </div>
+        );
+    }
+
+    // Not cooling, not ready: SOMETHING would refuse the request right now —
+    // either this plugin's own pacing or (for an engine that reports its own
+    // quota) the provider itself. `source` says which, so the explanation is
+    // never a guess and never the wrong one: plainly this plugin's own pacing
+    // when it is the plugin's own pacing, plainly the provider's own stated
+    // quota when the provider itself is what is holding things up — that
+    // second case is exactly the one the old `✦ N` presentation used to get
+    // wrong, showing a plugin-budget number while the provider was the real
+    // reason a request would fail.
+    const countdown = formatCountdown(quota.remainingMs);
+    const why = quota.source === "provider"
+        ? `${label} itself reports no requests left in its current window`
+        : `this plugin is pacing requests to ${label} to stay within safe usage limits`;
 
     return (
         <div
             style={indicatorStyle}
-            title={
-                `VcTranslate: ${quota.available} request${quota.available === 1 ? "" : "s"} available `
-                + `for the ⚡ force-translate action right now. ${explanation}`
-            }
+            title={`VcTranslate: ${why} — the ⚡ force-translate action will not send anything `
+                + `for another ${countdown}.`}
         >
-            ✦ {quota.available}
+            ✦ {countdown}
         </div>
     );
 }

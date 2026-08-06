@@ -80,6 +80,20 @@ function googleAnswers(payload: string, text = "hello there", lang = "es"): Nati
     };
 }
 
+/**
+ * "0:45" — the same "m:ss" arithmetic index.tsx's own (private) formatCountdown
+ * uses for the indicator and ⚡ label. Duplicated rather than imported: that
+ * function is intentionally not part of the module's public surface, and a
+ * three-line pure function is cheaper to duplicate than to export just for
+ * tests.
+ */
+function formatCountdownForTest(ms: number): string {
+    const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
 beforeEach(async () => {
     vi.useFakeTimers();
     native.translateBatch.mockReset();
@@ -2676,33 +2690,51 @@ describe("the quota indicator (chat-bar ✦)", () => {
         expect(render()).toBeNull();
     });
 
-    it("shows the plugin's own available token count when not cooling down", () => {
+    it("shows just the glyph — no number — when ready to send right now", () => {
+        // CHANGED: this used to assert `✦ ${BURST_CAPACITY}`, presenting the
+        // plugin's own internal rate-gate token count as if it were an API
+        // quota. Ready now renders the glyph alone; the count is gone.
         useGemini();
-        expect(text(render())).toBe(`✦ ${BURST_CAPACITY}`);
+        expect(text(render())).toBe("✦");
     });
 
-    it("reflects tokens actually spent through the gate — the same read runTier's acquireSlot() drives", async () => {
+    it("stays ready — the glyph alone — as tokens are actually spent through the gate, right up until it hits zero", async () => {
+        // CHANGED: this used to assert `✦ ${BURST_CAPACITY - 1}` after one
+        // spend, treating a live gate read as a number worth displaying. The
+        // read is still live (rateGateAvailable() below proves it), but as
+        // long as SOME capacity remains the presentation is unchanged: ready.
         useGemini();
         await acquireSlot();
         expect(rateGateAvailable()).toBe(BURST_CAPACITY - 1);
-        expect(text(render())).toBe(`✦ ${BURST_CAPACITY - 1}`);
+        expect(text(render())).toBe("✦");
     });
 
-    it("shows the cooldown countdown, in PREFERENCE to a token count, while cooling down", () => {
+    it("switches from ready to a wait once the gate is fully drained — never a bare zero", async () => {
+        useGemini();
+        for (let i = 0; i < BURST_CAPACITY; i++) await acquireSlot();
+        expect(rateGateAvailable()).toBe(0);
+        // No time has been advanced since the drain, so the wait is exactly
+        // one refill tick away — deterministic under the fake clock.
+        expect(text(render())).toBe(`✦ ${formatCountdownForTest(REFILL_MS)}`);
+    });
+
+    it("shows the cooldown countdown, in PREFERENCE to readiness, while cooling down", () => {
         useGemini();
         // The gate itself is untouched — BURST_CAPACITY tokens are still
-        // sitting in it — so a naive token-count read alone would say "3
-        // available" here. The point of this test is that cooldown wins.
+        // sitting in it — so a naive read alone would say "ready" here. The
+        // point of this test is that cooldown wins.
         setCooldown("gemini", Date.now() + 45_000);
         expect(text(render())).toBe("✦ 0:45");
     });
 
-    it("names the engine and spells out what the number means, in a title attribute", () => {
+    it("names the engine and says it is ready, in a title attribute", () => {
+        // CHANGED: this used to assert the title contained the raw
+        // BURST_CAPACITY figure and the word "available". Ready no longer
+        // carries a number anywhere, including the tooltip.
         useGemini();
         const title = titleOf(render());
         expect(title).toContain("Gemini");
-        expect(title).toContain(String(BURST_CAPACITY));
-        expect(title).toContain("available");
+        expect(title).toContain("ready");
     });
 
     it("says COOLING DOWN, not just a bare number, in the title while cooling", () => {
@@ -2712,9 +2744,19 @@ describe("the quota indicator (chat-bar ✦)", () => {
         expect(title).toContain("cooling down");
         expect(title).toContain("0:45");
     });
+
+    it("explains the wait in plain words, without internal vocabulary, once the gate is drained", async () => {
+        useGemini();
+        for (let i = 0; i < BURST_CAPACITY; i++) await acquireSlot();
+        const title = titleOf(render())!;
+        expect(title).toContain("Gemini");
+        expect(title).toContain(formatCountdownForTest(REFILL_MS));
+        expect(title.toLowerCase()).not.toContain("token bucket");
+        expect(title.toLowerCase()).not.toContain("gate");
+    });
 });
 
-describe("the ⚡ label reflects the plugin's own available budget", () => {
+describe("the ⚡ label matches the chat-bar indicator's readiness", () => {
     function forceButton(message: any) {
         const registered = __getPopoverButton(FORCE_QUALITY_POPOVER_ID);
         return registered ? registered.render(message) : null;
@@ -2724,38 +2766,55 @@ describe("the ⚡ label reflects the plugin's own available budget", () => {
         settings.store.geminiApiKey = "AIza-test";
     }
 
-    it("names how many requests are available right now", () => {
+    it("says ready when a request would go out right now", () => {
+        // CHANGED: this used to assert
+        // `spends one of ${BURST_CAPACITY} available now`, the same raw
+        // budget figure the indicator itself no longer shows.
         useGemini();
         const btn = forceButton(discordMessage("1", "hola"))!;
-        expect(btn.label).toBe(`Translate with Gemini now (spends one of ${BURST_CAPACITY} available now)`);
+        expect(btn.label).toBe("Translate with Gemini now (ready to send now)");
     });
 
-    it("says none are available once the gate is exhausted — never claims a spend it cannot make", async () => {
+    it("shows a wait once the gate is exhausted — never claims a spend it cannot make, and never says a bare zero", async () => {
+        // CHANGED: this used to assert the label said
+        // "none available right now". A drained gate is now a WAIT, exactly
+        // like a cooldown, not a claim of zero availability.
         useGemini();
         for (let i = 0; i < BURST_CAPACITY; i++) await acquireSlot();
         const btn = forceButton(discordMessage("1", "hola"))!;
-        expect(btn.label).toBe("Translate with Gemini now (none available right now)");
+        expect(btn.label).toBe(`Translate with Gemini now (not ready, ${formatCountdownForTest(REFILL_MS)} left)`);
     });
 
-    it("shows the cooldown countdown instead of a token count while cooling down", () => {
+    it("shows the cooldown countdown while cooling down", () => {
         useGemini();
         setCooldown("gemini", Date.now() + 45_000);
         const btn = forceButton(discordMessage("1", "hola"))!;
         expect(btn.label).toBe("Translate with Gemini now (cooling down, 0:45 left)");
     });
 
-    it("matches the chat-bar indicator's own number for the same state", () => {
+    it("matches the chat-bar indicator's own state, both ready and waiting", async () => {
+        // CHANGED: this used to assert both surfaces contained the same
+        // BURST_CAPACITY figure. There is no figure to share any more — what
+        // has to match is the READINESS itself, in both directions.
         useGemini();
-        const btn = forceButton(discordMessage("1", "hola"))!;
-        const indicator: any = plugin.chatBarButton!.render({ isMainChat: true, isAnyChat: true } as any);
-        function text(node: any): string {
+        function indicatorText(node: any): string {
             if (node === null || node === undefined || node === false) return "";
             if (typeof node === "string" || typeof node === "number") return String(node);
-            if (Array.isArray(node)) return node.map(text).join("");
-            return text(node.children);
+            if (Array.isArray(node)) return node.map(indicatorText).join("");
+            return indicatorText(node.children);
         }
-        expect(btn.label).toContain(String(BURST_CAPACITY));
-        expect(text(indicator)).toContain(String(BURST_CAPACITY));
+        const renderIndicator = () =>
+            plugin.chatBarButton!.render({ isMainChat: true, isAnyChat: true } as any);
+
+        // Ready: both agree.
+        expect(forceButton(discordMessage("1", "hola"))!.label).toContain("ready to send now");
+        expect(indicatorText(renderIndicator())).toBe("✦");
+
+        // Drained: both show the SAME wait.
+        for (let i = 0; i < BURST_CAPACITY; i++) await acquireSlot();
+        const countdown = formatCountdownForTest(REFILL_MS);
+        expect(forceButton(discordMessage("2", "hola"))!.label).toContain(countdown);
+        expect(indicatorText(renderIndicator())).toBe(`✦ ${countdown}`);
     });
 
     it("says a request is already running once one is in flight for this message, so a second click reads as an obvious no-op", async () => {
@@ -2767,7 +2826,7 @@ describe("the ⚡ label reflects the plugin's own available budget", () => {
 
         const before = forceButton(message)!;
         expect(before.label).not.toContain("already translating");
-        expect(before.label).toBe(`Translate with Gemini now (spends one of ${BURST_CAPACITY} available now)`);
+        expect(before.label).toBe("Translate with Gemini now (ready to send now)");
 
         before.onClick!(undefined as any);
 
@@ -3371,9 +3430,11 @@ describe("the Groq engine, end to end through the renderer", () => {
  * The defect: the `✦ N` indicator showed the plugin's OWN token bucket and
  * nothing else, so it could read `✦ 3` while the provider refused the very
  * next request instantly. An engine that reports its remaining quota on every
- * response makes the honest number available; these pin that it is used.
+ * response makes the honest signal available; these pin that it is used —
+ * now expressed as READY vs. a WAIT rather than as a raw count, so a zero
+ * from the provider must render a wait, never a bare `✦ 0`.
  */
-describe("the quota indicator shows the PROVIDER's number when the provider reports one", () => {
+describe("the quota indicator reflects the PROVIDER's own report when the provider makes one", () => {
     function render(): any {
         return plugin.chatBarButton!.render({ isMainChat: true, isAnyChat: true } as any);
     }
@@ -3385,6 +3446,12 @@ describe("the quota indicator shows the PROVIDER's number when the provider repo
     }
     function titleOf(node: any): string | undefined {
         return node?.props?.title;
+    }
+    /** "✦ 0:45" -> 45 (seconds); "✦" -> null (ready, no wait to parse). */
+    function waitSeconds(rendered: string): number | null {
+        const match = /^✦ (\d+):(\d{2})$/.exec(rendered);
+        if (!match) return null;
+        return Number(match[1]) * 60 + Number(match[2]);
     }
     function useGroq() {
         settings.store.engine = "groq";
@@ -3401,62 +3468,90 @@ describe("the quota indicator shows the PROVIDER's number when the provider repo
         await settle();
     }
 
-    it("shows ZERO when the provider says zero, even though the gate still holds tokens", async () => {
-        // THE defect, exactly: a token count alone says "3 available" here,
-        // and clicking ⚡ on the strength of it earns an instant 429.
+    it("renders a WAIT — never a bare zero — when the provider says zero, even though the gate still holds tokens", async () => {
+        // CHANGED: this used to assert a literal `✦ 0`. THE defect this whole
+        // feature replaces: a bare zero (or, before that, a token count) is
+        // not something a reader can act on the way a countdown is, and a
+        // raw "0" reads as broken rather than as "wait".
         useGroq();
         await reportRemaining(0);
 
         expect(rateGateAvailable()).toBeGreaterThan(0);
-        expect(text(render())).toBe("✦ 0");
+        const rendered = text(render());
+        expect(rendered).not.toBe("✦ 0");
+        expect(waitSeconds(rendered)).not.toBeNull();
+        expect(waitSeconds(rendered)!).toBeGreaterThan(0);
     });
 
-    it("shows the provider's number whenever it is the smaller of the two real limits", async () => {
+    it("is still READY when the provider's remaining count is positive, whichever of the two real limits is smaller", async () => {
+        // CHANGED: this used to assert `✦ 1`. A remaining count of 1 clears
+        // both real limits (gate > 0 and provider = 1 > 0), so this is a
+        // READY state now, same presentation as any other ready state.
         useGroq();
         await reportRemaining(1);
-        expect(text(render())).toBe("✦ 1");
+        expect(text(render())).toBe("✦");
     });
 
-    it("keeps showing the gate's number when the gate is the binding limit", async () => {
-        // A generous provider figure must not be presented as headroom this
-        // plugin will actually let through — both limits are real and a
-        // request has to clear both.
+    it("still respects the gate even when the provider's own figure is generous", async () => {
+        // CHANGED: this used to compare against `✦ ${rateGateAvailable()}`.
+        // A generous provider figure must not be presented as more headroom
+        // than this plugin will actually let through — both limits are real
+        // and a request has to clear both. Proven here by draining the GATE
+        // to zero while the provider still says it has thousands left: the
+        // binding wait must be attributed to the gate, not the provider.
         useGroq();
         await reportRemaining(9_999);
-        expect(text(render())).toBe(`✦ ${rateGateAvailable()}`);
+        expect(rateGateAvailable()).toBeGreaterThan(0);
+        expect(text(render())).toBe("✦"); // gate not yet drained: still ready
+
+        const stillInGate = rateGateAvailable();
+        for (let i = 0; i < stillInGate; i++) await acquireSlot();
+        expect(rateGateAvailable()).toBe(0);
+        const rendered = text(render());
+        expect(waitSeconds(rendered)).not.toBeNull();
+        // A provider figure of 9,999 could never be the binding reason for a
+        // wait; the wait must come from the gate's own (short) refill tick,
+        // not from the provider's stated (60s) reset window.
+        expect(waitSeconds(rendered)!).toBeLessThan(60);
     });
 
-    it("says in the tooltip that the number is the provider's own, not the plugin's budget", async () => {
+    it("says in the tooltip that it is the provider's own report, in plain words, when the provider is what is blocking", async () => {
         useGroq();
         await reportRemaining(0);
         const title = titleOf(render())!;
         expect(title).toContain("Groq");
-        expect(title).toContain("OWN reported remaining quota");
-        // The old wording would be an outright lie about this number.
-        expect(title).not.toContain("not an estimate of");
+        expect(title).toContain("itself reports no requests left");
+        // Internal vocabulary must not leak into user-facing text.
+        expect(title.toLowerCase()).not.toContain("token bucket");
+        expect(title.toLowerCase()).not.toContain("budget");
     });
 
-    it("keeps the plugin's-own-budget wording for an engine that reports nothing", async () => {
-        // Gemini and Claude say nothing on a success, and the honest thing to
-        // show for them is unchanged.
+    it("explains a gate wait in plain words for an engine that reports nothing", async () => {
+        // Gemini and Claude say nothing on a success, so a wait for them can
+        // only ever be this plugin's own pacing, never the provider's.
         settings.store.engine = "gemini";
         settings.store.geminiApiKey = "AIza-test";
+        for (let i = 0; i < BURST_CAPACITY; i++) await acquireSlot();
         const title = titleOf(render())!;
-        expect(title).toContain("the plugin's own budget");
-        expect(title).toContain("not an estimate of");
+        expect(title).toContain("this plugin is pacing requests");
+        expect(title).not.toContain("itself reports no requests left");
     });
 
-    it("stops trusting the provider's number once its window has rolled over", async () => {
-        // A remaining count is a snapshot of one window. Past the reset it is a
-        // floor the provider has already moved past, and showing it would
-        // understate what is available — a confident wrong answer in the one
-        // place the user reads to decide whether to spend.
+    it("stops trusting the provider's number once its window has rolled over, and falls back to the gate's own readiness", async () => {
+        // A remaining count is a snapshot of one window. Past the reset it is
+        // a floor the provider has already moved past, and showing a wait
+        // derived from it would overstate how long is really left — a
+        // confident wrong answer in the one place the user reads to decide
+        // whether to spend.
         useGroq();
         await reportRemaining(0, 30_000);
-        expect(text(render())).toBe("✦ 0");
+        expect(text(render())).not.toBe("✦ 0");
+        expect(waitSeconds(text(render()))).not.toBeNull();
 
         await vi.advanceTimersByTimeAsync(31_000);
-        expect(text(render())).toBe(`✦ ${rateGateAvailable()}`);
+        // The provider reading is now stale; only the gate's own state (which
+        // has refilled across that same 31s) decides readiness.
+        expect(text(render())).toBe(`✦`);
     });
 
     it("stops trusting a reading older than a minute even if no reset was stated", async () => {
@@ -3468,37 +3563,44 @@ describe("the quota indicator shows the PROVIDER's number when the provider repo
         );
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
-        expect(text(render())).toBe("✦ 0");
+        expect(text(render())).not.toBe("✦ 0");
+        expect(waitSeconds(text(render()))).not.toBeNull();
 
         await vi.advanceTimersByTimeAsync(61_000);
-        expect(text(render())).toBe(`✦ ${rateGateAvailable()}`);
+        expect(text(render())).toBe("✦");
     });
 
     it("does not show one engine's reading against another engine", async () => {
         useGroq();
         await reportRemaining(0);
-        expect(text(render())).toBe("✦ 0");
+        expect(text(render())).not.toBe("✦ 0");
+        expect(waitSeconds(text(render()))).not.toBeNull();
 
         settings.store.engine = "gemini";
         settings.store.geminiApiKey = "AIza-test";
-        expect(text(render())).toBe(`✦ ${rateGateAvailable()}`);
+        // Gemini has never had a provider reading recorded, and its own gate
+        // is untouched — ready, not a leaked wait from groq's reading.
+        expect(text(render())).toBe("✦");
     });
 
-    it("still lets the cooldown countdown outrank a provider count", async () => {
+    it("still lets the cooldown countdown outrank readiness even with a generous provider figure", async () => {
         useGroq();
         await reportRemaining(9_999);
         setCooldown("groq", Date.now() + 45_000);
         expect(text(render())).toBe("✦ 0:45");
     });
 
-    it("gives the ⚡ label the same number the indicator shows", async () => {
+    it("gives the ⚡ label the same wait the indicator shows", async () => {
         // One source for both, so the two can never disagree about what
         // pressing ⚡ is about to do.
         useGroq();
         await reportRemaining(0);
         const registered = __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!;
         const btn = registered.render(discordMessage("2", "que tal"))!;
-        expect(btn.label).toBe("Translate with Groq now (none available right now)");
+        const countdown = waitSeconds(text(render()));
+        expect(countdown).not.toBeNull();
+        expect(btn.label).toContain(formatCountdownForTest(countdown! * 1000));
+        expect(btn.label).toMatch(/^Translate with Groq now \(not ready, \d+:\d{2} left\)$/);
     });
 });
 
@@ -3581,10 +3683,14 @@ describe("the provider's reported quota is not trusted blindly, and does not out
         await settle();
     }
 
-    it("ignores a remaining count that is not a usable number", async () => {
+    it("ignores a remaining count that is not a usable number, and stays ready like an engine with no provider reading", async () => {
         // This value crossed an IPC boundary having started life as a remote
         // HTTP header. A NaN or a negative reaching the indicator would be a
         // number the user is asked to make a spending decision on.
+        //
+        // CHANGED: this used to assert `✦ ${rateGateAvailable()}`. With the
+        // gate still holding capacity after one spend, an ignored reading now
+        // means plain READY.
         useGroq();
         for (const bad of [-5, Number.NaN, "12", null, undefined]) {
             plugin.stop!();
@@ -3594,29 +3700,39 @@ describe("the provider's reported quota is not trusted blindly, and does not out
             useGroq();
 
             await reportRateLimit({ remainingRequests: bad });
-            expect(text(render())).toBe(`✦ ${rateGateAvailable()}`);
+            expect(rateGateAvailable()).toBeGreaterThan(0);
+            expect(text(render())).toBe("✦");
         }
     });
 
     it("ignores a rate-limit payload that is not an object at all", async () => {
         useGroq();
         await reportRateLimit("nearly out");
-        expect(text(render())).toBe(`✦ ${rateGateAvailable()}`);
+        expect(rateGateAvailable()).toBeGreaterThan(0);
+        expect(text(render())).toBe("✦");
     });
 
-    it("forgets the reading across a stop/start, rather than showing a dead window's count", async () => {
-        // The count describes a rate-limit window that has almost certainly
-        // rolled over by the time the plugin runs again, and a stale count
-        // presented as current is worse than showing the gate's own number.
+    it("forgets the reading across a stop/start, rather than showing a dead window's wait", async () => {
+        // The reading describes a rate-limit window that has almost
+        // certainly rolled over by the time the plugin runs again, and a
+        // stale wait presented as current is worse than the gate's own
+        // (freshly reset) readiness.
         useGroq();
         await reportRateLimit({ remainingRequests: 0, resetRequestsMs: 600_000 });
-        expect(text(render())).toBe("✦ 0");
+        // CHANGED: this used to assert a literal `✦ 0`. A zero from the
+        // provider must render a wait, never a bare zero.
+        expect(text(render())).not.toBe("✦ 0");
+        expect(text(render())).toMatch(/^✦ \d+:\d{2}$/);
 
         plugin.stop!();
         await plugin.start!();
         for (let i = 0; i < 20; i++) await Promise.resolve();
         useGroq();
 
-        expect(text(render())).toBe(`✦ ${rateGateAvailable()}`);
+        // CHANGED: this used to assert `✦ ${rateGateAvailable()}`. The
+        // restart resets both the gate and the forgotten provider reading, so
+        // this is simply ready.
+        expect(rateGateAvailable()).toBeGreaterThan(0);
+        expect(text(render())).toBe("✦");
     });
 });

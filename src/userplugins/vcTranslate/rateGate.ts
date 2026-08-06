@@ -170,12 +170,13 @@ function wake(): void {
  * (which this deliberately does not call).
  *
  * WHY THIS EXISTS: the chat-bar quota indicator (index.tsx's `QuotaIndicator`)
- * has to show the user "how many ⚡ clicks will actually go through right
- * now", and that number has to BE the gate's own answer, not a parallel
- * estimate that could drift from it. The only way to ask the gate that
- * question without changing what it will do next is a read that mutates
- * nothing — a UI polling this every second must not itself perturb the
- * bucket `acquireSlot()` depends on for correctness.
+ * has to know "would an ⚡ click actually go through right now", and that
+ * answer has to BE the gate's own answer, not a parallel estimate that could
+ * drift from it. (The indicator no longer DISPLAYS this number — see that
+ * file's docs — but it still reads it to decide ready vs. wait.) The only way
+ * to ask the gate that question without changing what it will do next is a
+ * read that mutates nothing — a UI polling this every second must not itself
+ * perturb the bucket `acquireSlot()` depends on for correctness.
  *
  * THE ARITHMETIC is `refill()`'s, duplicated rather than shared, because
  * `refill()`'s whole contract is "bring `lastRefillAt` up to date as a side
@@ -192,6 +193,31 @@ export function rateGateAvailable(): number {
     const gained = Math.floor(elapsed / refillMs);
     if (gained <= 0) return tokens;
     return Math.min(capacity, tokens + gained);
+}
+
+/**
+ * How long until the gate would hand out a token, if none is available right
+ * now — the twin read to `rateGateAvailable()`, sharing its whole contract
+ * (a PURE read; nothing here writes `lastRefillAt` or spends a token).
+ *
+ * WHY THIS EXISTS: the chat-bar indicator (index.tsx's `QuotaIndicator`) no
+ * longer shows this gate's raw token count — a count is not something a
+ * reader can act on, and the number is this plugin's internal pacing, not
+ * the provider's quota (see that file's docs for the full reasoning). What a
+ * reader CAN act on is a wait, so when the gate would refuse right now this
+ * is what the indicator shows instead.
+ *
+ * Zero whenever `rateGateAvailable()` is itself positive — nothing to wait
+ * for. Otherwise this is the same arithmetic `refill()` uses to decide
+ * whether a gain has happened yet, just solved for "how much longer" instead
+ * of "how many": `rateGateAvailable() === 0` here means `elapsed < refillMs`
+ * (a full refill tick has not yet elapsed since `lastRefillAt`), so the
+ * remainder of that tick is exactly the wait.
+ */
+export function rateGateWaitMs(): number {
+    if (rateGateAvailable() > 0) return 0;
+    const elapsed = Date.now() - lastRefillAt;
+    return Math.max(0, refillMs - elapsed);
 }
 
 /**
@@ -306,9 +332,10 @@ export function tuneRateGateToObservedLimit(limitPerMinute: number): boolean {
  *
  * A remaining count of ZERO returns false and changes nothing. It is not
  * ignored — it is handled where a zero can actually be represented: the
- * cooldown parks the engine, and the quota indicator shows the 0 (see
- * describeQuotaState in index.tsx). A token bucket cannot express "no requests
- * at all" without becoming a deadlock, so it must not try.
+ * cooldown parks the engine, and the quota indicator shows a wait rather than
+ * a bare zero (see describeQuotaState in index.tsx). A token bucket cannot
+ * express "no requests at all" without becoming a deadlock, so it must not
+ * try.
  */
 export function tuneRateGateToProviderBudget(
     remainingRequests: number,
