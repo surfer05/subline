@@ -11,16 +11,17 @@ const native = vi.hoisted(() => {
     return { translateBatch };
 });
 
-import plugin from "../index";
+import plugin, { FORCE_QUALITY_POPOVER_ID } from "../index";
 import { BURST_CAPACITY, LEARNED_QUOTA_KEY, rateGateSettings, REFILL_MS } from "../rateGate";
 import { toggleChannel } from "../channels";
-import { cooldownUntil } from "../cooldownStore";
+import { cooldownUntil, setCooldown } from "../cooldownStore";
 import settings from "../settings";
 import { clearStore, getTranslation, makeKey, setTranslation } from "../store";
-import { QUALITY_DEBOUNCE_MS } from "../types";
+import { FAST_DEBOUNCE_MS, QUALITY_DEBOUNCE_MS } from "../types";
 import type { NativeResponse } from "../native";
 import { __resetSettings } from "./stubs/api-settings";
 import * as DataStore from "./stubs/api-datastore";
+import { __getPopoverButton, __reset as __resetMessagePopover } from "./stubs/api-messagepopover";
 import {
     __resetWebpackCommon, __stubMarkAsDm, __stubSetSelectedChannel,
     FluxDispatcher, LocaleStore, shownToasts, stubMessages
@@ -85,6 +86,7 @@ beforeEach(async () => {
     clearStore();
     __resetSettings();
     __resetWebpackCommon();
+    __resetMessagePopover();
     DataStore.__reset();
 
     settings.store.globalAuto = true;
@@ -2342,5 +2344,243 @@ describe("scrolling back through history does not spend the quality tier's quota
         await settle();
 
         expect(geminiIds()).toContain("live-2");
+    });
+});
+
+describe("the force-quality popover action (⚡)", () => {
+    /** The item Vencord would get back from calling render() on this button. */
+    function forceButton(message: any) {
+        const registered = __getPopoverButton(FORCE_QUALITY_POPOVER_ID);
+        return registered ? registered.render(message) : null;
+    }
+
+    /**
+     * Flush the microtask queue without advancing any timer. Unlike settle(),
+     * nothing here waits on a debounce window — the force action bypasses the
+     * batcher entirely — and the rate gate hands out a token synchronously
+     * whenever one is free, so a plain microtask drain is enough to let
+     * runTier's awaits (acquireSlot, then the native call) resolve.
+     */
+    async function flush() {
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+    }
+
+    function useGemini() {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+    }
+
+    it("is registered as its own popover button, separate from the 🌐 channel toggle", () => {
+        expect(__getPopoverButton(FORCE_QUALITY_POPOVER_ID)).toBeDefined();
+        useGemini();
+        const forced = forceButton(discordMessage("1", "hola"))!;
+        const toggle = plugin.messagePopoverButton!.render(discordMessage("1", "hola") as any)!;
+        expect(forced.label).not.toEqual(toggle.label);
+    });
+
+    it("unregisters on stop() so a disabled plugin leaves no stale button behind", () => {
+        plugin.stop!();
+        expect(__getPopoverButton(FORCE_QUALITY_POPOVER_ID)).toBeUndefined();
+        // afterEach() below calls stop() again; harmless (every reset it
+        // performs is idempotent), but re-start here so afterEach's own
+        // teardown finds the plugin in the state it expects.
+        plugin.start!();
+    });
+
+    it("sends the message to the quality tier even though it already has a Google entry", async () => {
+        useGemini();
+        setTranslation(key("1"), { lang: "es", text: "rough", via: "google" });
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "gemini"
+                ? { ok: true, results: [{ id: "1", lang: "de", text: "good", skip: false }] }
+                : { ok: true, results: [] });
+
+        const btn = forceButton(discordMessage("1", "hola"));
+        expect(btn).not.toBeNull();
+        btn!.onClick!(undefined as any);
+        await flush();
+
+        expect(native.translateBatch.mock.calls.some(c => c[0] === "gemini")).toBe(true);
+        expect(getTranslation(key("1"))).toEqual({ lang: "de", text: "good", via: "gemini" });
+    });
+
+    it("works for a message the scroll-back rule would otherwise exclude", async () => {
+        useGemini();
+        const foreign = (id: string) => discordMessage(id, "je vais m'en aller incessamment sous peu");
+        native.translateBatch.mockImplementation(
+            async (engine: string, _k: string, payload: string) =>
+                engine === "google"
+                    ? googleAnswers(payload, "rough", "fr")
+                    : { ok: true, results: [] }
+        );
+
+        // Get past the channel-open load, so the next one is genuine scroll-back.
+        stubMessages.set(CHANNEL, [foreign("open-0")]);
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
+        await settle();
+
+        // A never-before-seen message, loaded by a scroll — demoted to the
+        // fast tier only by the scroll-back rule (initialHistoryPending was
+        // already consumed by the load above).
+        const scrolled = foreign("scrolled-1");
+        stubMessages.set(CHANNEL, [scrolled, ...(stubMessages.get(CHANNEL) as any[])]);
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
+        await settle();
+
+        expect(getTranslation(key("scrolled-1"))).toMatchObject({ via: "google" });
+        expect(
+            native.translateBatch.mock.calls.some(c =>
+                c[0] === "gemini"
+                && JSON.parse(c[2] as string).messages.some((m: any) => m.id === "scrolled-1"))
+        ).toBe(false);
+
+        // Now the user asks by hand.
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "gemini"
+                ? { ok: true, results: [{ id: "scrolled-1", lang: "fr", text: "better", skip: false }] }
+                : { ok: true, results: [] });
+
+        const btn = forceButton(scrolled);
+        expect(btn).not.toBeNull();
+        btn!.onClick!(undefined as any);
+        await flush();
+
+        expect(getTranslation(key("scrolled-1"))).toMatchObject({ via: "gemini", text: "better" });
+    });
+
+    it("bypasses the qualityAttempted ledger — a message whose earlier attempt failed can be retried by hand", async () => {
+        useGemini();
+        stubMessages.set(CHANNEL, [discordMessage("1", "hola")]);
+        // The model omits every id — a real attempt that writes nothing, the
+        // routine case the ledger exists for (see "a failed quality attempt
+        // is not re-requested forever" above).
+        native.translateBatch.mockImplementation(
+            async (engine: string, _k: string, payload: string) =>
+                engine === "google"
+                    ? googleAnswers(payload, "rough", "de")
+                    : {
+                        ok: true,
+                        results: JSON.parse(payload).messages.map(
+                            (m: { id: string; }) => ({ id: m.id, failed: true })
+                        )
+                    }
+        );
+
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        const spentAutomatically =
+            native.translateBatch.mock.calls.filter(c => c[0] === "gemini").length;
+        expect(spentAutomatically).toBe(1);
+
+        // Confirm the ledger really is what is blocking the automatic path,
+        // before asking whether the button gets past it.
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        expect(native.translateBatch.mock.calls.filter(c => c[0] === "gemini").length)
+            .toBe(spentAutomatically);
+
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "gemini"
+                ? { ok: true, results: [{ id: "1", lang: "de", text: "good", skip: false }] }
+                : { ok: true, results: [] });
+
+        const btn = forceButton(discordMessage("1", "hola"));
+        expect(btn).not.toBeNull();
+        btn!.onClick!(undefined as any);
+        await flush();
+
+        expect(native.translateBatch.mock.calls.filter(c => c[0] === "gemini").length)
+            .toBe(spentAutomatically + 1);
+        expect(getTranslation(key("1"))).toMatchObject({ via: "gemini", text: "good" });
+    });
+
+    it("does not appear when the configured engine is Google", () => {
+        settings.store.engine = "google";
+        expect(forceButton(discordMessage("1", "hola"))).toBeNull();
+    });
+
+    it("does not appear for a message that already has a real LLM translation", () => {
+        useGemini();
+        setTranslation(key("1"), { lang: "es", text: "ya bueno", via: "gemini" });
+        expect(forceButton(discordMessage("1", "hola"))).toBeNull();
+    });
+
+    it("does not appear for a message an LLM already skipped (an authoritative verdict, not just a Google guess)", () => {
+        useGemini();
+        setTranslation(key("1"), { skipped: true, via: "gemini" });
+        expect(forceButton(discordMessage("1", "hola"))).toBeNull();
+    });
+
+    it("does not bypass the cooldown — with the engine cooling down, no request is sent", async () => {
+        useGemini();
+        setCooldown("gemini", Date.now() + 600_000);
+        native.translateBatch.mockClear();
+
+        // Cooldown is a runTier-level gate on the ENGINE, not a fact about
+        // configuration, so effectiveEngine() still reports "gemini" and the
+        // button is still offered — what must not happen is a request going
+        // out when it is clicked.
+        const btn = forceButton(discordMessage("1", "hola"));
+        expect(btn).not.toBeNull();
+        btn!.onClick!(undefined as any);
+        await flush();
+
+        expect(native.translateBatch).not.toHaveBeenCalled();
+    });
+
+    it("still routes the write through the upgrade rule — a Google result arriving later cannot clobber it", async () => {
+        const foreign = (id: string) => discordMessage(id, "je vais m'en aller incessamment sous peu");
+
+        // Get past the channel-open load under Google (the beforeEach
+        // default) so the scroll-back dispatch below is genuine scroll-back.
+        // The engine switch just after it is the ONLY settings change in
+        // this test, and nothing is in flight yet when it happens — so no
+        // batcher rebuild ever lands BETWEEN the slow Google call below and
+        // its resolution. That matters: a rebuild bumps the generation guard
+        // runTier checks before every write, and if one landed in between,
+        // this test would pass even with the upgrade rule (mayReplace)
+        // deleted — protected by a stale generation instead of by what it is
+        // actually meant to pin.
+        stubMessages.set(CHANNEL, [foreign("open-0")]);
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
+        await settle();
+
+        useGemini();
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) => {
+            if (engine === "gemini") {
+                return { ok: true, results: [{ id: "target", lang: "fr", text: "good", skip: false }] };
+            }
+            // Deliberately slow, so it lands AFTER the forced quality write below.
+            await new Promise<void>(resolve => setTimeout(resolve, 30_000));
+            return googleAnswers(payload, "rough", "fr");
+        });
+
+        // A scroll-back load: fast tier only (allowQuality is false), so the
+        // quality tier never marks "target" in-flight and the forced click
+        // below is not racing an automatic quality request for it.
+        const target = foreign("target");
+        stubMessages.set(CHANNEL, [target, ...(stubMessages.get(CHANNEL) as any[])]);
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
+        // Advance past the fast tier's own debounce so the batch actually
+        // flushes and the slow Google call starts (its 30s timer has not
+        // fired yet).
+        await vi.advanceTimersByTimeAsync(FAST_DEBOUNCE_MS);
+        await flush();
+
+        const btn = forceButton(target);
+        expect(btn).not.toBeNull();
+        btn!.onClick!(undefined as any);
+        await flush();
+        expect(getTranslation(key("target"))).toEqual({ lang: "fr", text: "good", via: "gemini" });
+
+        // Let the slow Google response land and try to overwrite it.
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flush();
+
+        expect(getTranslation(key("target"))).toEqual({ lang: "fr", text: "good", via: "gemini" });
     });
 });

@@ -30,6 +30,7 @@ export default defineConfig({
         // pure-logic and unaffected.
         alias: {
             "@api/DataStore": stub("api-datastore.ts"),
+            "@api/MessagePopover": stub("api-messagepopover.ts"),
             "@api/Settings": stub("api-settings.ts"),
             "@utils/Logger": stub("utils-logger.ts"),
             "@utils/types": stub("utils-types.ts"),

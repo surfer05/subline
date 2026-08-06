@@ -1,3 +1,4 @@
+import { addMessagePopoverButton, removeMessagePopoverButton } from "@api/MessagePopover";
 import { Logger } from "@utils/Logger";
 import definePlugin, { PluginNative } from "@utils/types";
 import { ChannelStore, FluxDispatcher, LocaleStore, MessageStore, React, SelectedChannelStore, Toasts, UserStore } from "@webpack/common";
@@ -484,6 +485,26 @@ function needsQuality(key: string): boolean {
 }
 
 /**
+ * Has an LLM already had its say on this message — a real translation or an
+ * authoritative skip? Used only to decide whether the force-quality popover
+ * button (see `forceQualityPopoverRender`) has anything left to offer.
+ *
+ * Deliberately `needsQuality()` minus the `qualityAttempted` check: that
+ * ledger bounds AUTOMATIC re-attempts (catch-up re-offering the same message
+ * on every channel open), and the whole point of the button this feeds is to
+ * let the user override it by hand for a message whose one automatic attempt
+ * already failed. Only a verdict actually sitting in the store — the one
+ * thing forcing another request cannot improve on — closes the door here.
+ */
+function hasQualityVerdict(key: string): boolean {
+    const e = getTranslation(key);
+    if (e === undefined) return false;
+    if (isRealTranslation(e)) return ENGINE_RANK[e.via] >= 1;
+    if ("skipped" in e) return e.via !== undefined && ENGINE_RANK[e.via] >= 1;
+    return false;   // failed / deferred — still worth a forced attempt
+}
+
+/**
  * One flush, for either tier. The tier is entirely described by which engine
  * it was built with — the fast tier is Google by construction and the quality
  * tier is only ever built for an LLM (see rebuildBatcher) — so there is one
@@ -681,6 +702,54 @@ async function runTier(
         // were queued, and not only on the happy path.
         for (const m of req.messages) inFlightSet.delete(m.id);
     }
+}
+
+/**
+ * Force ONE message through the quality tier on the user's explicit say-so —
+ * the click handler behind the force-quality popover button.
+ *
+ * Deliberately does not consult `needsQuality()`, the `qualityAttempted`
+ * ledger, or `allowQuality`: those bound AUTOMATIC spending (catch-up,
+ * scroll-back, live chat), and a user naming one specific message outranks
+ * all three — that is the entire point of a manual override. What this does
+ * NOT skip is `runTier()`'s own gates: the cooldown and the rate gate are
+ * limits on the ENGINE (how much it can be asked right now), not on how a
+ * request was chosen, and bypassing either would let one click spend the
+ * quota every other message is waiting on, or hammer an engine that just
+ * rejected us. Routed through `runTier()` itself — not a second call to
+ * `Native.translateBatch` — so the write still lands through
+ * `writeResult()`/`mayReplace()` exactly as an automatic quality batch does:
+ * a Google result arriving later still cannot clobber what this bought.
+ */
+async function forceQualityTranslate(message: Message): Promise<void> {
+    const engine = effectiveEngine();
+    // Not actually usable right now (no LLM configured, no key, or pinned to
+    // Google by an earlier auth failure) — the popover render() below already
+    // hides the button in exactly this case, but the engine can change
+    // between render and click, so check again rather than trust stale props.
+    if (!isLlmEngine(engine)) return;
+
+    // A duplicate click, or a race with a request already in flight for this
+    // message on this tier (live chat, catch-up). One spend at a time per
+    // message, same discipline as the automatic paths.
+    if (inFlightQuality.has(message.id)) return;
+    inFlightQuality.add(message.id);
+
+    const req: BatchRequest = {
+        messages: [{
+            id: message.id,
+            author: message.author?.username ?? "unknown",
+            text: message.content ?? "",
+            replyToId: replyParentId(message)
+        }],
+        // No conversation context: this is a deliberate, single-message,
+        // out-of-band request rather than a batch the conversation ring was
+        // built for. The LLM still translates it correctly without context —
+        // context only helps disambiguate, it is not required to answer.
+        context: [],
+        targetLang: settings.store.targetLang
+    };
+    await runTier(engine, req, batcherGeneration);
 }
 
 function rebuildBatcher() {
@@ -1280,6 +1349,59 @@ function TranslationAccessory({ message }: { message: Message; }) {
     );
 }
 
+/**
+ * Registered separately from `messagePopoverButton` below, via the lower-level
+ * `@api/MessagePopover` — the same real mechanism `messagePopoverButton`
+ * itself is backed by (see `startPlugin`/`stopPlugin` in Vencord's
+ * `PluginManager.ts`), just called under a second identifier. `definePlugin`'s
+ * declarative field only ever holds ONE button, because PluginManager
+ * registers it keyed by the plugin's own name; a second, independently
+ * visible action needs its own key. This is not a new registration mechanism,
+ * only a second use of the one Vencord already provides for exactly this.
+ */
+export const FORCE_QUALITY_POPOVER_ID = "VcTranslate-forceQuality";
+
+/**
+ * The ⚡ popover action: "spend one of the LLM's requests on THIS message,
+ * right now." Distinct from the 🌐 channel toggle above (which is a per-CHANNEL
+ * setting, no request involved) both in glyph — so the two are never confused
+ * in the hover toolbar — and in what it does: a one-shot, per-MESSAGE spend.
+ *
+ * Hidden whenever it could not do anything useful:
+ *  - no LLM is actually usable right now (`engine: "google"`, no key entered,
+ *    or pinned to Google by an earlier auth failure — see `effectiveEngine()`)
+ *    means there is no quality tier to force a message into at all;
+ *  - the message already carries an LLM verdict (`hasQualityVerdict()`) — a
+ *    real ✦ translation or an authoritative LLM skip — so another request
+ *    could not improve on what is already there.
+ *
+ * Still shown for a message stuck on a `≈` Google line, however that
+ * happened: scroll-back demoted it, the earlier automatic attempt failed and
+ * `qualityAttempted` is refusing to retry it, or it simply has not been
+ * reached yet. All three are exactly what this button exists to override.
+ */
+function forceQualityPopoverRender(message: Message) {
+    const channel = ChannelStore.getChannel(message.channel_id);
+    if (!channel) return null;
+
+    const engine = effectiveEngine();
+    if (!isLlmEngine(engine)) return null;
+
+    const key = makeKey(message.id, settings.store.targetLang);
+    if (hasQualityVerdict(key)) return null;
+
+    const { label } = LLM_ENGINES[engine];
+    return {
+        label: `Translate with ${label} now (spends one request)`,
+        icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
+        message,
+        channel,
+        onClick: () => {
+            void forceQualityTranslate(message);
+        }
+    };
+}
+
 export default definePlugin({
     name: "VcTranslate",
     description: "Automatically translates incoming messages and shows them as subtitles.",
@@ -1332,6 +1454,17 @@ export default definePlugin({
     },
 
     async start() {
+        // Registered here (and removed in stop()) rather than left as a
+        // static side effect of the module loading: the plugin can be
+        // disabled and re-enabled without a Discord restart, and a button
+        // still registered under a stopped plugin would call into handlers
+        // that assume the batchers/subscriptions below exist.
+        addMessagePopoverButton(
+            FORCE_QUALITY_POPOVER_ID,
+            forceQualityPopoverRender,
+            () => <span style={{ fontSize: "1rem" }}>⚡</span>
+        );
+
         await loadEnabledChannels();
         // AWAITED, unlike the translation cache below: this decides whether the
         // very first batch of the session is even allowed to touch the LLM
@@ -1393,6 +1526,7 @@ export default definePlugin({
     },
 
     stop() {
+        removeMessagePopoverButton(FORCE_QUALITY_POPOVER_ID);
         onSettingsChanged(null);
         FluxDispatcher.unsubscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onMessageUpdate);
