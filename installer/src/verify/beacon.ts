@@ -24,11 +24,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { PRODUCT_DIR_NAME, productDirFor } from "../bundle/layout.js";
 import type { Result } from "../patcher/result.js";
 import { err, fsError, ok } from "../patcher/result.js";
 
 export const BEACON_FILENAME = "status.json";
-export const PRODUCT_DIR_NAME = "Subline";
+export { PRODUCT_DIR_NAME };
 
 /**
  * The format this reader understands. A beacon claiming any other is refused.
@@ -87,23 +88,16 @@ export interface Beacon {
 }
 
 /**
- * Where the plugin writes it. Mirrors the plugin's own per-platform table, and
- * is a table here for the same reason — Windows (spec §5) is a row, not a
- * redesign.
+ * Where the plugin writes it: Subline's per-user data directory, which is also
+ * where the installed mod bundle lives. Resolved by `bundle/layout.ts` so there
+ * is one per-platform table rather than two that agree until one is edited.
  */
-const DIR_BY_PLATFORM: Partial<
-    Record<NodeJS.Platform, (env: NodeJS.ProcessEnv, home: string) => string | null>
-> = {
-    darwin: (_env, home) => join(home, "Library", "Application Support", PRODUCT_DIR_NAME),
-    win32: env => (env.LOCALAPPDATA ? join(env.LOCALAPPDATA, PRODUCT_DIR_NAME) : null)
-};
-
 export function beaconDirFor(
     platform: NodeJS.Platform = process.platform,
     env: NodeJS.ProcessEnv = process.env,
     home: string = homedir()
 ): string | null {
-    return DIR_BY_PLATFORM[platform]?.(env, home) ?? null;
+    return productDirFor(platform, env, home);
 }
 
 export function beaconPathFor(

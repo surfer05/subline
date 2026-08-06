@@ -2,26 +2,51 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { beforeEach, afterEach, describe, expect, it } from "vitest";
 
 import { buildAsar } from "../src/patcher/asar.js";
 import { markerPathFor, readMarker } from "../src/patcher/marker.js";
 import { patchInstall, unpatchInstall } from "../src/patcher/patch.js";
+import type { PatchOptions } from "../src/patcher/patch.js";
 import { inspectInstall } from "../src/patcher/state.js";
 import { buildStubAsar, readStub, STUB_PACKAGE_JSON, stubIndexSource } from "../src/patcher/stub.js";
-import type { Fixture } from "./fixture.js";
-import { makeDiscordFixture } from "./fixture.js";
+import type { Fixture, ModBundleFixture } from "./fixture.js";
+import { FIXTURE_VENCORD_COMMIT, makeDiscordFixture, makeModBundleFixture } from "./fixture.js";
 
-const LOADER = "/Applications/Subline.app/Contents/Resources/loader/patcher.js";
-const OTHER_LOADER = "/Applications/Subline.app/Contents/Resources/loader/patcher-v2.js";
 const VENCORD_LOADER = "/Users/someone/dev/Vencord/dist/patcher.js";
 
 const BUILD_ID = "1f2e3d4c5b6a7980";
 const NEW_BUILD_ID = "0011223344556677";
 
-const OPTIONS = { loaderPath: LOADER, productVersion: "1.2.3", buildId: BUILD_ID };
-
 let fixture: Fixture | null = null;
+
+/**
+ * The built mod bundle being installed. `loaderPath` and `buildId` are read out
+ * of it rather than passed in, so there is no way for a test — or a caller — to
+ * point the stub at one bundle and record another's identity.
+ */
+let bundle: ModBundleFixture;
+let extraBundles: ModBundleFixture[] = [];
+
+/** What this bundle stub must require. Derived from the bundle, never chosen. */
+function loader(): string {
+    return bundle.loaderPath;
+}
+
+function options(extra: Partial<PatchOptions> = {}): PatchOptions {
+    return { modBundleDir: bundle.dir, productVersion: "1.2.3", ...extra };
+}
+
+function secondBundle(): ModBundleFixture {
+    const extra = makeModBundleFixture({ buildId: NEW_BUILD_ID });
+    extraBundles.push(extra);
+    return extra;
+}
+
+beforeEach(() => {
+    bundle = makeModBundleFixture({ buildId: BUILD_ID });
+});
+
 afterEach(() => {
     if (fixture) {
         // Some tests chmod the resources dir to force EACCES; put it back so
@@ -34,6 +59,9 @@ afterEach(() => {
         fixture.cleanup();
     }
     fixture = null;
+    bundle.cleanup();
+    for (const extra of extraBundles) extra.cleanup();
+    extraBundles = [];
 });
 
 function sha256(path: string): string {
@@ -45,7 +73,7 @@ describe("patchInstall", () => {
         fixture = makeDiscordFixture();
         const originalHash = sha256(fixture.install.asarPath);
 
-        const result = patchInstall(fixture.install, OPTIONS);
+        const result = patchInstall(fixture.install, options());
         expect(result.ok).toBe(true);
         if (!result.ok) return;
 
@@ -58,11 +86,11 @@ describe("patchInstall", () => {
         expect(sha256(fixture.install.backupPath)).toBe(originalHash);
 
         // app.asar is exactly the stub, in the same shape the real install has.
-        expect(readFileSync(fixture.install.asarPath).equals(buildStubAsar(LOADER))).toBe(true);
+        expect(readFileSync(fixture.install.asarPath).equals(buildStubAsar(loader()))).toBe(true);
         const stub = readStub(fixture.install.asarPath);
         expect(stub.ok).toBe(true);
         if (!stub.ok || stub.value === null) throw new Error("expected a stub");
-        expect(stub.value.indexSource).toBe(stubIndexSource(LOADER));
+        expect(stub.value.indexSource).toBe(stubIndexSource(loader()));
         expect(stub.value.packageJson).toBe(STUB_PACKAGE_JSON);
 
         const state = inspectInstall(fixture.install);
@@ -71,25 +99,25 @@ describe("patchInstall", () => {
         const marker = readMarker(fixture.install.resourcesPath);
         expect(marker.ok).toBe(true);
         if (!marker.ok || marker.value === null) throw new Error("expected a marker");
-        expect(marker.value.loaderPath).toBe(LOADER);
+        expect(marker.value.loaderPath).toBe(loader());
         expect(marker.value.productVersion).toBe("1.2.3");
         expect(marker.value.discordVersion).toBe("0.0.406");
     });
 
     it("leaves no temp files behind", () => {
         fixture = makeDiscordFixture();
-        expect(patchInstall(fixture.install, OPTIONS).ok).toBe(true);
+        expect(patchInstall(fixture.install, options()).ok).toBe(true);
         const stray = readdirSync(fixture.install.resourcesPath).filter(name => name.includes("tmp"));
         expect(stray).toEqual([]);
     });
 
     it("is idempotent: patching an already-patched install writes nothing", () => {
         fixture = makeDiscordFixture();
-        expect(patchInstall(fixture.install, OPTIONS).ok).toBe(true);
+        expect(patchInstall(fixture.install, options()).ok).toBe(true);
         const backupHash = sha256(fixture.install.backupPath);
         const asarHash = sha256(fixture.install.asarPath);
 
-        const again = patchInstall(fixture.install, OPTIONS);
+        const again = patchInstall(fixture.install, options());
         expect(again.ok).toBe(true);
         if (!again.ok) return;
         expect(again.value.alreadyPatched).toBe(true);
@@ -104,7 +132,7 @@ describe("patchInstall", () => {
         // verification compares the beacon against; without it, "the plugin
         // loaded" and "OUR plugin loaded" are the same sentence.
         fixture = makeDiscordFixture();
-        const result = patchInstall(fixture.install, OPTIONS);
+        const result = patchInstall(fixture.install, options());
         expect(result.ok).toBe(true);
         if (!result.ok) return;
 
@@ -115,6 +143,84 @@ describe("patchInstall", () => {
         expect(marker.value.pluginBuildId).toBe(BUILD_ID);
     });
 
+    it("reads the build id OUT OF the bundle instead of being told what to expect", () => {
+        // The residual hole from the beacon work: the installer asserted the id
+        // it was patching. A correct bundle with a stale recorded id reports a
+        // working install as dead. Nothing below tells patchInstall an id — the
+        // only thing that changes between the two halves is the bundle's own
+        // contents, and the marker follows it.
+        fixture = makeDiscordFixture();
+
+        const first = patchInstall(fixture.install, options());
+        expect(first.ok && first.value.pluginBuildId).toBe(BUILD_ID);
+        expect(first.ok && first.value.bundle.buildId).toBe(BUILD_ID);
+
+        bundle.rebuild({ buildId: NEW_BUILD_ID });
+        const second = patchInstall(fixture.install, options());
+        expect(second.ok && second.value.pluginBuildId).toBe(NEW_BUILD_ID);
+
+        const marker = readMarker(fixture.install.resourcesPath);
+        expect(marker.ok && marker.value?.pluginBuildId).toBe(NEW_BUILD_ID);
+    });
+
+    it("carries the bundle's provenance on the report, so the log can name the Vencord it shipped", () => {
+        // Spec §6: when Discord changes its frontend the patches go stale and no
+        // amount of re-patching helps. "Which Vencord is installed" is the first
+        // question at that moment, and §7's log header has to be able to answer it.
+        fixture = makeDiscordFixture();
+        const result = patchInstall(fixture.install, options());
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+
+        expect(result.value.bundle.vencordCommit).toBe(FIXTURE_VENCORD_COMMIT);
+        expect(result.value.bundle.vencordVersion).toBe("1.15.0");
+        expect(result.value.bundle.pluginVersion).toBe("0.1.0");
+        expect(result.value.bundle.loaderPath).toBe(loader());
+    });
+
+    it("refuses a bundle whose manifest names a different build from its code, and does not touch Discord", () => {
+        // A mispackaged bundle. It would install cleanly and then verify as
+        // `foreign-beacon` forever, which reads as "somebody else's plugin is
+        // running" for code that is working perfectly. Refused before the
+        // archive is moved, not rolled back afterwards.
+        fixture = makeDiscordFixture();
+        const originalHash = sha256(fixture.install.asarPath);
+        bundle.rebuild({ buildId: BUILD_ID, stampedBuildId: NEW_BUILD_ID });
+
+        const result = patchInstall(fixture.install, options());
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error.code).toBe("MOD_BUNDLE_INVALID");
+
+        expect(sha256(fixture.install.asarPath)).toBe(originalHash);
+        expect(existsSync(fixture.install.backupPath)).toBe(false);
+        expect(existsSync(markerPathFor(fixture.install.resourcesPath))).toBe(false);
+    });
+
+    it("refuses a bundle whose loader is a stub of a file, and does not touch Discord", () => {
+        // The half-finished build: every name present, one artefact empty.
+        fixture = makeDiscordFixture();
+        const originalHash = sha256(fixture.install.asarPath);
+        writeFileSync(loader(), "");
+        bundle.restamp();
+
+        const result = patchInstall(fixture.install, options());
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error.code).toBe("MOD_BUNDLE_INVALID");
+        expect(sha256(fixture.install.asarPath)).toBe(originalHash);
+        expect(existsSync(fixture.install.backupPath)).toBe(false);
+    });
+
+    it("refuses a modBundleDir that is not a bundle at all", () => {
+        fixture = makeDiscordFixture();
+        const result = patchInstall(fixture.install, options({ modBundleDir: fixture.root }));
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error.code).toBe("MOD_BUNDLE_INVALID");
+        expect(existsSync(markerPathFor(fixture.install.resourcesPath))).toBe(false);
+    });
+
     it("re-patches when only the BUILD changed, even though the loader path did not", () => {
         // Spec §6: the helper self-updates the bundle in place, so a new build
         // routinely arrives behind an unchanged loaderPath. Treating that as
@@ -122,9 +228,15 @@ describe("patchInstall", () => {
         // and every verification of a perfectly healthy install would then read
         // as "a different copy of the plugin is running".
         fixture = makeDiscordFixture();
-        expect(patchInstall(fixture.install, OPTIONS).ok).toBe(true);
+        expect(patchInstall(fixture.install, options()).ok).toBe(true);
 
-        const upgraded = patchInstall(fixture.install, { ...OPTIONS, buildId: NEW_BUILD_ID });
+        // Exactly what the helper does: a new build lands in the SAME directory,
+        // so `modBundleDir` and therefore `loaderPath` are unchanged and only the
+        // id moves.
+        bundle.rebuild({ buildId: NEW_BUILD_ID });
+        expect(bundle.loaderPath).toBe(loader());
+
+        const upgraded = patchInstall(fixture.install, options());
         expect(upgraded.ok).toBe(true);
         if (!upgraded.ok) return;
         expect(upgraded.value.alreadyPatched).toBe(false);
@@ -134,21 +246,21 @@ describe("patchInstall", () => {
         if (!marker.ok || marker.value === null) throw new Error("expected a marker");
         expect(marker.value.pluginBuildId).toBe(NEW_BUILD_ID);
         // and the loader is untouched, which is the whole point of the case
-        expect(marker.value.loaderPath).toBe(LOADER);
+        expect(marker.value.loaderPath).toBe(loader());
     });
 
     it("re-patches an install whose marker predates build ids", () => {
         // The upgrade path from a marker written before this field existed. It
         // reads as "no id", which must not be mistaken for "the id we want".
         fixture = makeDiscordFixture();
-        expect(patchInstall(fixture.install, OPTIONS).ok).toBe(true);
+        expect(patchInstall(fixture.install, options()).ok).toBe(true);
 
         const markerPath = markerPathFor(fixture.install.resourcesPath);
         const old = JSON.parse(readFileSync(markerPath, "utf8")) as Record<string, unknown>;
         delete old.pluginBuildId;
         writeFileSync(markerPath, JSON.stringify(old, null, 4));
 
-        const again = patchInstall(fixture.install, OPTIONS);
+        const again = patchInstall(fixture.install, options());
         expect(again.ok).toBe(true);
         if (!again.ok) return;
         expect(again.value.alreadyPatched).toBe(false);
@@ -165,7 +277,7 @@ describe("patchInstall", () => {
         const originalHash = sha256(fixture.install.asarPath);
 
         const result = patchInstall(fixture.install, {
-            ...OPTIONS,
+            ...options(),
             hooks: {
                 afterWrite: ({ markerPath }) => {
                     const marker = JSON.parse(readFileSync(markerPath, "utf8")) as Record<string, unknown>;
@@ -186,10 +298,14 @@ describe("patchInstall", () => {
 
     it("re-points to a new loader without disturbing the preserved original", () => {
         fixture = makeDiscordFixture();
-        expect(patchInstall(fixture.install, OPTIONS).ok).toBe(true);
+        expect(patchInstall(fixture.install, options()).ok).toBe(true);
         const backupHash = sha256(fixture.install.backupPath);
 
-        const repoint = patchInstall(fixture.install, { ...OPTIONS, loaderPath: OTHER_LOADER });
+        // A bundle in a different directory: a new loader path AND a new
+        // identity, which is what installing a freshly downloaded bundle
+        // somewhere else looks like.
+        const other = secondBundle();
+        const repoint = patchInstall(fixture.install, options({ modBundleDir: other.dir }));
         expect(repoint.ok).toBe(true);
         if (!repoint.ok) return;
         expect(repoint.value.backupCreated).toBe(false);
@@ -197,7 +313,7 @@ describe("patchInstall", () => {
 
         const stub = readStub(fixture.install.asarPath);
         if (!stub.ok || stub.value === null) throw new Error("expected a stub");
-        expect(stub.value.loaderPath).toBe(OTHER_LOADER);
+        expect(stub.value.loaderPath).toBe(other.loaderPath);
     });
 
     it("refuses to patch over another mod without consent, and changes nothing", () => {
@@ -205,7 +321,7 @@ describe("patchInstall", () => {
         const asarHash = sha256(fixture.install.asarPath);
         const backupHash = sha256(fixture.install.backupPath);
 
-        const result = patchInstall(fixture.install, OPTIONS);
+        const result = patchInstall(fixture.install, options());
         expect(result.ok).toBe(false);
         if (result.ok) return;
         expect(result.error.code).toBe("FOREIGN_MOD_PRESENT");
@@ -220,7 +336,7 @@ describe("patchInstall", () => {
         fixture = makeDiscordFixture({ withBackup: true, stubLoaderPath: VENCORD_LOADER });
         const originalHash = sha256(fixture.install.backupPath);
 
-        const result = patchInstall(fixture.install, { ...OPTIONS, overwriteForeignMod: true });
+        const result = patchInstall(fixture.install, { ...options(), overwriteForeignMod: true });
         expect(result.ok).toBe(true);
         if (!result.ok) return;
         expect(result.value.replacedMod).toBe("vencord");
@@ -231,12 +347,12 @@ describe("patchInstall", () => {
 
         const stub = readStub(fixture.install.asarPath);
         if (!stub.ok || stub.value === null) throw new Error("expected a stub");
-        expect(stub.value.loaderPath).toBe(LOADER);
+        expect(stub.value.loaderPath).toBe(loader());
     });
 
     it("refuses BetterDiscord's unpacked app folder even with consent, because the patch would do nothing", () => {
         fixture = makeDiscordFixture({ withUnpackedAppDir: true });
-        const result = patchInstall(fixture.install, { ...OPTIONS, overwriteForeignMod: true });
+        const result = patchInstall(fixture.install, { ...options(), overwriteForeignMod: true });
         expect(result.ok).toBe(false);
         if (result.ok) return;
         expect(result.error.code).toBe("FOREIGN_MOD_PRESENT");
@@ -246,7 +362,7 @@ describe("patchInstall", () => {
 
     it("refuses to patch a broken install", () => {
         fixture = makeDiscordFixture({ withoutAsar: true, withBackup: true });
-        const result = patchInstall(fixture.install, OPTIONS);
+        const result = patchInstall(fixture.install, options());
         expect(result.ok).toBe(false);
         if (result.ok) return;
         expect(result.error.code).toBe("BROKEN_INSTALL");
@@ -260,7 +376,7 @@ describe("patchInstall", () => {
         writeFileSync(fixture.install.backupPath, buildStubAsar("/stale/leftover.js"));
         const genuineHash = sha256(fixture.install.asarPath);
 
-        const result = patchInstall(fixture.install, OPTIONS);
+        const result = patchInstall(fixture.install, options());
         expect(result.ok).toBe(true);
         if (!result.ok) return;
         expect(result.value.backupCreated).toBe(true);
@@ -272,7 +388,7 @@ describe("patchInstall", () => {
         const asarHash = sha256(fixture.install.asarPath);
         chmodSync(fixture.install.resourcesPath, 0o555);
 
-        const result = patchInstall(fixture.install, OPTIONS);
+        const result = patchInstall(fixture.install, options());
         expect(result.ok).toBe(false);
         if (result.ok) return;
         expect(result.error.code).toBe("PERMISSION_DENIED");
@@ -289,7 +405,7 @@ describe("patchInstall rollback", () => {
         const originalHash = sha256(fixture.install.asarPath);
 
         const result = patchInstall(fixture.install, {
-            ...OPTIONS,
+            ...options(),
             hooks: {
                 // Simulate a write that silently did not land as intended.
                 afterWrite: ({ asarPath }) => writeFileSync(asarPath, buildStubAsar("/wrong/loader.js"))
@@ -314,7 +430,7 @@ describe("patchInstall rollback", () => {
         const originalHash = sha256(fixture.install.asarPath);
 
         const result = patchInstall(fixture.install, {
-            ...OPTIONS,
+            ...options(),
             hooks: { afterWrite: ({ asarPath }) => writeFileSync(asarPath, Buffer.from("truncated garbage")) }
         });
 
@@ -333,11 +449,11 @@ describe("patchInstall rollback", () => {
         const originalHash = sha256(fixture.install.asarPath);
         const reordered = buildAsar([
             { name: "package.json", content: Buffer.from(STUB_PACKAGE_JSON, "utf8") },
-            { name: "index.js", content: Buffer.from(stubIndexSource(LOADER), "utf8") }
+            { name: "index.js", content: Buffer.from(stubIndexSource(loader()), "utf8") }
         ]);
 
         const result = patchInstall(fixture.install, {
-            ...OPTIONS,
+            ...options(),
             hooks: { afterWrite: ({ asarPath }) => writeFileSync(asarPath, reordered) }
         });
 
@@ -355,7 +471,7 @@ describe("patchInstall rollback", () => {
         const asarHash = sha256(fixture.install.asarPath);
         mkdirSync(join(fixture.install.backupPath, "occupied"), { recursive: true });
 
-        const result = patchInstall(fixture.install, OPTIONS);
+        const result = patchInstall(fixture.install, options());
         expect(result.ok).toBe(false);
         if (result.ok) return;
 
@@ -366,14 +482,13 @@ describe("patchInstall rollback", () => {
 
     it("rolls back a failed re-point by restoring the previous stub exactly", () => {
         fixture = makeDiscordFixture();
-        expect(patchInstall(fixture.install, OPTIONS).ok).toBe(true);
+        expect(patchInstall(fixture.install, options()).ok).toBe(true);
         const stubHash = sha256(fixture.install.asarPath);
         const backupHash = sha256(fixture.install.backupPath);
         const markerBefore = readFileSync(markerPathFor(fixture.install.resourcesPath), "utf8");
 
         const result = patchInstall(fixture.install, {
-            ...OPTIONS,
-            loaderPath: OTHER_LOADER,
+            ...options({ modBundleDir: secondBundle().dir }),
             hooks: { afterWrite: ({ asarPath }) => writeFileSync(asarPath, Buffer.from("garbage")) }
         });
 
@@ -386,14 +501,14 @@ describe("patchInstall rollback", () => {
 
         const state = inspectInstall(fixture.install);
         expect(state.ok && state.value.kind).toBe("patched-by-us");
-        expect(state.ok && state.value.loaderPath).toBe(LOADER);
+        expect(state.ok && state.value.loaderPath).toBe(loader());
     });
 
     it("reports ROLLBACK_FAILED loudly, with the backup location, when it cannot undo", () => {
         fixture = makeDiscordFixture();
 
         const result = patchInstall(fixture.install, {
-            ...OPTIONS,
+            ...options(),
             hooks: {
                 afterWrite: ({ asarPath, backupPath }) => {
                     // Verification will fail, and the backup we would restore
@@ -415,7 +530,7 @@ describe("unpatchInstall", () => {
     it("restores a byte-identical original and removes our artefacts", () => {
         fixture = makeDiscordFixture();
         const originalHash = sha256(fixture.install.asarPath);
-        expect(patchInstall(fixture.install, OPTIONS).ok).toBe(true);
+        expect(patchInstall(fixture.install, options()).ok).toBe(true);
 
         const result = unpatchInstall(fixture.install);
         expect(result.ok).toBe(true);
@@ -436,7 +551,7 @@ describe("unpatchInstall", () => {
 
     it("fails loudly with BACKUP_MISSING and keeps Discord launchable when the backup is gone", () => {
         fixture = makeDiscordFixture();
-        expect(patchInstall(fixture.install, OPTIONS).ok).toBe(true);
+        expect(patchInstall(fixture.install, options()).ok).toBe(true);
         unlinkSync(fixture.install.backupPath);
 
         const result = unpatchInstall(fixture.install);
@@ -452,7 +567,7 @@ describe("unpatchInstall", () => {
 
     it("refuses BACKUP_CORRUPT rather than moving a bad backup over app.asar", () => {
         fixture = makeDiscordFixture();
-        expect(patchInstall(fixture.install, OPTIONS).ok).toBe(true);
+        expect(patchInstall(fixture.install, options()).ok).toBe(true);
         writeFileSync(fixture.install.backupPath, buildStubAsar("/some/other/stub.js"));
         const asarHash = sha256(fixture.install.asarPath);
 
@@ -467,7 +582,7 @@ describe("unpatchInstall", () => {
     it("repairs the half-patched state by finishing the restore", () => {
         fixture = makeDiscordFixture();
         const originalHash = sha256(fixture.install.asarPath);
-        expect(patchInstall(fixture.install, OPTIONS).ok).toBe(true);
+        expect(patchInstall(fixture.install, options()).ok).toBe(true);
         // Simulate an interrupted patch: app.asar gone, backup present.
         unlinkSync(fixture.install.asarPath);
 
@@ -516,7 +631,7 @@ describe("unpatchInstall", () => {
 
     it("sweeps up a leftover backup and marker on an install Discord already restored", () => {
         fixture = makeDiscordFixture();
-        expect(patchInstall(fixture.install, OPTIONS).ok).toBe(true);
+        expect(patchInstall(fixture.install, options()).ok).toBe(true);
         // A Discord update dropped a fresh real app.asar over our stub.
         writeFileSync(fixture.install.asarPath, fixture.originalAsar);
 
@@ -555,7 +670,7 @@ describe("patch → unpatch → patch cycle", () => {
         const originalHash = sha256(fixture.install.asarPath);
 
         for (let i = 0; i < 3; i++) {
-            expect(patchInstall(fixture.install, OPTIONS).ok).toBe(true);
+            expect(patchInstall(fixture.install, options()).ok).toBe(true);
             expect(sha256(fixture.install.asarPath)).not.toBe(originalHash);
             expect(unpatchInstall(fixture.install).ok).toBe(true);
             expect(sha256(fixture.install.asarPath)).toBe(originalHash);

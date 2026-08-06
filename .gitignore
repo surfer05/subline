@@ -1,2 +1,7 @@
 node_modules/
 .DS_Store
+
+# Build scratch: the pinned Vencord checkout and the assembled mod bundle.
+# Reproducible from vencord.pin.json plus the plugin sources, so it is an
+# output, not a source.
+installer/build/

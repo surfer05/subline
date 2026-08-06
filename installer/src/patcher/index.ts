@@ -12,6 +12,27 @@
 export { buildAsar, readAsarDirectory, readAsarFiles } from "./asar.js";
 export type { AsarDirectory, AsarFileEntry } from "./asar.js";
 
+export { inspectModBundle, removeModBundle } from "../bundle/bundle.js";
+export type { ModBundle } from "../bundle/bundle.js";
+
+export { MOD_DIR_NAME, modBundleDirFor, PRODUCT_DIR_NAME, productDirFor } from "../bundle/layout.js";
+
+export {
+    digestEntries,
+    inspectBundleDir,
+    LOADER_ENTRY_NAME,
+    loaderPathFor,
+    manifestPathFor,
+    MOD_MANIFEST_FILENAME,
+    MOD_MANIFEST_FORMAT,
+    parseManifest,
+    renderManifest,
+    REQUIRED_ENTRIES,
+    SOURCE_NOTICE_NAME,
+    STAMPED_ENTRY_NAME
+} from "../bundle/spec.js";
+export type { BundleFacts, ModEntryDigest, ModManifest, VencordProvenance } from "../bundle/spec.js";
+
 export {
     branchFromPath,
     BRANCHES,

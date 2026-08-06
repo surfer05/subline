@@ -45,6 +45,14 @@ export type PatcherErrorCode =
     | "BEACON_MALFORMED"
     /** The beacon is a format version this installer does not understand. */
     | "BEACON_FORMAT_UNSUPPORTED"
+    /**
+     * The mod bundle we were told to install is missing, incomplete, or its
+     * manifest names a different build from the code beside it. Refused before
+     * Discord is touched: installing a bundle whose identity is wrong produces
+     * an install that patches cleanly and then reports itself as somebody
+     * else's, which is the failure this project keeps rediscovering.
+     */
+    | "MOD_BUNDLE_INVALID"
     /** Anything else that came back from the filesystem. */
     | "IO_ERROR";
 

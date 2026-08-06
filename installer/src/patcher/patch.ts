@@ -25,6 +25,8 @@
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { inspectModBundle } from "../bundle/bundle.js";
+import type { ModBundle } from "../bundle/bundle.js";
 import type { DiscordInstall } from "./locate.js";
 import { markerPathFor, MARKER_FORMAT, readMarker, removeMarker, writeMarker } from "./marker.js";
 import type { PatchMarker } from "./marker.js";
@@ -44,22 +46,26 @@ export interface PatchHooks {
 }
 
 export interface PatchOptions {
-    /** Absolute path to our built loader JS — what the stub will `require()`. */
-    loaderPath: string;
+    /**
+     * The built mod bundle to install — a directory, not a file.
+     *
+     * BOTH the loader path and the build id are DERIVED from it, and neither can
+     * be supplied by the caller. That is the whole design of this option:
+     *
+     *  - `loaderPath` is `<dir>/patcher.js`, so the stub cannot be pointed at
+     *    one bundle while the marker records another's identity.
+     *  - `buildId` is read out of the bundle's manifest and confirmed against
+     *    the stamp compiled into its renderer, so the installer OBSERVES which
+     *    build it is installing instead of ASSERTING it.
+     *
+     * The hole this closes: a caller that passed the right bundle and a stale id
+     * produced a perfectly working install that every later verification read as
+     * `foreign-beacon` — a dead-looking report for live code. There is no
+     * argument here that can be got wrong, because there is no argument.
+     */
+    modBundleDir: string;
     /** Installer version, recorded in the marker. */
     productVersion: string;
-    /**
-     * The build id of the plugin bundle this patch points at — the value that
-     * bundle stamps into its status beacon at runtime (see the plugin's
-     * `buildStamp.ts`).
-     *
-     * Recorded in the marker so `verifyOnce` has an expectation to check the
-     * beacon against. Without it, "the plugin loaded" and "the plugin WE
-     * installed loaded" are the same sentence, and a machine with a pre-existing
-     * Vencord + vcTranslate reports a healthy install while our patch does
-     * nothing.
-     */
-    buildId: string;
     /**
      * Patch over another mod. Spec §3 step 4: detect, explain, let them choose —
      * so this is never the default, it is the user's answer.
@@ -93,9 +99,23 @@ export interface PatchReport {
     replacedMod: KnownMod | null;
     discordVersion: string | null;
     previousState: InstallStateKind;
+    /**
+     * What was actually installed, as read from the bundle itself — plugin
+     * version and the upstream Vencord commit included, which is what spec §7's
+     * diagnostics header and §6's "which build are we shipping" both need.
+     */
+    bundle: ModBundle;
 }
 
 export function patchInstall(install: DiscordInstall, options: PatchOptions): Result<PatchReport> {
+    // FIRST, before Discord is even looked at. The bundle is our own artefact:
+    // if it is broken there is nothing to install, and finding that out after
+    // moving Discord's app.asar would mean rolling back a patch we should never
+    // have started.
+    const bundleResult = inspectModBundle(options.modBundleDir);
+    if (!bundleResult.ok) return bundleResult;
+    const bundle = bundleResult.value;
+
     const stateResult = inspectInstall(install);
     if (!stateResult.ok) return stateResult;
     const state = stateResult.value;
@@ -110,24 +130,25 @@ export function patchInstall(install: DiscordInstall, options: PatchOptions): Re
     // which would then fail every verification of a perfectly good install.
     if (
         state.kind === "patched-by-us"
-        && state.loaderPath === options.loaderPath
-        && state.marker?.pluginBuildId === options.buildId
+        && state.loaderPath === bundle.loaderPath
+        && state.marker?.pluginBuildId === bundle.buildId
     ) {
         return ok({
             install,
-            loaderPath: options.loaderPath,
-            pluginBuildId: options.buildId,
+            loaderPath: bundle.loaderPath,
+            pluginBuildId: bundle.buildId,
             backupPath: install.backupPath,
             markerPath: markerPathFor(install.resourcesPath),
             backupCreated: false,
             alreadyPatched: true,
             replacedMod: null,
             discordVersion: state.marker?.discordVersion ?? null,
-            previousState: state.kind
+            previousState: state.kind,
+            bundle
         });
     }
 
-    return applyPatch(install, state, options);
+    return applyPatch(install, state, options, bundle);
 }
 
 /** All the reasons we refuse to touch an install, each with its own named error. */
@@ -170,10 +191,16 @@ interface Undo {
     markerExisted: boolean;
 }
 
-function applyPatch(install: DiscordInstall, state: InstallState, options: PatchOptions): Result<PatchReport> {
+function applyPatch(
+    install: DiscordInstall,
+    state: InstallState,
+    options: PatchOptions,
+    bundle: ModBundle
+): Result<PatchReport> {
     const { asarPath, backupPath, resourcesPath } = install;
     const markerPath = markerPathFor(resourcesPath);
     const tempPath = join(resourcesPath, TEMP_FILENAME);
+    const identity: PatchIdentity = { loaderPath: bundle.loaderPath, buildId: bundle.buildId };
 
     // Discord's version goes into the marker so the helper can notice updates.
     const buildInfo = readDiscordVersion(install);
@@ -182,7 +209,7 @@ function applyPatch(install: DiscordInstall, state: InstallState, options: Patch
     // Derived from what `app.asar` actually *is*, never from the state label:
     // an unparseable foreign stub still must not be moved into `_app.asar`.
     const currentIsOriginal = !state.asarIsStub;
-    const stub = buildStubAsar(options.loaderPath);
+    const stub = buildStubAsar(identity.loaderPath);
 
     const undo: Undo = {
         previousAsar: null,
@@ -232,8 +259,8 @@ function applyPatch(install: DiscordInstall, state: InstallState, options: Patch
         format: MARKER_FORMAT,
         product: "subline",
         productVersion: options.productVersion,
-        loaderPath: options.loaderPath,
-        pluginBuildId: options.buildId,
+        loaderPath: identity.loaderPath,
+        pluginBuildId: identity.buildId,
         discordVersion,
         backupPath,
         patchedAt: new Date().toISOString()
@@ -248,7 +275,7 @@ function applyPatch(install: DiscordInstall, state: InstallState, options: Patch
     options.hooks?.afterWrite?.({ asarPath, backupPath, markerPath });
 
     // 5. Read back what we wrote. "The file was written" is not evidence (spec §7).
-    const verification = verifyPatch(install, options, stub);
+    const verification = verifyPatch(install, identity, stub);
     if (!verification.ok) {
         const rolled = rollback(install, undo, tempPath);
         if (!rolled.ok) return rolled;
@@ -261,15 +288,16 @@ function applyPatch(install: DiscordInstall, state: InstallState, options: Patch
 
     return ok({
         install,
-        loaderPath: options.loaderPath,
-        pluginBuildId: options.buildId,
+        loaderPath: identity.loaderPath,
+        pluginBuildId: identity.buildId,
         backupPath,
         markerPath,
         backupCreated: undo.backupCreated,
         alreadyPatched: false,
         replacedMod: state.kind === "patched-by-other" ? state.mod : null,
         discordVersion,
-        previousState: state.kind
+        previousState: state.kind,
+        bundle
     });
 }
 

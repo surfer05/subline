@@ -5,9 +5,14 @@
   "type": "module",
   "description": "Subline installer — patcher core",
   "scripts": {
+    "build:mod": "node scripts/buildMod.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
+  },
+  "//engines": "buildMod.mjs imports src/bundle/spec.ts directly, so that the checks the build runs and the checks the installer runs are the same code. Node strips TypeScript types without a flag from 22.18 on.",
+  "engines": {
+    "node": ">=22.18"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

@@ -1,0 +1,19 @@
+{
+    "_comment": [
+        "The exact Vencord we build and redistribute. Edited by hand, deliberately:",
+        "moving to a newer upstream is a decision with consequences (spec §6 — when",
+        "Discord changes its frontend, the fix is a new mod built from a newer",
+        "Vencord), and it should show up as a reviewable diff rather than as whatever",
+        "the network returned that afternoon.",
+        "",
+        "'commit' is the load-bearing field. Vencord is GPL-3.0 and we ship its build",
+        "output, so the corresponding source must be identifiable and obtainable; a",
+        "full object id is the only pin that makes 'which Vencord is in this bundle'",
+        "answerable years later. 'version' is upstream's own package.json version and",
+        "is cross-checked at build time, so a pin whose two halves disagree fails the",
+        "build instead of shipping."
+    ],
+    "repository": "https://github.com/Vendicated/Vencord.git",
+    "commit": "1a8c3b71bbfaeb195a7f402458b6b68b0ccea7ef",
+    "version": "1.15.0"
+}
