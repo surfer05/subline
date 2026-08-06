@@ -25,6 +25,7 @@ function markAsOurs(f: Fixture, loaderPath = OUR_LOADER): void {
         product: "subline",
         productVersion: "0.0.0",
         loaderPath,
+        pluginBuildId: "1f2e3d4c5b6a7980",
         discordVersion: "0.0.406",
         backupPath: f.install.backupPath,
         patchedAt: new Date().toISOString()

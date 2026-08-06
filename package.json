@@ -1,5 +1,10 @@
 {
   "name": "discord-translate",
+  "version": "0.1.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "scripts": {
+    "stamp": "node scripts/stampBuild.mjs",
+    "stamp:check": "node scripts/stampBuild.mjs --check"
+  }
 }

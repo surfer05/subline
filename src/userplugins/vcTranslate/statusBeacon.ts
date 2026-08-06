@@ -33,7 +33,7 @@ import { Logger } from "@utils/Logger";
 import type { PluginNative } from "@utils/types";
 
 import {
-    BEACON_FORMAT, PLUGIN_VERSION, tierForEngine,
+    BEACON_FORMAT, BUILD_ID, PLUGIN_VERSION, tierForEngine,
     type BeaconErrorCode, type BeaconTier, type StatusBeacon
 } from "./statusShape";
 import type { EngineId } from "./types";
@@ -84,6 +84,11 @@ function snapshot(): StatusBeacon | null {
         format: BEACON_FORMAT,
         product: "subline",
         pluginVersion: PLUGIN_VERSION,
+        // The identity of the build that is speaking. Compiled in from the
+        // generated stamp, so it describes THIS bundle and travels wherever the
+        // bundle is copied — which is what lets the installer tell our patch
+        // loading from someone else's pre-existing copy of this plugin loading.
+        buildId: BUILD_ID,
         loadedAt,
         updatedAt: nowIso(),
         lastTranslationAt,

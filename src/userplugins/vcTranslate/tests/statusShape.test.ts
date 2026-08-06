@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import { BUILD_ID } from "../buildStamp";
 import {
-    BEACON_ERROR_CODES, BEACON_FORMAT, sanitizeBeacon, tierForEngine, type StatusBeacon
+    BEACON_ERROR_CODES, BEACON_FORMAT, isBuildId, sanitizeBeacon, tierForEngine, type StatusBeacon
 } from "../statusShape";
 import { ENGINE_CAPS, type EngineId } from "../types";
 import { ENGINE_RANK } from "../upgrade";
@@ -14,6 +15,7 @@ function fullBeacon(): StatusBeacon {
         format: BEACON_FORMAT,
         product: "subline",
         pluginVersion: "0.1.0",
+        buildId: BUILD_ID,
         loadedAt: AT,
         updatedAt: "2026-08-06T10:05:00.000Z",
         lastTranslationAt: "2026-08-06T10:04:00.000Z",
@@ -47,7 +49,7 @@ describe("the beacon never carries message text", () => {
         expect(clean).not.toBeNull();
         expect(JSON.stringify(clean)).not.toContain(SECRET);
         expect(Object.keys(clean!)).toEqual([
-            "format", "product", "pluginVersion", "loadedAt", "updatedAt",
+            "format", "product", "pluginVersion", "buildId", "loadedAt", "updatedAt",
             "lastTranslationAt", "lastRenderedAt", "lastEngine", "counts", "lastError"
         ]);
     });
@@ -75,6 +77,24 @@ describe("the beacon never carries message text", () => {
         expect(beacon!.pluginVersion).toBe("unknown");
         expect(beacon!.lastEngine).toBeNull();
         expect(JSON.stringify(beacon)).not.toContain(SECRET);
+    });
+
+    it("refuses free text in the build identity slot", () => {
+        // buildId is the newest string in the shape and therefore the newest
+        // opportunity to smuggle a conversation into a world-readable file. It
+        // is a lowercase hex digest or it is nothing.
+        const beacon = sanitizeBeacon({ ...fullBeacon(), buildId: SECRET });
+
+        expect(beacon!.buildId).toBeNull();
+        expect(JSON.stringify(beacon)).not.toContain(SECRET);
+
+        // Including the shapes a lazier check would let through: a real id with
+        // text stapled to it, and text that begins with hex.
+        for (const buildId of [`${BUILD_ID} ${SECRET}`, `0a ${SECRET}`, `${SECRET} ${BUILD_ID}`]) {
+            const smuggled = sanitizeBeacon({ ...fullBeacon(), buildId });
+            expect(smuggled!.buildId).toBeNull();
+            expect(JSON.stringify(smuggled)).not.toContain(SECRET);
+        }
     });
 
     it("refuses free text in every timestamp slot", () => {
@@ -124,10 +144,51 @@ describe("sanitizeBeacon — what it keeps", () => {
         }
     });
 
+    it("keeps a well-formed build id, which is the whole point of the field", () => {
+        // The permissive half. A field that rejected everything would be safe
+        // and useless: the identity has to survive the trip to disk or the
+        // installer can never confirm anything.
+        expect(sanitizeBeacon(fullBeacon())!.buildId).toBe(BUILD_ID);
+        for (const buildId of ["0a80601a", "f".repeat(64), "0123456789abcdef"]) {
+            expect(sanitizeBeacon({ ...fullBeacon(), buildId })!.buildId).toBe(buildId);
+        }
+    });
+
+    it("reports a missing or malformed build id as null rather than a placeholder", () => {
+        // "No identity" must stay distinguishable from "some identity" — the
+        // installer refuses both, but says different things about them, and a
+        // placeholder string would be an identity some other build could match.
+        for (const buildId of [undefined, null, "", "0a80601", "0A80601A72BB57F6", 42, {}]) {
+            expect(sanitizeBeacon({ ...fullBeacon(), buildId })!.buildId).toBeNull();
+        }
+    });
+
+    it("does not fall back to pluginVersion when the build id is missing", () => {
+        // A version is not an identity: two different builds can both call
+        // themselves 0.1.0, which is exactly why buildId exists.
+        const beacon = sanitizeBeacon({ ...fullBeacon(), buildId: undefined, pluginVersion: "0.1.0" });
+        expect(beacon!.buildId).toBeNull();
+        expect(beacon!.pluginVersion).toBe("0.1.0");
+    });
+
     it("states its own format rather than echoing the caller's", () => {
         // A caller cannot label an old shape as a new one, which is what makes
         // the reader's format check worth doing.
         expect(sanitizeBeacon({ ...fullBeacon(), format: 99 })!.format).toBe(BEACON_FORMAT);
+    });
+
+    it("declares format 2 — the version in which a beacon carries an identity", () => {
+        // PINNED, and pinned on BOTH sides: the installer's reader duplicates
+        // this contract deliberately (it reads files written by other builds),
+        // and its SUPPORTED_BEACON_FORMAT carries the same assertion. Bumping
+        // one alone would make every healthy install read as unreadable, which
+        // is safe but silently wrong — so the number is nailed down where a
+        // change to it has to be deliberate in two places.
+        //
+        // Why 2 at all: a format-1 reader does not know `buildId` exists, so it
+        // would read ANOTHER build's beacon as a confirmation of ours. Refusing
+        // the whole document is the only honest thing an old reader can do.
+        expect(BEACON_FORMAT).toBe(2);
     });
 });
 

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { reportStatus } from "../native";
 import { statusDirFor, statusPathFor, writeStatusBeacon, writeStatusFile } from "../statusFile";
+import { BUILD_ID } from "../buildStamp";
 import { BEACON_FILENAME, BEACON_FORMAT, type StatusBeacon } from "../statusShape";
 
 const AT = "2026-08-06T10:00:00.000Z";
@@ -14,6 +15,7 @@ function beacon(overrides: Partial<StatusBeacon> = {}): StatusBeacon {
         format: BEACON_FORMAT,
         product: "subline",
         pluginVersion: "0.1.0",
+        buildId: BUILD_ID,
         loadedAt: AT,
         updatedAt: AT,
         lastTranslationAt: null,

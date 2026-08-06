@@ -9,6 +9,7 @@ const native = vi.hoisted(() => {
     return { reportStatus };
 });
 
+import { BUILD_ID } from "../buildStamp";
 import {
     MIN_WRITE_INTERVAL_MS, recordError, recordPluginLoaded, recordRendered,
     recordTranslation, resetStatusBeacon, __beaconSnapshot
@@ -55,6 +56,34 @@ describe("the load signal", () => {
 
         expect(native.reportStatus).toHaveBeenCalledTimes(1);
         expect(written(0).loadedAt).toBe("2026-08-06T10:00:00.000Z");
+    });
+
+    it("says WHICH BUILD loaded, not merely that something did", () => {
+        // The hole this closes: a machine that already had Vencord running a
+        // copy of this plugin would write a perfectly healthy beacon while our
+        // patch sat inert, and the installer would report success for an
+        // install that does nothing. The build id is compiled into the bundle,
+        // so it identifies the code that is actually speaking.
+        recordPluginLoaded();
+
+        expect(written(0).buildId).toBe(BUILD_ID);
+        // And it must survive the main process's sanitiser, which is what
+        // actually reaches disk — a field the writer strips would identify
+        // nothing.
+        expect(sanitizeBeacon(written(0))!.buildId).toBe(BUILD_ID);
+    });
+
+    it("carries the identity on every write, not just the first", async () => {
+        // The installer polls; whichever write it happens to read has to be
+        // attributable. A coalesced write rebuilt from session state is the one
+        // most likely to drop a field nobody re-checks.
+        recordPluginLoaded();
+        recordTranslation("google");
+        recordRendered();
+        await passThrottle();
+
+        expect(lastWritten().buildId).toBe(BUILD_ID);
+        expect(native.reportStatus.mock.calls.length).toBeGreaterThan(1);
     });
 
     it("reports a load with nothing translated yet — the legitimate idle state", () => {
@@ -338,7 +367,7 @@ describe("a broken beacon never breaks translation", () => {
         recordTranslation("gemini");
 
         expect(Object.keys(written(0)).sort()).toEqual([
-            "counts", "format", "lastEngine", "lastError", "lastRenderedAt",
+            "buildId", "counts", "format", "lastEngine", "lastError", "lastRenderedAt",
             "lastTranslationAt", "loadedAt", "pluginVersion", "product", "updatedAt"
         ]);
     });

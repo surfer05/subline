@@ -10,7 +10,7 @@
 
 export {
     BEACON_ERROR_CODES, BEACON_FILENAME, beaconDirFor, beaconPathFor, PRODUCT_DIR_NAME,
-    readBeacon, readBeaconAt, SUPPORTED_BEACON_FORMAT, validateBeacon
+    readBeacon, readBeaconAt, SUPPORTED_BEACON_FORMAT, toBuildId, validateBeacon
 } from "./beacon.js";
 export type { Beacon, BeaconError, BeaconErrorCode, BeaconTier } from "./beacon.js";
 

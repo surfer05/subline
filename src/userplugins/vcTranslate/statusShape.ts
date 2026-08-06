@@ -27,15 +27,19 @@
  *   - `lastEngine`      — an id ENGINE_CAPS already knows.
  *   - timestamps        — exactly `Date#toISOString()`'s output, nothing else.
  *   - `pluginVersion`   — version characters only, 32 max.
+ *   - `buildId`         — lowercase hex only. A digest, so it cannot be a
+ *                         sentence even in principle.
  *
  * There is no field a caller can put arbitrary text into, so message content
  * cannot reach the file even if something upstream tries to put it there.
  *
- * Deliberately dependency-free apart from `./types` (itself pure): this module
- * is imported by BOTH the renderer and the Electron main process, and the main
- * process cannot resolve Vencord's `@api/*` aliases.
+ * Deliberately dependency-free apart from `./types` and the generated
+ * `./buildStamp` (both pure): this module is imported by BOTH the renderer and
+ * the Electron main process, and the main process cannot resolve Vencord's
+ * `@api/*` aliases.
  */
 
+import { BUILD_ID, PLUGIN_VERSION } from "./buildStamp";
 import { ENGINE_CAPS, type EngineId } from "./types";
 
 /**
@@ -43,8 +47,14 @@ import { ENGINE_CAPS, type EngineId } from "./types";
  * MISREAD. The installer's reader refuses a format it does not know rather than
  * guessing — an unknown beacon must read as "cannot confirm", never as a
  * confirmation assembled from fields that no longer mean what it thinks.
+ *
+ * 2 — `buildId` added. A format-1 reader does not know the field exists, so it
+ * would read a beacon written by SOMEONE ELSE'S build of this plugin as a
+ * confirmation of ours: exactly the hole `buildId` was added to close. Bumping
+ * turns that misread into "unsupported format", i.e. "cannot confirm", which is
+ * the only safe way for an old reader to meet a new beacon.
  */
-export const BEACON_FORMAT = 1;
+export const BEACON_FORMAT = 2;
 
 export const BEACON_FILENAME = "status.json";
 
@@ -52,11 +62,17 @@ export const BEACON_FILENAME = "status.json";
 export const PRODUCT_DIR_NAME = "Subline";
 
 /**
- * The mod version the installer reports and the helper compares (spec §6: a
- * Discord frontend change makes the patches stale and only a NEW BUILD fixes
- * it, so "which build is actually running" has to be observable).
+ * The build identity and version, from the generated stamp (`pnpm stamp`) —
+ * NOT hand-maintained constants.
+ *
+ * `PLUGIN_VERSION` is spec §6's "which build is actually running": a Discord
+ * frontend change makes the patches stale and only a NEW BUILD fixes it, so a
+ * version nobody remembers to bump answers that question wrongly. `BUILD_ID` is
+ * a digest of the plugin's own sources, which is what lets the installer tell
+ * "a vcTranslate is running" apart from "the vcTranslate we installed is
+ * running". See scripts/stampBuild.mjs.
  */
-export const PLUGIN_VERSION = "0.1.0";
+export { BUILD_ID, PLUGIN_VERSION };
 
 /**
  * Which glyph the reader saw. `approx` is Google's `≈` line — free, instant,
@@ -116,6 +132,30 @@ export interface StatusBeacon {
     product: "subline";
     pluginVersion: string;
     /**
+     * WHICH BUILD reported in — the identity that travels with the bundle.
+     *
+     * `pluginVersion` cannot do this job: two different builds can both call
+     * themselves "0.1.0", and Vencord's own copy of a plugin like this one would
+     * happily claim any version it liked. `BUILD_ID` is a digest of the shipped
+     * sources (scripts/stampBuild.mjs), so it is different for every build that
+     * differs at all, and the installer records the one it expects in
+     * `subline-patch.json` when it patches (spec §3c).
+     *
+     * That is what closes the hole this beacon otherwise leaves open: a machine
+     * that ALREADY had Vencord running a copy of this plugin would write a
+     * perfectly healthy beacon while our patch sat inert, and the installer
+     * would read it and report success for an install that does nothing.
+     *
+     * Nullable because the reader must be able to tell "a build that carries no
+     * identity" apart from "a build that carries a different one" — and treat
+     * both as "not confirmed" rather than guessing at either.
+     *
+     * Deliberately NOT derived from anything about the surrounding Discord
+     * install: the renderer has no reliable way to learn which app.asar loaded
+     * it, and a value it had to infer would be a value it could infer wrongly.
+     */
+    buildId: string | null;
+    /**
      * When `start()` ran. THE staleness anchor: the installer compares this
      * against the moment it launched Discord, and a beacon whose load predates
      * that launch is a previous install's, proving nothing about this one.
@@ -150,8 +190,23 @@ const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 /** Version characters only. No spaces, so no sentence can pass. */
 const VERSION_STRING = /^[0-9A-Za-z.+-]{1,32}$/;
 
+/**
+ * A build id is a truncated hex digest and nothing else.
+ *
+ * The bound is a range rather than the exact 16 the stamper emits so a future
+ * change of digest length is not a format change; the alphabet is what matters.
+ * Lowercase hex has no spaces, no punctuation and no letters past `f`, so this
+ * field cannot carry a word, let alone a message — which is the property every
+ * string in this file has to have (see the header).
+ */
+const BUILD_ID_PATTERN = /^[0-9a-f]{8,64}$/;
+
 export function isBeaconTimestamp(value: unknown): value is string {
     return typeof value === "string" && ISO_TIMESTAMP.test(value);
+}
+
+export function isBuildId(value: unknown): value is string {
+    return typeof value === "string" && BUILD_ID_PATTERN.test(value);
 }
 
 function isKnownEngine(value: unknown): value is EngineId {
@@ -219,6 +274,10 @@ export function sanitizeBeacon(value: unknown): StatusBeacon | null {
             typeof raw.pluginVersion === "string" && VERSION_STRING.test(raw.pluginVersion)
                 ? raw.pluginVersion
                 : "unknown",
+        // Null, never a placeholder string: "no identity" and "some identity"
+        // must stay distinguishable, because the installer refuses both — but
+        // for different reasons and with different advice.
+        buildId: isBuildId(raw.buildId) ? raw.buildId : null,
         loadedAt: raw.loadedAt,
         // An absent/malformed updatedAt would make every beacon look freshly
         // written; falling back to loadedAt is the conservative direction.

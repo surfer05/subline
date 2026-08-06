@@ -18,6 +18,16 @@
  * against a REFERENCE INSTANT the installer knows: when it patched, and when it
  * launched Discord.
  *
+ * AND IDENTITY OUTRANKS RECENCY. A fresh, healthy, well-timed beacon still only
+ * proves "a vcTranslate is running" — not "the vcTranslate WE just patched in is
+ * running". A machine that already had Vencord with this plugin would produce
+ * exactly that beacon while our patch sat inert, and every signal we have would
+ * be green on an install that does nothing. So the plugin stamps its own build
+ * id into the beacon, the patcher records the id it expects in
+ * `subline-patch.json` (spec §3c), and a beacon that reports a DIFFERENT id — or
+ * NO id — is refused here in the same class as a stale one. Never guessed at,
+ * in either direction.
+ *
  * "NOTHING TO TRANSLATE YET" IS NOT A FAILURE. Someone may open Discord to a
  * channel where everyone speaks their language. That install is fine and must
  * not be reported as broken — but it must not be reported as confirmed either.
@@ -26,7 +36,7 @@
 
 import type { Result } from "../patcher/result.js";
 import type { Beacon, BeaconErrorCode } from "./beacon.js";
-import { readBeacon, readBeaconAt } from "./beacon.js";
+import { readBeacon, readBeaconAt, toBuildId } from "./beacon.js";
 
 export type VerificationStatus =
     /** No beacon at all. The mod never reported in. */
@@ -35,6 +45,16 @@ export type VerificationStatus =
     | "stale-beacon"
     /** A beacon exists and cannot be read. Evidence is missing, not negative. */
     | "unreadable-beacon"
+    /**
+     * A beacon from a DIFFERENT build of this plugin — someone's pre-existing
+     * Vencord install, or an older Subline. Our patch is not what Discord loaded.
+     */
+    | "foreign-beacon"
+    /**
+     * A beacon that carries no build identity at all, so it cannot be attributed
+     * to this installation. Refused for the same reason, with different advice.
+     */
+    | "unidentified-beacon"
     /** Loaded for this launch, nothing translated yet. Legitimate and non-failing. */
     | "loaded-idle"
     /** Loaded for this launch and reporting failures, with nothing on screen. */
@@ -59,6 +79,15 @@ export interface VerificationReport {
     pending: boolean;
     /** A beacon was found but belongs to an earlier install. */
     stale: boolean;
+    /**
+     * Whether the beacon's build id is the one we patched in.
+     *
+     * `"match"` is a precondition of `confirmed`, never a substitute for it.
+     * `"unknown"` means no beacon was read at all, so there was nothing to
+     * check — deliberately a fourth value rather than folding into `"absent"`,
+     * which specifically means "a beacon, without an identity".
+     */
+    identity: "match" | "mismatch" | "absent" | "unknown";
     /** Which glyph the reader is actually getting. */
     tier: "none" | "approx" | "upgraded";
     /** The most recent error the plugin reported for this launch. */
@@ -72,6 +101,21 @@ export interface VerificationReport {
 }
 
 export interface VerifyOptions {
+    /**
+     * The build id the plugin we installed will report — read back from the
+     * `subline-patch.json` marker the patcher wrote (spec §3c), which is where
+     * ownership already lives.
+     *
+     * REQUIRED, and required on purpose. An optional expectation is one a caller
+     * can forget to pass, and the failure mode of forgetting is the exact hole
+     * this closes: a healthy-looking confirmation of somebody else's plugin. A
+     * caller with nothing to compare against has no business confirming
+     * anything, so the type system asks for it rather than the docs.
+     *
+     * A value that is not a well-formed build id can match nothing, which makes
+     * every beacon read as foreign — the safe direction.
+     */
+    expectedBuildId: string;
     /**
      * When the patch was written, epoch ms. A beacon older than this cannot
      * describe the install we just made, whatever else it says.
@@ -130,6 +174,7 @@ function report(partial: Partial<VerificationReport> & {
         loaded: false,
         pending: false,
         stale: false,
+        identity: "unknown",
         tier: "none",
         errorCode: null,
         beacon: null,
@@ -181,6 +226,21 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
         });
     }
 
+    // Whose build is this? Computed before anything in the file is believed,
+    // for the same reason staleness is: a beacon that is not ours describes an
+    // install that is not ours, however healthy every field in it looks.
+    //
+    // An expectation that is not itself a well-formed build id matches nothing,
+    // so a caller who passes a placeholder gets "foreign" rather than a free
+    // pass. There is no value of `expectedBuildId` that means "skip the check".
+    const expectedBuildId = toBuildId(options.expectedBuildId);
+    const identity: "match" | "mismatch" | "absent" =
+        beacon.buildId === null
+            ? "absent"
+            : expectedBuildId !== null && beacon.buildId === expectedBuildId
+                ? "match"
+                : "mismatch";
+
     // THE STALENESS GATE, before anything in the file is believed. A beacon
     // whose load predates this install is a previous install's, and every
     // count, timestamp and engine id in it belongs to that one.
@@ -188,12 +248,49 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
         return report({
             status: "stale-beacon",
             stale: true,
+            identity,
             pending: withinWaitingPeriod,
             beacon,
             summary: withinWaitingPeriod
                 ? "Waiting for Discord to start — the status file is still the previous installation's."
                 : "Subline is installed, but the only status we can find predates this installation, "
                   + "so we cannot confirm it is working. Quit Discord completely and reopen it."
+        });
+    }
+
+    // THE IDENTITY GATE. Same class as staleness, and for the same reason: what
+    // follows only means anything if the thing that wrote it is the thing we
+    // installed. `loaded` stays FALSE in both branches — something loaded, but
+    // not our patch, and this report's `loaded` means ours.
+    //
+    // Both stay `pending` inside the window: the commonest way to see a foreign
+    // beacon is that the OTHER install's plugin reported in first and ours has
+    // not started yet, which the next poll may well resolve.
+    if (identity === "mismatch") {
+        return report({
+            status: "foreign-beacon",
+            identity,
+            pending: withinWaitingPeriod,
+            beacon,
+            summary: withinWaitingPeriod
+                ? "Waiting for Discord to load Subline — the status file is currently another copy of the "
+                  + "plugin's."
+                : "Discord is running a different copy of this plugin, not the one Subline installed, so we "
+                  + "cannot confirm this installation is working. Remove any existing Vencord or vcTranslate "
+                  + "setup and install again."
+        });
+    }
+
+    if (identity === "absent") {
+        return report({
+            status: "unidentified-beacon",
+            identity,
+            pending: withinWaitingPeriod,
+            beacon,
+            summary: withinWaitingPeriod
+                ? "Waiting for Discord to load Subline — the status file does not say which build wrote it."
+                : "Something reported in from Discord, but it did not identify itself as the build Subline "
+                  + "installed, so we cannot confirm this installation is working."
         });
     }
 
@@ -213,6 +310,7 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
                 status: "translating-upgraded",
                 confirmed: true,
                 loaded: true,
+                identity,
                 tier,
                 errorCode,
                 beacon,
@@ -222,6 +320,7 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
                 status: "translating-approx",
                 confirmed: true,
                 loaded: true,
+                identity,
                 tier: "approx",
                 errorCode,
                 beacon,
@@ -240,6 +339,7 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
         return report({
             status: "translating-not-rendering",
             loaded: true,
+            identity,
             tier,
             errorCode,
             beacon,
@@ -255,6 +355,7 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
         return report({
             status: "loaded-erroring",
             loaded: true,
+            identity,
             errorCode,
             beacon,
             pending: withinWaitingPeriod,
@@ -266,6 +367,7 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
     return report({
         status: "loaded-idle",
         loaded: true,
+        identity,
         beacon,
         pending: withinWaitingPeriod,
         // NOT a failure, and worded so it does not read as one. A channel where

@@ -9,6 +9,7 @@ import {
 } from "../src/verify/beacon.js";
 
 const AT = "2026-08-06T10:00:00.000Z";
+const BUILD_ID = "1f2e3d4c5b6a7980";
 const AT_MS = Date.parse(AT);
 
 /** What the plugin actually writes, in full. */
@@ -17,6 +18,7 @@ function beaconDocument(overrides: Record<string, unknown> = {}) {
         format: SUPPORTED_BEACON_FORMAT,
         product: "subline",
         pluginVersion: "0.1.0",
+        buildId: BUILD_ID,
         loadedAt: AT,
         updatedAt: "2026-08-06T10:05:00.000Z",
         lastTranslationAt: "2026-08-06T10:04:00.000Z",
@@ -139,6 +141,7 @@ describe("validateBeacon — what survives, and what is coerced", () => {
         expect(read.ok && read.value).toEqual({
             format: SUPPORTED_BEACON_FORMAT,
             pluginVersion: "0.1.0",
+            buildId: BUILD_ID,
             loadedAt: AT_MS,
             updatedAt: Date.parse("2026-08-06T10:05:00.000Z"),
             lastTranslationAt: Date.parse("2026-08-06T10:04:00.000Z"),

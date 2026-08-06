@@ -16,7 +16,10 @@ const LOADER = "/Applications/Subline.app/Contents/Resources/loader/patcher.js";
 const OTHER_LOADER = "/Applications/Subline.app/Contents/Resources/loader/patcher-v2.js";
 const VENCORD_LOADER = "/Users/someone/dev/Vencord/dist/patcher.js";
 
-const OPTIONS = { loaderPath: LOADER, productVersion: "1.2.3" };
+const BUILD_ID = "1f2e3d4c5b6a7980";
+const NEW_BUILD_ID = "0011223344556677";
+
+const OPTIONS = { loaderPath: LOADER, productVersion: "1.2.3", buildId: BUILD_ID };
 
 let fixture: Fixture | null = null;
 afterEach(() => {

@@ -49,6 +49,18 @@ export interface PatchOptions {
     /** Installer version, recorded in the marker. */
     productVersion: string;
     /**
+     * The build id of the plugin bundle this patch points at — the value that
+     * bundle stamps into its status beacon at runtime (see the plugin's
+     * `buildStamp.ts`).
+     *
+     * Recorded in the marker so `verifyOnce` has an expectation to check the
+     * beacon against. Without it, "the plugin loaded" and "the plugin WE
+     * installed loaded" are the same sentence, and a machine with a pre-existing
+     * Vencord + vcTranslate reports a healthy install while our patch does
+     * nothing.
+     */
+    buildId: string;
+    /**
      * Patch over another mod. Spec §3 step 4: detect, explain, let them choose —
      * so this is never the default, it is the user's answer.
      */
@@ -56,9 +68,21 @@ export interface PatchOptions {
     hooks?: PatchHooks;
 }
 
+/** What a patch claims to be, and what verification holds it to. */
+export interface PatchIdentity {
+    loaderPath: string;
+    buildId: string;
+}
+
 export interface PatchReport {
     install: DiscordInstall;
     loaderPath: string;
+    /**
+     * The build id recorded in the marker — hand this to `verifyOnce` as
+     * `expectedBuildId`, so post-install verification checks the beacon against
+     * the build this very patch installed rather than against a guess.
+     */
+    pluginBuildId: string;
     backupPath: string;
     markerPath: string;
     /** True when Discord's original archive was moved to `_app.asar` during this run. */
@@ -79,10 +103,20 @@ export function patchInstall(install: DiscordInstall, options: PatchOptions): Re
     const guard = guardPatchable(state, options);
     if (guard) return guard;
 
-    if (state.kind === "patched-by-us" && state.loaderPath === options.loaderPath) {
+    // "Nothing to do" requires the marker to agree about the BUILD too, not just
+    // the path. The helper self-updates the bundle in place (spec §6), so a new
+    // build routinely arrives behind an unchanged loaderPath — and short-
+    // circuiting there would leave the marker naming the previous build's id,
+    // which would then fail every verification of a perfectly good install.
+    if (
+        state.kind === "patched-by-us"
+        && state.loaderPath === options.loaderPath
+        && state.marker?.pluginBuildId === options.buildId
+    ) {
         return ok({
             install,
             loaderPath: options.loaderPath,
+            pluginBuildId: options.buildId,
             backupPath: install.backupPath,
             markerPath: markerPathFor(install.resourcesPath),
             backupCreated: false,
@@ -199,6 +233,7 @@ function applyPatch(install: DiscordInstall, state: InstallState, options: Patch
         product: "subline",
         productVersion: options.productVersion,
         loaderPath: options.loaderPath,
+        pluginBuildId: options.buildId,
         discordVersion,
         backupPath,
         patchedAt: new Date().toISOString()
@@ -213,7 +248,7 @@ function applyPatch(install: DiscordInstall, state: InstallState, options: Patch
     options.hooks?.afterWrite?.({ asarPath, backupPath, markerPath });
 
     // 5. Read back what we wrote. "The file was written" is not evidence (spec §7).
-    const verification = verifyPatch(install, options.loaderPath, stub);
+    const verification = verifyPatch(install, options, stub);
     if (!verification.ok) {
         const rolled = rollback(install, undo, tempPath);
         if (!rolled.ok) return rolled;
@@ -227,6 +262,7 @@ function applyPatch(install: DiscordInstall, state: InstallState, options: Patch
     return ok({
         install,
         loaderPath: options.loaderPath,
+        pluginBuildId: options.buildId,
         backupPath,
         markerPath,
         backupCreated: undo.backupCreated,
@@ -238,7 +274,8 @@ function applyPatch(install: DiscordInstall, state: InstallState, options: Patch
 }
 
 /** Read the patch back off disk and prove it is exactly what we meant to write. */
-export function verifyPatch(install: DiscordInstall, loaderPath: string, expected?: Buffer): Result<true> {
+export function verifyPatch(install: DiscordInstall, expected: PatchIdentity, expectedBytes?: Buffer): Result<true> {
+    const { loaderPath, buildId } = expected;
     let actual: Buffer;
     try {
         actual = readFileSync(install.asarPath);
@@ -246,7 +283,7 @@ export function verifyPatch(install: DiscordInstall, loaderPath: string, expecte
         return fsError<true>(cause, install.asarPath, "read back the patched app.asar");
     }
 
-    if (expected && !actual.equals(expected)) {
+    if (expectedBytes && !actual.equals(expectedBytes)) {
         return err<true>("VERIFICATION_FAILED", "The patched app.asar does not match what was written.", {
             path: install.asarPath
         });
@@ -298,6 +335,17 @@ export function verifyPatch(install: DiscordInstall, loaderPath: string, expecte
         return err<true>("VERIFICATION_FAILED", "The patch marker is missing or points at a different loader.", {
             path: markerPathFor(install.resourcesPath)
         });
+    }
+    // The marker's build id is what post-install verification will compare the
+    // beacon against. A marker that landed with the wrong one (or none) would
+    // make every later verification of a healthy install fail, and the moment to
+    // catch that is here, while the patch can still be rolled back.
+    if (marker.value.pluginBuildId !== buildId) {
+        return err<true>(
+            "VERIFICATION_FAILED",
+            `The patch marker records build ${marker.value.pluginBuildId ?? "none"} instead of ${buildId}.`,
+            { path: markerPathFor(install.resourcesPath) }
+        );
     }
 
     return ok(true);

@@ -27,7 +27,9 @@ export { MARKER_FILENAME, MARKER_FORMAT, markerPathFor, readMarker, removeMarker
 export type { PatchMarker } from "./marker.js";
 
 export { patchInstall, unpatchInstall, verifyPatch } from "./patch.js";
-export type { PatchHooks, PatchOptions, PatchReport, UnpatchOptions, UnpatchReport } from "./patch.js";
+export type {
+    PatchHooks, PatchIdentity, PatchOptions, PatchReport, UnpatchOptions, UnpatchReport
+} from "./patch.js";
 
 export { err, errnoOf, fsError, ok } from "./result.js";
 export type { PatcherError, PatcherErrorCode, Result } from "./result.js";

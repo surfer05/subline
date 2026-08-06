@@ -30,8 +30,16 @@ import { err, fsError, ok } from "../patcher/result.js";
 export const BEACON_FILENAME = "status.json";
 export const PRODUCT_DIR_NAME = "Subline";
 
-/** The format this reader understands. A beacon claiming any other is refused. */
-export const SUPPORTED_BEACON_FORMAT = 1;
+/**
+ * The format this reader understands. A beacon claiming any other is refused.
+ *
+ * MUST BE BUMPED IN LOCKSTEP with `BEACON_FORMAT` in the plugin's
+ * `statusShape.ts` (they are duplicated on purpose — see the header). Format 2
+ * added `buildId`, without which this reader cannot tell our build's beacon from
+ * a pre-existing vcTranslate's, so a format-1 document is refused rather than
+ * read with the identity check quietly skipped.
+ */
+export const SUPPORTED_BEACON_FORMAT = 2;
 
 export type BeaconTier = "approx" | "upgraded";
 
@@ -58,6 +66,15 @@ export interface BeaconError {
 export interface Beacon {
     format: number;
     pluginVersion: string;
+    /**
+     * WHICH BUILD wrote this — a digest stamped into the plugin's own bundle.
+     *
+     * `null` when the document carries no usable one. That is kept distinct from
+     * "carries a different one" all the way to `verifyOnce`, because they are
+     * different situations with different advice, and because collapsing them
+     * here would be this reader guessing — which it never does.
+     */
+    buildId: string | null;
     loadedAt: number;
     updatedAt: number;
     lastTranslationAt: number | null;
@@ -113,6 +130,20 @@ function toCount(value: unknown): number {
 
 function isErrorCode(value: unknown): value is BeaconErrorCode {
     return typeof value === "string" && (BEACON_ERROR_CODES as readonly string[]).includes(value);
+}
+
+/**
+ * A build id is a hex digest. Mirrors the plugin's `BUILD_ID_PATTERN`.
+ *
+ * Enforced on the reading side too, not merely trusted: this file is untrusted
+ * input from a user-writable directory, and an unconstrained string here would
+ * be a free-text field in a document that is explicitly not allowed to have one
+ * (spec §7 — this tool reads DMs, and the beacon is world-readable).
+ */
+const BUILD_ID_PATTERN = /^[0-9a-f]{8,64}$/;
+
+export function toBuildId(value: unknown): string | null {
+    return typeof value === "string" && BUILD_ID_PATTERN.test(value) ? value : null;
 }
 
 /**
@@ -177,6 +208,11 @@ export function validateBeacon(parsed: unknown, path: string): Result<Beacon> {
     return ok({
         format: SUPPORTED_BEACON_FORMAT,
         pluginVersion: typeof raw.pluginVersion === "string" ? raw.pluginVersion : "unknown",
+        // NOT fatal, and deliberately so: a beacon with no identity is still
+        // evidence that SOMETHING loaded, which the diagnostics screen wants to
+        // say out loud. It simply is not evidence that OUR build loaded, and
+        // `verifyOnce` is where that costs the confirmation.
+        buildId: toBuildId(raw.buildId),
         loadedAt,
         // A missing updatedAt must not read as "written just now" — fall back
         // to the load, which is the older and therefore safer of the two.

@@ -21,7 +21,12 @@ import type { Result } from "./result.js";
 import { err, fsError, ok } from "./result.js";
 
 export const MARKER_FILENAME = "subline-patch.json";
-export const MARKER_FORMAT = 1;
+
+/** 2 — `pluginBuildId` added, so the marker can also answer "which build". */
+export const MARKER_FORMAT = 2;
+
+/** A build id is a hex digest (see the plugin's buildStamp.ts). */
+const BUILD_ID_PATTERN = /^[0-9a-f]{8,64}$/;
 
 export interface PatchMarker {
     format: number;
@@ -30,6 +35,21 @@ export interface PatchMarker {
     productVersion: string;
     /** The absolute path the stub `require()`s. Cross-checked against the stub itself. */
     loaderPath: string;
+    /**
+     * WHICH BUILD of the plugin this patch installed — the value the running
+     * plugin stamps into its status beacon, recorded here at patch time so
+     * verification has something to compare against.
+     *
+     * `loaderPath` cannot serve: we bundle Vencord, so a path is
+     * indistinguishable from Vencord's own (§3c's whole point), and the same
+     * path keeps pointing at a new bundle every time the helper self-updates.
+     * The build id changes with the bytes.
+     *
+     * Nullable because a marker written by an older installer has none, and the
+     * reader must not invent one — an absent id means "we cannot say which build
+     * this is", which downstream costs a confirmation rather than granting one.
+     */
+    pluginBuildId: string | null;
     /** Discord's version at patch time — the helper compares this to notice updates. */
     discordVersion: string | null;
     /** Where the untouched original was preserved. */
@@ -74,6 +94,13 @@ export function readMarker(resourcesPath: string): Result<PatchMarker | null> {
         product: "subline",
         productVersion: typeof candidate.productVersion === "string" ? candidate.productVersion : "unknown",
         loaderPath: candidate.loaderPath,
+        // Validated, not merely copied: this value is compared against a beacon
+        // to decide whether an install is confirmed, and a marker on disk can be
+        // edited. A malformed one reads as "no id", never as a wildcard.
+        pluginBuildId:
+            typeof candidate.pluginBuildId === "string" && BUILD_ID_PATTERN.test(candidate.pluginBuildId)
+                ? candidate.pluginBuildId
+                : null,
         discordVersion: typeof candidate.discordVersion === "string" ? candidate.discordVersion : null,
         backupPath: typeof candidate.backupPath === "string" ? candidate.backupPath : "",
         patchedAt: typeof candidate.patchedAt === "string" ? candidate.patchedAt : ""

@@ -20,6 +20,15 @@ const NOW = Date.parse("2026-08-06T12:00:40.000Z");
 /** Past the point where waiting longer is honest. */
 const LATER = LAUNCHED_AT + DEFAULT_VERIFY_TIMEOUT_MS + 1_000;
 
+/**
+ * The build id the installer patched in, and one belonging to some other
+ * build of the same plugin. Written out here rather than imported from the
+ * plugin: this reader validates a FILE, and the file may have been written by a
+ * build the installer has never seen.
+ */
+const OUR_BUILD = "1f2e3d4c5b6a7980";
+const OTHER_BUILD = "99887766554433221100aabb";
+
 const iso = (ms: number) => new Date(ms).toISOString();
 
 let root: string;
@@ -43,6 +52,7 @@ function writeBeacon(overrides: Record<string, unknown> = {}): void {
         format: SUPPORTED_BEACON_FORMAT,
         product: "subline",
         pluginVersion: "0.1.0",
+        buildId: OUR_BUILD,
         loadedAt: iso(LAUNCHED_AT + 3_000),
         updatedAt: iso(LAUNCHED_AT + 20_000),
         lastTranslationAt: iso(LAUNCHED_AT + 18_000),
@@ -56,6 +66,7 @@ function writeBeacon(overrides: Record<string, unknown> = {}): void {
 
 function verify(overrides: Record<string, unknown> = {}) {
     return verifyOnce({
+        expectedBuildId: OUR_BUILD,
         patchedAt: PATCHED_AT,
         launchedAt: LAUNCHED_AT,
         now: NOW,
@@ -258,6 +269,7 @@ describe("awaitVerification", () => {
         let clock = NOW;
         let polls = 0;
         const result = await awaitVerification({
+            expectedBuildId: OUR_BUILD,
             patchedAt: PATCHED_AT,
             launchedAt: LAUNCHED_AT,
             beaconPath,
@@ -277,6 +289,7 @@ describe("awaitVerification", () => {
     it("gives up honestly when nothing ever reports in", async () => {
         let clock = NOW;
         const result = await awaitVerification({
+            expectedBuildId: OUR_BUILD,
             patchedAt: PATCHED_AT,
             launchedAt: LAUNCHED_AT,
             beaconPath,
@@ -295,6 +308,7 @@ describe("awaitVerification", () => {
         writeBeacon({ lastRenderedAt: null });
         let polls = 0;
         const result = await awaitVerification({
+            expectedBuildId: OUR_BUILD,
             patchedAt: PATCHED_AT,
             launchedAt: LAUNCHED_AT,
             beaconPath,
@@ -313,6 +327,7 @@ describe("awaitVerification", () => {
         let clock = NOW;
         let polls = 0;
         const result = await awaitVerification({
+            expectedBuildId: OUR_BUILD,
             patchedAt: PATCHED_AT,
             launchedAt: LAUNCHED_AT,
             beaconPath,
