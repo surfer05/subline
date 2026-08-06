@@ -98,6 +98,92 @@ describe("patchInstall", () => {
         expect(sha256(fixture.install.asarPath)).toBe(asarHash);
     });
 
+    it("records which BUILD of the plugin it installed, not only which path", () => {
+        // Spec §3c's sidecar is where ownership lives, so it is where the
+        // build identity lives too. This value is what post-install
+        // verification compares the beacon against; without it, "the plugin
+        // loaded" and "OUR plugin loaded" are the same sentence.
+        fixture = makeDiscordFixture();
+        const result = patchInstall(fixture.install, OPTIONS);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+
+        expect(result.value.pluginBuildId).toBe(BUILD_ID);
+
+        const marker = readMarker(fixture.install.resourcesPath);
+        if (!marker.ok || marker.value === null) throw new Error("expected a marker");
+        expect(marker.value.pluginBuildId).toBe(BUILD_ID);
+    });
+
+    it("re-patches when only the BUILD changed, even though the loader path did not", () => {
+        // Spec §6: the helper self-updates the bundle in place, so a new build
+        // routinely arrives behind an unchanged loaderPath. Treating that as
+        // "already patched" would leave the marker naming the PREVIOUS build,
+        // and every verification of a perfectly healthy install would then read
+        // as "a different copy of the plugin is running".
+        fixture = makeDiscordFixture();
+        expect(patchInstall(fixture.install, OPTIONS).ok).toBe(true);
+
+        const upgraded = patchInstall(fixture.install, { ...OPTIONS, buildId: NEW_BUILD_ID });
+        expect(upgraded.ok).toBe(true);
+        if (!upgraded.ok) return;
+        expect(upgraded.value.alreadyPatched).toBe(false);
+        expect(upgraded.value.pluginBuildId).toBe(NEW_BUILD_ID);
+
+        const marker = readMarker(fixture.install.resourcesPath);
+        if (!marker.ok || marker.value === null) throw new Error("expected a marker");
+        expect(marker.value.pluginBuildId).toBe(NEW_BUILD_ID);
+        // and the loader is untouched, which is the whole point of the case
+        expect(marker.value.loaderPath).toBe(LOADER);
+    });
+
+    it("re-patches an install whose marker predates build ids", () => {
+        // The upgrade path from a marker written before this field existed. It
+        // reads as "no id", which must not be mistaken for "the id we want".
+        fixture = makeDiscordFixture();
+        expect(patchInstall(fixture.install, OPTIONS).ok).toBe(true);
+
+        const markerPath = markerPathFor(fixture.install.resourcesPath);
+        const old = JSON.parse(readFileSync(markerPath, "utf8")) as Record<string, unknown>;
+        delete old.pluginBuildId;
+        writeFileSync(markerPath, JSON.stringify(old, null, 4));
+
+        const again = patchInstall(fixture.install, OPTIONS);
+        expect(again.ok).toBe(true);
+        if (!again.ok) return;
+        expect(again.value.alreadyPatched).toBe(false);
+
+        const marker = readMarker(fixture.install.resourcesPath);
+        expect(marker.ok && marker.value?.pluginBuildId).toBe(BUILD_ID);
+    });
+
+    it("rolls back when the marker lands naming a different build", () => {
+        // The marker's build id is what every later verification depends on, so
+        // a wrong one is caught here, while the patch can still be undone —
+        // not weeks later as an install that reports itself foreign.
+        fixture = makeDiscordFixture();
+        const originalHash = sha256(fixture.install.asarPath);
+
+        const result = patchInstall(fixture.install, {
+            ...OPTIONS,
+            hooks: {
+                afterWrite: ({ markerPath }) => {
+                    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as Record<string, unknown>;
+                    marker.pluginBuildId = NEW_BUILD_ID;
+                    writeFileSync(markerPath, JSON.stringify(marker, null, 4));
+                }
+            }
+        });
+
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error.code).toBe("VERIFICATION_FAILED");
+        expect(result.error.message).toContain(NEW_BUILD_ID);
+        // Discord is exactly as it was.
+        expect(sha256(fixture.install.asarPath)).toBe(originalHash);
+        expect(existsSync(markerPathFor(fixture.install.resourcesPath))).toBe(false);
+    });
+
     it("re-points to a new loader without disturbing the preserved original", () => {
         fixture = makeDiscordFixture();
         expect(patchInstall(fixture.install, OPTIONS).ok).toBe(true);

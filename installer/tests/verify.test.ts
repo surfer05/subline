@@ -196,6 +196,165 @@ describe("staleness outranks presence", () => {
     });
 });
 
+describe("identity outranks recency", () => {
+    // THE HOLE THIS CLOSES. `patchInstall` refuses foreign mods, so the normal
+    // flow does not reach here — but "the beacon says a vcTranslate loaded"
+    // and "the beacon says OUR vcTranslate loaded" are different sentences, and
+    // the beacon is the one signal this project trusts. Every beacon below is
+    // fresh, well-timed and reports painted subtitles: healthy on every axis
+    // except whose build wrote it.
+
+    it("refuses a beacon written by a different build of the same plugin", () => {
+        // Someone's pre-existing Vencord install running their own copy. Our
+        // patch could be doing nothing at all and this file would look like this.
+        writeBeacon({ buildId: OTHER_BUILD });
+
+        const result = verify({ now: LATER });
+
+        expect(result.status).toBe("foreign-beacon");
+        expect(result.confirmed).toBe(false);
+        expect(result.loaded).toBe(false);
+        expect(result.identity).toBe("mismatch");
+        expect(result.beacon?.lastRenderedAt).not.toBeNull();  // it really does look healthy
+    });
+
+    it("refuses a beacon that carries no identity at all", () => {
+        // An older build, or a hand-built userplugin. Absence is not a pass:
+        // the reader must never fill in an identity it was not given.
+        writeBeacon({ buildId: undefined });
+
+        const result = verify({ now: LATER });
+
+        expect(result.status).toBe("unidentified-beacon");
+        expect(result.confirmed).toBe(false);
+        expect(result.identity).toBe("absent");
+    });
+
+    it("confirms when the identity is the one we patched in", () => {
+        // The permissive half, and it has to be asserted: a gate that refused
+        // everything would be safe and useless.
+        writeBeacon({ buildId: OUR_BUILD });
+        const result = verify();
+        expect(result.identity).toBe("match");
+        expect(result.confirmed).toBe(true);
+    });
+
+    it("keeps waiting on a foreign beacon while there is still time", () => {
+        // The commonest way to see one: the OTHER install reported in first and
+        // ours has not started yet. Inside the window that is a wait, not a
+        // verdict — but it is never a confirmation.
+        writeBeacon({ buildId: OTHER_BUILD });
+        const result = verify();
+        expect(result.pending).toBe(true);
+        expect(result.confirmed).toBe(false);
+        expect(result.summary).toContain("Waiting");
+    });
+
+    it("tells the user what to do about a foreign install, once waiting is over", () => {
+        writeBeacon({ buildId: OTHER_BUILD });
+        const result = verify({ now: LATER });
+        expect(result.summary).toContain("different copy");
+        expect(result.summary).not.toContain("Waiting");
+    });
+
+    it("refuses an identity that is close but not equal", () => {
+        // A prefix, a suffix, and a differing final character: the comparison is
+        // equality, never containment.
+        for (const buildId of [
+            OUR_BUILD.slice(0, -1),
+            `${OUR_BUILD}0`,
+            `${OUR_BUILD.slice(0, -1)}1`
+        ]) {
+            writeBeacon({ buildId });
+            expect(verify({ now: LATER }).confirmed).toBe(false);
+        }
+    });
+
+    it("refuses a beacon whose identity is not a build id at all", () => {
+        // Hand-edited or corrupt. The reader constrains the field on the way in,
+        // so anything that is not a hex digest arrives as "no identity".
+        for (const buildId of ["", "not-a-build", "0A80601A72BB57F6", 42, null, { id: OUR_BUILD }]) {
+            writeBeacon({ buildId });
+            const result = verify({ now: LATER });
+            expect(result.status).toBe("unidentified-beacon");
+            expect(result.confirmed).toBe(false);
+        }
+    });
+
+    it("cannot be satisfied by an expectation that is not itself a build id", () => {
+        // There is no value of expectedBuildId that means "skip the check". A
+        // caller who passes a placeholder gets refused, not a free pass —
+        // including the placeholder that a malformed beacon would carry too.
+        for (const expectedBuildId of ["", "unknown", "*", "0A80601A72BB57F6"]) {
+            writeBeacon({ buildId: OUR_BUILD });
+            expect(verify({ now: LATER, expectedBuildId }).confirmed).toBe(false);
+            writeBeacon({ buildId: expectedBuildId });
+            expect(verify({ now: LATER, expectedBuildId }).confirmed).toBe(false);
+        }
+    });
+
+    it("reports staleness ahead of identity when a beacon is both", () => {
+        // Order matters only for the message. A previous Subline install's
+        // beacon carries OUR id and is still worthless, and "quit Discord and
+        // reopen it" is better advice than "remove your other install".
+        const lastWeek = LAUNCHED_AT - 7 * 24 * 60 * 60 * 1_000;
+        writeBeacon({ buildId: OUR_BUILD, loadedAt: iso(lastWeek), lastRenderedAt: iso(lastWeek + 5_000) });
+        expect(verify({ now: LATER }).status).toBe("stale-beacon");
+    });
+
+    it("does not confirm a foreign beacon at any point in the timeline", () => {
+        // The invariant: nothing about waiting longer, or less, turns someone
+        // else's plugin into ours.
+        writeBeacon({ buildId: OTHER_BUILD });
+        for (const now of [PATCHED_AT, LAUNCHED_AT, NOW, LATER, LATER * 2]) {
+            expect(verify({ now }).confirmed).toBe(false);
+        }
+    });
+
+    it("stops polling a foreign beacon once the window closes", async () => {
+        // awaitVerification uses `pending`, so the foreign branch has to answer
+        // it correctly or the installer waits out 90 seconds and then reports
+        // the same thing it already knew.
+        writeBeacon({ buildId: OTHER_BUILD });
+        let clock = NOW;
+        const result = await awaitVerification({
+            expectedBuildId: OUR_BUILD,
+            patchedAt: PATCHED_AT,
+            launchedAt: LAUNCHED_AT,
+            beaconPath,
+            clock: () => clock,
+            sleep: async ms => { clock += ms; }
+        });
+
+        expect(result.status).toBe("foreign-beacon");
+        expect(result.confirmed).toBe(false);
+        expect(clock).toBeGreaterThanOrEqual(LAUNCHED_AT + DEFAULT_VERIFY_TIMEOUT_MS);
+    });
+
+    it("confirms once OUR build replaces the foreign beacon mid-poll", async () => {
+        // The real sequence on a machine with a pre-existing install: their
+        // plugin reports first, ours reports after Discord finishes loading.
+        writeBeacon({ buildId: OTHER_BUILD });
+        let clock = NOW;
+        let polls = 0;
+        const result = await awaitVerification({
+            expectedBuildId: OUR_BUILD,
+            patchedAt: PATCHED_AT,
+            launchedAt: LAUNCHED_AT,
+            beaconPath,
+            clock: () => clock,
+            sleep: async ms => {
+                clock += ms;
+                polls += 1;
+                if (polls === 2) writeBeacon({ buildId: OUR_BUILD });
+            }
+        });
+
+        expect(result.confirmed).toBe(true);
+        expect(polls).toBe(2);
+    });
+});
+
 describe("'could not confirm' is a first-class result", () => {
     it("waits, rather than failing, while Discord is still starting", () => {
         const result = verify();  // no beacon written at all

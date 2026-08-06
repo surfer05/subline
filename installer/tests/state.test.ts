@@ -1,15 +1,16 @@
-import { unlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { MARKER_FORMAT, writeMarker } from "../src/patcher/marker.js";
+import { MARKER_FORMAT, readMarker, writeMarker } from "../src/patcher/marker.js";
 import { inspectInstall } from "../src/patcher/state.js";
 import { buildStubAsar } from "../src/patcher/stub.js";
 import type { Fixture } from "./fixture.js";
 import { makeDiscordFixture } from "./fixture.js";
 
 const OUR_LOADER = "/Applications/Subline.app/Contents/Resources/loader/patcher.js";
+const OUR_BUILD_ID = "1f2e3d4c5b6a7980";
 
 let fixture: Fixture | null = null;
 afterEach(() => {
@@ -25,7 +26,7 @@ function markAsOurs(f: Fixture, loaderPath = OUR_LOADER): void {
         product: "subline",
         productVersion: "0.0.0",
         loaderPath,
-        pluginBuildId: "1f2e3d4c5b6a7980",
+        pluginBuildId: OUR_BUILD_ID,
         discordVersion: "0.0.406",
         backupPath: f.install.backupPath,
         patchedAt: new Date().toISOString()
@@ -190,6 +191,32 @@ describe("inspectInstall", () => {
         if (!result.ok) return;
         expect(result.value.kind).toBe("broken");
         expect(result.value.reason).toBe("marker-unreadable");
+    });
+
+    it("keeps the build identity the marker records", () => {
+        fixture = makeDiscordFixture({ withBackup: true });
+        markAsOurs(fixture);
+        const marker = readMarker(fixture.install.resourcesPath);
+        expect(marker.ok && marker.value?.pluginBuildId).toBe(OUR_BUILD_ID);
+    });
+
+    it("reads a malformed build identity as absent rather than passing it through", () => {
+        // This value decides whether a running plugin is the one we installed.
+        // A marker on disk is editable, so a string that is not a digest must
+        // arrive as "we cannot say which build", never as an id that something
+        // could be compared equal to.
+        fixture = makeDiscordFixture({ withBackup: true });
+        for (const pluginBuildId of ["", "unknown", "*", "1F2E3D4C5B6A7980", "1f2e3d4", 7, null, {}]) {
+            markAsOurs(fixture);
+            const path = join(fixture.install.resourcesPath, "subline-patch.json");
+            const marker = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+            marker.pluginBuildId = pluginBuildId;
+            writeFileSync(path, JSON.stringify(marker, null, 4));
+
+            const read = readMarker(fixture.install.resourcesPath);
+            expect(read.ok).toBe(true);
+            expect(read.ok && read.value?.pluginBuildId).toBeNull();
+        }
     });
 
     it("errors when the path is not a Discord install at all", () => {

@@ -108,6 +108,25 @@ describe("a damaged beacon degrades safely", () => {
         expect(!read.ok && read.error.code).toBe("BEACON_FORMAT_UNSUPPORTED");
     });
 
+    it("refuses a format-1 beacon, which predates the build identity", () => {
+        // Format 1 has no `buildId`, so its "the plugin loaded" cannot be
+        // attributed to any particular build. Refusing the document is more
+        // honest than reading it and quietly skipping the identity check.
+        writeDocument(beaconDocument({ format: 1, buildId: undefined }));
+        const read = readBeaconAt(path);
+        expect(!read.ok && read.error.code).toBe("BEACON_FORMAT_UNSUPPORTED");
+    });
+
+    it("understands format 2, and says so where a change has to be deliberate", () => {
+        // PINNED, and pinned on BOTH sides: the plugin's own BEACON_FORMAT
+        // carries the same assertion. The contract is duplicated on purpose
+        // (see beacon.ts's header), and the drift that duplication risks is one
+        // side being bumped alone — which turns every healthy install into
+        // "unreadable-beacon" silently. Two pins make that a test failure that
+        // names the other side.
+        expect(SUPPORTED_BEACON_FORMAT).toBe(2);
+    });
+
     it("refuses a beacon with no usable load timestamp", () => {
         // Without it nothing can be dated to an installation, which is the one
         // question this file exists to answer.
@@ -168,6 +187,39 @@ describe("validateBeacon — what survives, and what is coerced", () => {
             const partial = validateBeacon(beaconDocument({ lastError }), path);
             expect(partial.ok && partial.value.lastError).toBeNull();
         }
+    });
+
+    it("keeps a well-formed build id — the field the confirmation now depends on", () => {
+        for (const buildId of [BUILD_ID, "0a80601a", "f".repeat(64)]) {
+            const read = validateBeacon(beaconDocument({ buildId }), path);
+            expect(read.ok && read.value.buildId).toBe(buildId);
+        }
+    });
+
+    it("reads a missing or malformed build id as null, never as a wildcard", () => {
+        // This file is untrusted input from a user-writable directory. An
+        // unconstrained string here would be a free-text field in a document
+        // that is not allowed to have one (spec §7 — the plugin reads DMs), and
+        // a coerced placeholder would be an identity some build could match.
+        for (const buildId of [
+            undefined, null, "", 42, {}, ["0a80601a"],
+            "0a80601",                          // shorter than any digest we emit
+            "0A80601A72BB57F6",                 // uppercase
+            "0a80601a-72bb-57f6",               // punctuation
+            "1f2e3d4c5b6a7980 and then he said" // a real id with text stapled on
+        ]) {
+            const read = validateBeacon(beaconDocument({ buildId }), path);
+            expect(read.ok && read.value.buildId).toBeNull();
+        }
+    });
+
+    it("does not discard the whole beacon over a missing identity", () => {
+        // "Something loaded but would not say which build" is a state the
+        // diagnostics screen wants to report out loud. It costs the
+        // confirmation in verifyOnce, not the evidence here.
+        const read = validateBeacon(beaconDocument({ buildId: undefined }), path);
+        expect(read.ok).toBe(true);
+        expect(read.ok && read.value.loadedAt).toBe(AT_MS);
     });
 
     it("falls back to the load time when updatedAt is missing", () => {
