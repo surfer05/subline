@@ -139,7 +139,21 @@ describe("the plugin actually reports that it loaded", () => {
     it("stops reporting once the plugin is stopped", async () => {
         // A beacon written after stop() would be vouching for a session that
         // no longer exists.
+        //
+        // There has to be a write ALREADY PENDING when stop() runs, or the test
+        // is vacuous (found by mutation): with nothing armed, an idle beacon
+        // writes nothing whether stop() resets it or not. So this translates
+        // first — which arms the coalescing timer — and stops inside the
+        // window.
         await start();
+        native.translateBatch.mockImplementation(
+            async (_e: string, _k: string, payload: string) => googleAnswers(payload)
+        );
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", TEXT) });
+        await vi.advanceTimersByTimeAsync(1_000);   // past the fast tier, inside the write window
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        expect(getTranslation(makeKey("1", "en"))).toMatchObject({ via: "google" });
+
         plugin.stop!();
         native.reportStatus.mockClear();
 
@@ -193,16 +207,30 @@ describe("the plugin reports what it actually did", () => {
         // mayReplace() refuses a Google line over an existing LLM one. Nothing
         // was shown to the reader, so nothing may be counted — otherwise a
         // plugin whose every write is refused still reports translations.
+        //
+        // The ORDER here is the whole test, and getting it wrong makes the test
+        // vacuous (found by mutation): if the LLM line is already in the store
+        // when the message is dispatched, needsFast() answers "resolved", the
+        // message is never sent to Google at all, and writeResult is never
+        // reached — so a beacon that counted refused writes would still pass.
+        // The line has to land WHILE the Google request is in flight, which is
+        // also the real race: the two tiers write the same key from different
+        // latencies.
         await start();
-        setTranslation(makeKey("1", "en"), { lang: "es", text: "already better", via: "gemini" });
-        native.reportStatus.mockClear();
-
         native.translateBatch.mockImplementation(
             async (_e: string, _k: string, payload: string) => googleAnswers(payload)
         );
+
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", TEXT) });
+        // Inside the fast tier's 700ms debounce: queued, not yet answered.
+        await vi.advanceTimersByTimeAsync(100);
+        setTranslation(makeKey("1", "en"), { lang: "es", text: "already better", via: "gemini" });
+        native.reportStatus.mockClear();
+
         await settle();
 
+        // The Google result came back and was refused over the Gemini line.
+        expect(getTranslation(makeKey("1", "en"))).toMatchObject({ via: "gemini" });
         expect(lastBeacon()?.counts.approx ?? 0).toBe(0);
     });
 

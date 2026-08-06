@@ -256,13 +256,22 @@ describe("writes are coalesced — this is the translation hot path", () => {
         // stop() calls resetStatusBeacon(). A surviving timer would write a
         // beacon for a session that no longer exists — and `loadedAt` is
         // exactly what the installer trusts to mean "this launch".
+        //
+        // The timer count is asserted DIRECTLY, and it has to be: dropping the
+        // clearTimeout leaves the write silent anyway, because the cleared
+        // `loadedAt` makes the flush a no-op. So a behavioural assertion alone
+        // passes over a genuine leak — one armed timer per stop/start cycle,
+        // held for as long as the renderer lives. (Found by mutation: removing
+        // the clearTimeout left the suite green.)
         recordPluginLoaded();
         recordTranslation("google");
+        expect(vi.getTimerCount()).toBe(1);
         native.reportStatus.mockClear();
 
         resetStatusBeacon();
-        await passThrottle();
 
+        expect(vi.getTimerCount()).toBe(0);
+        await passThrottle();
         expect(native.reportStatus).not.toHaveBeenCalled();
     });
 });
