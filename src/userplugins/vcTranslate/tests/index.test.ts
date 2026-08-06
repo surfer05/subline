@@ -3434,3 +3434,67 @@ describe("the rate gate retunes from the provider's own remaining count", () => 
         expect(rateGateSettings()).toEqual({ capacity: BURST_CAPACITY, refillMs: REFILL_MS });
     });
 });
+
+describe("the provider's reported quota is not trusted blindly, and does not outlive the session", () => {
+    function render(): any {
+        return plugin.chatBarButton!.render({ isMainChat: true, isAnyChat: true } as any);
+    }
+    function text(node: any): string {
+        if (node === null || node === undefined || node === false) return "";
+        if (typeof node === "string" || typeof node === "number") return String(node);
+        if (Array.isArray(node)) return node.map(text).join("");
+        return text(node.children);
+    }
+    function useGroq() {
+        settings.store.engine = "groq";
+        settings.store.groqApiKey = "gsk-test";
+    }
+    async function reportRateLimit(providerRateLimit: unknown) {
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) =>
+            engine === "google"
+                ? googleAnswers(payload)
+                : { ok: true, results: [], providerRateLimit }
+        );
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+    }
+
+    it("ignores a remaining count that is not a usable number", async () => {
+        // This value crossed an IPC boundary having started life as a remote
+        // HTTP header. A NaN or a negative reaching the indicator would be a
+        // number the user is asked to make a spending decision on.
+        useGroq();
+        for (const bad of [-5, Number.NaN, "12", null, undefined]) {
+            plugin.stop!();
+            await plugin.start!();
+            for (let i = 0; i < 20; i++) await Promise.resolve();
+            clearStore();
+            useGroq();
+
+            await reportRateLimit({ remainingRequests: bad });
+            expect(text(render())).toBe(`✦ ${rateGateAvailable()}`);
+        }
+    });
+
+    it("ignores a rate-limit payload that is not an object at all", async () => {
+        useGroq();
+        await reportRateLimit("nearly out");
+        expect(text(render())).toBe(`✦ ${rateGateAvailable()}`);
+    });
+
+    it("forgets the reading across a stop/start, rather than showing a dead window's count", async () => {
+        // The count describes a rate-limit window that has almost certainly
+        // rolled over by the time the plugin runs again, and a stale count
+        // presented as current is worse than showing the gate's own number.
+        useGroq();
+        await reportRateLimit({ remainingRequests: 0, resetRequestsMs: 600_000 });
+        expect(text(render())).toBe("✦ 0");
+
+        plugin.stop!();
+        await plugin.start!();
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        useGroq();
+
+        expect(text(render())).toBe(`✦ ${rateGateAvailable()}`);
+    });
+});
