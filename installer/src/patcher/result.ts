@@ -36,6 +36,15 @@ export type PatcherErrorCode =
     | "BUILD_INFO_MALFORMED"
     /** The file is not a valid asar archive. */
     | "INVALID_ASAR"
+    /**
+     * The plugin's status beacon exists but is unusable — unparsable, not ours,
+     * or missing the load timestamp that dates it to an installation. Never a
+     * reason to call an install broken: the beacon is evidence, and absent
+     * evidence means "cannot confirm" (spec §7), not "does not work".
+     */
+    | "BEACON_MALFORMED"
+    /** The beacon is a format version this installer does not understand. */
+    | "BEACON_FORMAT_UNSUPPORTED"
     /** Anything else that came back from the filesystem. */
     | "IO_ERROR";
 
