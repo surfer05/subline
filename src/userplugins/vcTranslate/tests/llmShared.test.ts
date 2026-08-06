@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { extractRows, mapRows, parseJsonText, stripCodeFence } from "../engines/llmShared";
 import type { BatchRequest } from "../types";
 import { fenced, REAL_GEMINI_FENCED_TEXT, REAL_GEMINI_TRANSLATIONS } from "./fixtures/realGeminiText";
+import { calls, __resetLogCalls } from "./stubs/utils-logger";
 
 /**
  * The response-shape hardening, tested where it lives — llmShared is what BOTH
@@ -198,6 +199,41 @@ describe("mapRows — the safeguards the tolerance must not weaken", () => {
     it("still marks every requested id absent from the response as failed", () => {
         expect(mapRows([{ id: 1, lang: "ar", text: "hello", skip: false }], req))
             .toContainEqual({ id: "2", failed: true });
+    });
+});
+
+describe("mapRows — hallucinated-id debug logging", () => {
+    it("logs nothing by default (debug omitted)", () => {
+        __resetLogCalls();
+        mapRows([{ id: "999", lang: "ar", text: "invented", skip: false }], req);
+        expect(calls).toEqual([]);
+    });
+
+    it("logs nothing when debug is explicitly false", () => {
+        __resetLogCalls();
+        mapRows([{ id: "999", lang: "ar", text: "invented", skip: false }], req, false);
+        expect(calls).toEqual([]);
+    });
+
+    it("logs the dropped id when debug is true", () => {
+        __resetLogCalls();
+        mapRows([{ id: "999", lang: "ar", text: "invented", skip: false }], req, true);
+        expect(calls).toHaveLength(1);
+        expect(calls[0].level).toBe("debug");
+        expect(String(calls[0].args[0])).toContain("999");
+        expect(String(calls[0].args[0])).toContain("hallucinated");
+    });
+
+    it("does not log for a row with no id at all — only a REAL hallucinated id", () => {
+        __resetLogCalls();
+        mapRows(["nope", null, 7], req, true);
+        expect(calls).toEqual([]);
+    });
+
+    it("does not log anything for ordinary valid rows", () => {
+        __resetLogCalls();
+        mapRows([{ id: "1", lang: "ar", text: "hello", skip: false }], req, true);
+        expect(calls).toEqual([]);
     });
 });
 

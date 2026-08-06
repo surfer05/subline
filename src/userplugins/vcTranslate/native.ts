@@ -92,7 +92,14 @@ export async function translateBatch(
     engine: EngineId,
     apiKey: string,
     reqJson: string,
-    model?: string
+    model?: string,
+    // Same route as `apiKey`/`model`, for the same reason (see their own
+    // comments): the debugLogging setting lives in the RENDERER, and this
+    // process cannot read it, so the renderer reads it once and passes the
+    // answer down. Defaults false so every existing call site (and every test
+    // that does not care about this) behaves exactly as it did before this
+    // parameter existed.
+    debug = false
 ): Promise<NativeResponse> {
     let req: BatchRequest;
     try {
@@ -104,8 +111,8 @@ export async function translateBatch(
     try {
         const results = await withRetry(
             () => {
-                if (engine === "claude") return translateWithClaude(req, apiKey);
-                if (engine === "gemini") return translateWithGemini(req, apiKey, fetch, model);
+                if (engine === "claude") return translateWithClaude(req, apiKey, fetch, debug);
+                if (engine === "gemini") return translateWithGemini(req, apiKey, fetch, model, debug);
                 return translateWithGoogle(req);
             },
             { retries: 1, delayMs: 1000, shouldRetry: isRetryable }

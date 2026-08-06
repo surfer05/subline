@@ -48,9 +48,10 @@ async function run(
     engine: "google" | "claude" | "gemini",
     apiKey: string,
     json = reqJson,
-    model?: string
+    model?: string,
+    debug?: boolean
 ) {
-    const p = translateBatch(EV, engine, apiKey, json, model);
+    const p = translateBatch(EV, engine, apiKey, json, model, debug);
     const settled = Promise.allSettled([p]);
     await vi.runAllTimersAsync();
     const [outcome] = await settled;
@@ -138,6 +139,33 @@ describe("translateBatch — success", () => {
         await run("gemini", "AIza-test");
 
         expect(gemini.mock.calls[0][3]).toBeUndefined();
+    });
+
+    it("forwards debug=true across the IPC boundary to the gemini engine", async () => {
+        // Same route as apiKey/model — settings live in the renderer, this
+        // process cannot read them, so the caller (index.tsx's runTier) has
+        // to pass the answer down as a plain argument.
+        gemini.mockResolvedValue([{ id: "1", skip: true }]);
+
+        await run("gemini", "AIza-test", reqJson, undefined, true);
+
+        expect(gemini.mock.calls[0][4]).toBe(true);
+    });
+
+    it("forwards debug=true across the IPC boundary to the claude engine", async () => {
+        claude.mockResolvedValue([{ id: "1", skip: true }]);
+
+        await run("claude", "sk-test", reqJson, undefined, true);
+
+        expect(claude.mock.calls[0][3]).toBe(true);
+    });
+
+    it("defaults debug to false when the caller omits it", async () => {
+        gemini.mockResolvedValue([{ id: "1", skip: true }]);
+
+        await run("gemini", "AIza-test");
+
+        expect(gemini.mock.calls[0][4]).toBe(false);
     });
 });
 

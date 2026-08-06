@@ -163,6 +163,23 @@ daily budget:
   because guessing wrong would silently lose a translation with no error and
   no way for you to know. It is implemented **only** for English targets; every
   other target language skips the check entirely.
+- **Chat shorthand, and elongated versions of it, are never sent.** A whole
+  message that is nothing but shorthand/interjections (`gg`, `brb`, `hbu`,
+  and about 80 more) is skipped without a request (`skip.ts`), and so is an
+  *elongated* one — `yesssss`, `waiiiiiit`, `helloooooo`, `lmaoooooo`,
+  `goooooood morninggggg`, `shhhh` all skip, because any run of **three or
+  more** identical letters is first collapsed down to one (`yesssss` → `yes`,
+  `helloooooo` → `hello`) before the shorthand check runs. A run of exactly
+  two is left alone — `hello`'s own doubled `l` is untouched, only the
+  elongated `o` collapses — because English essentially never triples a
+  letter in ordinary spelling, so 3+ is a safe threshold and 2 would not be.
+  The same collapsing also feeds the English-sentence check just above, so an
+  elongated word buried inside a longer sentence (`"sooooo good to see you"`)
+  still counts as evidence. It cannot manufacture a false match on its own —
+  a foreign word like Romanian `ceeeee` collapses to `ce`, which is in
+  neither list and so still gets translated — only deliberately adding a
+  *collapsed* word to `CHAT_SHORTHAND` or `ENGLISH_WORDS` can do that, which
+  is why those additions stay short and deliberate rather than automatic.
 - **Translations are remembered across restarts.** Restarting Discord used to
   re-translate the whole visible backlog from scratch; now it costs nothing.
   See Privacy below for what that means for other people's messages.
@@ -575,18 +592,57 @@ guessed 30-second pause applies only when none of the three is available.
    English check, cold-channel catch-up) before assuming the plugin is broken.
 
 **A message you expected to translate is silently skipped.**
-By design, in one of three ways. Locally, structurally: your own messages, and
+By design, in one of three ways. Locally, structurally: your own messages,
 messages that are only emotes, mentions, links, digits/punctuation, or emoji
-once those are stripped out, are treated as untranslatable and never sent to
-any engine (see `skip.ts`). Locally, linguistically: with an English target,
-a message the plugin can confidently place as English is skipped without a
-request (`detectLang.ts`) — this errs heavily toward sending, so if a
-*non*-English message is ever skipped this way, that is a bug worth reporting.
-Remotely: the engine itself reports a message that is already in
+once those are stripped out, and messages that are entirely chat shorthand —
+plain (`gg`, `brb`) or elongated (`yesssss`, `helloooooo`, `goooooood
+morninggggg`, see "Use" above) — are treated as untranslatable and never sent
+to any engine (see `skip.ts`). Locally, linguistically: with an English
+target, a message the plugin can confidently place as English is skipped
+without a request (`detectLang.ts`) — this errs heavily toward sending, so if
+a *non*-English message is ever skipped this way, that is a bug worth
+reporting. Remotely: the engine itself reports a message that is already in
 your target language, and there is nothing to subtitle. All three are deliberate —
 they avoid burning API calls on content with nothing to translate. The second
 kind is recorded as resolved rather than left blank, so reopening the channel
-does not re-request the whole already-translated backlog.
+does not re-request the whole already-translated backlog. To see WHICH of
+these (or which tier) actually decided a specific message's fate, turn on
+**"Log detailed per-message translation decisions"** below and check the
+console — it is built for exactly this question.
+
+**Diagnosing a specific message step by step (why no subtitle appeared, why ⚡
+seemed to do nothing, or anything else that "should have happened but
+didn't").**
+Settings → VcTranslate → **debugLogging** ("Log detailed per-message
+translation decisions...", off by default) makes every per-message decision
+this plugin makes show up in the Discord developer console
+(Ctrl+Shift+I / Cmd+Option+I), tagged `VcTranslate` like every other log line
+this plugin prints, so filtering the console for that name shows only this
+plugin's output. **It includes message text** — the whole point is a decision
+log that does not hide the message it decided about — and everything printed
+stays on your own machine; nothing about the setting sends anything anywhere.
+With it on, for a given message id you can read straight through its whole
+life: `[enqueue]` says which tier(s) it went to, or which local rule
+(`shouldSkip` vs `isConfidentlyTargetLanguage`) skipped it and cost nothing;
+`[flush]` says whether a batch was blocked before it was even sent (cooling
+down, waiting on the rate gate, a stale generation) or actually went out;
+`[response]` says what came back for each id — a translation, a skip, a
+failure, or (for an LLM engine) an id in the response that was never in the
+request, dropped as hallucinated; `[write]` says whether the result actually
+landed in the store or was refused, and why (a marker over a real
+translation, or a lower-ranked engine trying to replace a higher one); and
+`[force-quality]` says whether a ⚡ click was received at all and which guard,
+if any, stopped it (no LLM configured, already in flight). That covers the
+motivating case directly: a ⚡ click that "spent a request" but produced no
+subtitle is one of — cooling down (`[flush] blocked — cooling down`), the
+rate gate had nothing to give (`[flush] blocked — stale generation` after a
+wait, or the click never got past `[force-quality] blocked`), the model
+answered `skip`/`failed` for that id (`[response] ... skip` / `... failed`),
+or the model answered a *different* id entirely (`[response] ... dropped as
+hallucinated`) — and the log line tells you which, in one look, instead of a
+few rounds of guessing. With the setting off there is no change in behaviour
+and nothing extra is computed — every call site is guarded on the setting
+before any log string is even built, not just before it is printed.
 
 **A message edit doesn't update the subtitle.**
 It should: an edit clears the old subtitle and re-queues the new text, so the
@@ -766,6 +822,13 @@ and re-spend on, the same backlog. Two consequences worth stating plainly:
 To wipe it, clear Vencord's `DataStore` (the same action that would forget your
 per-channel toggles).
 
+**The `debugLogging` setting (off by default) prints message text to your own
+local console.** Nothing about it changes what leaves your machine or where —
+Google/Claude/Gemini already receive the same text either way, described
+above — it only controls whether that text (and the plugin's decision about
+it) is *also* printed to the Discord developer console for you to read. See
+"Diagnosing a specific message" under Troubleshooting for what it shows.
+
 ## Known limitations
 
 - Incoming messages only. No outgoing translation, no voice, no DMs — desktop
@@ -812,7 +875,7 @@ reports a *smaller* pass count that still looks like success.
 `vitest` is not saved as a dependency; in a fresh clone run `npm i -D vitest`
 first.
 
-427 tests across 15 suites (`batcher`, `claude`, `detectLang`, `gemini`,
+468 tests across 15 suites (`batcher`, `claude`, `detectLang`, `gemini`,
 `google`, `index`, `llmShared`, `native`, `rateGate`, `rateHint`, `retry`,
 `romanized`, `skip`, `store`, `upgrade` — see `tests/`). `tests/fixtures/`
 holds shared non-test data, notably the verbatim bytes of a real Gemini 429

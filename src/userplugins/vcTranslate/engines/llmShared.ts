@@ -1,4 +1,21 @@
+import { Logger } from "@utils/Logger";
+
 import { isSameText, type BatchRequest, type Result } from "../types";
+
+/**
+ * A SECOND `Logger` instance, not the one index.tsx builds — and unavoidably
+ * so. mapRows() runs wherever the engine that calls it runs, which is the
+ * Electron MAIN process (native.ts is the plugin's native/IPC side), a
+ * separate realm from index.tsx's renderer. The two cannot share a JS object
+ * across that boundary. Same construction (`new Logger("VcTranslate")`) as
+ * index.tsx's, so both print under the identical "VcTranslate" tag and filter
+ * identically in DevTools — see the `debugLogging` setting in settings.ts for
+ * what turns this on. `debug` is threaded down as a plain argument (from
+ * native.ts's `translateBatch`) rather than read from a setting: settings
+ * live in the renderer, and this code cannot see them any more than
+ * `apiKey`/`model` can — see native.ts's own comment on that.
+ */
+const logger = new Logger("VcTranslate");
 
 /**
  * Shared between engines/claude.ts and engines/gemini.ts: the prompt builder
@@ -202,8 +219,16 @@ function rowId(raw: unknown): string | undefined {
  * "translations" identical to their source (isSameText), and mark every
  * requested id that never got a usable row as an explicit `{ failed: true }`
  * rather than letting it vanish.
+ *
+ * `debug`, when true, logs every id dropped here for being present in the
+ * response but absent from the request — the "model answered a different
+ * message than the one asked" failure mode, which otherwise leaves no trace:
+ * the id is silently gone by the time this function returns, and the caller
+ * only ever sees the requested id come back `{ failed: true }`. Off by
+ * default and checked before any string is built, same discipline as every
+ * other debugLogging call site (see settings.ts).
  */
-export function mapRows(rows: unknown[], req: BatchRequest): Result[] {
+export function mapRows(rows: unknown[], req: BatchRequest, debug = false): Result[] {
     const validIds = new Set(req.messages.map(m => m.id));
     const results: Result[] = [];
 
@@ -213,7 +238,15 @@ export function mapRows(rows: unknown[], req: BatchRequest): Result[] {
         // Coerced (see rowId) but never invented: an id the model made up is
         // still dropped here, numeric or not.
         const id = rowId(r.id);
-        if (id === undefined || !validIds.has(id)) continue;
+        if (id === undefined || !validIds.has(id)) {
+            if (debug && id !== undefined) {
+                logger.debug(
+                    `[response] id ${id} present in the response but not in the `
+                    + "request — dropped as hallucinated"
+                );
+            }
+            continue;
+        }
         if (r.skip === true) {
             results.push({ id, skip: true });
             continue;

@@ -127,6 +127,20 @@ describe("parseGeminiResponse", () => {
         ]);
     });
 
+    it("forwards the debug flag through to mapRows without changing the result", () => {
+        const body = {
+            steps: [{
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        translations: [{ id: "10", lang: "ja", text: "ok", skip: false }]
+                    })
+                }]
+            }]
+        };
+        expect(parseGeminiResponse(body, req, true)).toEqual(parseGeminiResponse(body, req, false));
+    });
+
     it("marks a requested id absent from the response as failed", () => {
         const body = {
             steps: [{

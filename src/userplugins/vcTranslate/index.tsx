@@ -478,13 +478,44 @@ function announceMissingKeyOnce() {
     });
 }
 
+/** A short, human-readable description of a stored entry, for debug logging only. */
+function describeStoredForLog(e: StoredTranslation | undefined): string {
+    if (e === undefined) return "‹none›";
+    if (isRealTranslation(e)) return `${e.via}:${JSON.stringify(e.text)}`;
+    if ("skipped" in e) return `skipped(${e.via ?? "google-unmarked"})`;
+    if ("failed" in e) return "failed";
+    return "deferred";
+}
+
+/**
+ * Why mayReplace() refused a write, for debug logging only — mirrors its two
+ * refusal branches exactly (see upgrade.ts). Only called once a refusal is
+ * already known, so `existing` is guaranteed to be a real translation here:
+ * that is the only case mayReplace() ever returns false for.
+ */
+function refuseReasonForLog(existing: StoredTranslation | undefined, next: StoredTranslation): string {
+    const existingVia = (existing as { via: EngineId }).via;
+    if (!isRealTranslation(next)) return `a marker cannot replace ${existingVia}'s real translation`;
+    return `${next.via} (rank ${ENGINE_RANK[next.via]}) cannot replace ${existingVia} (rank ${ENGINE_RANK[existingVia]})`;
+}
+
 /**
  * The ONLY way an engine result reaches the store. Two tiers write to the same
  * key from different latencies, so every write has to ask whether it is
  * actually an improvement — see upgrade.ts.
  */
 function writeResult(key: string, value: StoredTranslation): void {
-    if (mayReplace(getTranslation(key), value)) setTranslation(key, value);
+    const existing = getTranslation(key);
+    const allowed = mayReplace(existing, value);
+    if (settings.store.debugLogging) {
+        logger.debug(
+            allowed
+                ? `[write] ${key}: wrote ${describeStoredForLog(value)}`
+                : `[write] ${key}: refused ${describeStoredForLog(value)} over `
+                  + `${describeStoredForLog(existing)} — ${refuseReasonForLog(existing, value)}`
+        );
+    }
+    if (allowed) setTranslation(key, value);
 }
 
 /**
@@ -585,6 +616,12 @@ async function runTier(
     // The in-flight set belonging to THIS tier. The other tier's request for
     // the same id (if any) is a separate round trip and settles on its own.
     const inFlightSet = isQuality ? inFlightQuality : inFlightFast;
+    const debug = settings.store.debugLogging;
+
+    if (debug) {
+        const ids = req.messages.map(m => m.id);
+        logger.debug(`[flush] ${engine}: batch of ${ids.length} — ids=${JSON.stringify(ids)}`);
+    }
 
     try {
         // Superseded by a later rebuild (settings changed, or a fallback
@@ -614,24 +651,47 @@ async function runTier(
         // unreachable, no behavioural test can pin it (removing it changes
         // nothing observable); the invariant that keeps it unreachable is
         // pinned instead, by "leaves no stale timer behind" in index.test.ts.
-        if (myGeneration !== batcherGeneration) return;
+        if (myGeneration !== batcherGeneration) {
+            if (debug) logger.debug(`[flush] ${engine}: blocked — stale generation (pre-gate)`);
+            return;
+        }
 
         // Cooling down after a 429: do not spend a request to be told so
         // again. Nothing is marked and nothing is diverted — the fast tier's
         // Google line for these same messages is already on screen.
-        if (isQuality && isLlmEngine(engine) && isCoolingDown(engine)) return;
+        if (isQuality && isLlmEngine(engine) && isCoolingDown(engine)) {
+            if (debug) {
+                logger.debug(
+                    `[flush] ${engine}: blocked — cooling down for another `
+                    + `${formatCountdown(cooldownUntil(engine) - Date.now())}`
+                );
+            }
+            return;
+        }
 
         // Only the LLM engines are rate-gated — Google is per-message with its
         // own concurrency cap (engines/google.ts) and was never the source of
         // the 429 storm this gate exists for.
         if (isQuality) {
+            const gateWaitStarted = Date.now();
             await acquireSlot();
+            if (debug) {
+                const waitedMs = Date.now() - gateWaitStarted;
+                logger.debug(
+                    waitedMs > 5
+                        ? `[flush] ${engine}: rate gate — waited ${waitedMs}ms for a slot`
+                        : `[flush] ${engine}: rate gate — slot was available immediately`
+                );
+            }
             // stop()/rebuild may have happened while this flush sat behind the
             // gate (resetRateGate() wakes queued waiters immediately for
             // exactly that reason, rather than leaving them to time out on the
             // next refill tick). Re-check before spending a real request on a
             // batch nothing will ever read the result of.
-            if (myGeneration !== batcherGeneration) return;
+            if (myGeneration !== batcherGeneration) {
+                if (debug) logger.debug(`[flush] ${engine}: blocked — stale generation (post-gate)`);
+                return;
+            }
         }
 
         // The request is about to be SPENT, so record it before it can fail in
@@ -657,7 +717,8 @@ async function runTier(
                 engine,
                 isLlmEngine(engine) ? apiKeyFor(engine) : "",
                 JSON.stringify(engine === "google" ? withSourceLangs(req) : req),
-                modelFor(engine)
+                modelFor(engine),
+                debug
             );
         } catch {
             res = null;
@@ -670,9 +731,18 @@ async function runTier(
         // was already stale when it started — it cannot catch one that went
         // stale during the await. Re-check before any write, so a superseded
         // response is dropped instead of landing under the old engine's key.
-        if (myGeneration !== batcherGeneration) return;
+        if (myGeneration !== batcherGeneration) {
+            if (debug) logger.debug(`[flush] ${engine}: blocked — stale generation (post-response)`);
+            return;
+        }
 
         if (res === null || !res.ok) {
+            if (debug) {
+                logger.debug(
+                    `[flush] ${engine}: response not ok — `
+                    + (res === null ? "IPC call rejected" : res.error)
+                );
+            }
             if (res !== null) {
                 // Park the engine for as long as the API asked for. Still the
                 // whole point of the cooldown: retrying into a wall that just
@@ -707,6 +777,10 @@ async function runTier(
 
         for (const r of res.results) {
             const key = makeKey(r.id, req.targetLang);
+            if (debug) {
+                const outcome = "failed" in r ? "failed" : r.skip ? "skip" : `translation (${r.lang})`;
+                logger.debug(`[response] ${engine} ${r.id}: ${outcome}`);
+            }
             if ("failed" in r) {
                 if (!isQuality) writeResult(key, { failed: true });
                 continue;
@@ -763,17 +837,27 @@ async function runTier(
  * a Google result arriving later still cannot clobber what this bought.
  */
 async function forceQualityTranslate(message: Message): Promise<void> {
+    const debug = settings.store.debugLogging;
+    if (debug) logger.debug(`[force-quality] ${message.id}: click received`);
+
     const engine = effectiveEngine();
     // Not actually usable right now (no LLM configured, no key, or pinned to
     // Google by an earlier auth failure) — the popover render() below already
     // hides the button in exactly this case, but the engine can change
     // between render and click, so check again rather than trust stale props.
-    if (!isLlmEngine(engine)) return;
+    if (!isLlmEngine(engine)) {
+        if (debug) logger.debug(`[force-quality] ${message.id}: blocked — no LLM engine usable right now`);
+        return;
+    }
 
     // A duplicate click, or a race with a request already in flight for this
     // message on this tier (live chat, catch-up). One spend at a time per
     // message, same discipline as the automatic paths.
-    if (inFlightQuality.has(message.id)) return;
+    if (inFlightQuality.has(message.id)) {
+        if (debug) logger.debug(`[force-quality] ${message.id}: blocked — already in flight on the quality tier`);
+        return;
+    }
+    if (debug) logger.debug(`[force-quality] ${message.id}: passed guards, spending a ${engine} request`);
     inFlightQuality.add(message.id);
 
     const req: BatchRequest = {
@@ -886,7 +970,18 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true) {
     // is a pure local function call that returns the same answer for free, and
     // not writing keeps a local guess out of the persisted cache, where a
     // heuristic mistake would otherwise outlive the session.
-    if (isLocallySkipped(pending.text, isOwn)) {
+    const skipReason = localSkipReason(pending.text, isOwn);
+    if (skipReason !== null) {
+        // Guarded, not just quiet: with the setting off this must cost
+        // nothing beyond the one boolean read below — no template string is
+        // built. See settings.ts's debugLogging for what this is for and why
+        // message text is included.
+        if (settings.store.debugLogging) {
+            logger.debug(
+                `[enqueue] ${pending.id}: locally skipped by ${skipReason} `
+                + `— text=${JSON.stringify(pending.text)}`
+            );
+        }
         // Both rings: fastBatcher's is never actually read (it does not
         // support context) but recording into it is harmless, and
         // qualityBatcher may be null (Google-only). Whichever tier(s) end up
@@ -904,14 +999,18 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true) {
     // miss for the whole round trip, so "no entry" must not be read as
     // "never requested". Checked and set per tier — a message is legitimately
     // in flight on both at once.
+    let wentFast = false;
     if (!inFlightFast.has(pending.id) && needsFast(key)) {
         inFlightFast.add(pending.id);
         fastBatcher?.add(pending);
+        wentFast = true;
     }
 
+    let wentQuality = false;
     if (allowQuality && qualityBatcher && !inFlightQuality.has(pending.id) && needsQuality(key)) {
         inFlightQuality.add(pending.id);
         qualityBatcher.add(pending);
+        wentQuality = true;
     }
     // No `else`. Two ways to reach one: qualityBatcher is null (no LLM
     // configured), in which case there is no second ring to feed at all —
@@ -919,6 +1018,33 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true) {
     // there is nothing useful to record; or allowQuality is false, i.e.
     // scroll-back, which must NOT be recorded as context for the reasons in
     // this function's doc comment.
+
+    if (settings.store.debugLogging) {
+        const tiers = [wentFast && "fast", wentQuality && "quality"].filter(Boolean).join("+");
+        logger.debug(`[enqueue] ${pending.id}: -> ${tiers || "neither (in flight or already resolved)"}`);
+    }
+}
+
+/** Which local rule decided to skip a message — see `localSkipReason`. */
+type LocalSkipReason = "shouldSkip" | "isConfidentlyTargetLanguage";
+
+/**
+ * Decided locally, for free, with no engine involved: either there is nothing
+ * translatable left in the text (`shouldSkip`), or it is already in the
+ * target language (`isConfidentlyTargetLanguage`) — or neither, `null`.
+ *
+ * Same short-circuit order as the `||` this replaces: `shouldSkip` is checked
+ * first and `isConfidentlyTargetLanguage` only when it says no, so behaviour
+ * is unchanged. Split out from a plain boolean (what `isLocallySkipped` below
+ * still returns, for its two ordinary callers) so debugLogging can report
+ * WHICH of the two rules fired — the enqueue-side logging exists specifically
+ * so a message that silently never reaches an engine is still diagnosable
+ * from the console.
+ */
+function localSkipReason(text: string, isOwn: boolean): LocalSkipReason | null {
+    if (shouldSkip(text, isOwn)) return "shouldSkip";
+    if (isConfidentlyTargetLanguage(text, settings.store.targetLang)) return "isConfidentlyTargetLanguage";
+    return null;
 }
 
 /**
@@ -930,8 +1056,7 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true) {
  * costs no catch-up budget — see the budget comment in catchUp().
  */
 function isLocallySkipped(text: string, isOwn: boolean): boolean {
-    return shouldSkip(text, isOwn)
-        || isConfidentlyTargetLanguage(text, settings.store.targetLang);
+    return localSkipReason(text, isOwn) !== null;
 }
 
 /**
@@ -1187,6 +1312,13 @@ function catchUp(channelId: string, opts: CatchUpOptions = {}) {
     // Back to chronological order before enqueuing, so the batcher's rolling
     // context window sees the conversation the right way round.
     candidates.reverse();
+
+    if (settings.store.debugLogging) {
+        logger.debug(
+            `[catchUp] ${channelId}: allowQuality=${allowQuality} `
+            + `candidates=${candidates.length} budgetSpent=${budget}/${count}`
+        );
+    }
 
     for (const message of candidates) {
 

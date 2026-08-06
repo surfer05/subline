@@ -37,7 +37,7 @@ function topLevelKeys(value: unknown): string {
  * change is diagnosable from the Discord console rather than a silent
  * failure or a generic "no text" message that gives no clue why.
  */
-export function parseGeminiResponse(body: unknown, req: BatchRequest): Result[] {
+export function parseGeminiResponse(body: unknown, req: BatchRequest, debug = false): Result[] {
     if (body === null || typeof body !== "object") {
         throw new Error(`gemini: response is not an object (got ${typeof body})`);
     }
@@ -75,7 +75,7 @@ export function parseGeminiResponse(body: unknown, req: BatchRequest): Result[] 
 
     const parsed = parseJsonText(text, "gemini");
     const rows = extractRows(parsed, "gemini");
-    return mapRows(rows, req);
+    return mapRows(rows, req, debug);
 }
 
 /**
@@ -105,7 +105,8 @@ export async function translateWithGemini(
     req: BatchRequest,
     apiKey: string,
     fetchImpl: typeof fetch = fetch,
-    model?: string
+    model?: string,
+    debug = false
 ): Promise<Result[]> {
     const chosenModel = typeof model === "string" && model.trim() !== ""
         ? model.trim()
@@ -172,5 +173,5 @@ export async function translateWithGemini(
         );
     }
 
-    return parseGeminiResponse(await res.json(), req);
+    return parseGeminiResponse(await res.json(), req, debug);
 }

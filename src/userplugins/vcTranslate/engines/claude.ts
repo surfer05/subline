@@ -22,7 +22,7 @@ export { buildPrompt };
  */
 export const TRUNCATED_ERROR = "claude: response truncated (max_tokens)";
 
-export function parseClaudeResponse(body: unknown, req: BatchRequest): Result[] {
+export function parseClaudeResponse(body: unknown, req: BatchRequest, debug = false): Result[] {
     // Checked before anything else: a max_tokens stop means the JSON below is
     // cut off mid-object, so every downstream diagnostic ("not valid JSON",
     // "missing translations array") would be a misleading description of a
@@ -42,13 +42,14 @@ export function parseClaudeResponse(body: unknown, req: BatchRequest): Result[] 
 
     const parsed = parseJsonText(textBlock.text, "claude");
     const rows = extractRows(parsed, "claude");
-    return mapRows(rows, req);
+    return mapRows(rows, req, debug);
 }
 
 export async function translateWithClaude(
     req: BatchRequest,
     apiKey: string,
-    fetchImpl: typeof fetch = fetch
+    fetchImpl: typeof fetch = fetch,
+    debug = false
 ): Promise<Result[]> {
     const res = await fetchImpl(ENDPOINT, {
         method: "POST",
@@ -84,5 +85,5 @@ export async function translateWithClaude(
         throw new HttpError(`claude: HTTP ${res.status}`, res.status, retryAfterFromHeader(res));
     }
 
-    return parseClaudeResponse(await res.json(), req);
+    return parseClaudeResponse(await res.json(), req, debug);
 }

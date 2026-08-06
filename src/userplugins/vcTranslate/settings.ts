@@ -106,6 +106,24 @@ export const settings = definePluginSettings({
         type: OptionType.BOOLEAN,
         description: "Auto-translate every channel (otherwise use the per-channel globe button)",
         default: false
+    },
+    debugLogging: {
+        type: OptionType.BOOLEAN,
+        // Says plainly what this does and where it goes: message TEXT is
+        // included (it is the whole point — a decision log that hides the
+        // message it decided about is not diagnosable), and it never leaves
+        // this machine — it is printed through Vencord's own Logger, to the
+        // same DevTools console every other plugin already logs to. Off by
+        // default because most sessions do not need it and it is a
+        // deliberate, informed opt-in when one does.
+        description:
+            "Log detailed per-message translation decisions to your own local " +
+            "Discord console (which tier a message went to or which rule " +
+            "skipped it, rate-gate/cooldown blocks, what each engine returned, " +
+            "and store writes). Message text is included in these logs. " +
+            "Nothing leaves your machine — this only affects what is printed " +
+            "to the console. Off by default.",
+        default: false
     }
 }, {
     anthropicApiKey: {

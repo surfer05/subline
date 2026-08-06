@@ -126,6 +126,22 @@ describe("parseClaudeResponse", () => {
         ]);
     });
 
+    it("forwards the debug flag through to mapRows without changing the result", () => {
+        // parseClaudeResponse is a pass-through for debug — see llmShared's
+        // mapRows tests for the actual logging behaviour. This just pins that
+        // the third argument reaches mapRows and the returned Result[] is
+        // unaffected by it either way.
+        const body = {
+            content: [{
+                type: "text",
+                text: JSON.stringify({
+                    translations: [{ id: "10", lang: "ja", text: "ok", skip: false }]
+                })
+            }]
+        };
+        expect(parseClaudeResponse(body, req, true)).toEqual(parseClaudeResponse(body, req, false));
+    });
+
     it("marks a requested id absent from the response as failed", () => {
         const body = {
             content: [{
