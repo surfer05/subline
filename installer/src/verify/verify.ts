@@ -230,16 +230,20 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
     // for the same reason staleness is: a beacon that is not ours describes an
     // install that is not ours, however healthy every field in it looks.
     //
-    // An expectation that is not itself a well-formed build id matches nothing,
-    // so a caller who passes a placeholder gets "foreign" rather than a free
-    // pass. There is no value of `expectedBuildId` that means "skip the check".
+    // An expectation we cannot use is checked FIRST and reads as "not ours",
+    // never as "cannot tell": a caller with a placeholder instead of a real
+    // build id has nothing to confirm against, and letting that fall through to
+    // the beacon's own field would let two unusable values agree with each
+    // other. There is no value of `expectedBuildId` that means "skip the check".
     const expectedBuildId = toBuildId(options.expectedBuildId);
     const identity: "match" | "mismatch" | "absent" =
-        beacon.buildId === null
-            ? "absent"
-            : expectedBuildId !== null && beacon.buildId === expectedBuildId
-                ? "match"
-                : "mismatch";
+        expectedBuildId === null
+            ? "mismatch"
+            : beacon.buildId === null
+                ? "absent"
+                : beacon.buildId === expectedBuildId
+                    ? "match"
+                    : "mismatch";
 
     // THE STALENESS GATE, before anything in the file is believed. A beacon
     // whose load predates this install is a previous install's, and every

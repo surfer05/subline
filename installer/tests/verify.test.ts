@@ -287,9 +287,13 @@ describe("identity outranks recency", () => {
         // including the placeholder that a malformed beacon would carry too.
         for (const expectedBuildId of ["", "unknown", "*", "0A80601A72BB57F6"]) {
             writeBeacon({ buildId: OUR_BUILD });
-            expect(verify({ now: LATER, expectedBuildId }).confirmed).toBe(false);
+            expect(verify({ now: LATER, expectedBuildId }).status).toBe("foreign-beacon");
+
+            // And the beacon echoing the same unusable value back does not make
+            // the two agree: an expectation we cannot use is checked before the
+            // beacon's own field, so it can never be satisfied by matching it.
             writeBeacon({ buildId: expectedBuildId });
-            expect(verify({ now: LATER, expectedBuildId }).confirmed).toBe(false);
+            expect(verify({ now: LATER, expectedBuildId }).status).toBe("foreign-beacon");
         }
     });
 
@@ -317,13 +321,21 @@ describe("identity outranks recency", () => {
         // the same thing it already knew.
         writeBeacon({ buildId: OTHER_BUILD });
         let clock = NOW;
+        let polls = 0;
         const result = await awaitVerification({
             expectedBuildId: OUR_BUILD,
             patchedAt: PATCHED_AT,
             launchedAt: LAUNCHED_AT,
             beaconPath,
             clock: () => clock,
-            sleep: async ms => { clock += ms; }
+            // The cap turns "never stops" into a FAILURE rather than a hang.
+            // The injected sleep resolves immediately, so a branch that stays
+            // pending forever starves the event loop and vitest's own timeout
+            // can never fire — the suite would sit there rather than report.
+            sleep: async ms => {
+                clock += ms;
+                if (++polls > 500) throw new Error("awaitVerification never stopped polling");
+            }
         });
 
         expect(result.status).toBe("foreign-beacon");
@@ -347,6 +359,7 @@ describe("identity outranks recency", () => {
                 clock += ms;
                 polls += 1;
                 if (polls === 2) writeBeacon({ buildId: OUR_BUILD });
+                if (polls > 500) throw new Error("awaitVerification never stopped polling");
             }
         });
 
