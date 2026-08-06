@@ -11,7 +11,7 @@ import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./c
 import { isConfidentlyTargetLanguage } from "./detectLang";
 import {
     acquireSlot, loadRateGateTuning, rateGateAvailable, rateGateSettings, resetRateGate,
-    tuneRateGateToObservedLimit
+    tuneRateGateToObservedLimit, tuneRateGateToProviderBudget
 } from "./rateGate";
 import { isRomanizedGuess } from "./romanized";
 import settings from "./settings";
@@ -226,22 +226,33 @@ function forgetQualityAttempts(messageId: string): void {
 let batcherGeneration = 0;
 
 /**
- * The two key-gated engines, keyed by the setting that holds their API key
- * and the label used in the "no key set" / "rejected the key" toasts. A
- * lookup table rather than an `engine === "claude" || engine === "gemini"`
- * conditional in every function below — this is the one place that has to
- * know both engines exist, so a third key-gated engine only means one new
- * entry here rather than a growing tangle of per-function branches.
+ * The key-gated engines, keyed by the setting that holds their API key and the
+ * label used in the "no key set" / "rejected the key" toasts. A lookup table
+ * rather than an `engine === "claude" || engine === "gemini"` conditional in
+ * every function below — this is the one place that has to know which engines
+ * exist, so adding a key-gated engine is one new entry here rather than a
+ * growing tangle of per-function branches. Adding Groq proved that: this row
+ * and the settings fields it names were the whole of it.
  */
 const LLM_ENGINES = {
     claude: { keySetting: "anthropicApiKey", label: "Anthropic" },
-    gemini: { keySetting: "geminiApiKey", label: "Gemini" }
-} as const satisfies Record<string, { keySetting: "anthropicApiKey" | "geminiApiKey"; label: string }>;
+    gemini: { keySetting: "geminiApiKey", label: "Gemini" },
+    groq: { keySetting: "groqApiKey", label: "Groq" }
+} as const satisfies Record<
+    string,
+    { keySetting: "anthropicApiKey" | "geminiApiKey" | "groqApiKey"; label: string }
+>;
 
 type LlmEngineId = keyof typeof LLM_ENGINES;
 
+/**
+ * Asked of the table itself rather than of a hand-written list of ids, so the
+ * table above stays the single place that knows which engines are key-gated —
+ * a repeated `||` chain is exactly how a fourth engine would end up recognised
+ * in some functions and silently not in others.
+ */
 function isLlmEngine(id: EngineId): id is LlmEngineId {
-    return id === "claude" || id === "gemini";
+    return Object.prototype.hasOwnProperty.call(LLM_ENGINES, id);
 }
 
 /** The API key configured for a key-gated engine. */
@@ -260,8 +271,11 @@ function apiKeyFor(engine: LlmEngineId): string {
  * string can never reach the wire as a model name.
  */
 function modelFor(engine: EngineId): string {
-    if (engine !== "gemini") return "";
-    const configured = settings.store.geminiModel;
+    const configured = engine === "gemini"
+        ? settings.store.geminiModel
+        : engine === "groq"
+            ? settings.store.groqModel
+            : "";
     return typeof configured === "string" ? configured.trim() : "";
 }
 
@@ -324,29 +338,141 @@ function formatCountdown(ms: number): string {
 }
 
 /**
+ * The last thing the PROVIDER itself said about our remaining allowance, for
+ * the engine that said it.
+ *
+ * THE DEFECT THIS EXISTS FOR: the `✦ N` indicator used to show our own token
+ * bucket and nothing else, so it could read `✦ 3` while the provider was
+ * refusing instantly — the user clicks ⚡ on the strength of a number the
+ * provider never agreed to and gets an immediate 429. Only an OpenAI-compatible
+ * engine (Groq) reports this at all; Gemini and Claude say nothing on a
+ * success, and for them everything below simply never fires.
+ *
+ * Not a Map keyed by engine: exactly one engine is ever configured at a time,
+ * so a second entry could only ever be a stale reading for an engine nobody is
+ * using — and `engine` is recorded here precisely so that a reading taken
+ * before the user switched engines is discarded rather than shown against the
+ * new one.
+ */
+interface ProviderQuotaReading {
+    engine: LlmEngineId;
+    remaining: number;
+    /** When this was read, for the staleness check below. */
+    observedAt: number;
+    /** When the provider's window rolls over, if it said. */
+    resetAt: number | null;
+}
+
+let providerQuota: ProviderQuotaReading | null = null;
+
+/**
+ * How long a provider reading is worth showing when the provider named no
+ * reset time.
+ *
+ * A remaining count is a snapshot: it goes out of date as the window rolls and
+ * as anything else on the same key spends. Sixty seconds is the shortest
+ * window any of these providers rate-limits over, so a reading older than that
+ * cannot still be describing the window it was taken in.
+ */
+const PROVIDER_QUOTA_MAX_AGE_MS = 60_000;
+
+/**
+ * Record what a successful response reported. Every field is re-validated
+ * here rather than trusted: this arrives from a remote header, through IPC,
+ * and a NaN or a negative would otherwise reach the indicator as a number the
+ * user is asked to make a decision on.
+ */
+function recordProviderQuota(engine: LlmEngineId, reported: unknown): void {
+    if (reported === null || typeof reported !== "object") return;
+    const { remainingRequests, resetRequestsMs } = reported as {
+        remainingRequests?: unknown;
+        resetRequestsMs?: unknown;
+    };
+    // A reading with no remaining count says nothing this can use. Zero IS a
+    // usable count — it is the single most important thing the provider can
+    // tell us — so the guard is on type and sign, never on truthiness.
+    if (typeof remainingRequests !== "number" || !Number.isFinite(remainingRequests)) return;
+    if (remainingRequests < 0) return;
+
+    const now = Date.now();
+    const resetMs = typeof resetRequestsMs === "number"
+        && Number.isFinite(resetRequestsMs)
+        && resetRequestsMs > 0
+        ? resetRequestsMs
+        : null;
+
+    providerQuota = {
+        engine,
+        remaining: remainingRequests,
+        observedAt: now,
+        resetAt: resetMs === null ? null : now + resetMs
+    };
+}
+
+/**
+ * The provider's own remaining count for this engine, if we have one worth
+ * believing — otherwise undefined, which is the state Gemini and Claude are
+ * permanently in.
+ *
+ * "Worth believing" is deliberately conservative, because a stale number here
+ * is worse than no number: it is a confident wrong answer in a place the user
+ * reads to decide whether to spend. So it must be for THIS engine, taken
+ * recently, and from a window that has not since rolled over — once the
+ * provider's window resets, the count we hold is a floor the provider has
+ * already moved past, and showing it would understate what is available.
+ */
+function providerRemainingFor(engine: LlmEngineId): number | undefined {
+    const reading = providerQuota;
+    if (reading === null || reading.engine !== engine) return undefined;
+    const now = Date.now();
+    if (reading.resetAt !== null && now >= reading.resetAt) return undefined;
+    if (now - reading.observedAt > PROVIDER_QUOTA_MAX_AGE_MS) return undefined;
+    return reading.remaining;
+}
+
+/**
  * "How many ⚡ clicks would actually go through right now, for this engine" —
  * the single source both the chat-bar quota indicator and the ⚡ popover
  * label read from, so the two can never disagree about what pressing ⚡ is
  * about to do.
  *
- * COOLDOWN TAKES PRIORITY over a token count on purpose: the rate gate can
- * still be holding tokens while the engine itself is parked after a 429 (the
- * two are independent — see `runTier`'s cooldown check, which runs BEFORE the
- * gate is ever asked), and a token count would tell the user ⚡ is ready when
- * clicking it would actually do nothing.
+ * COOLDOWN TAKES PRIORITY over a count on purpose: the rate gate can still be
+ * holding tokens while the engine itself is parked after a 429 (the two are
+ * independent — see `runTier`'s cooldown check, which runs BEFORE the gate is
+ * ever asked), and a count would tell the user ⚡ is ready when clicking it
+ * would actually do nothing.
  *
- * The token count itself comes from `rateGateAvailable()` — a PURE read of
- * the gate this engine's requests actually go through, never a parallel
- * estimate of the provider's own remaining allowance. That is the whole
- * point: the honest number is what THIS plugin will let through, which is
- * exactly what ⚡ is about to spend.
+ * TWO LIMITS, AND THE ANSWER IS THE SMALLER. `rateGateAvailable()` is a PURE
+ * read of the gate this engine's requests actually go through, and it used to
+ * be the whole answer — with the honest caveat that it was the plugin's own
+ * budget rather than the provider's, which the plugin could not see. For an
+ * engine that DOES report its own remaining count (see `providerRemainingFor`)
+ * both limits are real and a request has to clear both, so the number that
+ * answers the question asked is `min` of the two. That is what fixes the
+ * defect: at gate 3, provider 0, this now says 0 — the truth — instead of 3.
+ * When no provider figure is known, `min` of one number is that number, and
+ * the previous behaviour is untouched by construction.
+ *
+ * `source` says which limit is binding, purely so the tooltip can explain a
+ * number that would otherwise look wrong ("the gate has 3, why does it say
+ * 0?"). Ties go to `provider` only when the provider figure is the smaller or
+ * equal one, because that is when it is the number actually doing the work.
  */
 function describeQuotaState(
     engine: LlmEngineId
-): { cooling: true; remainingMs: number } | { cooling: false; available: number } {
+): { cooling: true; remainingMs: number }
+    | { cooling: false; available: number; source: "gate" | "provider" } {
     const remainingMs = cooldownUntil(engine) - Date.now();
     if (remainingMs > 0) return { cooling: true, remainingMs };
-    return { cooling: false, available: rateGateAvailable() };
+
+    const gate = rateGateAvailable();
+    const provider = providerRemainingFor(engine);
+    if (provider === undefined) return { cooling: false, available: gate, source: "gate" };
+    return {
+        cooling: false,
+        available: Math.min(gate, provider),
+        source: provider <= gate ? "provider" : "gate"
+    };
 }
 
 /**
@@ -847,6 +973,39 @@ async function runTier(
                 }
             }
             return;
+        }
+
+        // What the provider itself said is left, when the provider says
+        // anything (OpenAI-compatible engines only — see native.ts's
+        // `providerRateLimit`). Two consumers, and they want different things
+        // from the same number:
+        //
+        //  - the quota indicator, which can now show the provider's truth
+        //    instead of our guess (see describeQuotaState). This is the fix
+        //    for `✦ 3` sitting next to an instant 429.
+        //  - the rate gate, which retunes from it exactly as it already does
+        //    from a 429's stated quota — but only ever downwards, and without
+        //    persisting it (see tuneRateGateToProviderBudget for why both).
+        //
+        // Recorded BEFORE the results are written, so a reading is not lost to
+        // an exception in the write loop, and only for the quality tier: the
+        // fast tier is Google, which is not gated, not keyed and reports none
+        // of this.
+        if (isQuality && isLlmEngine(engine)) {
+            const reported = res.providerRateLimit;
+            recordProviderQuota(engine, reported);
+            if (reported !== undefined && typeof reported.remainingRequests === "number") {
+                const retuned = tuneRateGateToProviderBudget(
+                    reported.remainingRequests, reported.resetRequestsMs
+                );
+                if (debug && retuned) {
+                    logger.debug(
+                        `[flush] ${engine}: rate gate retuned from the provider's own remaining `
+                        + `count (${reported.remainingRequests} left) — now one request every `
+                        + `${rateGateSettings().refillMs}ms`
+                    );
+                }
+            }
         }
 
         for (const r of res.results) {
@@ -1509,7 +1668,8 @@ const ENGINE_PROVENANCE: Record<EngineId, { glyph: string; label: string; }> = {
     google: { glyph: "≈", label: "Google Translate" },
     // ✦ — context-aware: batched, with a rolling window of recent messages.
     claude: { glyph: "✦", label: "Claude" },
-    gemini: { glyph: "✦", label: "Gemini" }
+    gemini: { glyph: "✦", label: "Gemini" },
+    groq: { glyph: "✦", label: "Groq" }
 };
 
 function TranslationAccessory({ message }: { message: Message; }) {
@@ -1758,10 +1918,16 @@ function forceQualityPopoverRender(message: Message) {
  *
  * WHY THIS EXISTS: the ⚡ action above spends a scarce, per-minute request
  * with no visible cost anywhere else in the UI — a user deciding whether to
- * click it was previously blank on how much was left. This answers that,
- * with the same number `runTier` will actually enforce, not an estimate of
- * the provider's own remaining allowance (which this plugin cannot see and
- * would be dishonest to guess at).
+ * click it was previously blank on how much was left. This answers that, with
+ * a number `runTier` will actually enforce rather than a guess.
+ *
+ * WHICH LIMIT THE NUMBER DESCRIBES depends on the engine, and the tooltip says
+ * which. For Claude and Gemini it is this plugin's own token bucket, because
+ * those providers report nothing about their side and inventing a figure would
+ * be dishonest. For an engine that DOES report its remaining quota on every
+ * response (Groq — see `providerRemainingFor`), the smaller of the two real
+ * limits is shown, so the indicator can no longer say `✦ 3` while the provider
+ * is refusing instantly.
  *
  * PRIORITY ORDER, exactly `describeQuotaState()`'s: cooling down (⚡ will not
  * work at all right now, however many tokens the gate happens to be holding)
@@ -1815,14 +1981,26 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
         );
     }
 
+    // TWO SENTENCES, because the number can now mean two different things and
+    // the difference is exactly what the user needs to know. When the binding
+    // limit is the plugin's own gate the wording is unchanged and still says
+    // plainly that this is NOT the provider's remaining quota. When the
+    // provider itself reported the smaller number, that caveat would be a lie:
+    // the figure IS the provider's, which is the whole point of showing it —
+    // an indicator reading `✦ 3` while the provider refuses instantly is the
+    // defect this replaces.
+    const explanation = quota.source === "provider"
+        ? `This is ${label}'s OWN reported remaining quota, which is lower right now than this `
+          + "plugin's internal budget — so it is what will actually stop a request."
+        : `This is the plugin's own budget for ${label} — deliberately kept under its free-tier `
+          + `limit — not an estimate of ${label}'s own remaining quota.`;
+
     return (
         <div
             style={indicatorStyle}
             title={
                 `VcTranslate: ${quota.available} request${quota.available === 1 ? "" : "s"} available `
-                + `for the ⚡ force-translate action right now. This is the plugin's own budget for `
-                + `${label} — deliberately kept under its free-tier limit — not an estimate of `
-                + `${label}'s own remaining quota.`
+                + `for the ⚡ force-translate action right now. ${explanation}`
             }
         >
             ✦ {quota.available}
@@ -2027,6 +2205,12 @@ export default definePlugin({
         // is persisted and start() reads it back, so the next session does not
         // reopen the gate at the untaught defaults and buy a fresh 429.
         resetRateGate();
+        // The provider's last reported remaining count. Dropped with the rest
+        // of the in-memory session state and deliberately NOT persisted: it
+        // describes a rate-limit window that has almost certainly rolled over
+        // by the time anything reads it again, and a stale count shown as if
+        // it were current is worse than showing the gate's own number.
+        providerQuota = null;
         // Drops the session AND any armed coalescing timer, so a stopped plugin
         // cannot write a beacon afterwards. That matters for more than
         // tidiness: the beacon's `loadedAt` is what the installer compares

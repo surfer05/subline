@@ -277,6 +277,62 @@ export function tuneRateGateToObservedLimit(limitPerMinute: number): boolean {
 }
 
 /**
+ * Retune from what the PROVIDER says is left right now — the
+ * `x-ratelimit-remaining-requests` / `x-ratelimit-reset-requests` pair an
+ * OpenAI-compatible service sends on every response (see rateHint.ts).
+ *
+ * A REAL NUMBER BEATS AN INFERRED ONE, which is the same argument
+ * tuneRateGateToObservedLimit() makes — but this number is a different KIND of
+ * fact, and the difference dictates two rules that function does not have:
+ *
+ *  1. IT ONLY EVER TIGHTENS. A remaining count is not a ceiling; it is what is
+ *     left of one. Groq's `x-ratelimit-limit-requests` is a per-DAY figure, so
+ *     "14,370 remaining, resets in 3 minutes" divides out to thousands per
+ *     minute — a number that says nothing whatsoever about the per-minute
+ *     ceiling this gate exists to respect, and that would disable the gate
+ *     outright if it were allowed to loosen it. So a derived rate is applied
+ *     only when it is SLOWER than the rate already in force. What that leaves
+ *     is exactly the case worth acting on: the provider telling us we are
+ *     nearly out.
+ *  2. IT IS NOT PERSISTED. tuneRateGateToObservedLimit() persists because a
+ *     quota is a fact about the API key that outlives the session. How many
+ *     requests happen to be left in this minute is a fact about this minute,
+ *     and writing it to disk would start the next session throttled by a
+ *     window that closed hours ago.
+ *
+ * `resetMs` is the window the count applies to; a missing or unusable one is
+ * treated as a minute, which is the shortest window worth planning around and
+ * the one that yields the most conservative rate for a given count.
+ *
+ * A remaining count of ZERO returns false and changes nothing. It is not
+ * ignored — it is handled where a zero can actually be represented: the
+ * cooldown parks the engine, and the quota indicator shows the 0 (see
+ * describeQuotaState in index.tsx). A token bucket cannot express "no requests
+ * at all" without becoming a deadlock, so it must not try.
+ */
+export function tuneRateGateToProviderBudget(
+    remainingRequests: number,
+    resetMs?: number
+): boolean {
+    if (!Number.isFinite(remainingRequests) || remainingRequests <= 0) return false;
+
+    const windowMs = typeof resetMs === "number" && Number.isFinite(resetMs) && resetMs > 0
+        ? resetMs
+        : 60_000;
+    const perMinute = (remainingRequests * 60_000) / windowMs;
+
+    // The rate applyObservedLimit() would derive, computed here only to decide
+    // whether it is a tightening. Kept as the same arithmetic rather than a
+    // second rule, so the two can never disagree about what a given number
+    // means.
+    const targetPerMinute = Math.max(1, Math.floor(perMinute * SAFETY_FACTOR));
+    const nextRefillMs = Math.round(60_000 / targetPerMinute);
+    if (nextRefillMs <= refillMs) return false;
+
+    return applyObservedLimit(perMinute);
+}
+
+/**
  * Apply the persisted quota, if there is one. Called (and awaited) from the
  * plugin's `start()` BEFORE any batcher exists, so the first quality batch of
  * the session already goes out under the learned rate rather than under the

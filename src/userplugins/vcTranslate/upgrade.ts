@@ -9,14 +9,17 @@ import type { EngineId } from "./types";
  * either direction. A rank makes the outcome depend on WHICH engine produced
  * a line rather than on which reply happened to arrive last.
  *
- * Claude and Gemini share a rank: both see the conversation, neither is
- * meaningfully more authoritative than the other, and only one is ever
- * configured at a time.
+ * Claude, Gemini and Groq share a rank: all three see the conversation,
+ * none is meaningfully more authoritative than the others, and only one is
+ * ever configured at a time. The rank is about WHAT KIND of answer an engine
+ * produces (context-aware vs per-message), not about which vendor is better —
+ * so a fourth context-aware engine is another 1, not a new tier.
  */
 export const ENGINE_RANK: Record<EngineId, number> = {
     google: 0,
     claude: 1,
-    gemini: 1
+    gemini: 1,
+    groq: 1
 };
 
 /** A stored entry that actually carries text to show, as opposed to a marker. */

@@ -94,7 +94,8 @@ export type BeaconTier = "approx" | "upgraded";
 const TIER_BY_ENGINE: Record<EngineId, BeaconTier> = {
     google: "approx",
     claude: "upgraded",
-    gemini: "upgraded"
+    gemini: "upgraded",
+    groq: "upgraded"
 };
 
 export function tierForEngine(engine: EngineId): BeaconTier {

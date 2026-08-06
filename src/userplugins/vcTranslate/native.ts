@@ -3,12 +3,32 @@ import type { IpcMainInvokeEvent } from "electron";
 import { translateWithClaude, TRUNCATED_ERROR } from "./engines/claude";
 import { translateWithGemini } from "./engines/gemini";
 import { translateWithGoogle } from "./engines/google";
+import { translateWithGroq } from "./engines/groq";
+import type { ProviderRateLimit } from "./rateHint";
 import { withRetry } from "./retry";
 import { writeStatusBeacon } from "./statusFile";
 import type { BatchRequest, EngineId, Result } from "./types";
 
 export type NativeResponse =
-    | { ok: true; results: Result[] }
+    | {
+        ok: true;
+        results: Result[];
+        /**
+         * What the PROVIDER said about our remaining allowance, when the
+         * provider says anything at all (see rateHint.ts's
+         * rateLimitFromHeaders — today that is Groq alone; Gemini and Claude
+         * report nothing and leave this undefined).
+         *
+         * Takes the same route as `retryAfterMs` and `quotaLimitPerMinute`
+         * below, and exists for the same reason: the engine is the only code
+         * that ever sees a Response, so a number not carried here is a number
+         * parsed and discarded. What is new is WHEN it arrives — those two are
+         * salvage from a rejection, this rides on a SUCCESS, which is what
+         * lets the renderer's quota indicator report the provider's own
+         * remaining count instead of only ever the plugin's internal guess.
+         */
+        providerRateLimit?: ProviderRateLimit;
+    }
     | {
         ok: false;
         error: string;
@@ -22,6 +42,20 @@ export type NativeResponse =
          */
         quotaModel?: string;
     };
+
+/**
+ * What one engine call produced: the translations, plus anything the provider
+ * volunteered about our remaining allowance.
+ *
+ * A UNIFORM shape for all four engines, even though only Groq ever fills the
+ * second field. The alternative — dispatching to functions with two different
+ * return types — would put a `typeof`/shape test in the retry path, which is
+ * precisely where a mistake becomes "the batch silently returned nothing".
+ */
+interface EngineOutcome {
+    results: Result[];
+    rateLimit?: ProviderRateLimit;
+}
 
 /**
  * Both engines report transport failures as `<engine>: HTTP <status>`.
@@ -81,7 +115,32 @@ function isRetryable(err: unknown): boolean {
 }
 
 /**
- * `model` is only meaningful for Gemini today. It crosses IPC as an argument
+ * The single dispatch point: engine id → engine call.
+ *
+ * Extracted from `translateBatch`'s retry closure so the per-engine argument
+ * lists (which differ — Google takes no key, Claude takes no model) live in
+ * one readable place, and so adding an engine is one branch here rather than a
+ * longer expression inside a callback.
+ */
+async function runEngine(
+    engine: EngineId,
+    req: BatchRequest,
+    apiKey: string,
+    model: string | undefined,
+    debug: boolean
+): Promise<EngineOutcome> {
+    // The only engine that reports a rate limit of its own, so the only one
+    // whose outcome is used as-is rather than wrapped.
+    if (engine === "groq") return translateWithGroq(req, apiKey, fetch, model, debug);
+    if (engine === "claude") return { results: await translateWithClaude(req, apiKey, fetch, debug) };
+    if (engine === "gemini") {
+        return { results: await translateWithGemini(req, apiKey, fetch, model, debug) };
+    }
+    return { results: await translateWithGoogle(req) };
+}
+
+/**
+ * `model` is meaningful for Gemini and Groq today. It crosses IPC as an argument
  * rather than being read here because settings live in the RENDERER — the main
  * process has no access to the plugin's settings store — so this is the same
  * route `apiKey` already takes. An empty/absent value means "whatever the
@@ -110,15 +169,14 @@ export async function translateBatch(
     }
 
     try {
-        const results = await withRetry(
-            () => {
-                if (engine === "claude") return translateWithClaude(req, apiKey, fetch, debug);
-                if (engine === "gemini") return translateWithGemini(req, apiKey, fetch, model, debug);
-                return translateWithGoogle(req);
-            },
+        const outcome = await withRetry(
+            () => runEngine(engine, req, apiKey, model, debug),
             { retries: 1, delayMs: 1000, shouldRetry: isRetryable }
         );
-        return { ok: true, results };
+        // `providerRateLimit` is undefined for every engine that reports
+        // nothing, which is what keeps this response byte-identical to the one
+        // Gemini/Claude/Google produced before this field existed.
+        return { ok: true, results: outcome.results, providerRateLimit: outcome.rateLimit };
     } catch (err) {
         const raw = err instanceof Error ? err.message : "unknown error";
         // Surface rate limiting so the renderer can pause the queue. Extracted

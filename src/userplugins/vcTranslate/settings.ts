@@ -3,7 +3,7 @@ import { OptionType } from "@utils/types";
 import { LocaleStore } from "@webpack/common";
 
 import { notifySettingsChanged } from "./settingsBridge";
-import { DEFAULT_GEMINI_MODEL } from "./types";
+import { DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_MODEL } from "./types";
 
 /**
  * Default target language, taken from Discord's own locale rather than a
@@ -36,7 +36,8 @@ export const settings = definePluginSettings({
         options: [
             { label: "Google only (free, no key — no ✦ upgrade)", value: "google", default: true },
             { label: "Claude Haiku (needs API key, best quality)", value: "claude" },
-            { label: "Gemini Flash (needs free API key, context-aware)", value: "gemini" }
+            { label: "Gemini Flash (needs free API key, context-aware)", value: "gemini" },
+            { label: "Groq (needs free API key, 30 requests/min — most headroom)", value: "groq" }
         ],
         // engine is captured by value when the batcher is built, so a change
         // here must rebuild it (see settingsBridge.ts / index.tsx).
@@ -77,6 +78,30 @@ export const settings = definePluginSettings({
         // Same immediacy requirement as the keys above: switching model to
         // escape a dead one must take effect on the next batch, not on next
         // reload — a user doing this is already stuck.
+        onChange: notifySettingsChanged
+    },
+    groqApiKey: {
+        type: OptionType.STRING,
+        description: "Groq API key (only used when the Groq engine is selected)",
+        default: "",
+        placeholder: "gsk_...",
+        // Same immediacy requirement as the two keys above.
+        onChange: notifySettingsChanged
+    },
+    groqModel: {
+        type: OptionType.STRING,
+        // Written BEFORE this engine's first ever request, not after a week of
+        // misdiagnosis — which is the only difference between this field and
+        // geminiModel above. A model with no free-tier availability returns 429
+        // to every request forever, which is the same status code as ordinary
+        // throttling, and without a settings field the only cure is a rebuild.
+        description:
+            `Groq model (default ${DEFAULT_GROQ_MODEL}). If ✦ upgrades stop appearing — especially `
+            + "if they never appear at all — this model may no longer be available on your key's "
+            + "free tier. Try another from console.groq.com's model list; the change applies to "
+            + "the next batch, with no restart. Blank uses the default.",
+        default: DEFAULT_GROQ_MODEL,
+        placeholder: DEFAULT_GROQ_MODEL,
         onChange: notifySettingsChanged
     },
     targetLang: {
@@ -145,6 +170,13 @@ export const settings = definePluginSettings({
     geminiModel: {
         // Ditto: a model name is meaningless unless Gemini is what runs.
         hidden() { return this.store.engine !== "gemini"; }
+    },
+    groqApiKey: {
+        // Same mechanism again, gated on the Groq engine.
+        hidden() { return this.store.engine !== "groq"; }
+    },
+    groqModel: {
+        hidden() { return this.store.engine !== "groq"; }
     }
 });
 

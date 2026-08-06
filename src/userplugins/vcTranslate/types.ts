@@ -1,4 +1,4 @@
-export type EngineId = "google" | "claude" | "gemini";
+export type EngineId = "google" | "claude" | "gemini" | "groq";
 
 /**
  * The Gemini model the quality tier asks for unless the user overrides it in
@@ -29,6 +29,30 @@ export type EngineId = "google" | "claude" | "gemini";
  * upgrades stop can change it without waiting for a rebuild.
  */
 export const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+
+/**
+ * The Groq model the quality tier asks for unless the user overrides it in
+ * settings (see `groqModel` in settings.ts).
+ *
+ * A SETTING FROM DAY ONE, and the reason is the paragraph above this one. The
+ * plugin shipped for a week pinned to a Gemini model the key had zero quota
+ * for; the symptom was a 429 on every request, which reads as throttling, and
+ * the only cure was a rebuild. That is not a mistake worth making twice on a
+ * new provider, so Groq's model is user-changeable before its first request
+ * has ever been sent.
+ *
+ * `llama-3.3-70b-versatile` is Groq's general-purpose free-tier chat model at
+ * the time of writing. NOT MEASURED against a live key — there is no Groq key
+ * on this machine yet — which is precisely why this is a default rather than a
+ * constant: WHICH MODEL IS FREE MOVES UNDER US, on this provider exactly as it
+ * did on the last one, and the user must be able to move with it from the
+ * settings page.
+ *
+ * Lives here, in the module both the renderer (settings.ts) and the native
+ * side (engines/groq.ts) already import, so the setting's default and the
+ * request's fallback are the same string by construction.
+ */
+export const DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile";
 
 export interface PendingMessage {
     id: string;
@@ -117,7 +141,8 @@ export type Result =
 export const ENGINE_CAPS: Record<EngineId, { supportsContext: boolean }> = {
     google: { supportsContext: false },
     claude: { supportsContext: true },
-    gemini: { supportsContext: true }
+    gemini: { supportsContext: true },
+    groq: { supportsContext: true }
 };
 
 /**
