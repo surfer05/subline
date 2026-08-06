@@ -97,6 +97,77 @@ function isForcedInFlight(messageId: string): boolean {
 }
 
 /**
+ * Why the manual ⚡ click gets a self-reported failure hint and the batched
+ * pipeline never does — see runTier's own comment for the reasoning ("a
+ * quality failure is invisible by design"). That silence is correct for an
+ * AUTOMATIC batch: nothing the reader did caused it, and an error marker
+ * would take away a readable Google line for information they cannot act on.
+ * A manual click is different — the user spent a scarce request on purpose,
+ * and "translating…" flashing then vanishing into silence reads as a bug,
+ * not as nothing having happened.
+ *
+ * Three kinds because the remedy differs: `cooldown` and `gate` both mean
+ * the request never left the client at all (wait a moment and try again);
+ * `failed` means it went out and the engine itself rejected or failed it
+ * (something is actually wrong). `code` is only ever a `BeaconErrorCode` — a
+ * closed set of categories, the same ones the beacon already uses — never
+ * the engine's own error text, which can echo back translated message
+ * content and must never reach the DOM.
+ */
+type ForcedHint =
+    | { kind: "cooldown" }
+    | { kind: "gate" }
+    | { kind: "failed"; code: BeaconErrorCode };
+
+// How long a failure hint stays on screen before it clears itself. Long
+// enough to read, short enough that it cannot be mistaken for a permanent
+// marker — and it never becomes one: nothing here is ever written through
+// setTranslation/writeResult, so it cannot outlive this module's memory.
+// Exported so tests can advance exactly this long rather than hardcoding a
+// duplicate of the constant.
+export const FORCED_HINT_TTL_MS = 5_000;
+
+const forcedHints = new Map<string, ForcedHint>();
+const forcedHintTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * Records (and self-expires) the hint for one message's most recent manual
+ * click. Replaces rather than stacks: a second click's outcome always wins
+ * over whatever the first left behind. Notifies over the SAME channel
+ * `forcedInFlight` uses (see its own doc for why this reuses rather than
+ * duplicates that pub/sub) — one subscription in TranslationAccessory
+ * already covers both.
+ */
+function setForcedHint(messageId: string, hint: ForcedHint): void {
+    const existingTimer = forcedHintTimers.get(messageId);
+    if (existingTimer !== undefined) clearTimeout(existingTimer);
+    forcedHints.set(messageId, hint);
+    forcedHintTimers.set(messageId, setTimeout(() => {
+        forcedHintTimers.delete(messageId);
+        forcedHints.delete(messageId);
+        notifyForcedInFlight();
+    }, FORCED_HINT_TTL_MS));
+    notifyForcedInFlight();
+}
+
+/**
+ * Called at the START of every fresh manual click, so a hint left over from
+ * an EARLIER click on this same message cannot linger alongside — or
+ * outlive — this one.
+ */
+function clearForcedHint(messageId: string): void {
+    const existingTimer = forcedHintTimers.get(messageId);
+    if (existingTimer !== undefined) clearTimeout(existingTimer);
+    forcedHintTimers.delete(messageId);
+    forcedHints.delete(messageId);
+}
+
+/** What TranslationAccessory shows for THIS message's manual ⚡ hint, if anything. */
+function forcedHintFor(messageId: string): ForcedHint | undefined {
+    return forcedHints.get(messageId);
+}
+
+/**
  * Store keys the quality tier has already SPENT A REQUEST on this session.
  *
  * THE BUG THIS EXISTS FOR: a quality-tier failure deliberately writes nothing
@@ -803,7 +874,13 @@ function beaconErrorCode(res: { error: string } | null): BeaconErrorCode {
  * `finally` still releases this tier's in-flight ids however the flush ended.
  */
 async function runTier(
-    engine: EngineId, req: BatchRequest, myGeneration: number
+    engine: EngineId, req: BatchRequest, myGeneration: number,
+    // Manual-⚡-only: set by forceQualityTranslate so it can learn WHY this
+    // flush produced nothing, in terms the reader can act on (see
+    // ForcedHint's own doc). Both onFlush closures in rebuildBatcher leave
+    // this undefined, so every `report?.(...)` below is a no-op for the
+    // automatic pipeline — its invisible-failure behaviour is unchanged.
+    report?: (outcome: ForcedHint) => void
 ): Promise<void> {
     const isQuality = engine !== "google";
     // The in-flight set belonging to THIS tier. The other tier's request for
@@ -846,6 +923,7 @@ async function runTier(
         // pinned instead, by "leaves no stale timer behind" in index.test.ts.
         if (myGeneration !== batcherGeneration) {
             if (debug) logger.debug(`[flush] ${engine}: blocked — stale generation (pre-gate)`);
+            report?.({ kind: "gate" });
             return;
         }
 
@@ -859,6 +937,7 @@ async function runTier(
                     + `${formatCountdown(cooldownUntil(engine) - Date.now())}`
                 );
             }
+            report?.({ kind: "cooldown" });
             return;
         }
 
@@ -883,6 +962,7 @@ async function runTier(
             // batch nothing will ever read the result of.
             if (myGeneration !== batcherGeneration) {
                 if (debug) logger.debug(`[flush] ${engine}: blocked — stale generation (post-gate)`);
+                report?.({ kind: "gate" });
                 return;
             }
         }
@@ -941,7 +1021,13 @@ async function runTier(
             // (see BEACON_ERROR_CODES). This is what lets the installer report
             // "loaded, but erroring" instead of the indistinguishable "loaded,
             // nothing to translate yet".
-            recordError(beaconErrorCode(res));
+            const errorCode = beaconErrorCode(res);
+            recordError(errorCode);
+            // Manual-⚡-only — see ForcedHint's own doc. Reuses the same
+            // closed set of categories the beacon just recorded, so this can
+            // never leak the engine's own (potentially remote-text-bearing)
+            // error string into the DOM.
+            report?.({ kind: "failed", code: errorCode });
 
             if (res !== null) {
                 // Park the engine for as long as the API asked for. Still the
@@ -1092,6 +1178,9 @@ async function forceQualityTranslate(message: Message): Promise<void> {
     }
     if (debug) logger.debug(`[force-quality] ${message.id}: passed guards, spending a ${engine} request`);
     inFlightQuality.add(message.id);
+    // A hint left over from an EARLIER click on this same message must not
+    // survive into this one — see clearForcedHint's own doc.
+    clearForcedHint(message.id);
     // Manual-path-only indicator for TranslationAccessory — see the comment
     // on `forcedInFlight` above for why this is a second set rather than a
     // second use of inFlightQuality.
@@ -1118,8 +1207,14 @@ async function forceQualityTranslate(message: Message): Promise<void> {
     // on every one of those paths (see runTier), so piggy-backing on the same
     // await here releases forcedInFlight at exactly the same point, never
     // stuck on a path runTier itself handles.
+    //
+    // `report` is how runTier tells THIS caller — and only this caller, see
+    // ForcedHint's own doc — why nothing landed, so TranslationAccessory can
+    // show a brief, self-clearing hint instead of the silence an automatic
+    // failure gets. Success needs no report of its own: the store write is
+    // what the accessory's ✦/≈ line already reacts to.
     try {
-        await runTier(engine, req, batcherGeneration);
+        await runTier(engine, req, batcherGeneration, outcome => setForcedHint(message.id, outcome));
     } finally {
         forcedInFlight.delete(message.id);
         notifyForcedInFlight();
@@ -1672,6 +1767,53 @@ const ENGINE_PROVENANCE: Record<EngineId, { glyph: string; label: string; }> = {
     groq: { glyph: "✦", label: "Groq" }
 };
 
+/**
+ * The short, human phrase for a `failed` hint's tooltip — "if it is cheap,
+ * include a short human phrase... so the user can tell 'wait a minute' from
+ * 'something is broken' without turning on debug logging." Reuses
+ * `BeaconErrorCode` rather than inventing a second vocabulary, so this can
+ * never drift from what the beacon itself already records — and, same as
+ * that code, is never the engine's own (potentially remote-text-bearing)
+ * error string.
+ */
+function describeFailureReason(code: BeaconErrorCode): string {
+    switch (code) {
+        case "rate-limited": return "rate limited";
+        case "auth-rejected": return "rejected key";
+        case "ipc-failed":
+        case "engine-error":
+        default: return "engine error";
+    }
+}
+
+/**
+ * What a `ForcedHint` renders as — glyph text plus a longer tooltip. Text
+ * differs across all three kinds (not just the tooltip) so "wait a minute"
+ * reads as visibly different from "something is wrong" even for a reader who
+ * never hovers.
+ */
+function forcedHintDisplay(hint: ForcedHint): { text: string; title: string } {
+    switch (hint.kind) {
+        case "cooldown":
+            return {
+                text: "⚡ cooling down",
+                title: "VcTranslate: this engine is cooling down after a rate limit — "
+                    + "the request was never sent. Try ⚡ again in a moment."
+            };
+        case "gate":
+            return {
+                text: "⚡ rate limited",
+                title: "VcTranslate: the request was still waiting for a rate-limit slot "
+                    + "when it was superseded, so nothing was sent. Try ⚡ again."
+            };
+        case "failed":
+            return {
+                text: "⚡ translation failed",
+                title: `VcTranslate: the request went out and failed (${describeFailureReason(hint.code)}).`
+            };
+    }
+}
+
 function TranslationAccessory({ message }: { message: Message; }) {
     const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
 
@@ -1702,18 +1844,40 @@ function TranslationAccessory({ message }: { message: Message; }) {
     // component that is not itself a StoredTranslation, so it is threaded
     // through every branch rather than folded into `entry`.
     const forcing = isForcedInFlight(message.id);
+    // The transient, self-clearing outcome of the MOST RECENT manual click —
+    // present only once `forcing` has already come back down (see
+    // forceQualityTranslate/setForcedHint), so a stale hint from an earlier
+    // click can never render alongside a fresh "⚡ translating…". Never read
+    // when `forcing` is true, for exactly that reason.
+    const hint = forcing ? undefined : forcedHintFor(message.id);
 
     if (!entry) {
         // Nothing to show yet — UNLESS a forced request is why: the reader
         // clicked ⚡ on a message that had never been translated at all (no
         // existing Google line to keep), and would otherwise see nothing
         // happen until the response lands, possibly several seconds away.
-        if (!forcing) return null;
-        return (
-            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-                ⚡ translating…
-            </div>
-        );
+        if (forcing) {
+            return (
+                <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
+                    ⚡ translating…
+                </div>
+            );
+        }
+        // Same reasoning, once the click has SETTLED without a store write —
+        // exactly the case a quality failure always produces (see runTier).
+        // Automatic failures leave this branch returning null, unchanged.
+        if (hint) {
+            const { text, title } = forcedHintDisplay(hint);
+            return (
+                <div
+                    style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}
+                    title={title}
+                >
+                    {text}
+                </div>
+            );
+        }
+        return null;
     }
 
     // A skipped message is already in the target language: there is nothing to
@@ -1725,12 +1889,25 @@ function TranslationAccessory({ message }: { message: Message; }) {
     // offers ⚡ on a Google-only skip (see forceQualityPopoverRender), so this
     // is a real, reachable state, not a dead one.
     if ("skipped" in entry) {
-        if (!forcing) return null;
-        return (
-            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-                ⚡ translating…
-            </div>
-        );
+        if (forcing) {
+            return (
+                <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
+                    ⚡ translating…
+                </div>
+            );
+        }
+        if (hint) {
+            const { text, title } = forcedHintDisplay(hint);
+            return (
+                <div
+                    style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}
+                    title={title}
+                >
+                    {text}
+                </div>
+            );
+        }
+        return null;
     }
 
     // Colours come from Discord's own theme tokens rather than a bare opacity:
@@ -1746,7 +1923,11 @@ function TranslationAccessory({ message }: { message: Message; }) {
     if ("failed" in entry) {
         return (
             <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-                ⚠ translation failed{forcing ? " · ⚡ translating…" : ""}
+                ⚠ translation failed
+                {forcing && " · ⚡ translating…"}
+                {!forcing && hint && (
+                    <span title={forcedHintDisplay(hint).title}> · {forcedHintDisplay(hint).text}</span>
+                )}
             </div>
         );
     }
@@ -1763,7 +1944,11 @@ function TranslationAccessory({ message }: { message: Message; }) {
     if ("deferred" in entry) {
         return (
             <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-                ⏳ translation delayed — retrying{forcing ? " · ⚡ translating…" : ""}
+                ⏳ translation delayed — retrying
+                {forcing && " · ⚡ translating…"}
+                {!forcing && hint && (
+                    <span title={forcedHintDisplay(hint).title}> · {forcedHintDisplay(hint).text}</span>
+                )}
             </div>
         );
     }
@@ -1825,10 +2010,18 @@ function TranslationAccessory({ message }: { message: Message; }) {
               * case: ⚡ exists specifically to upgrade one) must not take that
               * readable line away while the request is out. Same muted token
               * as the provenance prefix, so this reads as a continuation of
-              * it rather than a second, competing style.
+              * it rather than a second, competing style. The settled-failure
+              * hint gets the identical treatment once the click comes back
+              * down — the ≈ line above is exactly what must never be taken
+              * away in exchange for a failure the reader cannot act on.
               */}
             {forcing && (
                 <span style={{ color: "var(--text-muted)" }}> · ⚡ translating…</span>
+            )}
+            {!forcing && hint && (
+                <span style={{ color: "var(--text-muted)" }} title={forcedHintDisplay(hint).title}>
+                    {" "}· {forcedHintDisplay(hint).text}
+                </span>
             )}
         </div>
     );
@@ -2170,6 +2363,16 @@ export default definePlugin({
         // stuck showing "⚡ translating…" forever across a stop/start cycle.
         if (forcedInFlight.size > 0) {
             forcedInFlight.clear();
+            notifyForcedInFlight();
+        }
+        // Same reasoning, for the failure hint: a stopped plugin must not
+        // leave a timer armed (it would fire into a torn-down module on the
+        // next start()) or a hint that resurrects for a click that belonged
+        // to a session already gone.
+        if (forcedHints.size > 0 || forcedHintTimers.size > 0) {
+            for (const timer of forcedHintTimers.values()) clearTimeout(timer);
+            forcedHintTimers.clear();
+            forcedHints.clear();
             notifyForcedInFlight();
         }
         // Toggling the plugin off and on is an explicit user action and a

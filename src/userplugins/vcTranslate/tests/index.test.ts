@@ -11,7 +11,7 @@ const native = vi.hoisted(() => {
     return { translateBatch };
 });
 
-import plugin, { FORCE_QUALITY_POPOVER_ID } from "../index";
+import plugin, { FORCE_QUALITY_POPOVER_ID, FORCED_HINT_TTL_MS } from "../index";
 import { acquireSlot, BURST_CAPACITY, LEARNED_QUOTA_KEY, rateGateAvailable, rateGateSettings, REFILL_MS } from "../rateGate";
 import { toggleChannel } from "../channels";
 import { cooldownUntil, setCooldown } from "../cooldownStore";
@@ -3009,6 +3009,26 @@ describe("the manual ⚡ in-flight indicator on the subtitle accessory", () => {
         return text(node.children);
     };
 
+    /**
+     * Every `title` attribute anywhere in the rendered tree — there can be
+     * more than one (the provenance prefix carries its own alongside the
+     * hint's), so callers check with `.some()`/`.toContain()` on the array
+     * rather than assuming there is exactly one.
+     */
+    function titlesOf(node: any): string[] {
+        if (node === null || node === undefined || node === false) return [];
+        if (typeof node === "string" || typeof node === "number") return [];
+        if (Array.isArray(node)) return node.flatMap(titlesOf);
+        const own = node?.props?.title !== undefined ? [node.props.title] : [];
+        return [...own, ...titlesOf(node.children)];
+    }
+
+    /** The single `title` a caller expects — asserts there is exactly one. */
+    function titleOf(node: any): string | undefined {
+        const titles = titlesOf(node);
+        return titles.length === 1 ? titles[0] : titles.join(" | ");
+    }
+
     it("shows a ⚡ translating… hint the instant the button is clicked, before any response has arrived", async () => {
         useGemini();
         // Never resolves within this test: the point is what the accessory
@@ -3049,7 +3069,11 @@ describe("the manual ⚡ in-flight indicator on the subtitle accessory", () => {
         expect(text(rendered)).not.toContain("translating");
     });
 
-    it("clears the indicator when the request fails, leaving nothing behind (a quality failure writes no marker)", async () => {
+    it("shows a self-clearing failure hint when a forced request fails, and writes nothing to the store", async () => {
+        // A MANUAL click reporting its own outcome — the fix for the bug this
+        // suite is named after: the reader spent a scarce request on purpose
+        // and previously saw "⚡ translating…" flash then vanish into
+        // silence, indistinguishable from success-that-hasn't-landed-yet.
         useGemini();
         native.translateBatch.mockResolvedValue({ ok: false, error: "500 upstream error" });
         const message = discordMessage("1", "hola");
@@ -3060,13 +3084,28 @@ describe("the manual ⚡ in-flight indicator on the subtitle accessory", () => {
 
         await flush();
 
+        const rendered = render(message);
+        expect(rendered).not.toBeNull();
+        expect(text(rendered)).toContain("⚡");
+        expect(text(rendered)).toContain("translation failed");
+        // A short human phrase, not the raw "500 upstream error" — see
+        // beaconErrorCode()/describeFailureReason(): only a closed category
+        // ever reaches the DOM.
+        expect(titleOf(rendered)).toContain("engine error");
+        expect(titleOf(rendered)).not.toContain("500 upstream error");
+
         // Quality-tier failures deliberately write nothing to the store (see
-        // runTier), so with no prior entry there is nothing left to show at
-        // all once the indicator itself comes down.
+        // runTier) — a user-initiated retry hint must not become a permanent
+        // marker, or a store entry, either.
+        expect(getTranslation(key("1"))).toBeUndefined();
+
+        // Dismissible BY TIME: gone on its own once the hint's TTL elapses,
+        // with no further click and no store write ever having happened.
+        await vi.advanceTimersByTimeAsync(FORCED_HINT_TTL_MS);
         expect(render(message)).toBeNull();
     });
 
-    it("clears the indicator, and never sends a request, when the engine is cooling down", async () => {
+    it("shows a distinct, non-permanent hint — not a bare 'translating' vanish — when the engine is cooling down", async () => {
         useGemini();
         setCooldown("gemini", Date.now() + 600_000);
         native.translateBatch.mockClear();
@@ -3081,7 +3120,90 @@ describe("the manual ⚡ in-flight indicator on the subtitle accessory", () => {
         await flush();
 
         expect(native.translateBatch).not.toHaveBeenCalled();
+        const rendered = render(message);
+        expect(rendered).not.toBeNull();
+        // "wait a minute", not "something is broken" — the remedy differs
+        // from an engine error, so the wording must too.
+        expect(text(rendered)).toContain("cooling down");
+        expect(text(rendered)).not.toContain("translation failed");
+        expect(getTranslation(key("1"))).toBeUndefined();
+
+        await vi.advanceTimersByTimeAsync(FORCED_HINT_TTL_MS);
         expect(render(message)).toBeNull();
+    });
+
+    it("distinguishes a rate-gate refusal (rebuilt mid-wait) from both cooldown and an engine error", async () => {
+        // Drains the gate first, so the click below genuinely queues behind
+        // it rather than sending immediately.
+        useGemini();
+        for (let i = 0; i < BURST_CAPACITY; i++) await acquireSlot();
+        native.translateBatch.mockClear();
+        const message = discordMessage("1", "hola");
+
+        const btn = forceButton(message)!;
+        btn.onClick!(undefined as any);
+        await flush();
+        expect(native.translateBatch).not.toHaveBeenCalled();
+
+        // The batcher is rebuilt WHILE the click is still queued behind the
+        // gate — any settings change does this (see the "settings change
+        // mid-debounce" suite). By the time a token frees up, this flush's
+        // generation is stale and runTier's post-gate guard drops it without
+        // ever sending anything.
+        settings.store.targetLang = "de";
+        settings.store.targetLang = "en";
+
+        // Let the gate actually refill and resolve the queued waiter.
+        await vi.advanceTimersByTimeAsync(REFILL_MS);
+        await flush();
+
+        expect(native.translateBatch).not.toHaveBeenCalled();
+        const rendered = render(message);
+        expect(rendered).not.toBeNull();
+        expect(text(rendered)).toContain("rate limited");
+        expect(text(rendered)).not.toContain("cooling down");
+        expect(text(rendered)).not.toContain("translation failed");
+        expect(getTranslation(key("1"))).toBeUndefined();
+    });
+
+    it("keeps an existing Google ≈ line visible once a forced request has FAILED, alongside the hint", async () => {
+        useGemini();
+        setTranslation(key("1"), { lang: "es", text: "rough", via: "google" });
+        native.translateBatch.mockResolvedValue({ ok: false, error: "gemini: HTTP 401" });
+        const message = discordMessage("1", "hola");
+
+        const btn = forceButton(message)!;
+        btn.onClick!(undefined as any);
+        await flush();
+
+        const rendered = render(message);
+        // Never taken away — the entire point of ⚡: the reader still has the
+        // Google line the click was trying to upgrade.
+        expect(text(rendered)).toContain("rough");
+        expect(text(rendered)).toContain("translation failed");
+        expect(titlesOf(rendered).some(t => t.includes("rejected key"))).toBe(true);
+    });
+
+    it("still fails silently for the AUTOMATIC pipeline — no hint, no accessory change, from a live-chat quality failure", async () => {
+        // The behaviour this whole feature must NOT generalise to (see
+        // runTier's own doc). No forceQualityTranslate click happens here at
+        // all — MESSAGE_CREATE drives both tiers automatically.
+        useGemini();
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "google"
+                ? { ok: true, results: [{ id: "1", lang: "de", text: "rough", skip: false }] }
+                : { ok: false, error: "gemini: 500 upstream error" });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        const rendered = render(discordMessage("1", "hola"));
+        // The fast tier's Google line stands, with no failure hint of any
+        // kind stacked onto it — an automatic quality failure is invisible.
+        expect(text(rendered)).toContain("rough");
+        expect(text(rendered)).not.toContain("translation failed");
+        expect(text(rendered)).not.toContain("cooling down");
+        expect(text(rendered)).not.toContain("rate limited");
     });
 
     it("keeps an existing Google ≈ line visible while the indicator is showing — never replaces it", async () => {
