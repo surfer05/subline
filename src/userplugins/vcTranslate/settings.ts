@@ -104,8 +104,12 @@ export const settings = definePluginSettings({
     },
     globalAuto: {
         type: OptionType.BOOLEAN,
-        description: "Auto-translate every channel (otherwise use the per-channel globe button)",
-        default: false
+        // On by default so a fresh install works the moment it's enabled — no
+        // channel to find, no button to discover. Only ever covers channels
+        // with a guild_id; DMs and group DMs stay opt-in via the per-channel
+        // globe button regardless of this setting (see channelActive).
+        description: "Auto-translate every server channel you read. Turn off to require the per-channel globe button instead. DMs always stay opt-in, whatever this is set to.",
+        default: true
     },
     debugLogging: {
         type: OptionType.BOOLEAN,

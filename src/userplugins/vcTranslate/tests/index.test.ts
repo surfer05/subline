@@ -1619,6 +1619,44 @@ describe("globalAuto does not reach private conversations", () => {
     });
 });
 
+describe("a fresh install works without touching any setting", () => {
+    // The regression this guards: globalAuto used to default to false, so a
+    // brand-new install translated nothing until the user discovered the
+    // per-channel globe button. Every other test in this file sets
+    // globalAuto explicitly in beforeEach and so proves nothing about the
+    // default — these two restart the plugin over settings that were reset
+    // to their compiled-in defaults, touching NOTHING afterwards, to
+    // actually exercise what a fresh install gets.
+    beforeEach(async () => {
+        plugin.stop!();
+        __resetSettings();
+        await plugin.start!();
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+    });
+
+    it("translates a message in a guild channel with no settings touched", async () => {
+        respondWith({ ok: true, results: [{ id: "1", lang: "es", text: "hello", skip: false }] });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(getTranslation(key("1"))).toBeTruthy();
+    });
+
+    it("does not translate a DM with no settings touched", async () => {
+        __stubMarkAsDm("dm1");
+        __stubSetSelectedChannel("dm1");
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", {
+            message: { ...discordMessage("d1", "hola"), channel_id: "dm1" }
+        });
+        await settle();
+
+        const sent = native.translateBatch.mock.calls
+            .flatMap(c => JSON.parse(c[2] as string).messages.map((m: any) => m.id));
+        expect(sent).not.toContain("d1");
+    });
+});
+
 describe("catch-up spends its budget on requests, not on messages it will skip locally", () => {
     /** Confidently English by detectLang's rules, so it costs no request. */
     const english = (id: string) =>

@@ -67,15 +67,21 @@ Settings → Plugins.
 
 ## Use
 
-By default, no channel is translated. Hover any message in a channel → click
-the 🌐 button in the message's hover toolbar to turn on auto-translate for
-that channel. The choice persists across restarts (stored via Vencord's
-`DataStore`, keyed per channel id). Click it again (now showing 🌫) to turn a
-channel back off.
+Out of the box, no setup required: every server (guild) channel you read is
+already translated, using the free Google engine — that's the
+`globalAuto` setting, on by default. DMs and group DMs are different: they're
+never swept in by `globalAuto`, so they stay untranslated until you opt a
+specific one in. Hover any message in a channel or DM → click the 🌐 button
+in the message's hover toolbar to turn on auto-translate for that
+conversation specifically. The choice persists across restarts (stored via
+Vencord's `DataStore`, keyed per channel id). Click it again (now showing 🌫)
+to turn a channel back off.
 
-If you'd rather not manage this per channel, Settings → VcTranslate has a
-**"Auto-translate every channel"** (`globalAuto`) toggle that turns
-translation on everywhere at once, overriding the per-channel list.
+If you'd rather manage translation per channel instead of having every
+server channel translated automatically, Settings → VcTranslate has an
+**"Auto-translate every server channel you read"** (`globalAuto`) toggle —
+turn it off and use the 🌐 button to opt individual channels in, the same way
+DMs already work.
 
 **A second, per-message button — ⚡ "Translate with Gemini/Claude now" — forces
 one specific message through the quality tier.** It sits next to the 🌐
@@ -583,10 +589,12 @@ guessed 30-second pause applies only when none of the three is available.
 
 **Nothing translates at all.**
 1. Confirm the plugin is enabled: Settings → Plugins → VcTranslate.
-2. Confirm the *channel* is turned on: either the 🌐 popover button on a
-   message in that channel shows the "on" state, or "Auto-translate every
-   channel" (`globalAuto`) is checked in the plugin's own settings page. A
-   channel is off by default and stays off until one of these two is true.
+2. Confirm the *channel* is turned on. Server channels are covered by
+   default ("Auto-translate every server channel you read" / `globalAuto` is
+   checked in the plugin's own settings page out of the box); if that's been
+   turned off, or the conversation is a DM or group DM (never covered by
+   `globalAuto`), it needs the 🌐 popover button on a message in that
+   conversation to show the "on" state instead.
 3. Confirm you were *looking at* that channel when the message arrived. Live
    translation only happens for the channel on screen; anything else is
    translated when you open it. If a channel's backlog does not translate on
