@@ -10,6 +10,13 @@ import { isSameText, type BatchRequest, type Result } from "../types";
  * hitting. Keep BOTH engines routed through here.
  */
 
+/**
+ * The output contract we ASK for. Claude honours it. Gemini's `interactions`
+ * endpoint, measured against a live call with this exact schema, ignores it
+ * completely — see the note above parseJsonText. It is still sent: it costs
+ * nothing, it is what makes Claude's output well-formed, and a future Gemini
+ * endpoint honouring it would be a silent improvement rather than a change.
+ */
 export const SCHEMA = {
     type: "object",
     properties: {
@@ -83,23 +90,109 @@ export function buildPrompt(req: BatchRequest): string {
 }
 
 /**
+ * BE TOLERANT IN WHAT YOU ACCEPT, STRICT IN WHAT YOU TRUST.
+ *
+ * The three functions below were written against the contract we ASKED for —
+ * a bare `{ "translations": [ { "id": "<string>", ... } ] }` object, requested
+ * via SCHEMA above. Measured against the live Gemini `interactions` endpoint,
+ * that schema is simply IGNORED: the same prompt and the same schema came back
+ * as a ```json-fenced BARE ARRAY with NUMERIC ids. Every one of those three
+ * deviations used to be fatal — the fence alone made JSON.parse throw, which
+ * native.ts's isRetryable treats as retryable, so a whole batch was sent twice
+ * and then failed.
+ *
+ * So the SHAPE is now negotiable in all three ways. What is NOT negotiable, and
+ * is deliberately unchanged below, is what we then trust: an id the model
+ * invented is still dropped, a row missing a usable lang/text is still
+ * rejected, and every requested id still comes back with an explicit verdict.
+ * Tolerance about packaging must not become tolerance about content.
+ */
+
+/**
+ * A whole-string markdown code fence: ```` ```json ```` … ```` ``` ````.
+ *
+ * Anchored at both ends and applied to the TRIMMED text, so it only ever
+ * unwraps a response that IS a fenced block — a fence appearing inside a
+ * translation is not touched. The language tag is optional (```` ``` ````,
+ * ```` ```json ```` and ```` ```JSON ```` have all been seen from LLMs) and the
+ * closing fence's newline is optional so a single-line block still unwraps.
+ */
+const CODE_FENCE_RE = /^```[A-Za-z0-9_+-]*[ \t]*\r?\n?([\s\S]*?)\r?\n?[ \t]*```$/;
+
+/** The contents of a whole-string code fence, or the text unchanged. */
+export function stripCodeFence(text: string): string {
+    const m = CODE_FENCE_RE.exec(text.trim());
+    return m === null ? text : m[1];
+}
+
+/**
  * Parse the model's text output as JSON. `engineName` prefixes the thrown
  * message ("claude: ..." / "gemini: ...") so a failure is attributable at a
  * glance without inspecting the call stack.
+ *
+ * The raw text is tried FIRST and the fence is stripped only after that fails.
+ * A response that is already valid JSON therefore takes exactly the path it
+ * always did — the unwrapping cannot alter a well-formed payload, only rescue a
+ * malformed one.
  */
 export function parseJsonText(text: string, engineName: string): unknown {
     try {
         return JSON.parse(text);
     } catch {
-        throw new Error(`${engineName}: response was not valid JSON`);
+        // Fall through: a ```json fence is the observed reason a real response
+        // fails the parse above.
     }
+
+    const unfenced = stripCodeFence(text);
+    if (unfenced !== text) {
+        try {
+            return JSON.parse(unfenced);
+        } catch {
+            // Still not JSON — report the same error as any other garbage.
+        }
+    }
+
+    throw new Error(`${engineName}: response was not valid JSON`);
 }
 
-/** Pull the `translations` array out of the parsed JSON body. */
+/**
+ * Pull the translation rows out of the parsed JSON body.
+ *
+ * Accepts EITHER the `{ translations: [...] }` object the schema asks for
+ * (what Claude returns) OR a bare top-level array (what Gemini actually
+ * returns). Anything else is still an error rather than an empty result: a
+ * response we cannot read must not be indistinguishable from one that
+ * translated nothing.
+ */
 export function extractRows(parsed: unknown, engineName: string): unknown[] {
-    const rows = (parsed as { translations?: unknown }).translations;
-    if (!Array.isArray(rows)) throw new Error(`${engineName}: missing translations array`);
-    return rows;
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed !== null && typeof parsed === "object") {
+        const rows = (parsed as { translations?: unknown }).translations;
+        if (Array.isArray(rows)) return rows;
+    }
+    throw new Error(`${engineName}: missing translations array`);
+}
+
+/**
+ * The row's id as a string, or undefined if it is not an id at all.
+ *
+ * A NUMBER is accepted and coerced: the live Gemini response numbers its rows
+ * (`"id": 1`) even though the schema declares a string, and Discord message ids
+ * are decimal snowflakes, so the request's own ids are the exact strings
+ * `String(n)` produces for the small indices a model echoes back. Nothing else
+ * is coerced — `String(true)`/`String(null)` would invent an id out of a
+ * malformed row, and the membership check below is only a real check while the
+ * only way to pass it is to have been asked for.
+ *
+ * Non-integer and non-finite numbers are rejected rather than coerced: no
+ * requested id is ever `"1.5"` or `"NaN"`, so accepting them could only ever
+ * turn a malformed row into a miss — and doing it here keeps that reasoning in
+ * one place instead of relying on the Set lookup to clean up afterwards.
+ */
+function rowId(raw: unknown): string | undefined {
+    if (typeof raw === "string") return raw;
+    if (typeof raw === "number" && Number.isSafeInteger(raw)) return String(raw);
+    return undefined;
 }
 
 /**
@@ -115,10 +208,14 @@ export function mapRows(rows: unknown[], req: BatchRequest): Result[] {
     const results: Result[] = [];
 
     for (const row of rows) {
+        if (row === null || typeof row !== "object") continue;
         const r = row as { id?: unknown; lang?: unknown; text?: unknown; skip?: unknown };
-        if (typeof r.id !== "string" || !validIds.has(r.id)) continue;
+        // Coerced (see rowId) but never invented: an id the model made up is
+        // still dropped here, numeric or not.
+        const id = rowId(r.id);
+        if (id === undefined || !validIds.has(id)) continue;
         if (r.skip === true) {
-            results.push({ id: r.id, skip: true });
+            results.push({ id, skip: true });
             continue;
         }
         // Unusable row: a non-string lang/text, or skip:false with empty text.
@@ -129,13 +226,13 @@ export function mapRows(rows: unknown[], req: BatchRequest): Result[] {
         // A "translation" identical to its source is nothing to render.
         // Cheaper to catch here than to show the user a subtitle that
         // repeats the message verbatim.
-        const source = req.messages.find(m => m.id === r.id)?.text ?? "";
+        const source = req.messages.find(m => m.id === id)?.text ?? "";
         if (isSameText(r.text, source)) {
-            results.push({ id: r.id, skip: true });
+            results.push({ id, skip: true });
             continue;
         }
 
-        results.push({ id: r.id, lang: r.lang, text: r.text, skip: false });
+        results.push({ id, lang: r.lang, text: r.text, skip: false });
     }
 
     // Every requested id must come back with SOME verdict. An id the model

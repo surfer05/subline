@@ -177,6 +177,44 @@ describe("parseClaudeResponse", () => {
         ]);
     });
 
+    it("still parses its own already-correct { translations: [...] } shape with STRING ids", () => {
+        // Claude honours the schema. The tolerance added for Gemini (fences,
+        // bare arrays, numeric ids) lives in llmShared and is therefore on
+        // Claude's path too, so this pins that the shape Claude actually sends
+        // did not become collateral damage.
+        const body = {
+            content: [{
+                type: "text",
+                text: JSON.stringify({
+                    translations: [
+                        { id: "10", lang: "ja", text: "I'll skip today", skip: false },
+                        { id: "11", lang: "en", text: "hey there", skip: false }
+                    ]
+                })
+            }]
+        };
+        expect(parseClaudeResponse(body, req)).toEqual([
+            { id: "10", lang: "ja", text: "I'll skip today", skip: false },
+            { id: "11", lang: "en", text: "hey there", skip: false }
+        ]);
+    });
+
+    it("also tolerates a fenced response, since the hardening is shared", () => {
+        // Not observed from Claude, but the parsing is one shared function by
+        // design (see llmShared.ts): a fix that reached only one engine is the
+        // bug class that module exists to prevent.
+        const fence = "`".repeat(3);
+        const payload = JSON.stringify({
+            translations: [{ id: "10", lang: "ja", text: "ok", skip: false }]
+        });
+        const body = {
+            content: [{ type: "text", text: fence + "json\n" + payload + "\n" + fence }]
+        };
+        expect(parseClaudeResponse(body, req)).toContainEqual(
+            { id: "10", lang: "ja", text: "ok", skip: false }
+        );
+    });
+
     it("throws when the response contains no text block", () => {
         expect(() => parseClaudeResponse({ content: [] }, req)).toThrow();
     });
