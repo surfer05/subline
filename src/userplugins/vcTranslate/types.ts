@@ -1,5 +1,35 @@
 export type EngineId = "google" | "claude" | "gemini";
 
+/**
+ * The Gemini model the quality tier asks for unless the user overrides it in
+ * settings (see `geminiModel` in settings.ts).
+ *
+ * MEASURED, not chosen from a docs page. Probed side by side against one real
+ * free-tier key, same endpoint, same instant:
+ *
+ *   gemini-2.5-flash       200 — works
+ *   gemini-3.6-flash       429 quota exceeded, at ANY rate
+ *   gemini-2.5-pro         429 quota exceeded, at ANY rate
+ *   gemini-2.5-flash-lite  404 no longer available
+ *   gemini-3-flash         404 not found
+ *   gemini-2.0-flash       500
+ *
+ * The previous default was `gemini-3.6-flash`, which has no free-tier
+ * allowance on that key at all: it returned 429 on the FIRST request of a
+ * session, so every rate-limiting mechanism in this plugin was throttling
+ * against a wall that was never a rate limit, and no LLM translation ever
+ * reached the screen.
+ *
+ * Lives here, in the module both the renderer (settings.ts) and the native
+ * side (engines/gemini.ts) already import, so the setting's default and the
+ * request's fallback are the same string by construction.
+ *
+ * WHICH MODEL IS FREE MOVES UNDER US — that table is a snapshot, not a
+ * contract. That is precisely why the model is a SETTING: a user whose ✦
+ * upgrades stop can change it without waiting for a rebuild.
+ */
+export const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+
 export interface PendingMessage {
     id: string;
     author: string;

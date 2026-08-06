@@ -44,8 +44,13 @@ const EV = {} as never;
  * Drive translateBatch to completion under fake timers so the 1000ms retry
  * backoff does not make every retry test take a real second.
  */
-async function run(engine: "google" | "claude" | "gemini", apiKey: string, json = reqJson) {
-    const p = translateBatch(EV, engine, apiKey, json);
+async function run(
+    engine: "google" | "claude" | "gemini",
+    apiKey: string,
+    json = reqJson,
+    model?: string
+) {
+    const p = translateBatch(EV, engine, apiKey, json, model);
     const settled = Promise.allSettled([p]);
     await vi.runAllTimersAsync();
     const [outcome] = await settled;
@@ -110,6 +115,29 @@ describe("translateBatch — success", () => {
         expect(gemini.mock.calls[0][1]).toBe("AIza-test");
         expect(google).not.toHaveBeenCalled();
         expect(claude).not.toHaveBeenCalled();
+    });
+
+    it("forwards the model across the IPC boundary to the gemini engine", async () => {
+        // Settings live in the RENDERER; the main process cannot read them. So
+        // the model takes the same route as the api key — as an argument. If it
+        // is dropped here the setting is inert and a user stuck on a 429ing
+        // model has no way out short of a rebuild.
+        gemini.mockResolvedValue([{ id: "1", skip: true }]);
+
+        await run("gemini", "AIza-test", reqJson, "gemini-2.5-pro");
+
+        expect(gemini.mock.calls[0][3]).toBe("gemini-2.5-pro");
+    });
+
+    it("passes an unset model through as-is, leaving the fallback to the engine", async () => {
+        // Deliberately NOT defaulted here: one owner for that fallback (the
+        // engine), so the renderer, the IPC layer and the engine cannot come to
+        // disagree about which model an empty setting means.
+        gemini.mockResolvedValue([{ id: "1", skip: true }]);
+
+        await run("gemini", "AIza-test");
+
+        expect(gemini.mock.calls[0][3]).toBeUndefined();
     });
 });
 
@@ -269,6 +297,51 @@ describe("translateBatch — retryAfterMs", () => {
             retryAfterMs: 552,
             quotaLimitPerMinute: 20
         });
+    });
+
+    it("carries the model a 429 named across the IPC boundary", async () => {
+        // The renderer says something materially different when it knows the
+        // model — "try another model" instead of "you are rate limited" — and
+        // the engine is the only code that ever sees the 429 body.
+        const err = new Error("gemini: HTTP 429");
+        (err as { retryAfterMs?: number }).retryAfterMs = 552;
+        (err as { quotaModel?: string }).quotaModel = "gemini-3.6-flash";
+        gemini.mockRejectedValue(err);
+
+        const res = await run("gemini", "k");
+
+        expect((res as { quotaModel?: string }).quotaModel).toBe("gemini-3.6-flash");
+    });
+
+    it("does not report a model for a 429 that named none, or for a non-429", async () => {
+        gemini.mockRejectedValue(new Error("gemini: HTTP 429"));
+        expect((await run("gemini", "k") as { quotaModel?: string }).quotaModel).toBeUndefined();
+
+        const err = new Error("gemini: HTTP 401");
+        (err as { quotaModel?: string }).quotaModel = "gemini-3.6-flash";
+        gemini.mockRejectedValue(err);
+        expect((await run("gemini", "k") as { quotaModel?: string }).quotaModel).toBeUndefined();
+    });
+
+    it("ignores a non-string quotaModel rather than trusting it blindly", async () => {
+        const err = new Error("gemini: HTTP 429");
+        (err as { quotaModel?: unknown }).quotaModel = { evil: true };
+        gemini.mockRejectedValue(err);
+
+        expect((await run("gemini", "k") as { quotaModel?: string }).quotaModel).toBeUndefined();
+    });
+
+    it("scrubs the api key out of the model name too", async () => {
+        // The model name goes into a toast. It comes from a remote response, so
+        // it gets the same treatment as every other string that leaves here.
+        const key = "AIza-secret-value-do-not-leak";
+        const err = new Error("gemini: HTTP 429");
+        (err as { quotaModel?: string }).quotaModel = `gemini-${key}`;
+        gemini.mockRejectedValue(err);
+
+        const res = await run("gemini", key);
+
+        expect((res as { quotaModel?: string }).quotaModel).not.toContain(key);
     });
 
     it("does not invent a quota limit when the engine reported none", async () => {

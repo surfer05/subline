@@ -3,6 +3,7 @@ import { OptionType } from "@utils/types";
 import { LocaleStore } from "@webpack/common";
 
 import { notifySettingsChanged } from "./settingsBridge";
+import { DEFAULT_GEMINI_MODEL } from "./types";
 
 /**
  * Default target language, taken from Discord's own locale rather than a
@@ -59,6 +60,25 @@ export const settings = definePluginSettings({
         // must see a pasted/cleared key right away, not on next reload.
         onChange: notifySettingsChanged
     },
+    geminiModel: {
+        type: OptionType.STRING,
+        // The description is the whole point of this setting existing. Which
+        // Gemini models a free-tier key may call changes without notice, and a
+        // key with NO allowance for a model gets a 429 on its very first
+        // request — indistinguishable from being throttled unless the user is
+        // told what to try. The previous hardcoded default did exactly that
+        // for days: every subtitle stayed Google's ≈ and nothing said why.
+        description:
+            `Gemini model (default ${DEFAULT_GEMINI_MODEL}). If ✦ upgrades stop appearing and you ` +
+            "keep seeing a rate-limit toast, this model may no longer be available on your key's " +
+            `free tier — try another (e.g. ${DEFAULT_GEMINI_MODEL}). Blank uses the default.`,
+        default: DEFAULT_GEMINI_MODEL,
+        placeholder: DEFAULT_GEMINI_MODEL,
+        // Same immediacy requirement as the keys above: switching model to
+        // escape a dead one must take effect on the next batch, not on next
+        // reload — a user doing this is already stuck.
+        onChange: notifySettingsChanged
+    },
     targetLang: {
         type: OptionType.STRING,
         description: "Target language code",
@@ -98,6 +118,10 @@ export const settings = definePluginSettings({
     },
     geminiApiKey: {
         // Same mechanism, same reasoning, gated on the Gemini engine instead.
+        hidden() { return this.store.engine !== "gemini"; }
+    },
+    geminiModel: {
+        // Ditto: a model name is meaningless unless Gemini is what runs.
         hidden() { return this.store.engine !== "gemini"; }
     }
 });

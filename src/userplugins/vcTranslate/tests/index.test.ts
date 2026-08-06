@@ -527,6 +527,142 @@ describe("a rate-limited LLM leaves the reader the fast tier's Google line", () 
 
         expect(rateGateSettings().refillMs).toBe(REFILL_MS);
     });
+
+    /**
+     * THE DEFECT THIS SUITE EXISTS FOR. A key with no free-tier allowance for
+     * the configured model gets a 429 on its FIRST request of a session and on
+     * every request after it — permanently, at any rate. In the old toast that
+     * is word for word what ordinary throttling says, so the user waited it
+     * out, restarted, saw it again, and concluded they were being throttled.
+     * Days of it. The model name is the only thing in the response that tells
+     * the two apart, so it has to reach the user.
+     */
+    it("names the model, and points at the setting, when the 429 says which model is over quota", async () => {
+        useGemini();
+        respondByEngine({
+            gemini: {
+                ok: false, error: "gemini: HTTP 429", retryAfterMs: 30_000,
+                quotaModel: "gemini-3.6-flash"
+            },
+            google: googleTranslated("1")
+        });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        const toast = shownToasts.find(t => t.message.includes("gemini-3.6-flash"));
+        expect(toast).toBeDefined();
+        // The model, what is actually wrong with it, and where to fix it.
+        expect(toast!.message).toMatch(/quota|availab/i);
+        expect(toast!.message).toMatch(/settings/i);
+        // Still says what the reader gets meanwhile.
+        expect(toast!.message).toMatch(/Google/);
+    });
+
+    it("keeps the plain rate-limit wording when the 429 names no model", async () => {
+        // The two cases must stay distinguishable in BOTH directions: showing
+        // "try another model" for genuine throttling would send a user off
+        // changing a setting that was never the problem.
+        useGemini();
+        respondByEngine({ gemini: RATE_LIMITED, google: googleTranslated("1") });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        const toast = shownToasts.find(t => /rate limited/i.test(t.message));
+        expect(toast).toBeDefined();
+        expect(toast!.message).not.toMatch(/settings/i);
+    });
+
+    it("shows the model toast once per session too, not once per batch", async () => {
+        // The one-toast-per-session discipline is not per-message-shape: a
+        // catch-up storm re-enters cooldown repeatedly, and this toast is the
+        // longer of the two.
+        useGemini();
+        respondByEngine({
+            gemini: {
+                ok: false, error: "gemini: HTTP 429", retryAfterMs: 2_000,
+                quotaModel: "gemini-3.6-flash"
+            },
+            google: googleTranslated("1")
+        });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+
+        expect(native.translateBatch.mock.calls.filter(c => c[0] === "gemini").length)
+            .toBeGreaterThan(1);   // cooldown genuinely entered twice
+        expect(shownToasts.filter(t => t.message.includes("gemini-3.6-flash"))).toHaveLength(1);
+    });
+});
+
+/**
+ * The model is a SETTING because model availability moves under us: the
+ * previous compiled-in `gemini-3.6-flash` returned 429 on every request against
+ * a real free-tier key, and the only escape was a rebuild. A setting nothing
+ * reads would be exactly as useless, so what is pinned here is that the value
+ * travels all the way to the request.
+ */
+describe("the Gemini model setting reaches the request", () => {
+    function useGemini() {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+    }
+
+    /** The model argument of the first quality-tier call, if any. */
+    function modelSent(): unknown {
+        const call = native.translateBatch.mock.calls.find(c => c[0] === "gemini");
+        expect(call).toBeDefined();
+        return call![3];
+    }
+
+    it("sends the configured model with the quality batch", async () => {
+        useGemini();
+        settings.store.geminiModel = "gemini-2.5-pro";
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(modelSent()).toBe("gemini-2.5-pro");
+    });
+
+    it("sends the measured-working default when the setting was never touched", async () => {
+        useGemini();
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(modelSent()).toBe("gemini-2.5-flash");
+    });
+
+    it("picks up a model change mid-session, without a restart", async () => {
+        // A user doing this is already stuck on a model that refuses them.
+        useGemini();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        expect(modelSent()).toBe("gemini-2.5-flash");
+
+        settings.store.geminiModel = "gemini-2.5-flash-preview";
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+
+        const geminiCalls = native.translateBatch.mock.calls.filter(c => c[0] === "gemini");
+        expect(geminiCalls[geminiCalls.length - 1][3]).toBe("gemini-2.5-flash-preview");
+    });
+
+    it("sends no model on the Google tier, which has none", async () => {
+        useGemini();
+        settings.store.geminiModel = "gemini-2.5-pro";
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        const googleCall = native.translateBatch.mock.calls.find(c => c[0] === "google");
+        expect(googleCall).toBeDefined();
+        expect(googleCall![3]).toBe("");
+    });
 });
 
 describe("the rate gate — smooths a catch-up storm, never slows live chat", () => {

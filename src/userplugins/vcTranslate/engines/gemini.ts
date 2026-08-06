@@ -1,10 +1,11 @@
 import { HttpError } from "../httpError";
-import { quotaLimitFromGeminiBody, retryAfterFromGeminiBody, retryAfterFromHeader } from "../rateHint";
-import type { BatchRequest, Result } from "../types";
+import {
+    modelFromGeminiBody, quotaLimitFromGeminiBody, retryAfterFromGeminiBody, retryAfterFromHeader
+} from "../rateHint";
+import { DEFAULT_GEMINI_MODEL, type BatchRequest, type Result } from "../types";
 import { buildPrompt, extractRows, mapRows, parseJsonText, SCHEMA } from "./llmShared";
 
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions";
-const MODEL = "gemini-3.6-flash";
 
 // buildPrompt, enc, the injection guard, the translations schema and the
 // row-validation/hallucinated-id-filtering pass all live in ./llmShared,
@@ -18,9 +19,17 @@ function topLevelKeys(value: unknown): string {
 }
 
 /**
- * The `interactions` endpoint's response shape could not be verified against
- * a live call (no key was available while building this). Parse it exactly
- * as defensively as engines/google.ts parses its own unofficial endpoint:
+ * The `interactions` endpoint's OUTER shape (`steps[].content[].text`) is now
+ * confirmed against a live call — a real 200 with a real key parses through
+ * this function unchanged. What that same call disproved is the INNER shape:
+ * the `response_format` schema below is ignored, and the text block came back
+ * as a ```json-fenced bare array with numeric ids. That is handled in
+ * ./llmShared (parseJsonText/extractRows/mapRows), shared with claude.ts, so
+ * neither engine can be hardened without the other.
+ *
+ * The defensive style stays exactly as it was written, because the outer shape
+ * being right once is not the same as it being guaranteed. Parse it as
+ * defensively as engines/google.ts parses its own unofficial endpoint:
  * every access is an explicit typeof/Array.isArray check (never `?.`, which
  * would silently collapse a shape mismatch into `undefined` and produce a
  * confusing downstream error instead of a diagnosable one), and the
@@ -70,23 +79,38 @@ export function parseGeminiResponse(body: unknown, req: BatchRequest): Result[] 
 }
 
 /**
+ * `model` is a PARAMETER, not a constant, and it comes from a user setting
+ * (see `geminiModel` in settings.ts, defaulted from DEFAULT_GEMINI_MODEL in
+ * types.ts). Which Gemini models a free-tier key may call changes underneath
+ * us — the previous hardcoded `gemini-3.6-flash` returned 429 on every single
+ * request because the key had no allowance for THAT MODEL at all — and a
+ * compiled-in constant makes recovering from that a rebuild rather than a
+ * settings edit. A blank/absent value falls back to the default rather than
+ * sending `"model": ""`, which would be a 400 on every request.
+ *
  * KNOWN GAP, flagged rather than fixed: this engine sends no output-token cap
  * and checks no finish/stop reason, so it has no equivalent of claude.ts's
  * TRUNCATED_ERROR. If a 25-message batch ever did exhaust the server-side
  * default output budget, the cut-off JSON would surface as "response was not
  * valid JSON" — which native.ts's isRetryable treats as retryable, so the same
- * over-long batch would be sent twice before failing. Gemini 3 Flash's default
+ * over-long batch would be sent twice before failing. A Flash model's default
  * output ceiling is far above what 25 short chat translations produce, so this
- * is not expected to fire; it is not fixed here because the `interactions`
- * endpoint's request shape could not be verified against a live call (see the
- * parser comment above) and guessing a field name risks a 400 on every
- * request, which is a much worse failure than the one it would prevent.
+ * is not expected to fire; it is not fixed here because the field name for an
+ * output cap on the `interactions` request has still not been verified against
+ * a live call (the live call confirmed only that the request shape BELOW is
+ * accepted), and guessing one risks a 400 on every request — a much worse
+ * failure than the one it would prevent.
  */
 export async function translateWithGemini(
     req: BatchRequest,
     apiKey: string,
-    fetchImpl: typeof fetch = fetch
+    fetchImpl: typeof fetch = fetch,
+    model?: string
 ): Promise<Result[]> {
+    const chosenModel = typeof model === "string" && model.trim() !== ""
+        ? model.trim()
+        : DEFAULT_GEMINI_MODEL;
+
     const res = await fetchImpl(ENDPOINT, {
         method: "POST",
         headers: {
@@ -96,7 +120,7 @@ export async function translateWithGemini(
             "x-goog-api-key": apiKey
         },
         body: JSON.stringify({
-            model: MODEL,
+            model: chosenModel,
             input: buildPrompt(req),
             response_format: {
                 type: "text",
@@ -118,13 +142,23 @@ export async function translateWithGemini(
         // only ever appears in the body. Both reads are best-effort: a 4xx
         // response is not guaranteed to be JSON at all, and a parse failure
         // here must not shadow the real `HTTP <status>` error.
+        //
+        // The third salvaged value is the MODEL the quota was enforced
+        // against ("... limit: 20, model: gemini-3.6-flash"). It is what makes
+        // "this key has no allowance for this model at all" — a permanent
+        // condition a settings change fixes — distinguishable from ordinary
+        // throttling, which looks identical from the renderer otherwise. It is
+        // parsed here for the same reason as the other two: the engine is the
+        // only code that ever sees the response body.
         const headerHint = retryAfterFromHeader(res);
         let retryAfterMs = headerHint;
         let quotaLimitPerMinute: number | undefined;
+        let quotaModel: string | undefined;
         try {
             const body = await res.json();
             if (retryAfterMs === undefined) retryAfterMs = retryAfterFromGeminiBody(body);
             quotaLimitPerMinute = quotaLimitFromGeminiBody(body);
+            quotaModel = modelFromGeminiBody(body);
         } catch {
             // Not JSON, or no body to read — nothing to salvage, fall through
             // with whatever the header gave us.
@@ -133,7 +167,8 @@ export async function translateWithGemini(
             `gemini: HTTP ${res.status}`,
             res.status,
             retryAfterMs,
-            quotaLimitPerMinute
+            quotaLimitPerMinute,
+            quotaModel
         );
     }
 

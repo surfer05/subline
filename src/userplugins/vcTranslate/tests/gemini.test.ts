@@ -4,6 +4,7 @@ import type { BatchRequest } from "../types";
 import {
     REAL_GEMINI_429_JSON, REAL_GEMINI_429_LIMIT, REAL_GEMINI_429_RETRY_MS
 } from "./fixtures/real429";
+import { REAL_GEMINI_FENCED_TEXT, REAL_GEMINI_TRANSLATIONS } from "./fixtures/realGeminiText";
 
 const req: BatchRequest = {
     messages: [
@@ -182,6 +183,27 @@ describe("parseGeminiResponse", () => {
         const body = { steps: [{ content: [{ type: "text", text: JSON.stringify({ nope: [] }) }] }] };
         expect(() => parseGeminiResponse(body, req)).toThrow();
     });
+
+    it("parses the VERBATIM live response: ```json fence, bare array, numeric ids", () => {
+        // The measured reality of this endpoint: the response_format schema is
+        // IGNORED. Before the llmShared hardening this threw "response was not
+        // valid JSON" on the fence — which native.ts retries, so the batch was
+        // spent twice and then failed. It is why no ✦ ever reached the screen.
+        const liveReq: BatchRequest = {
+            messages: [
+                { id: "1", author: "yassine", text: "شحال هاد الوحش" },
+                { id: "2", author: "rana", text: "قلبت عمان كلها عليك" }
+            ],
+            context: [],
+            targetLang: "en"
+        };
+        const body = { steps: [{ content: [{ type: "text", text: REAL_GEMINI_FENCED_TEXT }] }] };
+
+        expect(parseGeminiResponse(body, liveReq)).toEqual([
+            { id: "1", lang: "ar-MA", text: REAL_GEMINI_TRANSLATIONS[0], skip: false },
+            { id: "2", lang: "ar-JO", text: REAL_GEMINI_TRANSLATIONS[1], skip: false }
+        ]);
+    });
 });
 
 describe("translateWithGemini", () => {
@@ -199,11 +221,50 @@ describe("translateWithGemini", () => {
         expect(url).not.toContain("AIza-test");
 
         const sent = JSON.parse(init.body);
-        expect(sent.model).toBe("gemini-3.6-flash");
+        // A LITERAL, not the DEFAULT_GEMINI_MODEL constant: asserting against
+        // the constant would pass for any value it was ever changed to, which
+        // is exactly how the previous default (gemini-3.6-flash — 429 on every
+        // request against a real free-tier key, so no ✦ ever appeared) could
+        // have been changed silently. Measured: this model returns 200.
+        expect(sent.model).toBe("gemini-2.5-flash");
         expect(sent.input).toBe(buildPrompt(req));
         expect(sent.response_format.type).toBe("text");
         expect(sent.response_format.mime_type).toBe("application/json");
         expect(sent.response_format.schema).toBeTruthy();
+    });
+
+    it("sends the model it was given, so a settings change reaches the wire", async () => {
+        // The model is a SETTING (settings.ts geminiModel) precisely because a
+        // model can lose free-tier availability under us. If the engine ignored
+        // the argument and kept using its constant, changing the setting would
+        // be a no-op and the user would still be stuck on a 429ing model.
+        const fetchImpl = vi.fn().mockResolvedValue(
+            apiResponse({ translations: [{ id: "10", lang: "ja", text: "ok", skip: false }] })
+        );
+        await translateWithGemini(req, "AIza-test", fetchImpl as any, "gemini-9.9-experimental");
+
+        expect(JSON.parse(fetchImpl.mock.calls[0][1].body).model).toBe("gemini-9.9-experimental");
+    });
+
+    it("falls back to the default model for a blank or whitespace-only setting", async () => {
+        // A cleared settings field must not send `"model": ""`, which would be
+        // a 400 on every single request — strictly worse than the 429 it was
+        // trying to escape.
+        for (const blank of ["", "   ", undefined]) {
+            const fetchImpl = vi.fn().mockResolvedValue(
+                apiResponse({ translations: [{ id: "10", lang: "ja", text: "ok", skip: false }] })
+            );
+            await translateWithGemini(req, "AIza-test", fetchImpl as any, blank);
+            expect(JSON.parse(fetchImpl.mock.calls[0][1].body).model).toBe("gemini-2.5-flash");
+        }
+    });
+
+    it("trims a model name pasted with surrounding whitespace", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue(
+            apiResponse({ translations: [{ id: "10", lang: "ja", text: "ok", skip: false }] })
+        );
+        await translateWithGemini(req, "AIza-test", fetchImpl as any, "  gemini-2.5-pro \n");
+        expect(JSON.parse(fetchImpl.mock.calls[0][1].body).model).toBe("gemini-2.5-pro");
     });
 
     it("throws on a non-OK status", async () => {
@@ -297,6 +358,10 @@ describe("translateWithGemini", () => {
         expect((caught as { retryAfterMs?: number }).retryAfterMs).toBe(REAL_GEMINI_429_RETRY_MS);
         expect((caught as { quotaLimitPerMinute?: number }).quotaLimitPerMinute)
             .toBe(REAL_GEMINI_429_LIMIT);
+        // The third salvaged value: the model the quota belongs to. Without it
+        // the renderer can only say "rate limited", which is what left a model
+        // with NO free-tier allowance looking like ordinary throttling.
+        expect((caught as { quotaModel?: string }).quotaModel).toBe("gemini-3.6-flash");
         // Both numbers come from ONE body read — res.json() consumes the
         // stream, so a second call would reject and lose whichever number was
         // parsed second.
@@ -320,6 +385,9 @@ describe("translateWithGemini", () => {
 
         expect((caught as { retryAfterMs?: number }).retryAfterMs).toBe(2_000);
         expect((caught as { quotaLimitPerMinute?: number }).quotaLimitPerMinute).toBeUndefined();
+        // Nothing named, nothing invented — the renderer must be able to tell
+        // "ordinary throttling" from "that model is unavailable".
+        expect((caught as { quotaModel?: string }).quotaModel).toBeUndefined();
     });
 
     it("leaves retryAfterMs undefined when neither header nor body carries a hint", async () => {

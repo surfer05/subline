@@ -205,6 +205,22 @@ function apiKeyFor(engine: LlmEngineId): string {
     return settings.store[LLM_ENGINES[engine].keySetting];
 }
 
+/**
+ * The model name to send with a batch, or "" for an engine that has no such
+ * setting (Google, and Claude — whose model is pinned in engines/claude.ts).
+ *
+ * Read at SEND time rather than captured when the batcher was built: a user
+ * changing the model is almost always a user trying to escape a model that is
+ * refusing them, and the next batch should already use the new one. "" means
+ * "engine default" on the far side; the engine owns that fallback so the empty
+ * string can never reach the wire as a model name.
+ */
+function modelFor(engine: EngineId): string {
+    if (engine !== "gemini") return "";
+    const configured = settings.store.geminiModel;
+    return typeof configured === "string" ? configured.trim() : "";
+}
+
 /** The engine actually in use — may differ from the configured one. */
 function effectiveEngine(): EngineId {
     const configured = settings.store.engine as EngineId;
@@ -272,7 +288,8 @@ function formatDuration(ms: number): string {
 function enterCooldown(
     engine: LlmEngineId,
     retryAfterMs: number | undefined,
-    quotaLimitPerMinute: number | undefined
+    quotaLimitPerMinute: number | undefined,
+    quotaModel?: string
 ): void {
     const asked = typeof retryAfterMs === "number" && retryAfterMs > 0
         ? retryAfterMs
@@ -300,25 +317,42 @@ function enterCooldown(
     const cooldownMs = Math.max(asked, rateGateSettings().refillMs);
     setCooldown(engine, Date.now() + cooldownMs);
 
-    announceCooldownOnce(engine, cooldownMs);
+    announceCooldownOnce(engine, cooldownMs, quotaModel);
 }
 
 /**
  * Same one-toast-per-session discipline as announceMissingKeyOnce(): a
  * catch-up storm can enter cooldown on several batches in a row, and a toast
  * per batch would be worse than the problem it describes.
+ *
+ * TWO MESSAGES, because there are two genuinely different problems and they
+ * arrive as the identical HTTP status.
+ *
+ *  - No model named: ordinary throttling. Wait it out; the ≈ line stands. This
+ *    is the message that has always been shown.
+ *  - A model named ("Quota exceeded for metric: ..., model: <name>"): the quota
+ *    that was exceeded belongs to THAT MODEL. On a free-tier key that is
+ *    usually not a rate at all — a model the key has no allowance for returns
+ *    429 on the first request of a session and on every request thereafter, so
+ *    waiting changes nothing and the ✦ upgrade never arrives. Days were lost to
+ *    reading exactly that as throttling, so the model name and the setting that
+ *    changes it go into the toast. See `geminiModel` in settings.ts.
  */
-function announceCooldownOnce(engine: LlmEngineId, cooldownMs: number): void {
+function announceCooldownOnce(
+    engine: LlmEngineId, cooldownMs: number, quotaModel?: string
+): void {
     if (announcedCooldown) return;
     announcedCooldown = true;
     const { label } = LLM_ENGINES[engine];
-    Toasts.show({
-        id: Toasts.genId(),
-        type: Toasts.Type.FAILURE,
-        message:
-            `VcTranslate: ${label} is rate limited — translations are using Google ` +
-            `(≈) for about ${formatDuration(cooldownMs)}.`
-    });
+
+    const message = typeof quotaModel === "string" && quotaModel !== ""
+        ? `VcTranslate: ${label} model "${quotaModel}" is over quota (429) — this model may `
+        + "have no free-tier availability on your key. Change the model in VcTranslate "
+        + "settings to try another. Translations are using Google (≈) meanwhile."
+        : `VcTranslate: ${label} is rate limited — translations are using Google `
+        + `(≈) for about ${formatDuration(cooldownMs)}.`;
+
+    Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message });
 }
 
 /**
@@ -560,7 +594,8 @@ async function runTier(
             res = await Native.translateBatch(
                 engine,
                 isLlmEngine(engine) ? apiKeyFor(engine) : "",
-                JSON.stringify(engine === "google" ? withSourceLangs(req) : req)
+                JSON.stringify(engine === "google" ? withSourceLangs(req) : req),
+                modelFor(engine)
             );
         } catch {
             res = null;
@@ -582,7 +617,9 @@ async function runTier(
                 // rejected us is how half the observed traffic became 429s.
                 // (`retryAfterMs` is only ever set for a 429 — see native.ts.)
                 if (isLlmEngine(engine) && res.retryAfterMs) {
-                    enterCooldown(engine, res.retryAfterMs, res.quotaLimitPerMinute);
+                    enterCooldown(
+                        engine, res.retryAfterMs, res.quotaLimitPerMinute, res.quotaModel
+                    );
                 }
                 // An auth failure means the key is wrong, not that the network
                 // blipped — retrying it every batch would be pure noise, so

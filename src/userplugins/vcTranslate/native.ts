@@ -8,7 +8,19 @@ import type { BatchRequest, EngineId, Result } from "./types";
 
 export type NativeResponse =
     | { ok: true; results: Result[] }
-    | { ok: false; error: string; retryAfterMs?: number; quotaLimitPerMinute?: number };
+    | {
+        ok: false;
+        error: string;
+        retryAfterMs?: number;
+        quotaLimitPerMinute?: number;
+        /**
+         * The model a 429 said the quota was enforced against, when it said
+         * so. Purely diagnostic: the renderer uses it to tell the user THIS
+         * MODEL is unavailable on their key rather than "you are rate
+         * limited". See rateHint.ts's modelFromGeminiBody.
+         */
+        quotaModel?: string;
+    };
 
 /**
  * Both engines report transport failures as `<engine>: HTTP <status>`.
@@ -67,11 +79,20 @@ function isRetryable(err: unknown): boolean {
     return status < 400 || status >= 500;  // retry 5xx, never other 4xx
 }
 
+/**
+ * `model` is only meaningful for Gemini today. It crosses IPC as an argument
+ * rather than being read here because settings live in the RENDERER — the main
+ * process has no access to the plugin's settings store — so this is the same
+ * route `apiKey` already takes. An empty/absent value means "whatever the
+ * engine's default is" (see DEFAULT_GEMINI_MODEL in types.ts); the engine, not
+ * this function, owns that fallback.
+ */
 export async function translateBatch(
     _: IpcMainInvokeEvent,
     engine: EngineId,
     apiKey: string,
-    reqJson: string
+    reqJson: string,
+    model?: string
 ): Promise<NativeResponse> {
     let req: BatchRequest;
     try {
@@ -84,7 +105,7 @@ export async function translateBatch(
         const results = await withRetry(
             () => {
                 if (engine === "claude") return translateWithClaude(req, apiKey);
-                if (engine === "gemini") return translateWithGemini(req, apiKey);
+                if (engine === "gemini") return translateWithGemini(req, apiKey, fetch, model);
                 return translateWithGoogle(req);
             },
             { retries: 1, delayMs: 1000, shouldRetry: isRetryable }
@@ -119,6 +140,22 @@ export async function translateBatch(
             ? limit
             : undefined;
 
-        return { ok: false, error: scrubKey(raw, apiKey), retryAfterMs, quotaLimitPerMinute };
+        // The model the 429 named, when it named one (see rateHint.ts). Like
+        // the quota there is no default — "no model stated" must stay
+        // distinguishable from a named one, because the renderer says something
+        // materially different in each case. Scrubbed on the same principle as
+        // `error`: it is engine-supplied text on its way to the renderer.
+        const named = (err as { quotaModel?: unknown })?.quotaModel;
+        const quotaModel = rateLimited && typeof named === "string" && named !== ""
+            ? scrubKey(named, apiKey)
+            : undefined;
+
+        return {
+            ok: false,
+            error: scrubKey(raw, apiKey),
+            retryAfterMs,
+            quotaLimitPerMinute,
+            quotaModel
+        };
     }
 }
