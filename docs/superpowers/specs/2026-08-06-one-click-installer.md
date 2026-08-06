@@ -57,13 +57,54 @@ and each failure needs its own explanation.
 3. **Detect Discord** — which branches are installed (Stable/PTB/Canary), and which are running.
 4. **Detect existing mods** — Vencord, BetterDiscord, Equicord. If found: show what was found, what would happen to it, and offer Proceed / Cancel.
 5. **Quit Discord** — required for patching. Offer to quit it for them; never kill it without asking.
-6. **Permission** (macOS only) — see §4.
-7. **Patch** — backup, write, verify.
+6. **Choose the reading language** — see §3a. One screen, pre-filled, one click to change.
+7. **Permission** (macOS only) — see §4.
+8. **Patch** — backup, write, verify.
 8. **Install the helper** — LaunchAgent / Scheduled Task.
 9. **Launch Discord and verify** — see §7. Do not declare success until translation is confirmed working.
 10. **Optional ✦ setup** — guided Google AI Studio key flow, skippable.
 
 ---
+
+## 3a. Reading language — the thing that makes this universal
+
+**The capability already exists and already defaults correctly.** `targetLang`
+resolves from the user's own Discord locale, so a Turkish Discord means Turkish
+translations with no configuration. Both engines honour it: Google receives
+`tl=<lang>`, and the LLM prompt instructs translation into that language.
+
+**Why it matters more than it looks.** Translation here is *per reader*, not per
+channel. Two people in the same voice channel — one reading English, one reading
+Turkish — each see the same conversation in their own language, and neither
+changes anything for anyone else. A translation bot cannot do this; it must pick
+one language for the whole room. This is the same architectural property that
+makes the product un-bot-able, and it is the strongest thing to lead with on the
+site.
+
+**What is missing is the UX.** The setting is currently a free-text field
+labelled "Target language code". A user who is not comfortable in English — the
+exact person this feature serves — cannot be expected to know that Turkish is
+`tr`. If auto-detection guesses wrong, they are stuck.
+
+**Required:**
+- Replace the code field with a **language picker showing names**, rendered via
+  `Intl.DisplayNames` (already used for the `?` tooltip). Show each language
+  **in its own language** — "Türkçe", not "Turkish" — because the person most
+  likely to change this setting is the one least able to read English.
+- **Confirm it during install** (step 6) rather than silently inheriting the
+  locale: one screen, pre-filled from Discord, one click to change.
+- Keep the underlying value a bare code (no region qualifier): the engines
+  compare it against the bare code the detector returns, so `pt-BR` would never
+  match `pt` and every message in the user's own language would be pointlessly
+  translated.
+
+**Known asymmetry, acceptable:** the free local "already in the target language,
+skip it" check (`detectLang.ts`) is implemented **for English only**. A Turkish
+reader therefore sends slightly more messages to Google than an English reader
+does. Google is free and unmetered so there is no cost, and the `✦` budget is
+unaffected — but it means `≈` lines appear on a few more messages. Extending the
+check to another language means writing and testing its own evidence and veto
+word lists; do not generalise the English one.
 
 ## 4. macOS specifics
 
