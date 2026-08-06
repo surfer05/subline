@@ -235,7 +235,7 @@ the second tier did not exist.
 | Engine | Cost | Quality |
 |---|---|---|
 | Google (fast tier, always on) | Free, no API key | Weaker on slang, mixed languages, and short fragments; each message is translated in isolation, with no conversation context |
-| Claude Haiku (`claude-haiku-4-5`) or Gemini (quality tier, when configured) | Roughly $2-3/month at typical chat volume for Claude; Gemini has a usable free tier | Noticeably better on slang and code-mixed text; batches multiple messages per request and includes a rolling window of recent channel context, so it can disambiguate short or ambiguous lines the way a person following the conversation would |
+| Claude Haiku (`claude-haiku-4-5`) or Gemini (`gemini-2.5-flash` by default, and configurable) (quality tier, when configured) | Roughly $2-3/month at typical chat volume for Claude; Gemini has a usable free tier | Noticeably better on slang and code-mixed text; batches multiple messages per request and includes a rolling window of recent channel context, so it can disambiguate short or ambiguous lines the way a person following the conversation would |
 
 To use Claude: create a key at console.anthropic.com, switch the
 **"Quality engine"** dropdown to Claude Haiku — the **"Anthropic API
@@ -243,6 +243,43 @@ key"** field is hidden until you do, since it is meaningless for Google — then
 paste the key into it. **Scope the key to a dedicated project with a spend
 limit** — it is stored in plaintext in Vencord's settings file, like every
 other Vencord plugin credential, not in your OS keychain.
+
+To use Gemini: create a key at aistudio.google.com, switch **"Quality
+engine"** to Gemini, and paste it into the **"Gemini API key"** field (also
+hidden until then). The same plaintext-storage caveat applies.
+
+### The Gemini model is a setting, and this matters
+
+A **"Gemini model"** field sits next to the key, defaulting to
+**`gemini-2.5-flash`**. It exists because *which* models a free-tier key may
+call changes without notice, and getting it wrong does not look like getting
+it wrong. Probed side by side against one real free-tier key, same endpoint,
+same instant:
+
+| Model | Result |
+|---|---|
+| `gemini-2.5-flash` | **200 — works** (the default) |
+| `gemini-3.6-flash` | 429 quota exceeded, on the *first* request, at any rate |
+| `gemini-2.5-pro` | 429 quota exceeded, likewise |
+| `gemini-2.5-flash-lite` | 404, no longer available |
+| `gemini-3-flash` | 404, not found |
+| `gemini-2.0-flash` | 500 |
+
+A model your key has **no free-tier allowance for at all** returns 429 to
+every request forever — not because you are sending too fast, but because
+that allowance is zero. It is the same status code as ordinary throttling,
+and for a long time this plugin reported it with the same message, so the
+symptom was "every subtitle stays `≈`, and a rate-limit toast appears seconds
+after every launch, no matter how little you send". Waiting does not help;
+changing the model does.
+
+So: **if `✦` upgrades stop appearing and you keep seeing a rate-limit toast,
+try a different model in that field.** A 429 that names a model now says so
+in the toast — it quotes the model and points you at the setting — so you can
+tell the two cases apart without reading the console. Leaving the field blank
+uses the default. Changing it takes effect on the next batch; no restart, and
+no rebuild of the plugin, which is the entire reason it is a setting rather
+than a constant in the source.
 
 Because the fast tier already gave the reader a Google line before the
 quality tier is ever asked, the LLM engine being unavailable costs nothing
@@ -255,6 +292,7 @@ be unavailable, and they recover differently:
 | Key field is empty | Immediately, as soon as you paste a key |
 | Engine rejected the key (401/403) | Only after restarting Discord — the quality tier is disabled for the rest of the session |
 | Engine is rate limited (429) | Automatically, when the cooldown lapses (see below) |
+| The configured Gemini model has no free-tier allowance (a 429 that names the model) | Never on its own — change the **"Gemini model"** setting (see above). The toast names the model in this case |
 
 Each shows one toast, and only one per session — never one per batch.
 
@@ -366,6 +404,33 @@ Concretely, on a 429 from Claude or Gemini:
 You get one toast the first time this happens in a session, saying
 translations are running on Google only for now and roughly how long until
 the better engine is back — and only one, however many batches are affected.
+
+**Unless the 429 names a model**, in which case the toast says that instead:
+which model is over quota, that it may have no free-tier availability on your
+key, and to change the model in settings. Steps 1-4 above still happen
+identically — the cooldown, the retune, the untouched `≈` lines — because from
+the transport's point of view nothing is different. Only the sentence the user
+reads changes, and that sentence is the difference between "wait" and "change
+one setting". See "The Gemini model is a setting, and this matters" above.
+
+### The response shape is not what we asked for, and is parsed anyway
+
+Both LLM engines request a strict JSON schema —
+`{ "translations": [ { "id", "lang", "text", "skip" } ] }`. Claude honours it.
+Gemini's `interactions` endpoint, measured, **ignores it**: the same prompt
+and the same schema come back as a ```` ```json ````-fenced **bare array**
+with **numeric** ids. All three deviations used to be fatal — the fence alone
+made the parse throw, which counts as retryable, so the batch was sent twice
+and then failed — and that, together with the model problem above, is why no
+`✦` line ever reached the screen.
+
+Parsing (`engines/llmShared.ts`, shared by both engines) is therefore tolerant
+about *packaging* and unchanged about *content*: a whole-string code fence is
+unwrapped, either a bare array or the `translations` object is accepted, and a
+numeric id is coerced to a string. But an id the model invented is still
+dropped, a row with no usable `lang`/`text` is still rejected, every requested
+id still comes back with an explicit verdict, and a response that is neither
+shape is still an error rather than a silent empty result.
 
 `{ deferred: true }` (the "⏳ translation delayed — retrying" line) is a
 holdover from a design where the LLM engine was the reader's *only*
@@ -503,6 +568,19 @@ restart anything. If it never comes back, the cause is a *rejected* key
 rather than a rate limit — that one does pin the session to Google-only, see
 the two items above.
 
+**Subtitles have *never* shown `✦` — not once, in any channel, on any launch — and Gemini is selected with a valid key.**
+This is a different problem from the one above, and the giveaway is the word
+*never*: a rate limit is intermittent, this is not. The usual cause is that
+your key has **no free-tier allowance for the configured model**, which
+returns 429 to every request from the very first one. Open the plugin
+settings and change **"Gemini model"** (the default, `gemini-2.5-flash`, is
+what was measured working; see "The Gemini model is a setting, and this
+matters" under "Engines"). If the rate-limit toast you saw quoted a model
+name, that is exactly this case, and the model it quoted is the one to
+change. The change applies to the next batch — no restart needed, though a
+restart also clears the per-session ledger so already-attempted messages get
+another try.
+
 One caveat on "comes back on its own", and it applies per message rather than
 globally: the messages whose single quality attempt was actually *spent*
 while the engine was failing are not asked again this session (see "one
@@ -629,14 +707,17 @@ reports a *smaller* pass count that still looks like success.
 `vitest` is not saved as a dependency; in a fresh clone run `npm i -D vitest`
 first.
 
-327 tests across 14 suites (`batcher`, `claude`, `detectLang`, `gemini`,
-`google`, `index`, `native`, `rateGate`, `rateHint`, `retry`, `romanized`,
-`skip`, `store`, `upgrade` — see `tests/`). `tests/fixtures/` holds shared
-non-test data, notably the verbatim bytes of a real Gemini 429 captured
-against the live API, which `rateHint.test.ts` and `gemini.test.ts` both
-assert against so they cannot drift apart from each other or from reality.
+398 tests across 15 suites (`batcher`, `claude`, `detectLang`, `gemini`,
+`google`, `index`, `llmShared`, `native`, `rateGate`, `rateHint`, `retry`,
+`romanized`, `skip`, `store`, `upgrade` — see `tests/`). `tests/fixtures/`
+holds shared non-test data, notably the verbatim bytes of a real Gemini 429
+captured against the live API (which `rateHint.test.ts` and `gemini.test.ts`
+both assert against so they cannot drift apart from each other or from
+reality) and the verbatim text of a real *successful* Gemini response — fenced,
+a bare array, numeric ids — which `llmShared.test.ts` and `gemini.test.ts`
+share for the same reason.
 
-Thirteen of the fourteen target pure-logic modules with no Discord/Vencord
+Fourteen of the fifteen target pure-logic modules with no Discord/Vencord
 runtime dependency (`store.test.ts` is pure logic plus the `DataStore` stub,
 which its persistence cases drive directly; `upgrade.test.ts` and
 `romanized.test.ts` are the two-tier and script-mismatch modules, also pure
@@ -704,6 +785,10 @@ of results.
 | 36 | **Romanized text:** post romanized Darija: `ana bghit nmchi l dar` | Either no ≈ line, or one marked `ar?`; the ✦ line that follows says "I want to go home" (NOT "don't want") | ☐ |
 | 37 | **Romanized text, pass-through:** post `baraka 3lik mn dak monster` | Google returns it unchanged so there may be no ≈ line at all — but a ✦ line still arrives and mentions the drink | ☐ |
 | 38 | **Romanized text, DM prerequisite:** before rows 36-37, confirm the DM is enabled with the 🌐 button first | Rows 36-37 do nothing in a DM that was never enabled; `globalAuto` never covers DMs | ☐ |
+| 39 | **Model setting, visibility:** open the plugin settings with engine = Google, then switch to Gemini | The "Gemini model" field is absent for Google and appears for Gemini, alongside the key field, pre-filled with `gemini-2.5-flash` | ☐ |
+| 40 | **Model setting, the fix it exists for:** set "Gemini model" to `gemini-3.6-flash`, post a foreign message, and watch | A `≈` line still appears. One toast quotes `gemini-3.6-flash`, says it may have no free-tier availability, and points at the settings — *not* the generic "rate limited" wording. No `✦` arrives | ☐ |
+| 41 | **Model setting, recovery without a restart:** with row 40's toast on screen, set the model back to `gemini-2.5-flash` and post another message | The next quality batch uses the new model and the message upgrades to `✦`, with no Discord restart and no reinstall | ☐ |
+| 42 | **Model setting, blank:** clear the "Gemini model" field entirely, then post a message | Translation still works — a blank field means the default, and must never send an empty model (which would be a 400 on every request) | ☐ |
 
 If you'd rather work from the brief's original phrasing, items 1-3 and 5-6
 above correspond to the brief's manual checklist 1-8 (minus a redundant
@@ -711,7 +796,8 @@ above correspond to the brief's manual checklist 1-8 (minus a redundant
 "edit"); items 7-23 are the additional cases raised in code review that the
 brief's original list did not cover (cold-channel catch-up, duplicate-event
 counting, mid-flight re-selection, retry-on-reopen, persistence-failure UX,
-and the empty/invalid/fixed API-key sequence); items 31-38 are the two-tier
+and the empty/invalid/fixed API-key sequence); items 39-42 cover the
+configurable Gemini model and the model-naming 429 toast; items 31-38 are the two-tier
 pipeline and romanized-text cases added for this task, taken verbatim from
 the two-tier plan's own manual checklist (`docs/superpowers/plans/2026-08-05-two-tier-translation.md`),
 renumbered to continue this table's existing sequence rather than colliding

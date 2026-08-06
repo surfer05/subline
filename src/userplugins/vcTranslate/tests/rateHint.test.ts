@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { quotaLimitFromGeminiBody, retryAfterFromGeminiBody, retryAfterFromHeader } from "../rateHint";
+import {
+    modelFromGeminiBody, quotaLimitFromGeminiBody, retryAfterFromGeminiBody, retryAfterFromHeader
+} from "../rateHint";
 import {
     REAL_GEMINI_429_BODY, REAL_GEMINI_429_LIMIT, REAL_GEMINI_429_RETRY_MS
 } from "./fixtures/real429";
@@ -131,5 +133,39 @@ describe("quotaLimitFromGeminiBody", () => {
 
     it("returns undefined for a nonsensical limit rather than throttling to nothing", () => {
         expect(quotaLimitFromGeminiBody({ error: { message: "limit: 0" } })).toBeUndefined();
+    });
+});
+
+describe("modelFromGeminiBody", () => {
+    it("reads the model the real 429 body says the quota belongs to", () => {
+        // This is the number-free half of the same message, and the only thing
+        // that distinguishes "this key cannot call this model at all" (a
+        // permanent 429 a settings change fixes) from ordinary throttling.
+        expect(modelFromGeminiBody(REAL_GEMINI_429_BODY)).toBe("gemini-3.6-flash");
+    });
+
+    it("stops at the model name and does not swallow the prose after it", () => {
+        // "... model: gemini-2.5-flash Please retry in 551.874307ms." — the
+        // value goes straight into a toast, so it must not drag a sentence in.
+        expect(modelFromGeminiBody({
+            error: { message: "limit: 20, model: gemini-2.5-flash Please retry in 2s." }
+        })).toBe("gemini-2.5-flash");
+    });
+
+    it("returns undefined when the message names no model", () => {
+        expect(modelFromGeminiBody({ error: { message: "Please retry in 2s." } })).toBeUndefined();
+        expect(modelFromGeminiBody(null)).toBeUndefined();
+        expect(modelFromGeminiBody({ error: { details: [{ retryDelay: "2s" }] } })).toBeUndefined();
+    });
+
+    it("does not let a hostile body smuggle arbitrary text into the toast", () => {
+        // The body is remote input. The capture is bounded to model-name
+        // characters so it cannot carry markup, newlines or a fake instruction.
+        expect(modelFromGeminiBody({
+            error: { message: "model: evil<script>alert(1)</script>" }
+        })).toBe("evil");
+        expect(modelFromGeminiBody({
+            error: { message: "model: " + "a".repeat(500) }
+        })!.length).toBeLessThanOrEqual(64);
     });
 });

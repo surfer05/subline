@@ -64,6 +64,22 @@ const RETRY_IN_RE = /retry\s+in\s+(\d+(?:\.\d+)?)\s*(ms|s)\b/i;
  */
 const QUOTA_LIMIT_RE = /\blimit:\s*(\d+)\b/i;
 
+/**
+ * "model: gemini-3.6-flash" — the model the quota was enforced AGAINST.
+ *
+ * Worth extracting because a 429 naming a model is not necessarily a rate
+ * limit at all: a free-tier key with no allowance for that particular model
+ * returns one on the FIRST request of a session, at any rate, forever. That is
+ * a settings problem, and it is indistinguishable from throttling unless the
+ * model name survives as far as the user (see index.tsx's cooldown toast).
+ *
+ * The character class stops at the space before "Please retry in ...", and
+ * bounds what can reach a toast to model-name characters — the value is lifted
+ * out of a remote response, so it is quoted into UI text and must not be able
+ * to carry arbitrary prose along with it.
+ */
+const QUOTA_MODEL_RE = /\bmodel:\s*([A-Za-z0-9][A-Za-z0-9._-]{0,63})/i;
+
 /** `error.message` as a string, or undefined if the body isn't that shape. */
 function errorMessageText(body: unknown): string | undefined {
     if (body === null || typeof body !== "object") return undefined;
@@ -130,4 +146,19 @@ export function quotaLimitFromGeminiBody(body: unknown): number | undefined {
     const limit = Number(m[1]);
     if (!Number.isFinite(limit) || limit <= 0) return undefined;
     return limit;
+}
+
+/**
+ * The model a quota message names, when it names one. See QUOTA_MODEL_RE:
+ * this is what lets the renderer say "THIS MODEL is out of quota, try another"
+ * instead of "you are being rate limited", which is the same sentence a user
+ * sees on every launch when the real problem is that their key cannot call the
+ * configured model at all.
+ */
+export function modelFromGeminiBody(body: unknown): string | undefined {
+    const message = errorMessageText(body);
+    if (message === undefined) return undefined;
+
+    const m = QUOTA_MODEL_RE.exec(message);
+    return m ? m[1] : undefined;
 }
