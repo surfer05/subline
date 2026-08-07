@@ -7,16 +7,20 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildAsar, readAsarDirectory, readAsarFiles } from "../src/patcher/asar.js";
 import { buildStubAsar, parseRequirePath, readStub, STUB_PACKAGE_JSON } from "../src/patcher/stub.js";
 import {
+    badEntryTypesAsarBytes,
     buildOriginalDiscordAsar,
     FOREIGN_BUNDLE_JS,
     FOREIGN_ORIGINAL_HEADER_JSON,
     FOREIGN_PACKAGE_JSON,
     foreignOriginalAsarBytes,
+    noFileTableAsarBytes,
     REAL_STUB_HEADER_JSON,
     REAL_STUB_INDEX_JS,
     REAL_STUB_PACKAGE_JSON,
     REAL_VENCORD_LOADER_PATH,
-    realVencordStubBytes
+    realVencordStubBytes,
+    realVencordStubWithPrefix,
+    threeEntryAsarBytes
 } from "./fixture.js";
 
 /**
@@ -151,6 +155,116 @@ describe("the reader, on archives our writer did not produce", () => {
 
     it("treats a foreign Discord-shaped archive as an original, not a stub", () => {
         const path = tempFile("foreign-not-stub.asar", foreignOriginalAsarBytes());
+        const result = readStub(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value).toBeNull();
+    });
+});
+
+/**
+ * Each rejection gate, isolated.
+ *
+ * A first mutation pass killed the offset arithmetic and the alignment rule but
+ * left every one of these alive: a malformed file usually trips several gates
+ * at once, so "the suite still says INVALID_ASAR" was being satisfied by
+ * whichever gate happened to fire second. Each test below constructs a file
+ * that ONLY the named gate rejects, and asserts the specific message — so
+ * deleting that gate changes an observable, and `broken` cannot quietly become
+ * unreachable.
+ */
+describe("the reader's rejection gates, one at a time", () => {
+    it("rejects a bad size pickle even when every other word is consistent", () => {
+        // Byte-for-byte the real stub apart from word 0. Nothing else is wrong,
+        // so no other gate can account for the rejection.
+        const path = tempFile("badsizepickle.asar", realVencordStubWithPrefix(0, 8));
+        const result = readAsarDirectory(path);
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error.code).toBe("INVALID_ASAR");
+        expect(result.error.message).toContain("size pickle");
+    });
+
+    it("rejects an implausibly large declared header rather than allocating it", () => {
+        const path = tempFile("huge.asar", realVencordStubWithPrefix(12, 64 * 1024 * 1024));
+        const result = readAsarDirectory(path);
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error.code).toBe("INVALID_ASAR");
+        expect(result.error.message).toContain("implausible");
+    });
+
+    it("rejects a zero-length declared header", () => {
+        const path = tempFile("zerolen.asar", realVencordStubWithPrefix(12, 0));
+        const result = readAsarDirectory(path);
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error.code).toBe("INVALID_ASAR");
+        expect(result.error.message).toContain("implausible");
+    });
+
+    it("rejects a file too small to hold a prefix, by that name", () => {
+        const path = tempFile("tiny.asar", realVencordStubBytes().subarray(0, 8));
+        const result = readAsarDirectory(path);
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error.code).toBe("INVALID_ASAR");
+        expect(result.error.message).toContain("too small");
+    });
+
+    it("rejects a truncated header, by that name", () => {
+        // A well-formed prefix promising 88 bytes of JSON, in a file that stops
+        // partway through it.
+        const path = tempFile("cutshort.asar", realVencordStubBytes().subarray(0, 60));
+        const result = readAsarDirectory(path);
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error.code).toBe("INVALID_ASAR");
+        expect(result.error.message).toContain("truncated");
+    });
+
+    it("rejects a header that parses but has no file table, without throwing", () => {
+        // Without the explicit check this reaches Object.keys(undefined) and
+        // comes back as a generic IO_ERROR — the wrong named failure (spec §7).
+        const path = tempFile("nofiletable.asar", noFileTableAsarBytes());
+        const result = readAsarDirectory(path);
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error.code).toBe("INVALID_ASAR");
+        expect(result.error.message).toContain("file table");
+    });
+
+    it("ignores entries whose size or offset are the wrong type", () => {
+        // Every well-formed archive agrees with these checks, so only a
+        // deliberately ill-typed one can show they are load-bearing.
+        const path = tempFile("badtypes.asar", badEntryTypesAsarBytes());
+        const result = readAsarDirectory(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.names).toEqual(["ok.js", "numoff.js", "strsize.js"]);
+        // A numeric offset and a string size are both refused; only the
+        // well-typed entry becomes a readable file.
+        expect(result.value.files).toEqual([{ name: "ok.js", size: 2, offset: 0 }]);
+    });
+
+    it("refuses to read entries the archive does not contain", () => {
+        const path = tempFile("forfiles.asar", realVencordStubBytes());
+        const dirResult = readAsarDirectory(path);
+        expect(dirResult.ok).toBe(true);
+        if (!dirResult.ok) return;
+
+        const files = readAsarFiles(path, dirResult.value, ["index.js", "absent.js"]);
+        expect(files.ok).toBe(false);
+        if (files.ok) return;
+        expect(files.error.code).toBe("INVALID_ASAR");
+        expect(files.error.message).toContain("absent.js");
+    });
+
+    it("does not call a three-entry archive a loader stub", () => {
+        // A stub is exactly index.js + package.json. An archive that merely
+        // contains both is somebody's real app, and claiming it is an injection
+        // would report a clean install as modified.
+        const path = tempFile("three.asar", threeEntryAsarBytes());
         const result = readStub(path);
         expect(result.ok).toBe(true);
         if (!result.ok) return;

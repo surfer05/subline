@@ -132,6 +132,72 @@ export function foreignOriginalAsarBytes(): Buffer {
     return buf;
 }
 
+/**
+ * Assemble an archive from a literal header JSON and literal prefix words.
+ *
+ * The four words are passed in rather than derived, so a test can state a
+ * deliberately WRONG one and pin the gate that is supposed to reject it. Used
+ * only for the malformed cases below; the healthy fixtures above hardcode
+ * their bytes outright.
+ */
+export function asarFromParts(
+    sizePickle: number,
+    headerPickleLength: number,
+    headerPayloadLength: number,
+    jsonLength: number,
+    headerJson: string,
+    data: Buffer = Buffer.alloc(0)
+): Buffer {
+    const json = Buffer.from(headerJson, "utf8");
+    const padded = json.length % 4 === 0 ? json.length : json.length + (4 - (json.length % 4));
+    const head = Buffer.alloc(16 + padded);
+    head.writeUInt32LE(sizePickle, 0);
+    head.writeUInt32LE(headerPickleLength, 4);
+    head.writeUInt32LE(headerPayloadLength, 8);
+    head.writeUInt32LE(jsonLength, 12);
+    json.copy(head, 16);
+    return Buffer.concat([head, data]);
+}
+
+/** The real Vencord stub with one prefix word overwritten, to isolate a single gate. */
+export function realVencordStubWithPrefix(offset: 0 | 4 | 8 | 12, value: number): Buffer {
+    const buf = realVencordStubBytes();
+    buf.writeUInt32LE(value, offset);
+    return buf;
+}
+
+/**
+ * A header whose entries have the RIGHT names but the WRONG types: an offset
+ * that is a number instead of a string, and a size that is a string instead of
+ * a number. Real archives never do this, which is precisely why the reader's
+ * type checks are otherwise unobservable — every well-formed file agrees with
+ * them, so dropping them changes nothing a healthy fixture can see.
+ */
+export const BAD_TYPES_HEADER_JSON =
+    '{"files":{"ok.js":{"size":2,"offset":"0"},"numoff.js":{"size":3,"offset":0},'
+    + '"strsize.js":{"size":"4","offset":"2"}}}';
+
+export function badEntryTypesAsarBytes(): Buffer {
+    // jsonLength 116 (4-aligned), payload 120, pickle 124, data at 132.
+    return asarFromParts(4, 124, 120, 116, BAD_TYPES_HEADER_JSON, Buffer.from("OK", "utf8"));
+}
+
+/** Parses as JSON, but there is no `files` table at all. */
+export function noFileTableAsarBytes(): Buffer {
+    // jsonLength 20 (4-aligned), payload 24, pickle 28.
+    return asarFromParts(4, 28, 24, 20, '{"notfiles":{"a":1}}');
+}
+
+/** A stub's two entry names plus a third — must not be mistaken for a loader stub. */
+export const THREE_ENTRY_HEADER_JSON =
+    '{"files":{"index.js":{"size":5,"offset":"0"},"package.json":{"size":2,"offset":"5"},'
+    + '"extra.js":{"size":3,"offset":"7"}}}';
+
+export function threeEntryAsarBytes(): Buffer {
+    // jsonLength 120 (4-aligned), payload 124, pickle 128, data at 136.
+    return asarFromParts(4, 128, 124, 120, THREE_ENTRY_HEADER_JSON, Buffer.from("xxxxx{}yyy", "utf8"));
+}
+
 export interface FixtureOptions {
     appName?: string;
     /** Omit `app.asar` entirely (the interrupted-patch case). */

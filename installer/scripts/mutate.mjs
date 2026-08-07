@@ -1213,10 +1213,188 @@ const MUTATIONS = [
         find: "    productName: \"Subline\",",
         with: "    productName: \"Subline Installer\",",
         expect: "names an executable the LaunchAgent's ProgramArguments will actually find"
+    },
+
+    /* ---- patcher/asar.ts: the READER ----
+     *
+     * The reader used to be tested only against archives buildAsar produced,
+     * so writer and reader could share a wrong assumption and agree. These
+     * mutations are aimed at the reader alone, and are killed by the
+     * literal-byte fixtures in tests/fixture.ts (realVencordStubBytes,
+     * foreignOriginalAsarBytes) rather than by anything round-tripped.
+     */
+    {
+        name: "asar: data begins 16 bytes after the header pickle, not 8",
+        file: "src/patcher/asar.ts",
+        find: "dataOffset: 8 + headerPickleLength",
+        with: "dataOffset: 16 + headerPickleLength",
+        expect: "reads the real Vencord stub's directory without going through buildAsar"
+    },
+    {
+        name: "asar: data offset measured from the payload rather than the pickle",
+        file: "src/patcher/asar.ts",
+        find: "dataOffset: 8 + headerPickleLength",
+        with: "dataOffset: 8 + headerPayloadLength",
+        expect: "reads the real Vencord stub's directory without going through buildAsar"
+    },
+    {
+        name: "asar: header JSON length read from the payload word",
+        file: "src/patcher/asar.ts",
+        find: "const jsonLength = prefix.readUInt32LE(12);",
+        with: "const jsonLength = prefix.readUInt32LE(8);",
+        expect: "reads the real Vencord stub's directory without going through buildAsar"
+    },
+    {
+        name: "asar: header JSON read from the wrong file position",
+        file: "src/patcher/asar.ts",
+        find: "readSync(fd, jsonBuf, 0, jsonLength, 16)",
+        with: "readSync(fd, jsonBuf, 0, jsonLength, 20)",
+        expect: "reads the real Vencord stub's directory without going through buildAsar"
+    },
+    {
+        name: "asar: header padding rule dropped",
+        file: "src/patcher/asar.ts",
+        find: "    return rem === 0 ? n : n + (PICKLE_ALIGNMENT - rem);",
+        with: "    return n;",
+        expect: "reads a foreign archive with padding, nested dirs, integrity, unpacked and link entries"
+    },
+    {
+        name: "asar: already-aligned lengths padded anyway",
+        file: "src/patcher/asar.ts",
+        find: "    return rem === 0 ? n : n + (PICKLE_ALIGNMENT - rem);",
+        with: "    return n + (PICKLE_ALIGNMENT - rem);",
+        expect: "reads the real Vencord stub's directory without going through buildAsar"
+    },
+    {
+        name: "asar: entries with a non-string offset treated as files",
+        file: "src/patcher/asar.ts",
+        find: 'if (typeof size !== "number" || typeof offset !== "string") continue; // a directory or link',
+        with: 'if (typeof size !== "number") continue; // a directory or link',
+        expect: "ignores entries whose size or offset are the wrong type"
+    },
+    {
+        name: "asar: entries with a non-number size treated as files",
+        file: "src/patcher/asar.ts",
+        find: 'if (typeof size !== "number" || typeof offset !== "string") continue; // a directory or link',
+        with: 'if (typeof offset !== "string") continue; // a directory or link',
+        expect: "ignores entries whose size or offset are the wrong type"
+    },
+    {
+        name: "asar: directory names dropped from the entry list",
+        file: "src/patcher/asar.ts",
+        find: "return ok({ names, files, dataOffset: 8 + headerPickleLength, headerJson });",
+        with: "return ok({ names: files.map(f => f.name), files, dataOffset: 8 + headerPickleLength, headerJson });",
+        expect: "reads a foreign archive with padding, nested dirs, integrity, unpacked and link entries"
+    },
+    {
+        name: "asar: the size-pickle gate never fires",
+        file: "src/patcher/asar.ts",
+        find: "if (sizePickleLength !== 4) {",
+        with: "if (false) {",
+        expect: "rejects a bad size pickle even when every other word is consistent"
+    },
+    {
+        name: "asar: the implausible-header-length gate never fires",
+        file: "src/patcher/asar.ts",
+        find: "if (jsonLength === 0 || jsonLength > MAX_HEADER_BYTES) {",
+        with: "if (false) {",
+        expect: "rejects an implausibly large declared header rather than allocating it"
+    },
+    {
+        name: "asar: the too-small-to-be-an-asar gate never fires",
+        file: "src/patcher/asar.ts",
+        find: "if (readPrefix < 16) {",
+        with: "if (false) {",
+        expect: "rejects a file too small to hold a prefix, by that name"
+    },
+    {
+        name: "asar: the truncated-header gate never fires",
+        file: "src/patcher/asar.ts",
+        find: "if (readJson < jsonLength) {",
+        with: "if (false) {",
+        expect: "rejects a truncated header, by that name"
+    },
+    {
+        name: "asar: the missing-file-table gate never fires",
+        file: "src/patcher/asar.ts",
+        find: 'if (typeof filesNode !== "object" || filesNode === null) {',
+        with: "if (false) {",
+        expect: "rejects a header that parses but has no file table, without throwing"
+    },
+    {
+        name: "asar: entry data read without the archive's data offset",
+        file: "src/patcher/asar.ts",
+        find: "readSync(fd, buf, 0, entry.size, directory.dataOffset + entry.offset)",
+        with: "readSync(fd, buf, 0, entry.size, entry.offset)",
+        expect: "reads payload out of a foreign archive at the padded data offset"
+    },
+    {
+        name: "asar: entry data read without the entry's own offset",
+        file: "src/patcher/asar.ts",
+        find: "readSync(fd, buf, 0, entry.size, directory.dataOffset + entry.offset)",
+        with: "readSync(fd, buf, 0, entry.size, directory.dataOffset)",
+        expect: "reads payload out of a foreign archive at the padded data offset"
+    },
+    {
+        name: "asar: reading absent entries returns an empty map instead of failing",
+        file: "src/patcher/asar.ts",
+        find: "if (missing.length > 0) {",
+        with: "if (false) {",
+        expect: "refuses to read entries the archive does not contain"
+    },
+
+    /* ---- patcher/stub.ts ---- */
+    {
+        name: "stub: any archive containing index.js and package.json is a stub",
+        file: "src/patcher/stub.ts",
+        find: "names.size === 2 && names.has(STUB_INDEX_NAME) && names.has(STUB_PACKAGE_NAME)",
+        with: "names.has(STUB_INDEX_NAME) && names.has(STUB_PACKAGE_NAME)",
+        expect: "does not call a three-entry archive a loader stub"
+    },
+
+    /* ---- the literal fixtures themselves ----
+     *
+     * If the transcribed bytes drift from the live archive they describe, the
+     * reader tests above are pinned to nothing. These mutate the fixture rather
+     * than the source, so a wrong constant has to be caught too.
+     */
+    {
+        name: "fixture: the real stub's header pickle length is transcribed wrongly",
+        file: "tests/fixture.ts",
+        find: "    buf.writeUInt32LE(96, 4);",
+        with: "    buf.writeUInt32LE(100, 4);",
+        expect: "the literal fixture really is the bytes captured from the live install"
+    },
+    {
+        name: "fixture: the foreign archive's header length is transcribed wrongly",
+        file: "tests/fixture.ts",
+        find: "    buf.writeUInt32LE(318, 12);",
+        with: "    buf.writeUInt32LE(316, 12);",
+        expect: "reads a foreign archive with padding, nested dirs, integrity, unpacked and link entries"
+    },
+    {
+        name: "fixture: the foreign archive's alignment padding carries data",
+        file: "tests/fixture.ts",
+        find: '    buf.write(FOREIGN_BUNDLE_JS, 336, "utf8");',
+        with: '    buf.write("XX", 334, "utf8");\n    buf.write(FOREIGN_BUNDLE_JS, 336, "utf8");',
+        expect: "the foreign-original literal describes the bytes it claims to"
+    },
+
+    /* ---- tests/helper.test.ts: the fixture clock ----
+     *
+     * START must stay RELATIVE to the real clock. As a fixed instant it worked
+     * until real time overtook it, then failed four health tests with no code
+     * change. This mutation restores the fixed instant it used to be.
+     */
+    {
+        name: "helper fixture: the clock anchor is a fixed instant again",
+        file: "tests/helper.test.ts",
+        find: "const START = Date.now() + 24 * 60 * 60 * 1000;",
+        with: 'const START = Date.parse("2026-08-07T09:00:00.000Z");',
+        expect: "says QUIET, and warns nobody, for an install with nothing to translate"
     }
 
 ];
-
 /* ------------------------------------------------------------------------ */
 
 function runSuite() {
