@@ -6,7 +6,10 @@
  * That ends a product's reputation early." So "patched by someone else" is a
  * first-class outcome with the mod named, not a generic "already patched".
  */
-import { existsSync, statSync } from "node:fs";
+// realFs, NOT node:fs: Electron treats any ".asar" path as a virtual archive,
+// so even existsSync/statSync on app.asar answer about a mount rather than the
+// file. See realFs.ts.
+import { existsSync, statSync } from "./realFs.js";
 import { join } from "node:path";
 import { readMarker } from "./marker.js";
 import { err, ok } from "./result.js";
@@ -84,7 +87,18 @@ export function inspectInstall(install) {
     const marker = markerResult.value;
     const stubResult = readStub(install.asarPath);
     if (!stubResult.ok) {
-        return ok(broken(install, "asar-unreadable", `Discord's app.asar could not be read as an archive (${stubResult.error.message})`));
+        // Two very different failures, and collapsing them into one told a user
+        // with a perfectly healthy Vencord install that Discord "needs
+        // repairing" — pointing them at repair and uninstall for a file that
+        // was never damaged. IO_ERROR means we could not OPEN it (permissions,
+        // sandboxing, Electron's asar interception); only a parse failure means
+        // the archive itself is bad.
+        const inaccessible = stubResult.error.code === "IO_ERROR";
+        return ok(broken(install, inaccessible ? "asar-inaccessible" : "asar-unreadable", inaccessible
+            ? "Subline could not open Discord's app.asar. Discord itself is "
+                + "probably fine — this is normally a permissions problem. "
+                + `(${stubResult.error.message})`
+            : `Discord's app.asar could not be read as an archive (${stubResult.error.message})`));
     }
     const stub = stubResult.value;
     if (stub === null) {

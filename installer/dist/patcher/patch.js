@@ -21,7 +21,10 @@
  * original and must not be overwritten with someone else's stub. The old stub
  * is held in memory instead, which is what rollback restores.
  */
-import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+// realFs, NOT node:fs: Electron treats any ".asar" path as a virtual archive to
+// mount rather than a file, so the rename, the stub write and the verify
+// read-back all misbehave inside the packaged app. See realFs.ts.
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "./realFs.js";
 import { join } from "node:path";
 import { inspectModBundle } from "../bundle/bundle.js";
 import { markerPathFor, MARKER_FORMAT, readMarker, removeMarker, writeMarker } from "./marker.js";

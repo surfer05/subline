@@ -158,8 +158,13 @@ function renderExtra(state: FlowState): void {
             const node = document.createElement("option");
             node.value = option.code;
             // The endonym leads. Someone who cannot read English must be able to
-            // find their own language in this list (§3a).
-            node.textContent = `${option.endonym} — ${option.englishName}`;
+            // find their own language in this list (§3a). The English name
+            // follows it only when it ADDS something — "Deutsch — German" helps,
+            // "English — English" just looks like a bug, and it is the first
+            // row an English-speaking user sees.
+            node.textContent = option.endonym === option.englishName
+                ? option.endonym
+                : `${option.endonym} — ${option.englishName}`;
             if (option.code === state.language) node.selected = true;
             select.append(node);
         }

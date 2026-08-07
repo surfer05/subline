@@ -65,8 +65,27 @@ const ACTION_LABELS = {
 /** Which action gets the filled button. One per screen, never two. */
 const PRIMARY = ["next", "set-language", "proceed-over-mod", "quit-discord", "retry", "finish", "open-permission-settings"];
 let chosenLanguage = null;
+/**
+ * The heading, with one override.
+ *
+ * `broken-install` normally does mean Discord is damaged. But the same step is
+ * reached when we merely could not OPEN app.asar — a permissions problem on a
+ * perfectly healthy install. Announcing "Discord needs repairing" there, beside
+ * a repair button and an Uninstall link, points the user at destructive
+ * remedies for a file that was never broken. See BrokenReason's
+ * `asar-inaccessible`.
+ */
+function headingFor(state) {
+    const s = state;
+    if (state.step === "broken-install"
+        && s.installState?.kind === "broken"
+        && s.installState.reason === "asar-inaccessible") {
+        return "Subline couldn't read Discord";
+    }
+    return STEP_TITLES[state.step] ?? state.step;
+}
 function render(state) {
-    stepName.textContent = STEP_TITLES[state.step] ?? state.step;
+    stepName.textContent = headingFor(state);
     detail.textContent = state.detail;
     if (state.busy) {
         const spinner = document.createElement("span");
