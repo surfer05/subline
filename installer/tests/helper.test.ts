@@ -432,6 +432,91 @@ describe("when re-patching fails", () => {
         expect(readPendingAlerts(harness.productDir).map(entry => entry.code)).toContain("repatch-failed");
     });
 
+    it("records that Discord still starts, so the log answers the only question that matters", async () => {
+        patchForReal(harness);
+        await harness.run();
+        simulateDiscordUpdate(harness.fixture.install, "0.0.407");
+
+        const failing: HelperPorts = {
+            ...harness.ports,
+            patch: (install, options) =>
+                patchInstall(install, {
+                    modBundleDir: options.modBundleDir,
+                    productVersion: PRODUCT_VERSION,
+                    hooks: { afterWrite: ({ asarPath }) => writeFileSync(asarPath, "not an asar at all") }
+                })
+        };
+        const report = await runHelperOnce(failing, { settle: FAST_SETTLE });
+
+        const failure = report.decisions.find(entry => entry.kind === "repatch" && entry.outcome === "failed");
+        expect(failure?.fields.discordStartable).toBe(true);
+        expect(failure?.fields.code).toBe("VERIFICATION_FAILED");
+        expect(failure?.fields.broken).toBeNull();
+    });
+
+    it("raises the LOUD alert when the rollback itself failed", async () => {
+        patchForReal(harness);
+        await harness.run();
+        simulateDiscordUpdate(harness.fixture.install, "0.0.407");
+
+        // The one outcome worse than a failed patch. There is no fixture that
+        // provokes a rename failure reliably, so the port supplies the error.
+        const failing: HelperPorts = {
+            ...harness.ports,
+            patch: () => err("ROLLBACK_FAILED", "Patching failed and Discord could not be restored automatically.")
+        };
+        const report = await runHelperOnce(failing, { settle: FAST_SETTLE });
+
+        expect(report.alerts.map(entry => entry.alert.code)).toEqual(["rollback-failed"]);
+        expect(harness.notifications[0]?.message).toContain("could not put Discord's own files back");
+    });
+
+    it("names the missing backup rather than giving the generic failure", async () => {
+        // §8's hardest case, reached for real: our stub is in place and Discord's
+        // own archive is gone, so nothing here can repair it and the user needs a
+        // different sentence — reinstall Discord, not "try again".
+        patchForReal(harness);
+        await harness.run();
+        unlinkSync(harness.fixture.install.backupPath);
+
+        const report = await harness.run();
+
+        expect(report.failed).toEqual([harness.fixture.install.rootPath]);
+        expect(report.alerts.map(entry => entry.alert.code)).toEqual(["backup-missing"]);
+        expect(harness.notifications[0]?.message).toContain("copy of Discord's original files is gone");
+        const failure = report.decisions.find(entry => entry.kind === "repatch" && entry.outcome === "failed");
+        expect(failure?.fields.code).toBe("BROKEN_INSTALL");
+        expect(failure?.fields.broken).toBe("our-patch-without-backup");
+        // The other half of the observation, and the half only this case can
+        // prove: `discordStartable` has to be able to come back FALSE. Every
+        // other failure here leaves a working Discord, so a version that always
+        // said "startable" would look right in all of them.
+        expect(failure?.fields.discordStartable).toBe(false);
+    });
+
+    it("gives an ordinary failure a second chance before telling anybody", async () => {
+        // A transient IO error while an update is landing is not news. Two in a
+        // row is.
+        patchForReal(harness);
+        await harness.run();
+        simulateDiscordUpdate(harness.fixture.install, "0.0.407");
+
+        const failing: HelperPorts = {
+            ...harness.ports,
+            patch: () => err("IO_ERROR", "Failed to write the new app.asar.")
+        };
+
+        const first = await runHelperOnce(failing, { settle: FAST_SETTLE });
+        expect(first.failed).toHaveLength(1);
+        expect(first.alerts).toEqual([]);
+        expect(harness.notifications).toEqual([]);
+
+        harness.advance(60 * 60_000);
+        const second = await runHelperOnce(failing, { settle: FAST_SETTLE });
+        expect(second.alerts.map(entry => entry.alert.code)).toEqual(["repatch-failed"]);
+        expect(second.alerts[0]?.alert.detail.failures).toBe(2);
+    });
+
     it("does not notify twice for the same unfixable condition", async () => {
         patchForReal(harness);
         await harness.run();
@@ -609,6 +694,49 @@ describe("trigger B — a new mod build", () => {
         harness.advance(60_000);
         const report = await harness.run({ updateIntervalMs: 6 * 60 * 60_000 });
         expect(report.updateChecked).toBe(true);
+    });
+
+    it("checks anyway, throttle or not, when the installed bundle is unusable", async () => {
+        // A broken bundle is exactly what trigger B can replace, so waiting six
+        // hours to look would be waiting on the one thing that could fix it. It is
+        // also how a half-deleted mod directory repairs itself.
+        patchForReal(harness);
+        harness.feed = ok(releaseDocument(harness.shipped.buildId, new TextEncoder().encode("x")));
+        await harness.run({ forceUpdateCheck: true });
+
+        rmSync(join(harness.runtimeDir, "renderer.js"), { force: true });
+        harness.advance(60_000);
+        const report = await harness.run({ updateIntervalMs: 6 * 60 * 60_000 });
+
+        expect(report.updateChecked).toBe(true);
+        expect(harness.logged).toContain("helper.scan bundle-unusable");
+    });
+
+    it("clears the 'needs an update' alert once the update lands", async () => {
+        patchForReal(harness);
+        harness.feed = ok(releaseDocument(harness.shipped.buildId, new TextEncoder().encode("x")));
+        for (let index = 0; index < 4; index += 1) {
+            harness.advance(3 * 60 * 60_000);
+            writeBeacon(harness.beaconPath, harness.shipped.buildId, {
+                loadedAt: new Date(harness.clock - 60_000).toISOString(),
+                lastTranslationAt: new Date(harness.clock).toISOString(),
+                lastRenderedAt: null,
+                counts: { approx: 9, upgraded: 0 }
+            });
+            await harness.run({ forceUpdateCheck: true });
+        }
+        expect(readPendingAlerts(harness.productDir).map(entry => entry.code)).toEqual(["mod-stale"]);
+
+        const next = makeModBundleFixture({ buildId: "9988776655443322" });
+        harness.nextBundle = next;
+        const bytes = new TextEncoder().encode("a zip");
+        harness.feed = ok(releaseDocument(next.buildId, bytes));
+        harness.download = ok(bytes);
+        harness.advance(60_000);
+        const report = await harness.run({ forceUpdateCheck: true });
+
+        expect(report.updateInstalled).toBe("9988776655443322");
+        expect(readPendingAlerts(harness.productDir)).toEqual([]);
     });
 
     it("is disabled cleanly when no feed is configured, rather than failing every run", async () => {

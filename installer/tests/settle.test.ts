@@ -186,7 +186,34 @@ describe("waiting for Discord's updater to settle", () => {
 
         expect(report.settled).toBe(false);
         expect(report.status).toBe("discord-running");
+        // The budget is spent as a NUMBER OF OBSERVATIONS derived from it, so
+        // the time it took can never exceed it either.
+        expect(report.attempts).toBe(3);
+        expect(report.waitedMs).toBe(30_000);
         expect(report.waitedMs).toBeLessThanOrEqual(40_000);
+    });
+
+    it("TERMINATES even when the clock never advances", async () => {
+        // Found by a mutation probe, which hung the whole suite. The loop used to
+        // be bounded only by `now()` — a port the CALLER supplies — so a clock
+        // that does not move (a coarse timer, a suspended machine reporting the
+        // same instant) made this run forever inside a background process nobody
+        // is watching. It starves the event loop with microtasks, so not even a
+        // test timeout fires: the failure mode is a hang, not an error.
+        const frozen: SettlePorts = {
+            now: () => 1_000_000,
+            sleep: async () => undefined,
+            discordRunning: async () => true,
+            mtimeOf: () => 0,
+            readDiscordVersion: () => ok({ version: "0.0.406", releaseChannel: "stable", raw: {} })
+        };
+        const report = await awaitDiscordSettled(INSTALL, frozen, OPTIONS);
+
+        expect(report.settled).toBe(false);
+        expect(report.status).toBe("discord-running");
+        expect(report.waitedMs).toBe(0);
+        // Bounded by observations, derived from the budget: 120s / 15s + 1.
+        expect(report.attempts).toBe(9);
     });
 
     it("takes one look even when there is no budget at all", async () => {
@@ -195,6 +222,7 @@ describe("waiting for Discord's updater to settle", () => {
 
         expect(report.status).toBe("discord-running");
         expect(report.reason).toContain("Discord is running");
+        expect(report.attempts).toBe(1);
     });
 
     it("refuses to call an install settled when nothing under Resources can be dated", async () => {

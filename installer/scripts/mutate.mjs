@@ -403,6 +403,418 @@ const MUTATIONS = [
         find: "                ...(options.searchRoots === undefined ? {} : { searchRoots: options.searchRoots }),",
         with: "",
         expect: "finds, patches and verifies a temp-directory Discord"
+    },
+
+    /* ==================================================================== *
+     * The background helper (spec §6). Two triggers, a health check that
+     * must not cry wolf, and a LaunchAgent nothing here ever registers.
+     * ==================================================================== */
+
+    {
+        name: "settle: never asks whether Discord is running",
+        file: "src/helper/settle.ts",
+        find: "if (await ports.discordRunning(install)) {",
+        with: "if (false) {",
+        expect: "refuses to act while Discord is running"
+    },
+    {
+        name: "settle: the quiet window is ignored",
+        file: "src/helper/settle.ts",
+        find: "if (quietFor === null || quietFor < quietMs) {",
+        with: "if (false) {",
+        expect: "refuses while files under Resources are still being written"
+    },
+    {
+        name: "settle: decides on ONE observation instead of two",
+        file: "src/helper/settle.ts",
+        find: "                const second = sample(install, ports);",
+        with: "                const second = first;",
+        expect: "does NOT settle on a quiet gap between two of the updater's own writes"
+    },
+    {
+        name: "settle: a version change during the confirmation is ignored",
+        file: "src/helper/settle.ts",
+        find: "if (second.version !== first.version) {",
+        with: "if (false) {",
+        expect: "does NOT settle on a quiet gap between two of the updater's own writes"
+    },
+    {
+        name: "settle: a file change during the confirmation is ignored",
+        file: "src/helper/settle.ts",
+        find: "} else if (second.newestMtime !== first.newestMtime) {",
+        with: "} else if (false) {",
+        expect: "does NOT settle when a file changes during the confirmation delay"
+    },
+    {
+        name: "settle: Discord starting during the confirmation is ignored",
+        file: "src/helper/settle.ts",
+        find: "} else if (await ports.discordRunning(install)) {",
+        with: "} else if (false) {",
+        expect: "does NOT settle when Discord starts during the confirmation delay"
+    },
+    {
+        name: "settle: an install nothing can date counts as quiet",
+        file: "src/helper/settle.ts",
+        find: "if (quietFor === null || quietFor < quietMs) {",
+        with: "if (quietFor !== null && quietFor < quietMs) {",
+        expect: "refuses to call an install settled when nothing under Resources can be dated"
+    },
+    {
+        name: "settle: the observation budget is off by one, so it overruns maxWaitMs",
+        file: "src/helper/settle.ts",
+        find: "    const maxAttempts = Math.floor(maxWaitMs / Math.max(1, pollMs)) + 1;",
+        with: "    const maxAttempts = Math.floor(maxWaitMs / Math.max(1, pollMs)) + 2;",
+        expect: "gives up within its budget"
+    },
+    {
+        name: "settle: a zero poll interval divides by zero and never bounds the loop",
+        file: "src/helper/settle.ts",
+        find: "    const maxAttempts = Math.floor(maxWaitMs / Math.max(1, pollMs)) + 1;",
+        with: "    const maxAttempts = 1;",
+        expect: "keeps waiting and settles once the update finishes"
+    },
+    {
+        name: "health: a quiet install counts as suspicious",
+        file: "src/helper/health.ts",
+        find: "const SUSPICIOUS: readonly VerificationStatus[] = [\"translating-not-rendering\"];",
+        with: "const SUSPICIOUS: readonly VerificationStatus[] = [\"translating-not-rendering\", \"loaded-idle\"];",
+        expect: "calls a loaded mod with nothing to translate QUIET"
+    },
+    {
+        name: "health: an erroring engine counts as a stale build",
+        file: "src/helper/health.ts",
+        find: "const SUSPICIOUS: readonly VerificationStatus[] = [\"translating-not-rendering\"];",
+        with: "const SUSPICIOUS: readonly VerificationStatus[] = [\"translating-not-rendering\", \"loaded-erroring\"];",
+        expect: "reports an erroring engine under its own name and NEVER as broken"
+    },
+    {
+        name: "health: silence counts as evidence",
+        file: "src/helper/health.ts",
+        find: "const SUSPICIOUS: readonly VerificationStatus[] = [\"translating-not-rendering\"];",
+        with: "const SUSPICIOUS: readonly VerificationStatus[] = [\"translating-not-rendering\", \"not-loaded\"];",
+        expect: "never escalates when nothing has reported in"
+    },
+    {
+        name: "health: escalates without enough observations",
+        file: "src/helper/health.ts",
+        find: "const qualifies = observations >= minObservations && sustainedMs >= minWindowMs;",
+        with: "const qualifies = sustainedMs >= minWindowMs;",
+        expect: "does not escalate on a long window with too few sightings"
+    },
+    {
+        name: "health: escalates without a long enough window",
+        file: "src/helper/health.ts",
+        find: "const qualifies = observations >= minObservations && sustainedMs >= minWindowMs;",
+        with: "const qualifies = observations >= minObservations;",
+        expect: "does not escalate on enough sightings that are all too close together"
+    },
+    {
+        name: "health: re-escalates on every run",
+        file: "src/helper/health.ts",
+        find: "escalated: qualifies && !wasBroken,",
+        with: "escalated: qualifies,",
+        expect: "escalates only ONCE"
+    },
+    {
+        name: "health: suspicion survives a healthy or quiet observation",
+        file: "src/helper/health.ts",
+        find: "                suspectSince: null,\n                observations: 0",
+        with: "                suspectSince: previous.suspectSince,\n                observations: previous.observations",
+        expect: "clears the suspicion on a QUIET observation too"
+    },
+    {
+        name: "release: the digest is not compared",
+        file: "src/helper/release.ts",
+        find: "if (digest !== manifest.artifact.sha256) {",
+        with: "if (false) {",
+        expect: "refuses bytes of the right length whose digest differs"
+    },
+    {
+        name: "release: the byte count is not compared",
+        file: "src/helper/release.ts",
+        find: "if (bytes.byteLength !== manifest.artifact.bytes) {",
+        with: "if (false) {",
+        expect: "names the byte counts when a download arrives short"
+    },
+    {
+        name: "release: plain http is fetched",
+        file: "src/helper/release.ts",
+        find: "if (parsed.protocol !== \"https:\") {",
+        with: "if (false) {",
+        expect: "refuses plain http even on an allowed host"
+    },
+    {
+        name: "release: any host is fetched from",
+        file: "src/helper/release.ts",
+        find: "if (!ALLOWED_RELEASE_HOSTS.includes(parsed.hostname)) {",
+        with: "if (false) {",
+        expect: "refuses https on a host that is not ours"
+    },
+    {
+        name: "release: an artefact with no checksum is accepted",
+        file: "src/helper/release.ts",
+        find: "if (typeof artifact.sha256 !== \"string\" || !SHA256_PATTERN.test(artifact.sha256)) {",
+        with: "if (false) {",
+        expect: "refuses an artefact with no checksum"
+    },
+    {
+        name: "release: an empty verifier list passes everything",
+        file: "src/helper/release.ts",
+        find: "if (verifiers.length === 0) {",
+        with: "if (false) {",
+        expect: "refuses an empty verifier list"
+    },
+    {
+        name: "release: verification becomes any-of instead of all-of",
+        file: "src/helper/release.ts",
+        find: "if (!result.ok) return result as Result<VerifiedRelease>;",
+        with: "if (!result.ok) continue;",
+        expect: "requires EVERY verifier to pass"
+    },
+    {
+        name: "release: a malformed build id is accepted",
+        file: "src/helper/release.ts",
+        find: "if (typeof parsed.buildId !== \"string\" || !BUILD_ID_PATTERN.test(parsed.buildId)) {",
+        with: "if (typeof parsed.buildId !== \"string\") {",
+        expect: "refuses a build id that could never match a bundle's"
+    },
+    {
+        name: "release: any manifest format is understood",
+        file: "src/helper/release.ts",
+        find: "if (parsed.format !== RELEASE_MANIFEST_FORMAT) {",
+        with: "if (false) {",
+        expect: "refuses a format it does not understand"
+    },
+    {
+        name: "release: a rolled-back release is never applied",
+        file: "src/helper/release.ts",
+        find: "return manifest.buildId !== installedBuildId;",
+        with: "return installedBuildId !== null && manifest.buildId > installedBuildId;",
+        expect: "treats any different build id as something to install"
+    },
+    {
+        name: "launchAgent: the plist is not XML-escaped",
+        file: "src/helper/launchAgent.ts",
+        find: "        .replace(/&/g, \"&amp;\")",
+        with: "        .replace(/&/g, \"&\")",
+        expect: "escapes a path launchd would otherwise refuse to parse"
+    },
+    {
+        name: "launchAgent: a live agent is not unregistered before its plist is rewritten",
+        file: "src/helper/launchAgent.ts",
+        find: "    const replaced = await launchctl.isLoaded(spec.label, uid);\n    if (replaced) {",
+        with: "    const replaced = await launchctl.isLoaded(spec.label, uid);\n    if (false) {",
+        expect: "unregisters an existing agent BEFORE rewriting its plist"
+    },
+    {
+        name: "launchAgent: a plist is left behind after a failed registration",
+        file: "src/helper/launchAgent.ts",
+        find: "            rmSync(plistPath, { force: true });\n        } catch {\n            // Reporting the registration failure matters more than the tidy-up.",
+        with: "            void plistPath;\n        } catch {\n            // Reporting the registration failure matters more than the tidy-up.",
+        expect: "leaves no plist behind when registration fails"
+    },
+    {
+        name: "launchAgent: registration is assumed rather than confirmed",
+        file: "src/helper/launchAgent.ts",
+        find: "    const loaded = await launchctl.isLoaded(spec.label, uid);\n    if (!loaded) {",
+        with: "    const loaded = true;\n    if (!loaded) {",
+        expect: "CONFIRMS the registration instead of trusting launchctl"
+    },
+    {
+        name: "launchAgent: the plist is deleted even when the agent could not be stopped",
+        file: "src/helper/launchAgent.ts",
+        find: "        if (!booted.ok) {\n            return err<boolean>(",
+        with: "        if (false) {\n            return err<boolean>(",
+        expect: "KEEPS the plist when unregistering fails"
+    },
+    {
+        name: "launchAgent: it never runs at login",
+        file: "src/helper/launchAgent.ts",
+        find: "        runAtLoad: true",
+        with: "        runAtLoad: false",
+        expect: "runs at login AND periodically"
+    },
+    {
+        name: "launchAgent: a zero interval is emitted, which launchd reads as unbounded",
+        file: "src/helper/launchAgent.ts",
+        find: "<integer>${Math.max(1, Math.trunc(spec.intervalSeconds))}</integer>",
+        with: "<integer>${Math.trunc(spec.intervalSeconds)}</integer>",
+        expect: "never emits a zero or negative interval"
+    },
+    {
+        name: "launchAgent: the agent runs a separate binary instead of the app",
+        file: "src/helper/launchAgent.ts",
+        find: "return [join(appPath, \"Contents\", \"MacOS\", executableName), HELPER_FLAG];",
+        with: "return [join(appPath, \"..\", \"subline-helper\"), HELPER_FLAG];",
+        expect: "runs THE APP with a flag, not a separate binary"
+    },
+    {
+        name: "helper: patches without waiting for the updater to settle",
+        file: "src/helper/helper.ts",
+        find: "    if (!settled.settled) {",
+        with: "    if (false) {",
+        expect: "defers while Discord is running rather than patching underneath it"
+    },
+    {
+        name: "helper: silently patches over another client mod",
+        file: "src/helper/helper.ts",
+        find: "        if (state.kind === \"patched-by-other\") {",
+        with: "        if (false) {",
+        expect: "refuses to patch over another client mod that arrived after us"
+    },
+    {
+        name: "helper: forgets an install the moment its marker is gone",
+        file: "src/helper/helper.ts",
+        find: "        const oursOnce = remembered !== undefined;",
+        with: "        const oursOnce = false;",
+        expect: "knows an install is ours from its own memory once the marker is gone"
+    },
+    {
+        name: "helper: acts on a Discord it has never patched",
+        file: "src/helper/helper.ts",
+        find: "        if (!oursNow && !oursOnce) {",
+        with: "        if (false) {",
+        expect: "ignores a Discord Subline has never patched"
+    },
+    {
+        name: "helper: the downloaded bundle's identity is not checked against the release",
+        file: "src/helper/helper.ts",
+        find: "        if (inspected.value.buildId !== manifest.buildId) {",
+        with: "        if (false) {",
+        expect: "installs nothing when the archive's bundle is not the build the release claimed"
+    },
+    {
+        name: "helper: every update failure is treated as never-transient",
+        file: "src/helper/helper.ts",
+        find: "    const immediate = error.code === \"RELEASE_UNVERIFIED\";",
+        with: "    const immediate = true;",
+        expect: "does not cry wolf about a network that is merely down"
+    },
+    {
+        name: "helper: a new build is installed but nothing is re-patched",
+        file: "src/helper/helper.ts",
+        find: "        const refreshed = refresh(run, entry);",
+        with: "        const refreshed = null;",
+        expect: "downloads, verifies, installs and re-patches"
+    },
+    {
+        name: "helper: a broken mod does not override the update throttle",
+        file: "src/helper/helper.ts",
+        find: "        || wasBroken",
+        with: "        || false",
+        expect: "checks anyway, throttle or not, once health says the mod is broken"
+    },
+    {
+        name: "helper: warns the mod is stale even when a newer build exists",
+        file: "src/helper/helper.ts",
+        find: "    if (feedHasNewer) {",
+        with: "    if (false) {",
+        expect: "does NOT warn about a stale mod when a newer build exists"
+    },
+    {
+        name: "helper: health is judged against the marker read BEFORE re-patching",
+        file: "src/helper/helper.ts",
+        find: "            const marker = run.ports.readMarker(entry.install.resourcesPath);\n            return { ...entry, marker: marker.ok ? marker.value : null };",
+        with: "            return entry;",
+        expect: "forgets its suspicion when a new build lands"
+    },
+    {
+        name: "helper: a failed re-patch is logged and never surfaced",
+        file: "src/helper/helper.ts",
+        find: "    if (IMMEDIATE_PATCH_ALERTS.includes(error.code) || failures >= REPATCH_FAILURES_BEFORE_ALERT) {",
+        with: "    if (false) {",
+        expect: "leaves Discord usable, says the rollback happened, and tells the user"
+    },
+    {
+        name: "helper: an alert is never cleared once the problem is fixed",
+        file: "src/helper/helper.ts",
+        find: "        run.clear(\"repatch-failed\");",
+        with: "        void 0;",
+        expect: "clears the alert once a later run succeeds"
+    },
+    {
+        name: "helper: Discord is not re-inspected after a failed patch",
+        file: "src/helper/helper.ts",
+        find: "    const after = run.ports.inspect(install);\n    const startable = after.ok && after.value.kind !== \"broken\";",
+        with: "    const after = run.ports.inspect(install);\n    const startable = true;",
+        expect: "names the missing backup rather than giving the generic failure"
+    },
+    {
+        name: "helper: the broken reason is never read, so a missing backup gets the generic message",
+        file: "src/helper/helper.ts",
+        find: "    if (brokenReason !== null && BACKUP_GONE_REASONS.includes(brokenReason)) {",
+        with: "    if (false) {",
+        expect: "names the missing backup rather than giving the generic failure"
+    },
+    {
+        name: "helper: a rollback failure gets the ordinary alert",
+        file: "src/helper/helper.ts",
+        find: "    if (error.code === \"ROLLBACK_FAILED\") {",
+        with: "    if (false) {",
+        expect: "raises the LOUD alert when the rollback itself failed"
+    },
+    {
+        name: "helper: the failure counter never increments, so one bad night alerts",
+        file: "src/helper/helper.ts",
+        find: "    const failures = (previous?.failures ?? 0) + 1;",
+        with: "    const failures = 2;",
+        expect: "gives an ordinary failure a second chance"
+    },
+    {
+        name: "helper: an unusable bundle no longer forces an update check",
+        file: "src/helper/helper.ts",
+        find: "        || bundleUnusable;",
+        with: "        || false;",
+        expect: "checks anyway, throttle or not, when the installed bundle is unusable"
+    },
+    {
+        name: "helper: the mod-stale alert survives the update that fixes it",
+        file: "src/helper/helper.ts",
+        find: "    run.clear(\"mod-stale\");\n\n    // A new bundle behind an unchanged loader path",
+        with: "    void 0;\n\n    // A new bundle behind an unchanged loader path",
+        expect: "clears the 'needs an update' alert once the update lands"
+    },
+    {
+        name: "alerts: the same alert notifies on every single run",
+        file: "src/helper/alerts.ts",
+        find: "    const dueAgain = previous === undefined || alert.at - previous.lastNotifiedAt >= repeatMs;",
+        with: "    const dueAgain = true;",
+        expect: "does not notify again inside the repeat window"
+    },
+    {
+        name: "alerts: a suppressed notification also suppresses the durable record",
+        file: "src/helper/alerts.ts",
+        find: "    writePendingAlerts(state, ports);\n\n    if (!dueAgain) {",
+        with: "    if (dueAgain) writePendingAlerts(state, ports);\n\n    if (!dueAgain) {",
+        expect: "keeps the durable record even when the notification is suppressed"
+    },
+    {
+        name: "alerts: a resolved alert leaves its file behind",
+        file: "src/helper/alerts.ts",
+        find: "            if (existsSync(path)) rmSync(path, { force: true });",
+        with: "            if (false) rmSync(path, { force: true });",
+        expect: "removes the file entirely when nothing is outstanding"
+    },
+    {
+        name: "helper state: a document that is not an object is read as state",
+        file: "src/helper/state.ts",
+        find: "    if (!isRecord(parsed)) return emptyHelperState();",
+        with: "    if (false) return emptyHelperState();",
+        expect: "reads a file that PARSES but is not an object"
+    },
+    {
+        name: "helper state: an alert with no timestamps is kept",
+        file: "src/helper/state.ts",
+        find: "            if (firstAt === null || lastNotifiedAt === null) continue;",
+        with: "            if (false) continue;",
+        expect: "keeps the fields it understands when the rest of the document is nonsense"
+    },
+    {
+        name: "uninstall: proceeds even though the helper is still running",
+        file: "src/app/uninstall.ts",
+        find: "    const helperStopped = !options.helper.applicable || options.helper.error === null;",
+        with: "    const helperStopped = true;",
+        expect: "changes NOTHING when the helper could not be stopped"
     }
 ];
 

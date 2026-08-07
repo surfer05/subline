@@ -55,6 +55,8 @@ export interface SettleReport {
     quietForMs: number | null;
     /** How long we waited inside this run. */
     waitedMs: number;
+    /** How many observations were made. Bounded by the budget — see below. */
+    attempts: number;
     /** One line for the log, saying what we decided and why. */
     reason: string;
 }
@@ -131,14 +133,33 @@ export async function awaitDiscordSettled(
     const startedAt = ports.now();
     const waited = (): number => ports.now() - startedAt;
 
+    /**
+     * THE ONLY BOUND, and it is a COUNT rather than a deadline.
+     *
+     * An earlier version looped until the clock passed `maxWaitMs`, which made
+     * termination depend on `now()` — a port the caller supplies. A clock that
+     * does not advance (a coarse timer, a suspended machine reporting the same
+     * instant, a caller injecting a fixed one) turned this into a loop that runs
+     * forever inside a background process nobody is watching, starving the event
+     * loop with microtasks so not even a timeout could fire. A mutation probe
+     * found it by hanging the whole suite.
+     *
+     * It is derived from the budget, so the behaviour is unchanged: exactly as
+     * many sleeps as fit in `maxWaitMs`, plus the observation that follows the
+     * last one. No floor is applied to the result — the do/while already
+     * guarantees that however small (or negative) the budget, one observation
+     * happens, and a second guard that cannot change an observable outcome is
+     * one nothing can test.
+     */
+    const maxAttempts = Math.floor(maxWaitMs / Math.max(1, pollMs)) + 1;
+    let attempts = 0;
+
     let lastReason: string;
     let lastStatus: SettleStatus;
     let lastQuietFor: number | null = null;
 
-    // A do/while, not a while: however small the budget, exactly one observation
-    // always happens. A helper that could return without having looked would
-    // report a blocking reason it never saw.
     do {
+        attempts += 1;
         if (await ports.discordRunning(install)) {
             lastStatus = "discord-running";
             lastReason = "Discord is running, so it may be updating itself and its app.asar is in use";
@@ -181,15 +202,16 @@ export async function awaitDiscordSettled(
                         version: second.version,
                         quietForMs: second.newestMtime === null ? null : ports.now() - second.newestMtime,
                         waitedMs: waited(),
+                        attempts,
                         reason: "Discord is closed and nothing under Resources has changed across two observations"
                     };
                 }
             }
         }
 
-        if (waited() + pollMs > maxWaitMs) break;
+        if (attempts >= maxAttempts) break;
         await ports.sleep(pollMs);
-    } while (waited() <= maxWaitMs);
+    } while (true);
 
     return {
         status: lastStatus,
@@ -197,6 +219,7 @@ export async function awaitDiscordSettled(
         version: null,
         quietForMs: lastQuietFor,
         waitedMs: waited(),
+        attempts,
         reason: lastReason
     };
 }

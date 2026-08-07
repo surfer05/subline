@@ -130,13 +130,24 @@ export const DEFAULT_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
  */
 const IMMEDIATE_PATCH_ALERTS: readonly PatcherErrorCode[] = [
     "ROLLBACK_FAILED",
-    "BACKUP_MISSING",
-    "BACKUP_CORRUPT",
     "VERIFICATION_FAILED",
     "PERMISSION_DENIED",
     "READ_ONLY_VOLUME",
-    "MOD_BUNDLE_INVALID"
+    "MOD_BUNDLE_INVALID",
+    "BROKEN_INSTALL"
 ];
+
+/**
+ * The half-patched states where Discord's own archive is gone.
+ *
+ * `patchInstall` reports these as `BROKEN_INSTALL` — it CANNOT return
+ * `BACKUP_MISSING`, which belongs to unpatch, and an earlier version of this file
+ * matched on that code and was therefore dead. The distinction earns its place
+ * because the remedy differs: an ordinary failed re-patch leaves a working
+ * Discord, while these leave one that only Discord's own reinstall can repair
+ * (spec §8), and that is a different sentence.
+ */
+const BACKUP_GONE_REASONS: readonly string[] = ["our-patch-without-backup", "asar-and-backup-missing"];
 
 export const REPATCH_FAILURES_BEFORE_ALERT = 2;
 export const UPDATE_FAILURES_BEFORE_ALERT = 3;
@@ -528,15 +539,20 @@ async function handlePatchFailure(
         failures
     };
 
+    // OBSERVED, not assumed. `patchInstall` rolls back on every failure path, but
+    // "Discord still starts" is the one claim worth checking rather than trusting,
+    // and it is the thing anyone reading this log afterwards most needs to know.
     const after = run.ports.inspect(install);
     const startable = after.ok && after.value.kind !== "broken";
+    const brokenReason = after.ok && after.value.kind === "broken" ? (after.value.reason ?? null) : null;
     run.decide("repatch", "failed", error.message, {
         path: install.rootPath,
         trigger,
         need,
         code: error.code,
         failures,
-        discordStartable: startable
+        discordStartable: startable,
+        broken: brokenReason
     });
 
     if (error.code === "ROLLBACK_FAILED") {
@@ -548,12 +564,12 @@ async function handlePatchFailure(
         );
         return;
     }
-    if (error.code === "BACKUP_MISSING" || error.code === "BACKUP_CORRUPT") {
+    if (brokenReason !== null && BACKUP_GONE_REASONS.includes(brokenReason)) {
         await run.alert(
             "backup-missing",
             "Subline cannot repair Discord because the copy of Discord's original files is gone. "
             + "Open Subline for the fix.",
-            { code: error.code, path: install.rootPath }
+            { code: error.code, broken: brokenReason, path: install.rootPath }
         );
         return;
     }
@@ -628,9 +644,13 @@ async function maybeUpdate(run: Run, managed: ManagedInstall[], bundle: ModBundl
     run.updateInstalled = installedNew.buildId;
     run.state.updateFailures = 0;
     run.clear("update-failed");
-    // The health suspicion was evidence about the OLD build. Carrying it over
-    // would let a fresh install inherit a verdict nothing has re-observed.
-    run.state.health = emptyHelperState().health;
+    // The suspicion was evidence about the OLD build, and it is discarded — but
+    // NOT here. `checkHealth` re-reads the marker after this run's re-patch, so
+    // the beacon still naming the old build reads as `foreign-beacon`, which is
+    // "no usable evidence" and clears the counter on its own. An explicit reset
+    // as well survived a mutation, because it could not change any outcome the
+    // marker re-read did not already produce — and it would be WRONG in the one
+    // case it differed, discarding a fresh observation of the new build.
     run.clear("mod-stale");
 
     // A new bundle behind an unchanged loader path means every install now
