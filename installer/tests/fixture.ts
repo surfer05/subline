@@ -46,6 +46,92 @@ export function buildOriginalDiscordAsar(marker = "original"): Buffer {
     ]);
 }
 
+/* ------------------------------------------------------------------------ *
+ * Archives the WRITER did not produce
+ * ------------------------------------------------------------------------ *
+ *
+ * Everything above comes out of `buildAsar`, which makes the reader's test
+ * surface circular: it is only ever shown files written by the encoder it is
+ * meant to be the decoder for, so any assumption the two share agrees with
+ * itself and no test notices.
+ *
+ * The two builders below break that loop. Every length, offset and prefix word
+ * is a LITERAL transcribed from a hexdump of a real archive — not computed by
+ * `buildAsar`, and deliberately not recomputed by a private re-implementation
+ * of `buildAsar`'s arithmetic, which would reintroduce the shared assumption
+ * one layer down. `asar.test.ts` asserts each literal against the bytes it
+ * claims to describe, so a wrong constant fails loudly rather than agreeing.
+ */
+
+export const REAL_VENCORD_LOADER_PATH = "/Users/surfer/dev/Vencord/dist/patcher.js";
+export const REAL_STUB_HEADER_JSON =
+    '{"files":{"index.js":{"size":52,"offset":"0"},"package.json":{"size":43,"offset":"52"}}}';
+export const REAL_STUB_INDEX_JS = 'require("/Users/surfer/dev/Vencord/dist/patcher.js")';
+export const REAL_STUB_PACKAGE_JSON = '{\n\t"name": "discord",\n\t"main": "index.js"\n}';
+
+/**
+ * The live Vencord-patched `/Applications/Discord.app/…/app.asar`, byte for
+ * byte, assembled from hardcoded literals:
+ *
+ *   u32@0  = 4    size-pickle payload
+ *   u32@4  = 96   header pickle length
+ *   u32@8  = 92   header payload length
+ *   u32@12 = 88   header JSON length   (88 % 4 == 0, so no padding)
+ *   [16]   88 bytes of JSON            → data begins at 104 = 8 + 96
+ *   [104]  52 bytes index.js
+ *   [156]  43 bytes package.json       → 199 bytes total
+ */
+export function realVencordStubBytes(): Buffer {
+    const buf = Buffer.alloc(199);
+    buf.writeUInt32LE(4, 0);
+    buf.writeUInt32LE(96, 4);
+    buf.writeUInt32LE(92, 8);
+    buf.writeUInt32LE(88, 12);
+    buf.write(REAL_STUB_HEADER_JSON, 16, "utf8");
+    buf.write(REAL_STUB_INDEX_JS, 104, "utf8");
+    buf.write(REAL_STUB_PACKAGE_JSON, 156, "utf8");
+    return buf;
+}
+
+/**
+ * A Discord-shaped archive in the form real asar writers emit and ours never
+ * does, transcribed from the header of the live 3.6 MB `_app.asar`:
+ *
+ *  - a header JSON length that is NOT a multiple of 4 (318), so the reader has
+ *    to apply the same padding rule the writer does to find the data at all;
+ *  - nested directory nodes (`data`), which carry `files` instead of a size;
+ *  - `integrity` blocks on entries, which our writer never emits;
+ *  - an `unpacked: true` entry, which has a size but NO offset because the
+ *    bytes live outside the archive in `app.asar.unpacked/`;
+ *  - a `link` entry (a symlink), which has neither size nor offset.
+ *
+ * Prefix words, all literal: 4 / 328 / 324 / 318, data at 336 = 8 + 328.
+ */
+export const FOREIGN_ORIGINAL_HEADER_JSON =
+    '{"files":{"bundle.js":{"size":18,"offset":"0","integrity":{"algorithm":"SHA256",'
+    + '"hash":"f7e7e845ab","blockSize":4194304,"blocks":["f7e7e845"]}},'
+    + '"data":{"files":{"e.json":{"size":2,"offset":"18"}}},'
+    + '"native.node":{"size":9999,"unpacked":true},'
+    + '"shortcut.js":{"link":"bundle.js"},'
+    + '"package.json":{"size":37,"offset":"20"}}}';
+export const FOREIGN_BUNDLE_JS = "// discord bundle\n";
+export const FOREIGN_E_JSON = "{}";
+export const FOREIGN_PACKAGE_JSON = '{"name":"discord","main":"bundle.js"}';
+
+export function foreignOriginalAsarBytes(): Buffer {
+    const buf = Buffer.alloc(393);
+    buf.writeUInt32LE(4, 0);
+    buf.writeUInt32LE(328, 4);
+    buf.writeUInt32LE(324, 8);
+    buf.writeUInt32LE(318, 12);
+    buf.write(FOREIGN_ORIGINAL_HEADER_JSON, 16, "utf8");
+    // Bytes 334 and 335 are the two alignment pad bytes, left as zero.
+    buf.write(FOREIGN_BUNDLE_JS, 336, "utf8");
+    buf.write(FOREIGN_E_JSON, 354, "utf8");
+    buf.write(FOREIGN_PACKAGE_JSON, 356, "utf8");
+    return buf;
+}
+
 export interface FixtureOptions {
     appName?: string;
     /** Omit `app.asar` entirely (the interrupted-patch case). */

@@ -7,7 +7,12 @@ import { MARKER_FORMAT, readMarker, writeMarker } from "../src/patcher/marker.js
 import { inspectInstall } from "../src/patcher/state.js";
 import { buildStubAsar } from "../src/patcher/stub.js";
 import type { Fixture } from "./fixture.js";
-import { makeDiscordFixture } from "./fixture.js";
+import {
+    foreignOriginalAsarBytes,
+    makeDiscordFixture,
+    REAL_VENCORD_LOADER_PATH,
+    realVencordStubBytes
+} from "./fixture.js";
 
 const OUR_LOADER = "/Applications/Subline.app/Contents/Resources/loader/patcher.js";
 const OUR_BUILD_ID = "1f2e3d4c5b6a7980";
@@ -84,6 +89,49 @@ describe("inspectInstall", () => {
         if (!result.ok) return;
         expect(result.value.kind).toBe("patched-by-other");
         expect(result.value.mod).toBe("equicord");
+    });
+
+    it("calls the REAL live Vencord app.asar a foreign mod, not a broken install", () => {
+        // End-to-end on the exact 199 bytes Vencord's own installer wrote to
+        // /Applications/Discord.app on this machine, assembled from literals
+        // rather than from buildStubAsar — see fixture.ts.
+        //
+        // Every other inspectInstall test here writes its app.asar with our own
+        // writer, so all of them would still pass if the reader only understood
+        // archives we produced. This one would not. Getting it wrong reports a
+        // healthy Vencord install as damaged and steers the user to repair or
+        // uninstall instead of spec §3 step 4's "detect, explain, let them
+        // choose".
+        fixture = makeDiscordFixture({ withBackup: true });
+        writeFileSync(fixture.install.asarPath, realVencordStubBytes());
+
+        const result = inspectInstall(fixture.install);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.kind).toBe("patched-by-other");
+        expect(result.value.reason).toBeNull();
+        expect(result.value.mod).toBe("vencord");
+        expect(result.value.modName).toBe("Vencord");
+        expect(result.value.loaderPath).toBe(REAL_VENCORD_LOADER_PATH);
+        expect(result.value.asarIsStub).toBe(true);
+        expect(result.value.summary).toContain("Vencord");
+    });
+
+    it("calls a foreign-written Discord archive unpatched, not a stub and not broken", () => {
+        // The other half: an original archive in the form a real asar writer
+        // emits (padded header, nested dirs, integrity, unpacked and link
+        // entries) must read as Discord's own, so a clean install is not
+        // mistaken for someone's injection.
+        fixture = makeDiscordFixture();
+        writeFileSync(fixture.install.asarPath, foreignOriginalAsarBytes());
+
+        const result = inspectInstall(fixture.install);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.kind).toBe("unpatched");
+        expect(result.value.reason).toBeNull();
+        expect(result.value.mod).toBeNull();
+        expect(result.value.asarIsStub).toBe(false);
     });
 
     it("detects BetterDiscord's unpacked resources/app folder on an untouched app.asar", () => {
