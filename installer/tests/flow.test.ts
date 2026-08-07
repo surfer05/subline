@@ -678,6 +678,39 @@ describe("macOS App Management", () => {
         expect(h.patchCalls).toHaveLength(1);
     });
 
+    it("lets macOS finish talking before opening Discord on top of it", async () => {
+        // A real run produced three interruptions at once: Apple's permission
+        // dialog, the background-activity notification from registering the
+        // LaunchAgent, and Discord relaunching. Each is fine alone; together
+        // they read as the machine doing things to itself.
+        const h = harness({ permission: ["blocked", "granted"] });
+        await toDetection(h);
+        await h.flow.send({ type: "set-language", code: "tr" });
+
+        const before = h.ports.now();
+        await h.flow.send({ type: "next" });
+        const elapsed = h.ports.now() - before;
+
+        // The injected clock only moves when the flow sleeps, so any settle
+        // pause is visible here and no real time is spent.
+        expect(elapsed).toBeGreaterThanOrEqual(2_500);
+        expect(h.launched).toBe(1);
+    });
+
+    it("does not pause for someone who already granted permission", async () => {
+        // They see none of those dialogs, so a pause would cost them time in
+        // exchange for nothing.
+        const h = harness({ permission: ["granted"] });
+        await toDetection(h);
+
+        const before = h.ports.now();
+        await h.flow.send({ type: "set-language", code: "tr" });
+        const elapsed = h.ports.now() - before;
+
+        expect(elapsed).toBeLessThan(2_500);
+        expect(h.launched).toBe(1);
+    });
+
     it("does not die when the grant never arrives — it offers retry", async () => {
         const h = harness({ permission: ["blocked"] });
         await toDetection(h);

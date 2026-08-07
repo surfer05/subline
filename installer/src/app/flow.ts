@@ -49,6 +49,16 @@ import type { PatcherError, Result } from "../patcher/result.js";
 import type { InstallState } from "../patcher/state.js";
 import type { AwaitVerifyOptions, VerificationReport } from "../verify/verify.js";
 
+/**
+ * How long to let macOS finish talking before opening Discord (see `launch`).
+ *
+ * Long enough that Apple's permission dialog and the background-activity
+ * notification are not still arriving when a Discord window appears; short
+ * enough that nobody reads it as the installer having hung. Only applied to
+ * users who actually went through the permission step.
+ */
+const SETTLE_BEFORE_LAUNCH_MS = 2_500;
+
 /* ------------------------------------------------------------------------ *
  * States
  * ------------------------------------------------------------------------ */
@@ -269,6 +279,14 @@ export class InstallFlow {
     private patchReport: PatchReport | null = null;
     private patchedAt = 0;
     private launchedAt = 0;
+    /**
+     * True once the macOS permission step was actually shown this run.
+     *
+     * Only those users get the settle pause before Discord is launched (see
+     * `launch`). Someone who already had the grant sees no dialogs, so pausing
+     * for them would be delay in exchange for nothing.
+     */
+    private permissionPrompted = false;
     private explicitPaths: string[] = [];
 
     constructor(private readonly ports: FlowPorts) {}
@@ -677,6 +695,10 @@ export class InstallFlow {
     }
 
     private explainPermission(status: AppManagementStatus): FlowState {
+        // Remember that this user saw the permission path, so `launch` knows to
+        // let macOS's own interruptions finish before opening Discord on top of
+        // them.
+        this.permissionPrompted = true;
         return this.set(state({
             step: "permission-explain",
             // Describes what Continue DOES, rather than sending the user off to
@@ -888,6 +910,30 @@ export class InstallFlow {
     private async launch(): Promise<FlowState> {
         const install = this.chosenInstall;
         if (install === null) return this.detect();
+
+        // Let macOS finish talking before opening a window on top of it.
+        //
+        // A real run produced three interruptions at once: Apple's "cannot
+        // update or delete other applications" dialog, the background-activity
+        // notification from registering the LaunchAgent, and Discord
+        // relaunching. Individually each is fine; simultaneously they read as a
+        // machine doing things to itself, which is the last impression a tool
+        // that modifies another app should give.
+        //
+        // Only for users who actually went through the permission step —
+        // someone who already had the grant sees no dialogs, so a pause would
+        // cost them time for nothing. Awaited through `ports.sleep`, which is
+        // the injected clock, so this is deterministic in tests rather than a
+        // real delay.
+        if (this.permissionPrompted) {
+            this.set(state({
+                step: "launching",
+                detail: "Finishing up — macOS may still be showing you a prompt. Discord opens in a moment.",
+                busy: true,
+                actions: []
+            }));
+            await this.ports.sleep(SETTLE_BEFORE_LAUNCH_MS);
+        }
 
         this.set(state({ step: "launching", detail: "Starting Discord…", busy: true, actions: [] }));
         const launched = await this.ports.launchDiscord(install);
