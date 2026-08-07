@@ -755,11 +755,21 @@ async function failUpdate(run: Run, error: { code: PatcherErrorCode; message: st
  * ------------------------------------------------------------------------ */
 
 async function checkHealth(run: Run, managed: ManagedInstall[]): Promise<void> {
+    // The markers are RE-READ rather than reused from the scan. A re-patch or a
+    // new bundle earlier in this same run changes the recorded build id, and
+    // judging the beacon against the id we saw BEFORE that would read a healthy
+    // install as somebody else's — the exact confusion `subline-patch.json`
+    // exists to prevent.
+    const current = managed
+        .map(entry => {
+            const marker = run.ports.readMarker(entry.install.resourcesPath);
+            return { ...entry, marker: marker.ok ? marker.value : null };
+        })
+        .filter(entry => entry.marker?.pluginBuildId != null);
+
     // The beacon is per-USER, not per-install, so it is judged once against the
     // install we patched most recently — the one whose plugin is running.
-    const newest = managed
-        .filter(entry => entry.marker?.pluginBuildId != null)
-        .sort((a, b) => patchedAtOf(b) - patchedAtOf(a))[0];
+    const newest = current.sort((a, b) => patchedAtOf(b) - patchedAtOf(a))[0];
 
     if (newest === undefined) {
         run.decide("health", "no-evidence", "no install carries a build id to compare a status file against");

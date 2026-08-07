@@ -95,6 +95,52 @@ function writeSettings(value: unknown): void {
     writeFileSync(settingsPath, JSON.stringify(value, null, 2), "utf8");
 }
 
+describe("uninstall — the background helper must be stopped first (§8 step 3)", () => {
+    it("changes NOTHING when the helper could not be stopped", () => {
+        // The helper re-patches Discord silently. Restoring Discord under a live
+        // agent means it puts the patch straight back at its next interval —
+        // software the user removed, still modifying another application.
+        const attempted: string[] = [];
+        const report = uninstall(
+            ports({ unpatch: install => { attempted.push(install.branch); return unpatchOk(install); } }),
+            {
+                installs: [INSTALL, PTB],
+                keepSettings: false,
+                helper: {
+                    applicable: true,
+                    removed: false,
+                    error: { code: "HELPER_REGISTRATION_FAILED", message: "launchctl refused" }
+                }
+            }
+        );
+
+        expect(attempted).toEqual([]);
+        expect(report.helperStopped).toBe(false);
+        expect(report.clean).toBe(false);
+        expect(report.discordRestored).toBe(false);
+        expect(report.problems[0]?.code).toBe("HELPER_REGISTRATION_FAILED");
+        expect(report.summary).toContain("background updater");
+        // Nothing was deleted, so the user can retry from exactly here.
+        expect(existsSync(manifestPathFor(modDir))).toBe(true);
+        expect(existsSync(join(productDir, "status.json"))).toBe(true);
+    });
+
+    it("proceeds when there is no helper to stop on this platform", () => {
+        const report = uninstall(ports(), {
+            installs: [INSTALL],
+            helper: { applicable: false, removed: false, error: null }
+        });
+        expect(report.helperStopped).toBe(true);
+        expect(report.discordRestored).toBe(true);
+    });
+
+    it("records that the helper is gone", () => {
+        const report = uninstall(ports(), { installs: [INSTALL], helper: HELPER_GONE });
+        expect(report.helperStopped).toBe(true);
+        expect(logged).toContain("info:uninstall.helper-stopped");
+    });
+});
+
 describe("uninstall", () => {
     it("restores Discord and removes the mod bundle", () => {
         const report = uninstall(ports(), { installs: [INSTALL], helper: HELPER_GONE });
