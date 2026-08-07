@@ -51,6 +51,7 @@ const STEP_TITLES: Partial<Record<FlowState["step"], string>> = {
     "broken-install": "Discord needs repairing",
     "betterdiscord-blocked": "BetterDiscord is installed",
     "mod-conflict": "Another mod is installed",
+    "already-installed": "Subline is already set up",
     "discord-running": "Discord is running",
     "quit-blocked": "Discord is still running",
     "choose-language": "Your reading language",

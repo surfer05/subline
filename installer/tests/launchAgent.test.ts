@@ -11,7 +11,7 @@
  * code-signing identity.
  */
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -304,11 +304,29 @@ describe("removing it (spec §8 step 3)", () => {
     });
 });
 
+/**
+ * The real agent's state, sampled at IMPORT — before any test in this file has
+ * run. `null` when there is none.
+ */
+function realAgentFingerprint(): string | null {
+    const path = launchAgentPlistPath(homedir());
+    if (!existsSync(path)) return null;
+    const s = statSync(path);
+    return `${s.size}:${s.mtimeMs}`;
+}
+const REAL_AGENT_BEFORE = realAgentFingerprint();
+
 describe("this machine", () => {
-    it("has no Subline LaunchAgent, because nothing in this suite installs one", () => {
-        // A standing gate, not a formality: every `installLaunchAgent` call above
-        // is given a temp `plistPath`, and this is what would catch one that was
-        // not.
-        expect(existsSync(launchAgentPlistPath(homedir()))).toBe(false);
+    it("is left exactly as the suite found it", () => {
+        // A standing gate, not a formality: every `installLaunchAgent` call
+        // above is given a temp `plistPath`, and this is what would catch one
+        // that was not.
+        //
+        // Asserts the suite CHANGED nothing, rather than that no agent exists.
+        // The previous version demanded the real path be empty, which broke the
+        // moment the actual installer was run on this machine — it was testing
+        // the developer's environment rather than this code, and a legitimate
+        // install turned the suite red.
+        expect(realAgentFingerprint()).toBe(REAL_AGENT_BEFORE);
     });
 });

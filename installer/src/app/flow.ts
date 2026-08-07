@@ -65,6 +65,15 @@ export type FlowStep =
     | "broken-install"
     | "betterdiscord-blocked"
     | "mod-conflict"
+    /**
+     * Already ours, and working. Reached by simply opening the app again — most
+     * often right after macOS's App Management prompt makes Subline quit and
+     * reopen, which it does whether or not the install already succeeded.
+     * Without this the flow walked the whole install again: quit Discord,
+     * pick a language, ask for permission, re-patch. All of it pointless, and
+     * all of it asking the user to redo work that was already done.
+     */
+    | "already-installed"
     /* §3 step 5. */
     | "discord-running"
     | "quit-blocked"
@@ -331,6 +340,13 @@ export class InstallFlow {
                 return this.inspectChosen(picked);
             }
 
+            // Nothing to do but close. Deliberately offers no "install again":
+            // re-patching a working install is a write to somebody else's
+            // application in exchange for nothing, and the helper already
+            // repairs the one case that needs it.
+            case "already-installed":
+                return this.current;
+
             case "mod-conflict":
                 if (action.type === "proceed-over-mod") {
                     this.overwriteForeignMod = true;
@@ -536,6 +552,26 @@ export class InstallFlow {
             }));
         }
 
+        if (installState.kind === "patched-by-us") {
+            // Do NOT re-walk the install. Reopening the app is the NORMAL way
+            // to arrive here: macOS's App Management prompt offers "Quit &
+            // Reopen", and it offers that whether or not the install already
+            // finished. Sending the user back through quitting Discord, the
+            // language picker and the permission step to redo work that is
+            // already done is how a one-click installer earns a reputation for
+            // being tedious.
+            return this.set(state({
+                step: "already-installed",
+                detail:
+                    "Subline is installed and Discord is set up to use it. There is nothing left to do — open Discord "
+                    + "and messages in other languages will have a translation underneath them. Updates are handled in "
+                    + "the background.",
+                install,
+                installState,
+                actions: ["finish"]
+            }));
+        }
+
         return this.checkRunning();
     }
 
@@ -648,10 +684,25 @@ export class InstallFlow {
             // pane for them and then polls. Instructions that ignore the button
             // sitting right there are how a one-click installer starts feeling
             // like homework.
+            // Two things this copy has to do, both learned from a real run.
+            //
+            // Pre-empt macOS's own wording. After the toggle, macOS says
+            // Subline "will not be able to update or delete other applications
+            // until it is quit". That sentence is Apple's and we cannot change
+            // a word of it — but to someone who has not been warned it reads
+            // like malware asking to delete their apps. Naming it first turns
+            // an alarm into an expected step.
+            //
+            // And do not promise no restart. The earlier copy said "you do not
+            // need to quit or restart anything"; macOS then offered exactly
+            // "Quit & Reopen", because the grant does not apply to a running
+            // process. Reopening is the normal path, not a fallback.
             detail:
-                "macOS needs your permission before Subline can update Discord. Continue, and Subline will open the "
-                + "right settings page for you — switch Subline on under App Management and this window carries on by "
-                + "itself. You do not need to quit or restart anything.",
+                "macOS needs your permission before Subline can change Discord. Continue, and Subline will open the "
+                + "right settings page — switch Subline on under App Management.\n\n"
+                + "macOS will then say Subline cannot \"update or delete other applications\" until it is quit. That is "
+                + "Apple's standard wording for this permission, not something Subline asks for: the only app it ever "
+                + "changes is Discord. Choose Quit & Reopen, and Subline will pick up where it left off.",
             permissionStatus: status,
             permissionSettingsUrl: this.ports.permissionSettingsUrl,
             install: this.chosenInstall ?? undefined,

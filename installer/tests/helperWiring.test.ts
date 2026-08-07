@@ -21,7 +21,7 @@
  * real `~/Library/LaunchAgents` has no Subline agent in it.
  */
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -362,9 +362,25 @@ describe("the install flow installs the helper", () => {
  * The standing assertion
  * ------------------------------------------------------------------------ */
 
+/**
+ * The real agent's state, sampled at IMPORT — before any test in this file has
+ * run. `null` when there is none.
+ */
+function realAgentFingerprint(): string | null {
+    const path = launchAgentPlistPath(homedir());
+    if (!existsSync(path)) return null;
+    const s = statSync(path);
+    return `${s.size}:${s.mtimeMs}`;
+}
+const REAL_AGENT_BEFORE = realAgentFingerprint();
+
 describe("this suite does not install anything", () => {
-    it("leaves the real ~/Library/LaunchAgents without a Subline agent", () => {
-        expect(existsSync(launchAgentPlistPath(homedir()))).toBe(false);
+    it("leaves the real ~/Library/LaunchAgents exactly as it found it", () => {
+        // Asserts the suite CHANGED nothing, rather than that no agent exists.
+        // Demanding an empty path made the suite fail as soon as the real
+        // installer was run on this machine — an assertion about the
+        // developer's environment rather than about this code.
+        expect(realAgentFingerprint()).toBe(REAL_AGENT_BEFORE);
     });
 });
 

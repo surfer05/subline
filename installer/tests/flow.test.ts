@@ -448,6 +448,39 @@ describe("BetterDiscord", () => {
 });
 
 /* ------------------------------------------------------------------------ *
+ * Already ours — reopening must not mean reinstalling
+ * ------------------------------------------------------------------------ */
+
+describe("a Discord we already patched", () => {
+    it("says so and stops, instead of walking the whole install again", async () => {
+        // Found by running the real app. macOS's App Management prompt offers
+        // "Quit & Reopen" — and offers it whether or not the install already
+        // succeeded. Reopening therefore sent the user back through quitting
+        // Discord, the language picker and the permission step to redo work
+        // that was already done. `patched-by-us` had no branch at all: it fell
+        // through to checkRunning() with every other outcome.
+        const h = harness({ inspect: { ok: true, value: installState("patched-by-us", "subline") } });
+        const state = await toDetection(h);
+
+        expect(state.step).toBe("already-installed");
+        expect(h.patchCalls).toHaveLength(0);
+        expect(state.actions).toEqual(["finish"]);
+    });
+
+    it("never re-patches a working install", async () => {
+        // Re-applying a good patch is a write to somebody else's application in
+        // exchange for nothing, and the helper already repairs the one case
+        // that needs it. So there is no action here that patches.
+        const h = harness({ inspect: { ok: true, value: installState("patched-by-us", "subline") } });
+        await toDetection(h);
+
+        const after = await h.flow.send({ type: "finish" });
+        expect(h.patchCalls).toHaveLength(0);
+        expect(after.step).toBe("already-installed");
+    });
+});
+
+/* ------------------------------------------------------------------------ *
  * Vencord / Equicord — detect, explain, let them choose
  * ------------------------------------------------------------------------ */
 
@@ -613,7 +646,17 @@ describe("macOS App Management", () => {
         expect(h.patchCalls).toHaveLength(0);
         expect(h.settingsOpened).toBe(0);
         expect(state.detail).toContain("App Management");
-        expect(state.detail).toContain("do not need to");
+        // Pre-empts macOS's own wording. After the toggle, macOS says Subline
+        // cannot "update or delete other applications" until it is quit, and
+        // offers Quit & Reopen, because the grant does not reach a running
+        // process. A user who has not been warned reads that as malware asking
+        // to delete their apps; naming it first makes it an expected step.
+        //
+        // The previous assertion pinned "do not need to" — from copy promising
+        // no quit or restart. A real run disproved that promise, so the promise
+        // and the test holding it both had to go.
+        expect(state.detail).toContain("Quit & Reopen");
+        expect(state.detail).not.toContain("do not need to quit");
     });
 
     it("carries the exact deep link spec §4 names", async () => {
