@@ -21,6 +21,19 @@
  * A mutation that leaves the suite green is a SURVIVOR: the behaviour it changed
  * is not actually asserted anywhere, and the test that claims to cover it is
  * decorative.
+ *
+ * ## Equivalent mutants, and the one rule for them
+ *
+ * A mutation marked `equivalent` is one that provably CANNOT change behaviour,
+ * because an invariant somewhere else makes the two forms identical. No test can
+ * kill it, and adding a test that appeared to would be a test asserting nothing.
+ *
+ * They are expected to survive, and surviving is not counted against the run.
+ * **A killed one is news**: it means the invariant it rested on has moved, and
+ * the code that quietly depended on that invariant now needs re-reading. So the
+ * `equivalent` field carries the reason as a string rather than a boolean, and
+ * every one has to be argued for in the report — an unexamined `equivalent: "..."`
+ * is exactly how a real gap gets marked as not-a-gap and stops being looked at.
  */
 
 import { execFileSync } from "node:child_process";
@@ -816,6 +829,392 @@ const MUTATIONS = [
         with: "    const helperStopped = true;",
         expect: "changes NOTHING when the helper could not be stopped"
     }
+,
+
+    /* ---------------------------------------------------------------- *
+     * PACKAGING — written adversarially.
+     *
+     * helper.md's lesson: "a clean pass means the mutations were not
+     * adversarial enough, and the way to find out is to write the ones you
+     * expect to survive." Every probe below was written aiming at code
+     * suspected of being unasserted, not at code known to be covered.
+     * ---------------------------------------------------------------- */
+
+    /* ---- packaging/bundleIdentity.ts ---- */
+    {
+        name: "bundleIdentity: a stale bundle is shipped anyway",
+        file: "packaging/bundleIdentity.ts",
+        find: "    if (buildId !== expectedBuildId) {",
+        with: "    if (false) {",
+        expect: "REFUSES a stale bundle"
+    },
+    {
+        name: "bundleIdentity: the inspector's own problems are discarded",
+        file: "packaging/bundleIdentity.ts",
+        find: "    const problems: string[] = [...facts.problems];",
+        with: "    const problems: string[] = [];",
+        expect: "renderer does not carry the id its manifest claims"
+    },
+    {
+        name: "bundleIdentity: a disagreeing plugin version is ignored",
+        file: "packaging/bundleIdentity.ts",
+        find: "    if (expectedPluginVersion !== null && pluginVersion !== expectedPluginVersion) {",
+        with: "    if (false) {",
+        expect: "plugin version that disagrees"
+    },
+    {
+        name: "bundleIdentity: everything agrees regardless of the problems found",
+        find: "agrees: problems.length === 0, problems };",
+        file: "packaging/bundleIdentity.ts",
+        with: "agrees: true, problems };",
+        expect: "REFUSES a stale bundle"
+    },
+    {
+        name: "bundleIdentity: an inspector that throws reads as a pass",
+        file: "packaging/bundleIdentity.ts",
+        find: "            agrees: false,\n            problems: [`the mod bundle at ${bundleDir} could not be inspected",
+        with: "            agrees: true,\n            problems: [`the mod bundle at ${bundleDir} could not be inspected",
+        expect: "inspector that throws"
+    },
+    {
+        name: "bundleIdentity: assert returns instead of throwing, so the hook ignores it",
+        file: "packaging/bundleIdentity.ts",
+        find: "    if (!report.agrees) {",
+        with: "    if (false) {",
+        expect: "THROWS on disagreement"
+    },
+    {
+        name: "bundleIdentity: the packaged path forgets the .app wrapper",
+        file: "packaging/bundleIdentity.ts",
+        find: "        ? [options.appOutDir, `${options.productName}.app`, \"Contents\", \"Resources\"]",
+        with: "        ? [options.appOutDir, \"Contents\", \"Resources\"]",
+        expect: "Contents/Resources/mod on macOS"
+    },
+    {
+        name: "bundleIdentity: Windows and macOS get the same layout",
+        file: "packaging/bundleIdentity.ts",
+        find: "        : [options.appOutDir, \"resources\"];",
+        with: "        : [options.appOutDir, \"Contents\", \"Resources\"];",
+        expect: "resources/mod on Windows"
+    },
+
+    /* ---- packaging/manifest.ts ---- */
+    {
+        name: "manifest: any two slash-separated words are a repository",
+        file: "packaging/manifest.ts",
+        find: "    const match = /^(?:https:\\/\\/github\\.com\\/|git@github\\.com:)?([^/\\s]+)\\/([^/\\s]+)$/.exec(trimmed);",
+        with: "    const match = /^(.+)\\/(.+)$/.exec(trimmed);",
+        expect: "not a repository"
+    },
+    {
+        name: "manifest: the feed URL points at a tag instead of latest",
+        file: "packaging/manifest.ts",
+        find: "/releases/latest/download/${RELEASE_MANIFEST_ASSET_NAME}`;",
+        with: "/releases/download/${RELEASE_MANIFEST_ASSET_NAME}`;",
+        expect: "untagged feed URL"
+    },
+    {
+        name: "manifest: the version is not tagged",
+        file: "packaging/manifest.ts",
+        find: "    return version.startsWith(\"v\") ? version : `v${version}`;",
+        with: "    return version;",
+        expect: "tags a version once"
+    },
+    {
+        name: "manifest: an empty artefact is described rather than refused",
+        file: "packaging/manifest.ts",
+        find: "    if (artifact.bytes <= 0) {",
+        with: "    if (false) {",
+        expect: "refuses to describe an empty artefact"
+    },
+    {
+        name: "manifest: the byte count is asserted rather than measured",
+        file: "packaging/manifest.ts",
+        find: "    return { name: basename(path), bytes: statSync(path).size, sha256: sha256OfFile(path) };",
+        with: "    return { name: basename(path), bytes: 1, sha256: sha256OfFile(path) };",
+        expect: "real byte count and digest"
+    },
+    {
+        name: "manifest: the checksum file carries paths, not names",
+        file: "packaging/manifest.ts",
+        find: "    return { name: basename(path), bytes: statSync(path).size, sha256: sha256OfFile(path) };",
+        with: "    return { name: path, bytes: statSync(path).size, sha256: sha256OfFile(path) };",
+        expect: "names and never paths"
+    },
+    {
+        name: "manifest: SHA256SUMS uses one space, which shasum -c cannot read",
+        file: "packaging/manifest.ts",
+        find: "        .map(digest => `${digest.sha256}  ${digest.name}`)",
+        with: "        .map(digest => `${digest.sha256} ${digest.name}`)",
+        expect: "verifiable by the real shasum"
+    },
+    {
+        name: "manifest: checksums are left in whatever order they arrived",
+        file: "packaging/manifest.ts",
+        find: "        .sort((a, b) => a.name.localeCompare(b.name))",
+        with: "        .sort(() => 0)",
+        expect: "names and never paths"
+    },
+    {
+        name: "manifest: a release with no artefacts writes an empty checksum file",
+        file: "packaging/manifest.ts",
+        find: "    if (digests.length === 0) throw new Error(\"A release with no artefacts has nothing to checksum.\");",
+        with: "    if (false) throw new Error(\"A release with no artefacts has nothing to checksum.\");",
+        expect: "refuses to write a checksum file for nothing"
+    },
+    {
+        name: "manifest: writes a format the shipped reader does not understand",
+        file: "packaging/manifest.ts",
+        find: "export const RELEASE_MANIFEST_FORMAT_WRITTEN = 1;",
+        with: "export const RELEASE_MANIFEST_FORMAT_WRITTEN = 2;",
+        expect: "accepted by the reader that SHIPS"
+    },
+    {
+        name: "manifest: the feed asset is renamed, so shipped builds poll a 404",
+        file: "packaging/manifest.ts",
+        find: "export const RELEASE_MANIFEST_ASSET_NAME = \"subline-release.json\";",
+        with: "export const RELEASE_MANIFEST_ASSET_NAME = \"release.json\";",
+        expect: "PROVES the URL the release script publishes to"
+    },
+    {
+        name: "manifest: a supplied signature is dropped",
+        file: "packaging/manifest.ts",
+        find: "        signature: options.signature ?? null",
+        with: "        signature: null",
+        expect: "carries a signature through"
+    },
+
+    /* ---- packaging/notarize.ts ---- */
+    {
+        name: "notarize: every build notarizes, credentials or not",
+        file: "packaging/notarize.ts",
+        find: "    return value === \"1\" || value === \"true\";",
+        with: "    return true;",
+        expect: "only notarizes when the flag is exactly on"
+    },
+    {
+        name: "notarize: a local build submits to Apple anyway",
+        file: "packaging/notarize.ts",
+        find: "    if (!isNotarizationRequested(env)) {",
+        with: "    if (false) {",
+        expect: "does nothing at all on a local build"
+    },
+    {
+        name: "notarize: a missing credential is skipped rather than refused",
+        file: "packaging/notarize.ts",
+        find: "    if (auth === null) {\n        throw new Error(",
+        with: "    if (false) {\n        throw new Error(",
+        expect: "REFUSES when it was asked to notarize"
+    },
+    {
+        name: "notarize: submits without --wait, so the staple races the ticket",
+        file: "packaging/notarize.ts",
+        find: "    return [\"notarytool\", \"submit\", archivePath, \"--wait\", ...authArgs(auth)];",
+        with: "    return [\"notarytool\", \"submit\", archivePath, ...authArgs(auth)];",
+        expect: "always waits"
+    },
+    {
+        name: "notarize: staples the archive instead of the app",
+        file: "packaging/notarize.ts",
+        find: "    await exec(\"/usr/bin/xcrun\", stapleArgs(path));",
+        with: "    await exec(\"/usr/bin/xcrun\", stapleArgs(archivePath));",
+        expect: "archives a .app first"
+    },
+    {
+        name: "notarize: submits a .app bundle directly, which notarytool refuses",
+        file: "packaging/notarize.ts",
+        find: "    const isApp = path.endsWith(\".app\");",
+        with: "    const isApp = false;",
+        expect: "archives a .app first"
+    },
+    {
+        name: "notarize: the submission archive is left behind on failure",
+        file: "packaging/notarize.ts",
+        find: "        if (isApp) (options.cleanup ?? (() => {}))(archivePath);",
+        with: "        if (false) (options.cleanup ?? (() => {}))(archivePath);",
+        expect: "removes the submission archive even when the submission failed"
+    },
+    {
+        name: "notarize: a blank variable counts as a credential",
+        file: "packaging/notarize.ts",
+        find: "    return typeof value === \"string\" && value.trim().length > 0;",
+        with: "    return typeof value === \"string\" && value.length > 0;",
+        expect: "treats a blank variable as absent"
+    },
+    {
+        name: "notarize: a half-set Apple ID triple counts as a credential",
+        file: "packaging/notarize.ts",
+        find: "    if (APPLE_ID_VARS.every(name => present(env, name))) {",
+        with: "    if (APPLE_ID_VARS.some(name => present(env, name))) {",
+        expect: "treats a blank variable as absent"
+    },
+    {
+        name: "notarize: the leakiest credential form is preferred",
+        file: "packaging/notarize.ts",
+        find: "    if (present(env, KEYCHAIN_PROFILE_VAR)) {",
+        with: "    if (false) {",
+        expect: "prefers the credential form that leaks least"
+    },
+
+    /* ---- src/helper/feed.ts ---- */
+    {
+        name: "feed: the update feed is live before any release exists",
+        file: "src/helper/feed.ts",
+        find: "export const RELEASE_FEED_ENABLED = false;",
+        with: "export const RELEASE_FEED_ENABLED = true;",
+        expect: "keeps the feed off until there is something to fetch"
+    },
+    {
+        name: "feed: the switch does nothing",
+        file: "src/helper/feed.ts",
+        find: "    return (options.enabled ?? RELEASE_FEED_ENABLED) ? RELEASE_FEED_URL : null;",
+        with: "    return RELEASE_FEED_URL;",
+        expect: "keeps the feed off until there is something to fetch"
+    },
+    {
+        name: "feed: releases are published to a repository that is not ours",
+        file: "src/helper/feed.ts",
+        find: "export const RELEASE_REPOSITORY = \"surfer05/vctranslate\";",
+        with: "export const RELEASE_REPOSITORY = \"surfer05/subline\";",
+        expect: "repository this code is actually in"
+    },
+
+    /* ---- src/app/flow.ts — §3 step 8b ---- */
+    {
+        name: "flow: the helper is never installed (helper.md concern 8, reopened)",
+        file: "src/app/flow.ts",
+        find: "        return this.installHelper();\n    }\n\n    /* ----",
+        with: "        return this.launch();\n    }\n\n    /* ----",
+        expect: "registers it once, between patching and launching"
+    },
+    {
+        name: "flow: retrying the helper re-patches Discord",
+        file: "src/app/flow.ts",
+        find: "                if (action.type === \"skip-helper\") return this.launch();\n                return this.installHelper();",
+        with: "                if (action.type === \"skip-helper\") return this.launch();\n                return this.applyPatch();",
+        expect: "re-runs ONLY the helper"
+    },
+    {
+        name: "flow: skipping the helper retries it instead of carrying on",
+        file: "src/app/flow.ts",
+        find: "                if (action.type === \"skip-helper\") return this.launch();",
+        with: "                if (action.type === \"skip-helper\") return this.installHelper();",
+        expect: "lets the user finish without it"
+    },
+    {
+        name: "flow: a failed helper is a dead end with no way past it",
+        file: "src/app/flow.ts",
+        find: "                actions: [\"retry\", \"skip-helper\", \"cancel\"]",
+        with: "                actions: [\"retry\", \"cancel\"]",
+        expect: "re-runs ONLY the helper"
+    },
+    {
+        name: "flow: the helper's outcome never reaches the last screen",
+        file: "src/app/flow.ts",
+        find: "            helper: this.helperOutcome ?? undefined,",
+        with: "            helper: undefined,",
+        expect: "carries the outcome to the last screen"
+    },
+    {
+        name: "flow: a failed helper registration launches Discord anyway",
+        file: "src/app/flow.ts",
+        find: "                step: \"helper-failed\",",
+        with: "                step: \"launching\",",
+        expect: "stops on a named screen when registration fails"
+    },
+
+    /* ---- src/main/ports.ts ---- */
+    {
+        name: "ports: Windows is told its helper failed to install",
+        file: "src/main/ports.ts",
+        find: "    if (platform !== \"darwin\") {\n        return ok({ applicable: false, installed: false, label: null, path: null });",
+        with: "    if (false) {\n        return ok({ applicable: false, installed: false, label: null, path: null });",
+        expect: "on Windows rather than failing"
+    },
+    {
+        name: "ports: removal on Windows pretends there was an agent",
+        file: "src/main/ports.ts",
+        find: "    if (platform !== \"darwin\") return { applicable: false, removed: false, error: null };",
+        with: "    if (false) return { applicable: false, removed: false, error: null };",
+        expect: "on Windows, which uninstall reads as"
+    },
+    {
+        name: "ports: removed reports the call succeeded, not that anything went",
+        file: "src/main/ports.ts",
+        find: "        removed: removed.ok && removed.value,",
+        with: "        removed: removed.ok,",
+        expect: "honest when there was nothing to remove"
+    },
+    {
+        name: "ports: a failed bootout is swallowed, so uninstall proceeds",
+        file: "src/main/ports.ts",
+        find: "        error: removed.ok ? null : removed.error",
+        with: "        error: null",
+        expect: "ABORTS with nothing changed"
+    },
+    {
+        name: "ports: installed is asserted rather than read back from launchctl",
+        file: "src/main/ports.ts",
+        find: "        installed: registered.value.loaded,",
+        with: "        installed: true,",
+        expect: "writes the plist under the given home",
+        // `installLaunchAgent` calls `launchctl print` after the bootstrap and
+        // RETURNS AN ERROR when the label is not listed, so `loaded` is `true`
+        // on every path that reaches here. The two forms are identical, and the
+        // one on the left is kept because it propagates an observation rather
+        // than restating a conclusion drawn in another file.
+        //
+        // If this ever gets KILLED, `installLaunchAgent` has stopped confirming
+        // its own registration — which is the failure launchAgent.ts's "a
+        // registration that silently did not happen is indistinguishable later
+        // from a helper with nothing to do" is entirely about.
+        equivalent: "installLaunchAgent refuses any registration launchctl does not confirm, so loaded is always true here"
+    },
+
+    /* ---- electron-builder.js ---- */
+    {
+        name: "packaging: signing is on by default, so a build reaches the keychain",
+        file: "electron-builder.js",
+        find: "const SIGNING_REQUESTED = process.env.SUBLINE_SIGN === \"1\" || process.env.SUBLINE_SIGN === \"true\";",
+        with: "const SIGNING_REQUESTED = true;",
+        expect: "DOES NOT SIGN unless it was asked to"
+    },
+    {
+        name: "packaging: identity auto-discovery is left on",
+        file: "electron-builder.js",
+        find: "if (!SIGNING_REQUESTED) process.env.CSC_IDENTITY_AUTO_DISCOVERY = \"false\";",
+        with: "if (false) process.env.CSC_IDENTITY_AUTO_DISCOVERY = \"false\";",
+        expect: "DOES NOT SIGN unless it was asked to"
+    },
+    {
+        name: "packaging: the hardened runtime is off",
+        file: "electron-builder.js",
+        find: "        hardenedRuntime: true,",
+        with: "        hardenedRuntime: false,",
+        expect: "turns the hardened runtime ON"
+    },
+    {
+        name: "packaging: the mod bundle is not shipped at all",
+        file: "electron-builder.js",
+        find: "    extraResources: [{ from: \"build/mod\", to: \"mod\" }],",
+        with: "    extraResources: [],",
+        expect: "ships the mod bundle from the directory build:mod writes"
+    },
+    {
+        name: "packaging: the NSIS installer demands administrator rights",
+        file: "electron-builder.js",
+        find: "        allowElevation: false,",
+        with: "        allowElevation: true,",
+        expect: "never asks for elevation"
+    },
+    {
+        name: "packaging: the executable is named something launchd cannot find",
+        file: "electron-builder.js",
+        find: "    productName: \"Subline\",",
+        with: "    productName: \"Subline Installer\",",
+        expect: "names an executable the LaunchAgent's ProgramArguments will actually find"
+    }
+
 ];
 
 /* ------------------------------------------------------------------------ */
@@ -873,6 +1272,8 @@ function main() {
     // ---- Step 2: mutate --------------------------------------------------
     const survivors = [];
     const wrongTest = [];
+    const equivalents = [];
+    const invariantMoved = [];
     let killed = 0;
 
     for (const mutation of MUTATIONS) {
@@ -900,6 +1301,19 @@ function main() {
 
         const died = result.failedTests > 0;
         const byExpected = result.names.some(name => name.includes(mutation.expect));
+
+        if (mutation.equivalent) {
+            // Expected to survive. Being killed is the interesting outcome.
+            if (died) {
+                invariantMoved.push(`${mutation.name} — marked equivalent ("${mutation.equivalent}") but the suite caught it`);
+                console.log(`INVARIANT MOVED  ${mutation.name}  [${result.failedTests}/${result.total} failing]`);
+            } else {
+                equivalents.push(mutation.name);
+                console.log(`EQUIVALENT ${mutation.name}  [cannot change behaviour: ${mutation.equivalent}]`);
+            }
+            continue;
+        }
+
         if (died && byExpected) {
             killed += 1;
             console.log(`KILLED   ${mutation.name}  [${result.failedTests}/${result.total} failing]`);
@@ -913,10 +1327,16 @@ function main() {
         }
     }
 
-    console.log(`\n${killed}/${MUTATIONS.length} killed, ${survivors.length} survivors.`);
+    const scored = MUTATIONS.length - equivalents.length - invariantMoved.length;
+    console.log(
+        `\n${killed}/${scored} killed, ${survivors.length} survivors`
+        + `${equivalents.length === 0 ? "" : `, ${equivalents.length} equivalent (expected to survive)`}.`
+    );
     for (const note of wrongTest) console.log(`  note: ${note}`);
+    for (const equivalent of equivalents) console.log(`  equivalent: ${equivalent}`);
+    for (const moved of invariantMoved) console.log(`  INVARIANT MOVED: ${moved}`);
     for (const survivor of survivors) console.log(`  SURVIVOR: ${survivor}`);
-    process.exit(survivors.length === 0 ? 0 : 1);
+    process.exit(survivors.length === 0 && invariantMoved.length === 0 ? 0 : 1);
 }
 
 main();

@@ -196,9 +196,9 @@ async function main() {
 
     /* -------------------------------------------------------------------- */
     heading("Package macOS", options.dryRun ? "" : "[SIGNING] [NOTARIZING]");
-    // `release/` is cleared first: it is not gitignored content we want to
-    // reason about, and a stale DMG from a previous version sitting next to this
-    // one is how the wrong file gets uploaded.
+    // `release/` is cleared first. Step 9 lists everything in it and step 10
+    // prints that list as a `gh release create` command — so a stale DMG from a
+    // previous version sitting in there is how the wrong file gets uploaded.
     rmSync(OUT_DIR, { recursive: true, force: true });
     mkdirSync(OUT_DIR, { recursive: true });
 

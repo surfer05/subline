@@ -301,6 +301,27 @@ describe("the release manifest", () => {
         expect(() => manifest()).toThrow(/nothing to release/);
     });
 
+    it("carries a signature through when one is supplied", () => {
+        // `REQUIRE_SIGNATURE` in release.ts is the switch that makes an unsigned
+        // release refuse to install once there is a key. A writer that silently
+        // dropped the field would make that switch impossible to turn on.
+        const signed = buildReleaseManifest({
+            repository: parseRepository("surfer05/vctranslate"),
+            tag: "v0.1.0",
+            buildId: "aaaa1111bbbb2222",
+            pluginVersion: "0.1.0",
+            artifact: digestFile(artifactPath),
+            publishedAt: "2026-08-07T09:00:00.000Z",
+            signature: { algorithm: "ed25519", keyId: "subline-1", value: "c2ln" }
+        });
+        expect(signed.signature).toEqual({ algorithm: "ed25519", keyId: "subline-1", value: "c2ln" });
+
+        const parsed = parseReleaseManifest(renderReleaseManifest(signed), "test");
+        expect(parsed.ok).toBe(true);
+        if (!parsed.ok) throw new Error(parsed.error.message);
+        expect(parsed.value.signature?.keyId).toBe("subline-1");
+    });
+
     it("ends with a newline, so the published asset is a well-formed text file", () => {
         expect(renderReleaseManifest(manifest()).endsWith("}\n")).toBe(true);
     });
@@ -337,6 +358,14 @@ describe("release URLs", () => {
         // release nobody made.
         expect(releaseFeedUrl(parseRepository(RELEASE_REPOSITORY))).toBe(RELEASE_FEED_URL);
         expect(FEED_ASSET_NAME).toBe(RELEASE_MANIFEST_ASSET_NAME);
+    });
+
+    it("names the repository this code is actually in", () => {
+        // Every release URL is derived from RELEASE_REPOSITORY, so a wrong value
+        // is self-consistent and invisible: the feed-agreement test above would
+        // still pass. package.json's `repository` is the independent witness.
+        const declared = JSON.parse(readFileSync(join(INSTALLER_DIR, "package.json"), "utf8")).repository.url;
+        expect(parseRepository(RELEASE_REPOSITORY)).toEqual(parseRepository(declared));
     });
 
     it("tags a version once, whether or not it already starts with v", () => {
