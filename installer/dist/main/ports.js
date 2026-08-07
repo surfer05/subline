@@ -21,6 +21,7 @@ import { defaultLanguage, discordSettingsPathFor, readDiscordLocale, setTargetLa
 import { parsePsOutput, processNameFor } from "../app/discordProcess.js";
 import { installModBundle, shippedModDirFor } from "../app/modInstall.js";
 import { inspectModBundle } from "../bundle/bundle.js";
+import { HELPER_LABEL, helperLaunchAgentSpec, installLaunchAgent, launchAgentPlistPath, removeLaunchAgent } from "../helper/launchAgent.js";
 import { modBundleDirFor, productDirFor } from "../bundle/layout.js";
 import { locateDiscordInstalls } from "../patcher/locate.js";
 import { patchInstall } from "../patcher/patch.js";
@@ -28,6 +29,60 @@ import { err, ok } from "../patcher/result.js";
 import { inspectInstall } from "../patcher/state.js";
 import { awaitVerification } from "../verify/verify.js";
 const run = promisify(execFile);
+/**
+ * Register the LaunchAgent, or say honestly that there is nothing to register.
+ *
+ * Windows returns `applicable: false` rather than an error: spec §5's Scheduled
+ * Task is not built, and a named failure on a platform that never had the feature
+ * would put a warning screen in front of every Windows user for something that is
+ * not wrong with their machine.
+ */
+export async function installHelperFor(wiring, platform = process.platform, home = homedir()) {
+    if (platform !== "darwin") {
+        return ok({ applicable: false, installed: false, label: null, path: null });
+    }
+    const registered = await installLaunchAgent({
+        plistPath: launchAgentPlistPath(home),
+        spec: helperLaunchAgentSpec(wiring.appPath, wiring.intervalSeconds, wiring.executableName),
+        uid: wiring.uid,
+        launchctl: wiring.launchctl,
+        platform
+    });
+    if (!registered.ok)
+        return registered;
+    return ok({
+        applicable: true,
+        // `loaded` is `launchctl print` AFTER the bootstrap, not the bootstrap's
+        // own exit code. See `launchAgent.ts`: a registration that silently did
+        // not happen is indistinguishable later from a helper with nothing to do.
+        installed: registered.value.loaded,
+        label: registered.value.label,
+        path: registered.value.plistPath
+    });
+}
+/**
+ * Unregister it — §8 step 3, and `uninstall`'s required precondition.
+ *
+ * Returns the `HelperRemoval` shape `uninstall` demands rather than a raw result,
+ * so the one caller that has to get this ordering right cannot assemble it
+ * wrongly. `uninstall.ts` explains what a forgotten ordering costs: Discord
+ * restored under a live agent is put straight back at the next interval.
+ */
+export async function removeHelperFor(wiring, platform = process.platform, home = homedir()) {
+    if (platform !== "darwin")
+        return { applicable: false, removed: false, error: null };
+    const removed = await removeLaunchAgent({
+        plistPath: launchAgentPlistPath(home),
+        label: HELPER_LABEL,
+        uid: wiring.uid,
+        launchctl: wiring.launchctl
+    });
+    return {
+        applicable: true,
+        removed: removed.ok && removed.value,
+        error: removed.ok ? null : removed.error
+    };
+}
 /** `ps` on macOS, `tasklist` on Windows, parsed into the same shape. */
 export async function listProcesses(platform, exec) {
     try {
@@ -136,6 +191,7 @@ export function createFlowPorts(options) {
             : installModBundle({ sourceDir: shippedDir, destDir: runtimeDir }),
         locate: explicitPaths => locateDiscordInstalls({
             platform,
+            ...(options.searchRoots === undefined ? {} : { searchRoots: options.searchRoots }),
             ...(explicitPaths === undefined ? {} : { explicitPaths })
         }),
         inspect: install => inspectInstall(install),
@@ -152,8 +208,14 @@ export function createFlowPorts(options) {
             productVersion: options.productVersion,
             overwriteForeignMod: patchOptions.overwriteForeignMod
         }),
+        installHelper: () => installHelperFor(options.helper, platform, home),
         launchDiscord: install => launchDiscord(install, platform, exec),
-        verify: verifyOptions => awaitVerification(verifyOptions)
+        // The same platform/env/home the mod bundle was installed with. Without
+        // these, `readBeacon` falls back to the process defaults and looks for
+        // the status file somewhere other than where this installation put it —
+        // which, on a machine that already has a beacon, means verifying THIS
+        // install against SOMEBODY ELSE'S status file.
+        verify: verifyOptions => awaitVerification({ ...verifyOptions, platform, env, home })
     };
 }
 /** The paths §8's uninstall needs, resolved the same way the flow resolves them. */

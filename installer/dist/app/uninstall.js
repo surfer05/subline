@@ -82,6 +82,35 @@ export function uninstall(ports, options) {
     const problems = [];
     const restores = [];
     const keepSettings = options.keepSettings ?? true;
+    // 0. THE PRECONDITION. Nothing is restored while a helper that re-patches
+    //    Discord may still be registered — it would undo the uninstall at its
+    //    next interval, and the user would be left with software they removed
+    //    still modifying another application. Refusing here leaves everything
+    //    exactly as it was, which is a state the user can retry from.
+    const helperStopped = !options.helper.applicable || options.helper.error === null;
+    if (!helperStopped) {
+        const error = options.helper.error;
+        ports.log.error("uninstall.helper-stop-failed", { code: error.code });
+        return {
+            restores: [],
+            helperStopped: false,
+            discordRestored: false,
+            modBundleRemoved: false,
+            modBundleKeptForSafety: true,
+            settingsRemoved: false,
+            productDataRemoved: false,
+            translationCache: "left-in-discord-storage",
+            problems: [error],
+            clean: false,
+            summary: "Subline could not stop its background updater, so nothing was removed. Removing Subline while "
+                + "that is still running would put the changes to Discord straight back. Nothing has been changed; "
+                + "restart your Mac and try again."
+        };
+    }
+    ports.log.info("uninstall.helper-stopped", {
+        applicable: options.helper.applicable,
+        removed: options.helper.removed
+    });
     // 1. Every Discord first (§8 steps 1–2: restore the archive, remove the
     //    sidecar — a stale one makes the NEXT install misread a foreign or
     //    absent patch as ours).
@@ -149,6 +178,7 @@ export function uninstall(ports, options) {
     const clean = discordRestored && problems.length === 0;
     return {
         restores,
+        helperStopped,
         discordRestored,
         modBundleRemoved,
         modBundleKeptForSafety,

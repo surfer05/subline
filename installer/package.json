@@ -15,9 +15,10 @@
     "build:mod": "node scripts/buildMod.mjs",
     "build:app": "tsc -p tsconfig.build.json && node scripts/copyRenderer.mjs",
     "start": "pnpm build:app && electron .",
-    "//pack": "Packaging is a CONFIG step, not a rewrite: build:mod produces build/mod, build:app produces dist, and electron-builder copies both.",
-    "pack": "pnpm build:mod && pnpm build:app && electron-builder --dir",
-    "dist": "pnpm build:mod && pnpm build:app && electron-builder",
+    "//pack:dir": "Packaging is a CONFIG step, not a rewrite: build:mod produces build/mod, build:app produces dist, and electron-builder copies both. Named pack:dir because `pnpm pack` is one of pnpm's own builtins and would shadow it. CSC_IDENTITY_AUTO_DISCOVERY=false is belt-and-braces on top of electron-builder.js's `identity: null` default: an unsigned local build must never reach the keychain.",
+    "pack:dir": "pnpm build:mod && pnpm build:app && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir",
+    "dist": "pnpm build:mod && pnpm build:app && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder",
+    "//dist:mac": "UNSIGNED. Signing is opt-in and belongs to the release engineer: `SUBLINE_SIGN=1 SUBLINE_NOTARIZE=1 pnpm dist:mac`, with the credentials in docs/RELEASING.md. The default must never touch the keychain.",
     "dist:mac": "pnpm build:mod && pnpm build:app && electron-builder --mac",
     "//dist:win": "Unsigned, deliberately — spec §1 and §10. See docs/RELEASING.md for what SmartScreen does about it.",
     "dist:win": "pnpm build:mod && pnpm build:app && electron-builder --win",
@@ -31,83 +32,6 @@
   "//engines": "buildMod.mjs imports src/bundle/spec.ts directly, so that the checks the build runs and the checks the installer runs are the same code. packaging/hooks.mjs does the same. Node strips TypeScript types without a flag from 22.18 on.",
   "engines": {
     "node": ">=22.18"
-  },
-  "build": {
-    "appId": "com.subline.installer",
-    "productName": "Subline",
-    "copyright": "Copyright © 2026 the Subline contributors. GPL-3.0-or-later.",
-    "directories": {
-      "output": "release",
-      "//buildResources": "NOT the default `build/`, which is the gitignored home of the assembled mod bundle and the pinned Vencord checkout. `packaging/` holds the entitlements and the hooks, which are inputs.",
-      "buildResources": "packaging"
-    },
-    "files": [
-      "dist/**/*",
-      "package.json"
-    ],
-    "//extraResources": "The mod bundle ships in Contents/Resources/mod and is COPIED OUT to ~/Library/Application Support/Subline/mod on install. It must never be loaded from here: see src/app/modInstall.ts — App Translocation would make the path vanish and stop Discord starting.",
-    "extraResources": [
-      {
-        "from": "build/mod",
-        "to": "mod"
-      }
-    ],
-    "//hooks": "packaging/hooks.mjs exports one function per hook name. beforePack and afterPack refuse to ship a mod bundle whose build id disagrees with the plugin stamp in this checkout; afterSign notarizes and staples. A configuration that quietly did not happen is this project's oldest failure mode.",
-    "beforePack": "./packaging/hooks.mjs",
-    "afterPack": "./packaging/hooks.mjs",
-    "afterSign": "./packaging/hooks.mjs",
-    "artifactName": "${productName}-${version}-${arch}.${ext}",
-    "mac": {
-      "category": "public.app-category.utilities",
-      "target": [
-        {
-          "target": "dmg",
-          "arch": [
-            "arm64",
-            "x64"
-          ]
-        }
-      ],
-      "//identity": "Deliberately unset. electron-builder auto-discovers the Developer ID Application certificate in the login keychain, or takes CSC_LINK + CSC_KEY_PASSWORD from the environment. Pinning a name here would put a Team ID in the repository and break every other machine.",
-      "hardenedRuntime": true,
-      "gatekeeperAssess": false,
-      "//entitlements": "Read packaging/entitlements.mac.plist before changing this. In particular: NO entitlement grants the right to modify another application. That is TCC's App Management, a user grant in System Settings, and it attaches to the SIGNING IDENTITY — which is why spec §4 requires Developer ID and why the app is not sandboxed.",
-      "entitlements": "packaging/entitlements.mac.plist",
-      "entitlementsInherit": "packaging/entitlements.mac.inherit.plist",
-      "//notarize": "false because packaging/hooks.mjs afterSign runs notarytool itself and staples the .app before the DMG wraps it — electron-builder's own step would not staple the app, only the archive.",
-      "notarize": false,
-      "extendInfo": {
-        "NSHumanReadableCopyright": "GPL-3.0-or-later",
-        "//NSAppleEventsUsageDescription": "The string macOS shows in the Automation prompt when Subline asks Discord to quit (spec §7: offer, never force-kill). Unlike App Management's wording, this one is ours to write.",
-        "NSAppleEventsUsageDescription": "Subline asks Discord to quit before it changes it, so nothing you are part-way through typing is lost.",
-        "LSMinimumSystemVersion": "11.0"
-      }
-    },
-    "dmg": {
-      "//": "Not signed: the app inside it is signed, notarized and stapled, which is what Gatekeeper checks. The release script notarizes and staples the DMG itself afterwards.",
-      "writeUpdateInfo": false
-    },
-    "win": {
-      "//signing": "UNSIGNED, deliberately — spec §1 and §10: an EV certificate needs a registered business and ~$500/yr, which is not justifiable pre-revenue. See docs/RELEASING.md for what users will see and for the ONE result that changes this decision (Defender quarantine, not the SmartScreen warning).",
-      "//adding-a-certificate": "A config change, not a rewrite: set CSC_LINK (path or base64 of the .pfx) and CSC_KEY_PASSWORD in the environment and electron-builder signs with no edit here at all. For a hardware token, add `certificateSubjectName` and `signingHashAlgorithms` to this block.",
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        }
-      ]
-    },
-    "nsis": {
-      "//perMachine": "Spec §5: Discord lives in %LOCALAPPDATA%\\Discord, per-user, so there is no UAC gate and no reason to ask for one. An unsigned installer that also demands elevation is close to a textbook Defender heuristic (§10).",
-      "oneClick": false,
-      "perMachine": false,
-      "allowElevation": false,
-      "allowToChangeInstallationDirectory": true,
-      "deleteAppDataOnUninstall": false,
-      "artifactName": "${productName}-Setup-${version}.${ext}"
-    }
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

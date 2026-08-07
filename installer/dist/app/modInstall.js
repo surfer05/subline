@@ -42,13 +42,14 @@ export function installModBundle(options) {
     if (destDir === sourceDir) {
         return err("MOD_BUNDLE_INVALID", "The mod bundle's source and runtime locations are the same directory. The bundle must be copied out of the app, or Discord would load it from a path that disappears when the app quits.", { path: destDir });
     }
-    // Refuse to replace a directory that is not one of ours, for the same
-    // reason `removeModBundle` does: this path comes from configuration and the
-    // operation is a recursive delete.
+    // A directory that is not one of ours is never replaced — but that guard
+    // lives in `removeModBundle` and is deliberately NOT duplicated here. An
+    // earlier version checked for the manifest first as a fail-fast; a mutation
+    // deleting that check left the whole suite green, because `removeModBundle`
+    // refuses the same directory a moment later with the same error code. A
+    // guard that cannot change an observable outcome is untested by definition
+    // and rots, so there is one reachable source of this refusal.
     const replaced = existsSync(destDir);
-    if (replaced && !existsSync(manifestPathFor(destDir))) {
-        return err("MOD_BUNDLE_INVALID", `${destDir} already exists and is not a Subline mod bundle, so Subline will not replace it.`, { path: destDir });
-    }
     const staging = `${destDir}${STAGING_SUFFIX}`;
     try {
         rmSync(staging, { recursive: true, force: true });
@@ -59,6 +60,7 @@ export function installModBundle(options) {
         rmSync(staging, { recursive: true, force: true });
         return fsError(cause, destDir, "copy the Subline mod into place");
     }
+    options.hooks?.afterStage?.(staging);
     // Check the COPY, before it becomes the live bundle. A truncated copy that
     // reached the runtime location would be found only by the patch that then
     // had to be rolled back.

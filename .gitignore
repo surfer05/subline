@@ -5,3 +5,6 @@ node_modules/
 # Reproducible from vencord.pin.json plus the plugin sources, so it is an
 # output, not a source.
 installer/build/
+
+# electron-builder output.
+installer/release/

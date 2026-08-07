@@ -61,6 +61,7 @@ export class InstallFlow {
     overwriteForeignMod = false;
     chosenLanguage = null;
     installedBundle = null;
+    helperOutcome = null;
     patchReport = null;
     patchedAt = 0;
     launchedAt = 0;
@@ -176,6 +177,15 @@ export class InstallFlow {
                 if (this.current.error?.code === "PERMISSION_DENIED")
                     return this.explainPermission("blocked");
                 return this.applyPatch();
+            // Discord is ALREADY PATCHED by the time this screen can appear, so
+            // retry re-runs only the helper — never the patch. Repeating a
+            // successful write to another application because a background agent
+            // would not register is a much worse failure than the one being
+            // retried.
+            case "helper-failed":
+                if (action.type === "skip-helper")
+                    return this.launch();
+                return this.installHelper();
             case "launch-failed":
                 if (action.type === "skip-launch")
                     return this.verify();
@@ -187,6 +197,7 @@ export class InstallFlow {
                     actions: [],
                     verification: this.current.verification,
                     patch: this.current.patch,
+                    helper: this.current.helper,
                     error: this.current.error
                 }));
             default:
@@ -484,6 +495,52 @@ export class InstallFlow {
             alreadyPatched: patched.value.alreadyPatched,
             replacedMod: patched.value.replacedMod ?? null
         });
+        return this.installHelper();
+    }
+    /* -------------------------------------------------------------------- *
+     * §3 step 8b: the background helper
+     * -------------------------------------------------------------------- */
+    /**
+     * Install the LaunchAgent, between patching and launching.
+     *
+     * **The ordering is not arbitrary.** After the patch, because there is no
+     * point registering a re-patcher for an install that does not exist and the
+     * agent would fire once at load against nothing. Before the launch and the
+     * verification, because those two steps can take minutes of a user watching
+     * Discord start — and a step placed after the last screen is a step that gets
+     * skipped by everyone who closes the window when they see the tick.
+     *
+     * A failure here is NOT fatal and does not roll anything back. Translation
+     * works; what is missing is the repair after Discord's next update. So the
+     * screen says exactly that and offers to carry on, because refusing to finish
+     * an install that is working would be a worse answer than a named warning.
+     */
+    async installHelper() {
+        this.set(state({
+            step: "installing-helper",
+            detail: "Setting Subline up to repair itself after Discord updates…",
+            busy: true,
+            actions: []
+        }));
+        const result = await this.ports.installHelper();
+        if (!result.ok) {
+            this.ports.log.error("helper.install-failed", { code: result.error.code });
+            return this.set(state({
+                step: "helper-failed",
+                detail: `${result.error.message} Translation itself is installed and will work. What is missing is the `
+                    + "background check that puts Subline back after Discord updates itself — without it, translation "
+                    + "will stop working at some point and you would need to run Subline again to restore it.",
+                error: result.error,
+                install: this.chosenInstall ?? undefined,
+                actions: ["retry", "skip-helper", "cancel"]
+            }));
+        }
+        this.helperOutcome = result.value;
+        this.ports.log.info("helper.installed", {
+            applicable: result.value.applicable,
+            installed: result.value.installed,
+            label: result.value.label
+        });
         return this.launch();
     }
     failPatch(error) {
@@ -565,6 +622,10 @@ export class InstallFlow {
             verification: report,
             patch: patch,
             bundle: this.installedBundle ?? undefined,
+            // Carried to the last screen so "installed, but it will not repair
+            // itself" is visible where the user actually looks, rather than only
+            // in the log.
+            helper: this.helperOutcome ?? undefined,
             actions: ["finish"]
         }));
     }
