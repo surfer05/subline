@@ -19,7 +19,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { APP_MANAGEMENT_SETTINGS_URL, probeAppManagement } from "../app/appManagement.js";
-import type { FlowLogger, FlowPorts } from "../app/flow.js";
+import type { FlowLogger, FlowPorts, HelperInstallOutcome } from "../app/flow.js";
+import type { HelperRemoval } from "../app/uninstall.js";
 import {
     defaultLanguage,
     discordSettingsPathFor,
@@ -31,6 +32,10 @@ import { parsePsOutput, processNameFor } from "../app/discordProcess.js";
 import type { RunningProcess } from "../app/discordProcess.js";
 import { installModBundle, shippedModDirFor } from "../app/modInstall.js";
 import { inspectModBundle } from "../bundle/bundle.js";
+import {
+    HELPER_LABEL, helperLaunchAgentSpec, installLaunchAgent, launchAgentPlistPath, removeLaunchAgent
+} from "../helper/launchAgent.js";
+import type { LaunchctlPort } from "../helper/launchAgent.js";
 import { modBundleDirFor, productDirFor } from "../bundle/layout.js";
 import { locateDiscordInstalls } from "../patcher/locate.js";
 import type { DiscordBranch, DiscordInstall } from "../patcher/locate.js";
@@ -58,6 +63,95 @@ export interface RealPortsOptions {
     searchRoots?: readonly string[];
     /** Injected by tests so no child process is spawned. */
     exec?: (file: string, args: string[]) => Promise<{ stdout: string }>;
+    /**
+     * Everything the background helper's registration needs (§3 step 8b).
+     *
+     * REQUIRED, deliberately. The reason this task exists at all is that
+     * `helper:install` was wired to IPC and to nothing else, so a real install
+     * silently got no helper — and spec §6 says a product with no helper dies
+     * quietly the first time Discord rewrites its frontend. An optional field
+     * here would rebuild exactly that hole: it would default to a no-op, every
+     * test would pass, and the shipped installer would register nothing.
+     */
+    helper: HelperWiring;
+}
+
+export interface HelperWiring {
+    /**
+     * The `.app` Subline is running from — NOT its executable.
+     * `helperLaunchAgentSpec` appends `Contents/MacOS/<name>` itself, because the
+     * agent has to run THIS bundle: macOS TCC grants attach to a code-signing
+     * identity, and the App Management permission the user granted during install
+     * is the one that lets the helper write inside `Discord.app` (spec §2).
+     */
+    appPath: string;
+    uid: number;
+    launchctl: LaunchctlPort;
+    intervalSeconds?: number;
+    /** The executable inside the bundle. Must match electron-builder's `productName`. */
+    executableName?: string;
+}
+
+/**
+ * Register the LaunchAgent, or say honestly that there is nothing to register.
+ *
+ * Windows returns `applicable: false` rather than an error: spec §5's Scheduled
+ * Task is not built, and a named failure on a platform that never had the feature
+ * would put a warning screen in front of every Windows user for something that is
+ * not wrong with their machine.
+ */
+export async function installHelperFor(
+    wiring: HelperWiring,
+    platform: NodeJS.Platform = process.platform,
+    home: string = homedir()
+): Promise<Result<HelperInstallOutcome>> {
+    if (platform !== "darwin") {
+        return ok({ applicable: false, installed: false, label: null, path: null });
+    }
+    const registered = await installLaunchAgent({
+        plistPath: launchAgentPlistPath(home),
+        spec: helperLaunchAgentSpec(wiring.appPath, wiring.intervalSeconds, wiring.executableName),
+        uid: wiring.uid,
+        launchctl: wiring.launchctl,
+        platform
+    });
+    if (!registered.ok) return registered as Result<HelperInstallOutcome>;
+    return ok({
+        applicable: true,
+        // `loaded` is `launchctl print` AFTER the bootstrap, not the bootstrap's
+        // own exit code. See `launchAgent.ts`: a registration that silently did
+        // not happen is indistinguishable later from a helper with nothing to do.
+        installed: registered.value.loaded,
+        label: registered.value.label,
+        path: registered.value.plistPath
+    });
+}
+
+/**
+ * Unregister it — §8 step 3, and `uninstall`'s required precondition.
+ *
+ * Returns the `HelperRemoval` shape `uninstall` demands rather than a raw result,
+ * so the one caller that has to get this ordering right cannot assemble it
+ * wrongly. `uninstall.ts` explains what a forgotten ordering costs: Discord
+ * restored under a live agent is put straight back at the next interval.
+ */
+export async function removeHelperFor(
+    wiring: Pick<HelperWiring, "uid" | "launchctl">,
+    platform: NodeJS.Platform = process.platform,
+    home: string = homedir()
+): Promise<HelperRemoval> {
+    if (platform !== "darwin") return { applicable: false, removed: false, error: null };
+    const removed = await removeLaunchAgent({
+        plistPath: launchAgentPlistPath(home),
+        label: HELPER_LABEL,
+        uid: wiring.uid,
+        launchctl: wiring.launchctl
+    });
+    return {
+        applicable: true,
+        removed: removed.ok && removed.value,
+        error: removed.ok ? null : removed.error
+    };
 }
 
 /** `ps` on macOS, `tasklist` on Windows, parsed into the same shape. */
@@ -209,6 +303,7 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
                 productVersion: options.productVersion,
                 overwriteForeignMod: patchOptions.overwriteForeignMod
             }),
+        installHelper: () => installHelperFor(options.helper, platform, home),
         launchDiscord: install => launchDiscord(install, platform, exec),
         // The same platform/env/home the mod bundle was installed with. Without
         // these, `readBeacon` falls back to the process defaults and looks for

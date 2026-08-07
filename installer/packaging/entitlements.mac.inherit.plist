@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      The helper executables Electron ships inside the bundle: the renderer,
+      the GPU process, and the crashpad handler.
+
+      They inherit the main executable's entitlements rather than declaring
+      their own, which is what keeps the *effective* set equal to the one file
+      above. In particular they do NOT get Apple events: the renderer is
+      sandboxed (`sandbox: true` in `main.ts`) and has no business sending them
+      — only the main process runs `osascript`.
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.inherit</key>
+    <true/>
+</dict>
+</plist>

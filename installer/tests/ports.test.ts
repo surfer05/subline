@@ -27,14 +27,24 @@ import {
 } from "../src/main/ports.js";
 import { readMarker } from "../src/patcher/marker.js";
 import { readStub } from "../src/patcher/stub.js";
-import { makeDiscordFixture, makeModBundleFixture } from "./fixture.js";
-import type { Fixture, ModBundleFixture } from "./fixture.js";
+import { makeDiscordFixture, makeFakeLaunchctl, makeModBundleFixture } from "./fixture.js";
+import type { FakeLaunchctl, Fixture, ModBundleFixture } from "./fixture.js";
 
 let discord: Fixture;
 let modSource: ModBundleFixture;
 let appResources: string;
 let home: string;
 let calls: Array<{ file: string; args: string[] }>;
+let launchctl: FakeLaunchctl;
+
+/**
+ * The helper's registration, always faked.
+ *
+ * `home` is a temp directory, so `launchAgentPlistPath(home)` writes the plist
+ * there and never to the real `~/Library/LaunchAgents`; `launchctl` is a fake, so
+ * nothing is ever registered with launchd on the machine running this suite.
+ */
+const helperWiring = () => ({ appPath: "/Applications/Subline.app", uid: 501, launchctl });
 
 beforeEach(() => {
     discord = makeDiscordFixture();
@@ -48,6 +58,7 @@ beforeEach(() => {
     }
     home = mkdtempSync(join(tmpdir(), "subline-home-"));
     calls = [];
+    launchctl = makeFakeLaunchctl();
 });
 
 afterEach(() => {
@@ -66,6 +77,7 @@ function ports(overrides: { processesStdout?: string } = {}) {
         env: {},
         home,
         searchRoots: [discord.root],
+        helper: helperWiring(),
         exec: async (file: string, args: string[]) => {
             calls.push({ file, args });
             return { stdout: overrides.processesStdout ?? "" };
@@ -177,6 +189,7 @@ describe("the real ports, end to end", () => {
             env: {},
             home,
             searchRoots: [empty],
+            helper: helperWiring(),
             exec: async () => ({ stdout: "" })
         });
         const flow = new InstallFlow(flowPorts);
@@ -198,6 +211,7 @@ describe("the real ports, end to end", () => {
                 env: {},
                 home,
                 searchRoots: [bd.root],
+                helper: helperWiring(),
                 exec: async () => ({ stdout: "" })
             });
             const flow = new InstallFlow(flowPorts);

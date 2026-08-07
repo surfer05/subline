@@ -77,6 +77,9 @@ export type FlowStep =
     /* §3 step 8. */
     | "patching"
     | "patch-failed"
+    /* §3 step 8b: the background helper. */
+    | "installing-helper"
+    | "helper-failed"
     /* §3 step 9 / §7. */
     | "launching"
     | "launch-failed"
@@ -96,6 +99,7 @@ export type FlowActionType =
     | "set-language"
     | "open-permission-settings"
     | "retry"
+    | "skip-helper"
     | "skip-launch"
     | "finish";
 
@@ -110,6 +114,7 @@ export type FlowAction =
     | { type: "set-language"; code: string }
     | { type: "open-permission-settings" }
     | { type: "retry" }
+    | { type: "skip-helper" }
     | { type: "skip-launch" }
     | { type: "finish" };
 
@@ -143,8 +148,28 @@ export interface FlowState {
     permissionSettingsUrl?: string;
     bundle?: ModBundle;
     patch?: PatchReport;
+    /** What happened to the background helper (§3 step 8b). */
+    helper?: HelperInstallOutcome;
     verification?: VerificationReport;
     searchedPaths?: string[];
+}
+
+/**
+ * The result of §3 step 8b — installing the thing that keeps the install alive.
+ *
+ * `applicable: false` is the honest answer on a platform where Subline has no
+ * background helper yet. Spec §5's Windows Scheduled Task is not built, and
+ * reporting "installed" for something that does not exist there would make the
+ * one screen that could tell a user their install will not repair itself say the
+ * opposite.
+ */
+export interface HelperInstallOutcome {
+    applicable: boolean;
+    /** True when a background agent is registered right now — confirmed, not assumed. */
+    installed: boolean;
+    label: string | null;
+    /** The LaunchAgent plist, for the diagnostics view. */
+    path: string | null;
 }
 
 /* ------------------------------------------------------------------------ *
@@ -184,6 +209,15 @@ export interface FlowPorts {
     setLanguage(code: string): Result<SetTargetLanguageReport>;
 
     patch(install: DiscordInstall, options: { modBundleDir: string; overwriteForeignMod: boolean }): Result<PatchReport>;
+    /**
+     * §3 step 8b. REQUIRED, and that is the entire point of this port existing.
+     *
+     * Before this, `helper:install` was an IPC handler no flow state ever called,
+     * so a real install got no helper at all — and spec §6 says a product with no
+     * helper dies quietly the first time Discord updates. A port the flow always
+     * calls is the difference between "the feature exists" and "the feature runs".
+     */
+    installHelper(): Promise<Result<HelperInstallOutcome>>;
     launchDiscord(install: DiscordInstall): Promise<Result<true>>;
     verify(options: AwaitVerifyOptions): Promise<VerificationReport>;
 
@@ -222,6 +256,7 @@ export class InstallFlow {
     private overwriteForeignMod = false;
     private chosenLanguage: string | null = null;
     private installedBundle: InstalledModBundle | null = null;
+    private helperOutcome: HelperInstallOutcome | null = null;
     private patchReport: PatchReport | null = null;
     private patchedAt = 0;
     private launchedAt = 0;
@@ -351,6 +386,15 @@ export class InstallFlow {
                 if (this.current.error?.code === "PERMISSION_DENIED") return this.explainPermission("blocked");
                 return this.applyPatch();
 
+            // Discord is ALREADY PATCHED by the time this screen can appear, so
+            // retry re-runs only the helper — never the patch. Repeating a
+            // successful write to another application because a background agent
+            // would not register is a much worse failure than the one being
+            // retried.
+            case "helper-failed":
+                if (action.type === "skip-helper") return this.launch();
+                return this.installHelper();
+
             case "launch-failed":
                 if (action.type === "skip-launch") return this.verify();
                 return this.launch();
@@ -362,6 +406,7 @@ export class InstallFlow {
                     actions: [],
                     verification: this.current.verification,
                     patch: this.current.patch,
+                    helper: this.current.helper,
                     error: this.current.error
                 }));
 
@@ -696,6 +741,57 @@ export class InstallFlow {
             alreadyPatched: patched.value.alreadyPatched,
             replacedMod: patched.value.replacedMod ?? null
         });
+        return this.installHelper();
+    }
+
+    /* -------------------------------------------------------------------- *
+     * §3 step 8b: the background helper
+     * -------------------------------------------------------------------- */
+
+    /**
+     * Install the LaunchAgent, between patching and launching.
+     *
+     * **The ordering is not arbitrary.** After the patch, because there is no
+     * point registering a re-patcher for an install that does not exist and the
+     * agent would fire once at load against nothing. Before the launch and the
+     * verification, because those two steps can take minutes of a user watching
+     * Discord start — and a step placed after the last screen is a step that gets
+     * skipped by everyone who closes the window when they see the tick.
+     *
+     * A failure here is NOT fatal and does not roll anything back. Translation
+     * works; what is missing is the repair after Discord's next update. So the
+     * screen says exactly that and offers to carry on, because refusing to finish
+     * an install that is working would be a worse answer than a named warning.
+     */
+    private async installHelper(): Promise<FlowState> {
+        this.set(state({
+            step: "installing-helper",
+            detail: "Setting Subline up to repair itself after Discord updates…",
+            busy: true,
+            actions: []
+        }));
+
+        const result = await this.ports.installHelper();
+        if (!result.ok) {
+            this.ports.log.error("helper.install-failed", { code: result.error.code });
+            return this.set(state({
+                step: "helper-failed",
+                detail:
+                    `${result.error.message} Translation itself is installed and will work. What is missing is the `
+                    + "background check that puts Subline back after Discord updates itself — without it, translation "
+                    + "will stop working at some point and you would need to run Subline again to restore it.",
+                error: result.error,
+                install: this.chosenInstall ?? undefined,
+                actions: ["retry", "skip-helper", "cancel"]
+            }));
+        }
+
+        this.helperOutcome = result.value;
+        this.ports.log.info("helper.installed", {
+            applicable: result.value.applicable,
+            installed: result.value.installed,
+            label: result.value.label
+        });
         return this.launch();
     }
 
@@ -785,6 +881,10 @@ export class InstallFlow {
             verification: report,
             patch: patch,
             bundle: this.installedBundle ?? undefined,
+            // Carried to the last screen so "installed, but it will not repair
+            // itself" is visible where the user actually looks, rather than only
+            // in the log.
+            helper: this.helperOutcome ?? undefined,
             actions: ["finish"]
         }));
     }

@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 
 import type { AppManagementStatus } from "../src/app/appManagement.js";
 import { InstallFlow, isConfirmedSuccess } from "../src/app/flow.js";
-import type { FlowPorts, FlowState } from "../src/app/flow.js";
+import type { FlowPorts, FlowState, FlowStep, HelperInstallOutcome } from "../src/app/flow.js";
 import type { InstalledModBundle } from "../src/app/modInstall.js";
 import type { ModBundle } from "../src/bundle/bundle.js";
 import type { DiscordInstall } from "../src/patcher/locate.js";
@@ -113,6 +113,7 @@ interface Script {
     permission?: AppManagementStatus[];
     installBundle?: Result<InstalledModBundle>;
     patch?: Result<PatchReport> | (() => Result<PatchReport>);
+    installHelper?: Array<Result<HelperInstallOutcome>>;
     launch?: Result<true>;
     verify?: VerificationReport;
     discordLocale?: string | null;
@@ -128,7 +129,10 @@ interface Harness {
     patchCalls: Array<{ modBundleDir: string; overwriteForeignMod: boolean }>;
     languageWrites: string[];
     verifyCalls: Array<{ expectedBuildId: string; patchedAt: number; launchedAt: number }>;
+    helperInstalls: number;
     launched: number;
+    /** The step names, in order, every transition passed through. */
+    steps: FlowStep[];
 }
 
 function harness(script: Script = {}): Harness {
@@ -137,13 +141,17 @@ function harness(script: Script = {}): Harness {
     let permissionCall = 0;
     let patchCall = 0;
 
+    let helperCall = 0;
+
     const h: Harness = {
         logged: [],
         settingsOpened: 0,
         patchCalls: [],
         languageWrites: [],
         verifyCalls: [],
-        launched: 0
+        helperInstalls: 0,
+        launched: 0,
+        steps: []
     } as unknown as Harness;
 
     const record = (level: string) => (event: string, fields: Record<string, unknown> = {}) => {
@@ -198,6 +206,15 @@ function harness(script: Script = {}): Harness {
             if (typeof script.patch === "function") return script.patch();
             return script.patch ?? { ok: true, value: patchReport() };
         },
+        installHelper: async () => {
+            h.helperInstalls += 1;
+            const scripted = script.installHelper;
+            if (scripted === undefined) {
+                return { ok: true, value: { applicable: true, installed: true, label: "com.subline.helper", path: "/Users/x/Library/LaunchAgents/com.subline.helper.plist" } };
+            }
+            const index = Math.min(helperCall++, scripted.length - 1);
+            return scripted[index] as Result<HelperInstallOutcome>;
+        },
         launchDiscord: async () => {
             h.launched += 1;
             t += 500;
@@ -221,6 +238,7 @@ function harness(script: Script = {}): Harness {
 
     h.ports = ports;
     h.flow = new InstallFlow(ports);
+    h.flow.onChange = next => { h.steps.push(next.step); };
     void patchCall;
     return h;
 }

@@ -24,15 +24,16 @@ import { DiagnosticsLog } from "../app/log.js";
 import { InstallFlow } from "../app/flow.js";
 import type { FlowAction, FlowState } from "../app/flow.js";
 import { uninstall } from "../app/uninstall.js";
-import type { HelperRemoval, UninstallReport } from "../app/uninstall.js";
+import type { UninstallReport } from "../app/uninstall.js";
 import {
-    createHelperPorts, createLaunchctl, HELPER_FLAG, HELPER_LABEL, helperLaunchAgentSpec,
-    installLaunchAgent, launchAgentPlistPath, readPendingAlerts, removeLaunchAgent, runHelperOnce
+    createHelperPorts, createLaunchctl, HELPER_FLAG, HELPER_LABEL, launchAgentPlistPath,
+    readPendingAlerts, releaseManifestUrl, runHelperOnce
 } from "../helper/index.js";
 import { productDirFor } from "../bundle/layout.js";
 import { locateDiscordInstalls } from "../patcher/locate.js";
 import { unpatchInstall } from "../patcher/patch.js";
-import { createFlowPorts, logDirFor, uninstallPaths } from "./ports.js";
+import { createFlowPorts, installHelperFor, logDirFor, removeHelperFor, uninstallPaths } from "./ports.js";
+import type { HelperWiring } from "./ports.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -44,12 +45,15 @@ const log = new DiagnosticsLog({ dir: logDirFor() });
 /**
  * Where the mod's own releases are published (spec §10: GitHub Releases).
  *
- * `null` disables trigger B entirely rather than pointing the helper at a URL
- * that does not exist yet — a 404 on every run would raise "cannot check for
- * updates" alerts for a feature that has not shipped, which is exactly the false
- * warning spec §6 says makes true ones get ignored.
+ * The URL, the asset name and the one switch that turns trigger B on all live in
+ * `helper/feed.ts` now, next to the reasoning — and the release script derives
+ * the same URLs from the same repository, so the feed a build polls and the feed
+ * a release is published to cannot drift apart. It still returns `null` until
+ * `RELEASE_FEED_ENABLED` is flipped, because a 404 on every hourly run would
+ * raise "cannot check for updates" for a feature that has not shipped, which is
+ * exactly the false warning spec §6 says makes true ones get ignored.
  */
-const RELEASE_MANIFEST_URL: string | null = null;
+const RELEASE_MANIFEST_URL: string | null = releaseManifestUrl();
 
 /* ------------------------------------------------------------------------ *
  * The background helper (spec §2, §6)
@@ -113,7 +117,8 @@ function createFlow(): InstallFlow {
         // used instead. Both are "the directory the shipped mod sits beside".
         appResourcesPath: app.isPackaged ? process.resourcesPath : join(here, "..", "..", "build"),
         productVersion: app.getVersion(),
-        log
+        log,
+        helper: helperWiring()
     });
     const created = new InstallFlow(ports);
     created.onChange = (state: FlowState) => send("flow:state", state);
@@ -207,14 +212,32 @@ ipcMain.handle("diagnostics:read", () => log.read());
 const launchctl = createLaunchctl();
 const helperPlistPath = (): string => launchAgentPlistPath(app.getPath("home"));
 
-/** §3 step 8b — install the LaunchAgent once Discord has been patched. */
-ipcMain.handle("helper:install", async () => {
-    const result = await installLaunchAgent({
-        plistPath: helperPlistPath(),
-        spec: helperLaunchAgentSpec(app.getPath("exe").replace(/\/Contents\/MacOS\/[^/]+$/, "")),
+/**
+ * The one description of the agent Subline installs.
+ *
+ * `app.getPath("exe")` is `<Subline.app>/Contents/MacOS/Subline`; the spec builder
+ * wants the bundle, and appends the rest itself. Same bundle, different flag —
+ * spec §2: a separate helper binary would be a different code-signing identity
+ * and would raise its own App Management prompt weeks later, out of nowhere.
+ */
+function helperWiring(): HelperWiring {
+    return {
+        appPath: app.getPath("exe").replace(/\/Contents\/MacOS\/[^/]+$/, ""),
         uid: userInfo().uid,
         launchctl
-    });
+    };
+}
+
+/**
+ * §3 step 8b, as a manual retry.
+ *
+ * The INSTALL FLOW is what normally registers the agent — `FlowPorts.installHelper`,
+ * called between patching and launching. This handler stays for the case that
+ * screen cannot cover: an existing installation whose agent was removed, which
+ * `helper:status` can now show and this can repair without re-patching Discord.
+ */
+ipcMain.handle("helper:install", async () => {
+    const result = await installHelperFor(helperWiring(), process.platform, app.getPath("home"));
     log.info("helper.install", { ok: result.ok, code: result.ok ? null : result.error.code });
     return result;
 });
@@ -229,18 +252,10 @@ ipcMain.handle("helper:alerts", () => readPendingAlerts(productDirFor()));
 
 ipcMain.handle("uninstall:run", async (_event, options: { keepSettings: boolean }): Promise<UninstallReport> => {
     // §8 step 3 FIRST. Restoring Discord under a live helper would have the
-    // helper put the patch straight back at its next interval.
-    const removed = await removeLaunchAgent({
-        plistPath: helperPlistPath(),
-        label: HELPER_LABEL,
-        uid: userInfo().uid,
-        launchctl
-    });
-    const helper: HelperRemoval = {
-        applicable: process.platform === "darwin",
-        removed: removed.ok && removed.value,
-        error: removed.ok ? null : removed.error
-    };
+    // helper put the patch straight back at its next interval. `removeHelperFor`
+    // returns the precondition `uninstall` requires, so this call site cannot
+    // assemble it wrongly.
+    const helper = await removeHelperFor(helperWiring(), process.platform, app.getPath("home"));
 
     const located = locateDiscordInstalls({ platform: process.platform });
     const installs = located.ok ? located.value : [];

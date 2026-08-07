@@ -59,6 +59,8 @@ const STEP_TITLES: Partial<Record<FlowState["step"], string>> = {
     "permission-blocked": "Permission not granted",
     patching: "Installing",
     "patch-failed": "Could not install",
+    "installing-helper": "Setting up background updates",
+    "helper-failed": "Background updates are not set up",
     launching: "Starting Discord",
     "launch-failed": "Could not start Discord",
     verifying: "Checking it works",
@@ -77,6 +79,10 @@ const ACTION_LABELS: Record<FlowActionType, string> = {
     "set-language": "Continue",
     "open-permission-settings": "Open System Settings",
     retry: "Try again",
+    // Named for what it costs, not for what it skips. "Continue" here would let
+    // someone give up the thing that keeps their install alive without ever
+    // learning they had.
+    "skip-helper": "Continue without background updates",
     "skip-launch": "I'll open Discord myself",
     finish: "Done"
 };

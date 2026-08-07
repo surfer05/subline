@@ -13,6 +13,11 @@ export {
 export type { Alert, AlertCode, AlertPorts, AlertRaised } from "./alerts.js";
 
 export {
+    RELEASE_FEED_ENABLED, RELEASE_FEED_URL, RELEASE_MANIFEST_ASSET_NAME, RELEASE_REPOSITORY,
+    releaseManifestUrl
+} from "./feed.js";
+
+export {
     MIN_OBSERVATIONS, MIN_WINDOW_MS, observeHealth
 } from "./health.js";
 export type { HealthObservation, HealthStatus, ObserveHealthOptions } from "./health.js";

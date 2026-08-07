@@ -18,6 +18,8 @@ import {
     renderManifest,
     SOURCE_NOTICE_NAME
 } from "../src/bundle/spec.js";
+import { HELPER_LABEL } from "../src/helper/launchAgent.js";
+import type { LaunchctlPort } from "../src/helper/launchAgent.js";
 import { buildAsar } from "../src/patcher/asar.js";
 import type { DiscordInstall } from "../src/patcher/locate.js";
 import { buildStubAsar } from "../src/patcher/stub.js";
@@ -117,6 +119,61 @@ export function makeDiscordFixture(options: FixtureOptions = {}): Fixture {
 
 export function readBytes(path: string): Buffer {
     return readFileSync(path);
+}
+
+/* ------------------------------------------------------------------------ *
+ * A fake `launchctl`
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Nothing in this suite may spawn `launchctl` or write to `~/Library/LaunchAgents`,
+ * for the same reason nothing writes to `/Applications`: the machine running the
+ * tests is somebody's machine, and a test that registers a background agent on it
+ * has installed software.
+ *
+ * It models the one behaviour that matters — `isLoaded` answers from state that
+ * `bootstrap`/`bootout` actually changed — so "registration is confirmed with a
+ * `print` afterwards" is a property a test can hold rather than a comment.
+ */
+export interface FakeLaunchctl extends LaunchctlPort {
+    calls: string[];
+    loaded: Set<string>;
+    failBootstrap: boolean;
+    failBootout: boolean;
+    /** Report the label as absent even after a successful bootstrap. */
+    lieAboutLoaded: boolean;
+}
+
+export function makeFakeLaunchctl(overrides: Partial<FakeLaunchctl> = {}): FakeLaunchctl {
+    const fake: FakeLaunchctl = {
+        calls: [],
+        loaded: new Set<string>(),
+        failBootstrap: false,
+        failBootout: false,
+        lieAboutLoaded: false,
+        async bootstrap(path: string, uid: number) {
+            fake.calls.push(`bootstrap gui/${uid} ${path}`);
+            if (fake.failBootstrap) {
+                return { ok: false, error: { code: "HELPER_REGISTRATION_FAILED", message: "launchctl said no" } };
+            }
+            if (!fake.lieAboutLoaded) fake.loaded.add(HELPER_LABEL);
+            return { ok: true, value: true };
+        },
+        async bootout(label: string, uid: number) {
+            fake.calls.push(`bootout gui/${uid}/${label}`);
+            if (fake.failBootout) {
+                return { ok: false, error: { code: "HELPER_REGISTRATION_FAILED", message: "launchctl refused" } };
+            }
+            fake.loaded.delete(label);
+            return { ok: true, value: true };
+        },
+        async isLoaded(label: string) {
+            fake.calls.push(`print ${label}`);
+            return fake.loaded.has(label);
+        },
+        ...overrides
+    };
+    return fake;
 }
 
 /* ------------------------------------------------------------------------ *

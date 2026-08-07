@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Subline's hardened-runtime entitlements.
+
+      READ THIS BEFORE ADDING ONE. Every entitlement here is a hole punched in
+      the hardened runtime, and Apple's notary service reads the list. The rule
+      applied to this file is: an entitlement is present only if a NAMED thing
+      the app does stops working without it. Nothing is here "because Electron
+      apps usually have it".
+
+      ---------------------------------------------------------------------
+      WHAT IS *NOT* HERE, AND THE ONE THAT MATTERS MOST
+      ---------------------------------------------------------------------
+
+      There is NO entitlement that lets an application modify another
+      application's bundle. Subline's entire purpose — writing
+      `Discord.app/Contents/Resources/app.asar` — is governed by TCC's
+      App Management service (`kTCCServiceSystemPolicyAppBundles`), which is a
+      *user grant*, made once in System Settings › Privacy & Security ›
+      App Management. It cannot be requested, declared, or entitled.
+
+      Two consequences for this file, both load-bearing:
+
+        1. `com.apple.security.app-sandbox` is DELIBERATELY ABSENT. A sandboxed
+           app cannot hold App Management over an arbitrary bundle, so adding
+           the sandbox would not tighten Subline — it would stop it working
+           and there would be no entitlement that brought it back.
+
+        2. The grant is keyed to the CODE-SIGNING IDENTITY, which is why
+           spec §4 requires Developer ID rather than ad-hoc signing: a stable
+           Team ID is what makes the permission persist across Subline's own
+           updates, and what lets the LaunchAgent helper (the same bundle, run
+           with `--helper`) write to Discord under the permission the user
+           already granted.
+
+      Also absent, and each for a reason:
+        · `com.apple.security.cs.disable-library-validation` — Subline loads no
+          third-party native code. Every dylib and framework inside the bundle
+          is signed with our own identity by electron-builder.
+        · `com.apple.security.cs.allow-dyld-environment-variables` — nothing
+          here sets DYLD_*; allowing it would let an attacker with local write
+          access inject a library into a process that edits another app.
+        · `com.apple.security.device.*`, `com.apple.security.network.server` —
+          no camera, no microphone, no listening socket.
+    -->
+
+    <!--
+      V8 compiles JavaScript to machine code at runtime. Without this, the
+      renderer aborts on launch. Required by every Electron app.
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!--
+      V8 also maps writable-then-executable pages outside the JIT entitlement's
+      narrow allowance. Chromium has needed this pair for as long as the
+      hardened runtime has existed; dropping it produces a crash at startup,
+      not a permission dialog.
+    -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!--
+      REQUIRED BY A FEATURE, not by Electron.
+
+      Two things Subline does are Apple events:
+        · `requestQuit` runs `osascript -e 'tell application "Discord" to quit'`
+          — spec §7's "offer to quit it; never force-kill silently". A kill
+          would lose whatever the user was typing, so the polite request is the
+          product decision and this entitlement is its cost.
+        · the helper's `display notification` for a failure it cannot repair
+          (§6, §7).
+
+      Under the hardened runtime, a process without this entitlement gets
+      `errAEEventNotPermitted` — the script fails with no prompt at all, which
+      would present as "the Quit button does nothing".
+
+      It pairs with `NSAppleEventsUsageDescription` in Info.plist: THAT string
+      is the one the user reads in the Automation prompt, and unlike App
+      Management it is ours to write.
+    -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>

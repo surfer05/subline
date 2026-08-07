@@ -16,6 +16,7 @@
     "noEmit": true
   },
   "//exclude": "The renderer is checked by tsconfig.renderer.json, which is the only config with the DOM lib. Keeping DOM out of THIS one is what stops main-process code reaching for document or window by accident.",
-    "include": ["src/**/*.ts", "tests/**/*.ts", "vitest.config.ts"],
+    "//include": "`packaging/` is type-checked here but never emitted — tsconfig.build.json narrows `include` back to src/. Those modules are loaded by RAW NODE from electron-builder's hooks, so they import only Node builtins; checking them here is what stops that constraint drifting silently.",
+    "include": ["src/**/*.ts", "tests/**/*.ts", "packaging/**/*.ts", "vitest.config.ts"],
     "exclude": ["src/renderer/**/*"]
 }
