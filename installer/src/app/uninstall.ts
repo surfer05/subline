@@ -55,10 +55,32 @@ export interface UninstallPorts {
     };
 }
 
+/**
+ * What happened when the caller stopped the background helper (§8 step 3).
+ *
+ * REQUIRED, and for the same reason `VerifyOptions.expectedBuildId` is: the
+ * invariant is an ORDERING, and an ordering a caller can forget is one that will
+ * be forgotten. The helper re-patches Discord silently (spec §6). Restore
+ * Discord's original `app.asar` while the agent is still registered and the next
+ * interval puts the patch straight back — an uninstalled product that keeps
+ * modifying Discord. So the helper is removed FIRST, by the caller (only it can
+ * talk to `launchctl`), and its outcome is handed in here as a precondition.
+ *
+ * `applicable: false` is the honest answer on a platform with no helper, or when
+ * one was never installed.
+ */
+export interface HelperRemoval {
+    applicable: boolean;
+    removed: boolean;
+    error: PatcherError | null;
+}
+
 export interface UninstallOptions {
     installs: readonly DiscordInstall[];
     /** §8 step 5: the user's answer. Defaults to keeping, which is the safe direction. */
     keepSettings?: boolean;
+    /** The result of stopping the background helper, which must already have happened. */
+    helper: HelperRemoval;
 }
 
 export interface RestoreOutcome {
@@ -75,6 +97,8 @@ export type TranslationCacheDisposition =
 
 export interface UninstallReport {
     restores: RestoreOutcome[];
+    /** True when no background helper is left that could re-patch Discord. */
+    helperStopped: boolean;
     /** True only when every Discord was returned to its original state. */
     discordRestored: boolean;
     modBundleRemoved: boolean;
@@ -146,6 +170,37 @@ export function uninstall(ports: UninstallPorts, options: UninstallOptions): Uni
     const restores: RestoreOutcome[] = [];
     const keepSettings = options.keepSettings ?? true;
 
+    // 0. THE PRECONDITION. Nothing is restored while a helper that re-patches
+    //    Discord may still be registered — it would undo the uninstall at its
+    //    next interval, and the user would be left with software they removed
+    //    still modifying another application. Refusing here leaves everything
+    //    exactly as it was, which is a state the user can retry from.
+    const helperStopped = !options.helper.applicable || options.helper.error === null;
+    if (!helperStopped) {
+        const error = options.helper.error as PatcherError;
+        ports.log.error("uninstall.helper-stop-failed", { code: error.code });
+        return {
+            restores: [],
+            helperStopped: false,
+            discordRestored: false,
+            modBundleRemoved: false,
+            modBundleKeptForSafety: true,
+            settingsRemoved: false,
+            productDataRemoved: false,
+            translationCache: "left-in-discord-storage",
+            problems: [error],
+            clean: false,
+            summary:
+                "Subline could not stop its background updater, so nothing was removed. Removing Subline while "
+                + "that is still running would put the changes to Discord straight back. Nothing has been changed; "
+                + "restart your Mac and try again."
+        };
+    }
+    ports.log.info("uninstall.helper-stopped", {
+        applicable: options.helper.applicable,
+        removed: options.helper.removed
+    });
+
     // 1. Every Discord first (§8 steps 1–2: restore the archive, remove the
     //    sidecar — a stale one makes the NEXT install misread a foreign or
     //    absent patch as ours).
@@ -212,6 +267,7 @@ export function uninstall(ports: UninstallPorts, options: UninstallOptions): Uni
     const clean = discordRestored && problems.length === 0;
     return {
         restores,
+        helperStopped,
         discordRestored,
         modBundleRemoved,
         modBundleKeptForSafety,

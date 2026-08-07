@@ -53,6 +53,24 @@ export type PatcherErrorCode =
      * else's, which is the failure this project keeps rediscovering.
      */
     | "MOD_BUNDLE_INVALID"
+    /**
+     * The release feed could not be reached. Distinct from every other failure
+     * here because it is the one that is routinely TRANSIENT — a laptop asleep
+     * on a train is not a broken install, and the helper must not tell anybody it
+     * is (spec §6: an updater that warns falsely gets ignored when it warns
+     * truthfully).
+     */
+    | "NETWORK_ERROR"
+    /** The release feed answered, but with something we cannot read as a release. */
+    | "RELEASE_MALFORMED"
+    /**
+     * A downloaded artefact did not match the digest published with it. NEVER
+     * transient: it means the bytes are not the bytes that were published, and
+     * the helper surfaces it at once rather than retrying quietly.
+     */
+    | "RELEASE_UNVERIFIED"
+    /** `launchctl` refused to register (or unregister) the background helper. */
+    | "HELPER_REGISTRATION_FAILED"
     /** Anything else that came back from the filesystem. */
     | "IO_ERROR";
 

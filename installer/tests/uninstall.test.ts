@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { PLUGIN_SETTINGS_KEY } from "../src/app/language.js";
 import { removePluginSettings, uninstall } from "../src/app/uninstall.js";
-import type { UninstallPorts } from "../src/app/uninstall.js";
+import type { HelperRemoval, UninstallPorts } from "../src/app/uninstall.js";
 import { manifestPathFor } from "../src/bundle/spec.js";
 import type { DiscordInstall } from "../src/patcher/locate.js";
 import type { UnpatchReport } from "../src/patcher/patch.js";
@@ -30,6 +30,9 @@ const INSTALL: DiscordInstall = {
     fromExplicitPath: false
 };
 const PTB: DiscordInstall = { ...INSTALL, branch: "ptb", rootPath: "/Applications/Discord PTB.app" };
+
+/** The ordinary precondition: the caller stopped the helper before calling us. */
+const HELPER_GONE: HelperRemoval = { applicable: true, removed: true, error: null };
 
 let root: string;
 let source: ModBundleFixture;
@@ -94,7 +97,7 @@ function writeSettings(value: unknown): void {
 
 describe("uninstall", () => {
     it("restores Discord and removes the mod bundle", () => {
-        const report = uninstall(ports(), { installs: [INSTALL] });
+        const report = uninstall(ports(), { installs: [INSTALL], helper: HELPER_GONE });
         expect(report.discordRestored).toBe(true);
         expect(report.modBundleRemoved).toBe(true);
         expect(report.clean).toBe(true);
@@ -108,7 +111,7 @@ describe("uninstall", () => {
             ports({
                 unpatch: install => { order.push(install.branch); return unpatchOk(install); }
             }),
-            { installs: [INSTALL, PTB] }
+            { installs: [INSTALL, PTB], helper: HELPER_GONE }
         );
         expect(order).toEqual(["stable", "ptb"]);
         expect(report.restores).toHaveLength(2);
@@ -123,7 +126,7 @@ describe("uninstall", () => {
                         ? unpatchOk(install)
                         : unpatchFail("PERMISSION_DENIED", "Not allowed to restore app.asar.")
             }),
-            { installs: [INSTALL, PTB] }
+            { installs: [INSTALL, PTB], helper: HELPER_GONE }
         );
 
         expect(report.discordRestored).toBe(false);
@@ -138,7 +141,7 @@ describe("uninstall", () => {
     it("says plainly what to do when the backup is gone, per §8", () => {
         const report = uninstall(
             ports({ unpatch: () => unpatchFail("BACKUP_MISSING", "Discord's original app.asar backup is missing.") }),
-            { installs: [INSTALL] }
+            { installs: [INSTALL], helper: HELPER_GONE }
         );
         expect(report.discordRestored).toBe(false);
         expect(report.summary).toContain("backup copy is gone");
@@ -150,7 +153,7 @@ describe("uninstall", () => {
 
     it("keeps settings and per-user data by default", () => {
         writeSettings({ plugins: { [PLUGIN_SETTINGS_KEY]: { targetLang: "tr" } } });
-        const report = uninstall(ports(), { installs: [INSTALL] });
+        const report = uninstall(ports(), { installs: [INSTALL], helper: HELPER_GONE });
         expect(report.settingsRemoved).toBe(false);
         expect(report.productDataRemoved).toBe(false);
         expect(existsSync(settingsPath)).toBe(true);
@@ -160,28 +163,28 @@ describe("uninstall", () => {
 
     it("removes settings and per-user data when asked", () => {
         writeSettings({ plugins: { [PLUGIN_SETTINGS_KEY]: { targetLang: "tr" } } });
-        const report = uninstall(ports(), { installs: [INSTALL], keepSettings: false });
+        const report = uninstall(ports(), { installs: [INSTALL], keepSettings: false, helper: HELPER_GONE });
         expect(report.settingsRemoved).toBe(true);
         expect(report.productDataRemoved).toBe(true);
         expect(existsSync(productDir)).toBe(false);
     });
 
     it("is honest that the translation cache is not ours to delete", () => {
-        const report = uninstall(ports(), { installs: [INSTALL], keepSettings: false });
+        const report = uninstall(ports(), { installs: [INSTALL], keepSettings: false, helper: HELPER_GONE });
         expect(report.translationCache).toBe("left-in-discord-storage");
         expect(report.summary).toContain("Discord's own storage");
         expect(report.summary).not.toContain("cache has been deleted");
     });
 
     it("reports having nothing to remove rather than claiming success", () => {
-        const report = uninstall(ports(), { installs: [] });
+        const report = uninstall(ports(), { installs: [], helper: HELPER_GONE });
         expect(report.discordRestored).toBe(false);
         expect(report.summary).toContain("nothing to remove");
     });
 
     it("tolerates a bundle that is already gone", () => {
         rmSync(modDir, { recursive: true, force: true });
-        const report = uninstall(ports(), { installs: [INSTALL] });
+        const report = uninstall(ports(), { installs: [INSTALL], helper: HELPER_GONE });
         expect(report.modBundleRemoved).toBe(false);
         expect(report.problems).toHaveLength(0);
         expect(report.clean).toBe(true);
@@ -192,7 +195,7 @@ describe("uninstall", () => {
         mkdirSync(modDir, { recursive: true });
         writeFileSync(join(modDir, "not-ours.txt"), "someone else's", "utf8");
 
-        const report = uninstall(ports(), { installs: [INSTALL] });
+        const report = uninstall(ports(), { installs: [INSTALL], helper: HELPER_GONE });
         expect(report.problems[0]?.code).toBe("MOD_BUNDLE_INVALID");
         expect(existsSync(join(modDir, "not-ours.txt"))).toBe(true);
         expect(report.clean).toBe(false);
@@ -201,7 +204,8 @@ describe("uninstall", () => {
     it("does nothing on an unsupported platform rather than deleting a null path", () => {
         const report = uninstall(ports({ modBundleDir: null, productDir: null }), {
             installs: [INSTALL],
-            keepSettings: false
+            keepSettings: false,
+            helper: HELPER_GONE
         });
         expect(report.modBundleRemoved).toBe(false);
         expect(report.productDataRemoved).toBe(false);
@@ -209,7 +213,7 @@ describe("uninstall", () => {
     });
 
     it("logs every restore and every failure", () => {
-        uninstall(ports({ unpatch: () => unpatchFail("IO_ERROR", "nope") }), { installs: [INSTALL] });
+        uninstall(ports({ unpatch: () => unpatchFail("IO_ERROR", "nope") }), { installs: [INSTALL], helper: HELPER_GONE });
         expect(logged).toContain("error:uninstall.restore-failed");
         expect(logged).toContain("warn:uninstall.bundle-kept");
     });
