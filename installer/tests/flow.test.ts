@@ -256,7 +256,10 @@ async function toDetection(h: Harness): Promise<FlowState> {
 describe("the happy path", () => {
     it("walks welcome → tiers → language → patch → verify → confirmed", async () => {
         const h = harness();
-        expect(h.flow.start().step).toBe("welcome");
+        // `start()` is async because it checks for an existing install BEFORE
+        // showing anything — a Discord already set up must not be made to read
+        // two screens of first-run explanation first.
+        expect((await h.flow.start()).step).toBe("welcome");
         expect((await h.flow.send({ type: "next" })).step).toBe("tiers");
 
         const language = await h.flow.send({ type: "next" });
@@ -452,6 +455,32 @@ describe("BetterDiscord", () => {
  * ------------------------------------------------------------------------ */
 
 describe("a Discord we already patched", () => {
+    it("is recognised before Welcome, not two screens later", async () => {
+        // Reported from a real reopen: the user still had to read and dismiss
+        // Welcome and the two-tiers explanation before being told there was
+        // nothing to do. Detection ran at `detecting`, which is two Continue
+        // clicks in — so first-run explanation was shown to someone who was not
+        // on their first run.
+        const h = harness({ inspect: { ok: true, value: installState("patched-by-us", "subline") } });
+
+        const first = await h.flow.start();
+
+        expect(first.step).toBe("already-installed");
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("still shows Welcome when there is nothing installed yet", async () => {
+        // The narrowness matters: only an install that is already OURS skips
+        // the explanation. Everyone else is genuinely at the start.
+        const h = harness({ inspect: { ok: true, value: installState("unpatched") } });
+        expect((await h.flow.start()).step).toBe("welcome");
+    });
+
+    it("still shows Welcome when another mod is installed", async () => {
+        const h = harness({ inspect: { ok: true, value: installState("patched-by-other", "vencord") } });
+        expect((await h.flow.start()).step).toBe("welcome");
+    });
+
     it("says so and stops, instead of walking the whole install again", async () => {
         // Found by running the real app. macOS's App Management prompt offers
         // "Quit & Reopen" — and offers it whether or not the install already

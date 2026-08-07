@@ -306,8 +306,41 @@ export class InstallFlow {
         return next;
     }
 
-    /** Show the first screen. Present so a caller never has to construct a state. */
-    start(): FlowState {
+    /**
+     * Show the first screen — but check for an existing install BEFORE showing
+     * it.
+     *
+     * Reopening the app is the normal way to arrive here: macOS's App
+     * Management prompt offers Quit & Reopen, and the helper's own diagnostics
+     * bring people back too. Detection used to happen only after Welcome and
+     * the two-tiers page, so someone whose Discord was already set up had to
+     * read and dismiss two screens of first-run explanation before being told
+     * there was nothing to do.
+     *
+     * Deliberately narrow: it looks for an install that is already OURS and
+     * nothing else. Every other outcome — unpatched, a foreign mod, broken —
+     * falls through to Welcome, because those users genuinely are at the start
+     * of an install and the explanation is for them.
+     *
+     * Never throws and never blocks on anything but the filesystem: any failure
+     * here simply means Welcome, which is exactly where the normal flow would
+     * have taken them anyway.
+     */
+    async start(): Promise<FlowState> {
+        try {
+            const installs = this.ports.locate(this.explicitPaths);
+            if (installs.ok) {
+                for (const install of installs.value) {
+                    const inspected = this.ports.inspect(install);
+                    if (inspected.ok && inspected.value.kind === "patched-by-us") {
+                        this.chosenInstall = install;
+                        return this.alreadyInstalled(install, inspected.value);
+                    }
+                }
+            }
+        } catch (cause) {
+            this.ports.log.warn("flow.resume-check-failed", { cause: String(cause) });
+        }
         return this.current;
     }
 
@@ -571,26 +604,36 @@ export class InstallFlow {
         }
 
         if (installState.kind === "patched-by-us") {
-            // Do NOT re-walk the install. Reopening the app is the NORMAL way
-            // to arrive here: macOS's App Management prompt offers "Quit &
-            // Reopen", and it offers that whether or not the install already
-            // finished. Sending the user back through quitting Discord, the
-            // language picker and the permission step to redo work that is
-            // already done is how a one-click installer earns a reputation for
-            // being tedious.
-            return this.set(state({
-                step: "already-installed",
-                detail:
-                    "Subline is installed and Discord is set up to use it. There is nothing left to do — open Discord "
-                    + "and messages in other languages will have a translation underneath them. Updates are handled in "
-                    + "the background.",
-                install,
-                installState,
-                actions: ["finish"]
-            }));
+            return this.alreadyInstalled(install, installState);
         }
 
         return this.checkRunning();
+    }
+
+    /**
+     * Nothing to do — Discord is already set up with this build.
+     *
+     * Reached two ways, which is why it lives here rather than inline: from
+     * `start()` before Welcome is ever shown, and from inspection partway
+     * through a run. Sending someone back through quitting Discord, the
+     * language picker and the permission step to redo work that is already done
+     * is how a one-click installer earns a reputation for being tedious.
+     *
+     * Deliberately offers no "install again": re-patching a working install is
+     * a write to somebody else's application in exchange for nothing, and the
+     * helper already repairs the one case that needs it.
+     */
+    private alreadyInstalled(install: DiscordInstall, installState: InstallState): FlowState {
+        return this.set(state({
+            step: "already-installed",
+            detail:
+                "Subline is installed and Discord is set up to use it. There is nothing left to do — open Discord "
+                + "and messages in other languages will have a translation underneath them. Updates are handled in "
+                + "the background.",
+            install,
+            installState,
+            actions: ["finish"]
+        }));
     }
 
     /* -------------------------------------------------------------------- *

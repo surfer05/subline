@@ -37,6 +37,15 @@
 import { awaitAppManagement } from "./appManagement.js";
 import { findDiscordProcesses, quitDiscord } from "./discordProcess.js";
 import { defaultLanguage, endonymOf, languageOptions } from "./language.js";
+/**
+ * How long to let macOS finish talking before opening Discord (see `launch`).
+ *
+ * Long enough that Apple's permission dialog and the background-activity
+ * notification are not still arriving when a Discord window appears; short
+ * enough that nobody reads it as the installer having hung. Only applied to
+ * users who actually went through the permission step.
+ */
+const SETTLE_BEFORE_LAUNCH_MS = 2_500;
 /* ------------------------------------------------------------------------ */
 function state(partial) {
     return { actions: [], busy: false, error: null, ...partial };
@@ -65,6 +74,14 @@ export class InstallFlow {
     patchReport = null;
     patchedAt = 0;
     launchedAt = 0;
+    /**
+     * True once the macOS permission step was actually shown this run.
+     *
+     * Only those users get the settle pause before Discord is launched (see
+     * `launch`). Someone who already had the grant sees no dialogs, so pausing
+     * for them would be delay in exchange for nothing.
+     */
+    permissionPrompted = false;
     explicitPaths = [];
     constructor(ports) {
         this.ports = ports;
@@ -129,6 +146,12 @@ export class InstallFlow {
                     return this.current;
                 return this.inspectChosen(picked);
             }
+            // Nothing to do but close. Deliberately offers no "install again":
+            // re-patching a working install is a write to somebody else's
+            // application in exchange for nothing, and the helper already
+            // repairs the one case that needs it.
+            case "already-installed":
+                return this.current;
             case "mod-conflict":
                 if (action.type === "proceed-over-mod") {
                     this.overwriteForeignMod = true;
@@ -313,6 +336,24 @@ export class InstallFlow {
                 actions: ["proceed-over-mod", "cancel"]
             }));
         }
+        if (installState.kind === "patched-by-us") {
+            // Do NOT re-walk the install. Reopening the app is the NORMAL way
+            // to arrive here: macOS's App Management prompt offers "Quit &
+            // Reopen", and it offers that whether or not the install already
+            // finished. Sending the user back through quitting Discord, the
+            // language picker and the permission step to redo work that is
+            // already done is how a one-click installer earns a reputation for
+            // being tedious.
+            return this.set(state({
+                step: "already-installed",
+                detail: "Subline is installed and Discord is set up to use it. There is nothing left to do — open Discord "
+                    + "and messages in other languages will have a translation underneath them. Updates are handled in "
+                    + "the background.",
+                install,
+                installState,
+                actions: ["finish"]
+            }));
+        }
         return this.checkRunning();
     }
     /* -------------------------------------------------------------------- *
@@ -406,11 +447,47 @@ export class InstallFlow {
         return this.explainPermission(status);
     }
     explainPermission(status) {
+        // Remember that this user saw the permission path, so `launch` knows to
+        // let macOS's own interruptions finish before opening Discord on top of
+        // them.
+        this.permissionPrompted = true;
         return this.set(state({
             step: "permission-explain",
-            detail: "macOS needs your permission before Subline can update Discord. Open System Settings, turn Subline on "
-                + "under Privacy & Security › App Management, and Subline will carry on by itself — you do not need to "
-                + "quit or restart anything.",
+            // Describes what Continue DOES, rather than sending the user off to
+            // find System Settings themselves — the next step opens the exact
+            // pane for them and then polls. Instructions that ignore the button
+            // sitting right there are how a one-click installer starts feeling
+            // like homework.
+            // Two things this copy has to do, both learned from a real run.
+            //
+            // Pre-empt macOS's own wording. After the toggle, macOS says
+            // Subline "will not be able to update or delete other applications
+            // until it is quit". That sentence is Apple's and we cannot change
+            // a word of it — but to someone who has not been warned it reads
+            // like malware asking to delete their apps. Naming it first turns
+            // an alarm into an expected step.
+            //
+            // And do not promise no restart. The earlier copy said "you do not
+            // need to quit or restart anything"; macOS then offered exactly
+            // "Quit & Reopen", because the grant does not apply to a running
+            // process. Reopening is the normal path, not a fallback.
+            // Everything after the first sentence exists because a real run
+            // produced three macOS interruptions at once — a permission dialog,
+            // a background-activity notification, and Discord relaunching — and
+            // none of them had been mentioned beforehand.
+            //
+            // "Later" is the right button, and that is a measured claim: on the
+            // run this copy was written from, the patch completed while the app
+            // was still running. Apple's dialog is about FUTURE modifications,
+            // not the one that already happened. Earlier copy here said to
+            // choose Quit & Reopen, which sent the user through the whole flow
+            // again for no reason.
+            detail: "macOS needs your permission before Subline can change Discord. Continue, and Subline will open the "
+                + "right settings page — switch Subline on under App Management.\n\n"
+                + "macOS will then say Subline cannot \"update or delete other applications\" until it is quit. That is "
+                + "Apple's wording for this permission, not something Subline asks for — the only app it ever changes "
+                + "is Discord. You can choose Later: the install finishes without restarting anything. Discord will "
+                + "reopen by itself when it is done.",
             permissionStatus: status,
             permissionSettingsUrl: this.ports.permissionSettingsUrl,
             install: this.chosenInstall ?? undefined,
@@ -567,6 +644,29 @@ export class InstallFlow {
         const install = this.chosenInstall;
         if (install === null)
             return this.detect();
+        // Let macOS finish talking before opening a window on top of it.
+        //
+        // A real run produced three interruptions at once: Apple's "cannot
+        // update or delete other applications" dialog, the background-activity
+        // notification from registering the LaunchAgent, and Discord
+        // relaunching. Individually each is fine; simultaneously they read as a
+        // machine doing things to itself, which is the last impression a tool
+        // that modifies another app should give.
+        //
+        // Only for users who actually went through the permission step —
+        // someone who already had the grant sees no dialogs, so a pause would
+        // cost them time for nothing. Awaited through `ports.sleep`, which is
+        // the injected clock, so this is deterministic in tests rather than a
+        // real delay.
+        if (this.permissionPrompted) {
+            this.set(state({
+                step: "launching",
+                detail: "Finishing up — macOS may still be showing you a prompt. Discord opens in a moment.",
+                busy: true,
+                actions: []
+            }));
+            await this.ports.sleep(SETTLE_BEFORE_LAUNCH_MS);
+        }
         this.set(state({ step: "launching", detail: "Starting Discord…", busy: true, actions: [] }));
         const launched = await this.ports.launchDiscord(install);
         this.launchedAt = this.ports.now();
