@@ -643,10 +643,15 @@ export class InstallFlow {
     private explainPermission(status: AppManagementStatus): FlowState {
         return this.set(state({
             step: "permission-explain",
+            // Describes what Continue DOES, rather than sending the user off to
+            // find System Settings themselves — the next step opens the exact
+            // pane for them and then polls. Instructions that ignore the button
+            // sitting right there are how a one-click installer starts feeling
+            // like homework.
             detail:
-                "macOS needs your permission before Subline can update Discord. Open System Settings, turn Subline on "
-                + "under Privacy & Security › App Management, and Subline will carry on by itself — you do not need to "
-                + "quit or restart anything.",
+                "macOS needs your permission before Subline can update Discord. Continue, and Subline will open the "
+                + "right settings page for you — switch Subline on under App Management and this window carries on by "
+                + "itself. You do not need to quit or restart anything.",
             permissionStatus: status,
             permissionSettingsUrl: this.ports.permissionSettingsUrl,
             install: this.chosenInstall ?? undefined,
