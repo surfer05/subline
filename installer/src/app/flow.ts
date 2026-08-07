@@ -697,12 +697,24 @@ export class InstallFlow {
             // need to quit or restart anything"; macOS then offered exactly
             // "Quit & Reopen", because the grant does not apply to a running
             // process. Reopening is the normal path, not a fallback.
+            // Everything after the first sentence exists because a real run
+            // produced three macOS interruptions at once — a permission dialog,
+            // a background-activity notification, and Discord relaunching — and
+            // none of them had been mentioned beforehand.
+            //
+            // "Later" is the right button, and that is a measured claim: on the
+            // run this copy was written from, the patch completed while the app
+            // was still running. Apple's dialog is about FUTURE modifications,
+            // not the one that already happened. Earlier copy here said to
+            // choose Quit & Reopen, which sent the user through the whole flow
+            // again for no reason.
             detail:
                 "macOS needs your permission before Subline can change Discord. Continue, and Subline will open the "
                 + "right settings page — switch Subline on under App Management.\n\n"
                 + "macOS will then say Subline cannot \"update or delete other applications\" until it is quit. That is "
-                + "Apple's standard wording for this permission, not something Subline asks for: the only app it ever "
-                + "changes is Discord. Choose Quit & Reopen, and Subline will pick up where it left off.",
+                + "Apple's wording for this permission, not something Subline asks for — the only app it ever changes "
+                + "is Discord. You can choose Later: the install finishes without restarting anything. Discord will "
+                + "reopen by itself when it is done.",
             permissionStatus: status,
             permissionSettingsUrl: this.ports.permissionSettingsUrl,
             install: this.chosenInstall ?? undefined,

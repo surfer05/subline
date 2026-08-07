@@ -655,7 +655,7 @@ describe("macOS App Management", () => {
         // The previous assertion pinned "do not need to" — from copy promising
         // no quit or restart. A real run disproved that promise, so the promise
         // and the test holding it both had to go.
-        expect(state.detail).toContain("Quit & Reopen");
+        expect(state.detail).toContain("choose Later");
         expect(state.detail).not.toContain("do not need to quit");
     });
 
