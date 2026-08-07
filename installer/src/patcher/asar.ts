@@ -21,7 +21,10 @@
  * 58 00 00 00` then 88 bytes of JSON, data starting at 0x68 = 104 = 8 + 96.
  */
 
-import { closeSync, openSync, readSync } from "node:fs";
+// realFs, NOT node:fs: Electron treats any ".asar" path as a virtual archive to
+// mount rather than a file to open, so this read fails inside the packaged app
+// while passing in vitest. See realFs.ts.
+import { closeSync, openSync, readSync } from "./realFs.js";
 
 import type { Result } from "./result.js";
 import { err, fsError, ok } from "./result.js";

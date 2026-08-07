@@ -1,4 +1,4 @@
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -227,6 +227,31 @@ describe("inspectInstall", () => {
         if (!result.ok) return;
         expect(result.value.kind).toBe("broken");
         expect(result.value.reason).toBe("asar-unreadable");
+    });
+
+    it("separates 'we could not open it' from 'the archive is damaged'", () => {
+        // A real user hit this: their Discord was a perfectly healthy Vencord
+        // install, but the packaged app could not OPEN app.asar (Electron
+        // treats ".asar" paths as archives to mount rather than files to read).
+        // We announced "Discord needs repairing" and offered repair and
+        // Uninstall for a file that was never broken. An unopenable archive and
+        // a corrupt one call for opposite remedies, so they must not share a
+        // reason.
+        //
+        // A directory where app.asar should be makes openSync fail with EISDIR:
+        // an IO error, with the bytes never examined at all.
+        fixture = makeDiscordFixture();
+        unlinkSync(fixture.install.asarPath);
+        mkdirSync(fixture.install.asarPath);
+
+        const result = inspectInstall(fixture.install);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.kind).toBe("broken");
+        expect(result.value.reason).toBe("asar-inaccessible");
+        // And the wording must not accuse Discord of being damaged.
+        expect(result.value.summary).toContain("could not open");
+        expect(result.value.summary).not.toContain("could not be read as an archive");
     });
 
     it("reports a mangled marker as broken rather than silently ignoring it", () => {

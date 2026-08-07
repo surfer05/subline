@@ -92,8 +92,30 @@ const PRIMARY: FlowActionType[] = ["next", "set-language", "proceed-over-mod", "
 
 let chosenLanguage: string | null = null;
 
+/**
+ * The heading, with one override.
+ *
+ * `broken-install` normally does mean Discord is damaged. But the same step is
+ * reached when we merely could not OPEN app.asar — a permissions problem on a
+ * perfectly healthy install. Announcing "Discord needs repairing" there, beside
+ * a repair button and an Uninstall link, points the user at destructive
+ * remedies for a file that was never broken. See BrokenReason's
+ * `asar-inaccessible`.
+ */
+function headingFor(state: FlowState): string {
+    const s = state as FlowState & { installState?: { kind?: string; reason?: string | null } };
+    if (
+        state.step === "broken-install"
+        && s.installState?.kind === "broken"
+        && s.installState.reason === "asar-inaccessible"
+    ) {
+        return "Subline couldn't read Discord";
+    }
+    return STEP_TITLES[state.step] ?? state.step;
+}
+
 function render(state: FlowState): void {
-    stepName.textContent = STEP_TITLES[state.step] ?? state.step;
+    stepName.textContent = headingFor(state);
 
     detail.textContent = state.detail;
     if (state.busy) {

@@ -7,7 +7,10 @@
  * first-class outcome with the mod named, not a generic "already patched".
  */
 
-import { existsSync, statSync } from "node:fs";
+// realFs, NOT node:fs: Electron treats any ".asar" path as a virtual archive,
+// so even existsSync/statSync on app.asar answer about a mount rather than the
+// file. See realFs.ts.
+import { existsSync, statSync } from "./realFs.js";
 import { join } from "node:path";
 
 import type { DiscordInstall } from "./locate.js";
@@ -35,8 +38,15 @@ export type BrokenReason =
     | "asar-missing-backup-present"
     /** Neither archive exists. Only Discord's own repair/reinstall fixes this. */
     | "asar-and-backup-missing"
-    /** `app.asar` exists but is not a readable asar archive. */
+    /** `app.asar` exists but is not a readable asar archive. Genuine damage. */
     | "asar-unreadable"
+    /**
+     * `app.asar` is there and may be perfectly fine — we simply could not OPEN
+     * it. Permissions, a sandboxed process, or Electron's own asar
+     * interception. NOT damage, and must never be presented as such: doing so
+     * steered a user with a healthy Vencord install toward repair/uninstall.
+     */
+    | "asar-inaccessible"
     /** Our marker and stub are present but `_app.asar` is gone — we cannot restore Discord. */
     | "our-patch-without-backup"
     /** Someone else's stub is present but the original was not preserved. */
@@ -170,11 +180,22 @@ export function inspectInstall(install: DiscordInstall): Result<InstallState> {
 
     const stubResult = readStub(install.asarPath);
     if (!stubResult.ok) {
+        // Two very different failures, and collapsing them into one told a user
+        // with a perfectly healthy Vencord install that Discord "needs
+        // repairing" — pointing them at repair and uninstall for a file that
+        // was never damaged. IO_ERROR means we could not OPEN it (permissions,
+        // sandboxing, Electron's asar interception); only a parse failure means
+        // the archive itself is bad.
+        const inaccessible = stubResult.error.code === "IO_ERROR";
         return ok(
             broken(
                 install,
-                "asar-unreadable",
-                `Discord's app.asar could not be read as an archive (${stubResult.error.message})`
+                inaccessible ? "asar-inaccessible" : "asar-unreadable",
+                inaccessible
+                    ? "Subline could not open Discord's app.asar. Discord itself is "
+                      + "probably fine — this is normally a permissions problem. "
+                      + `(${stubResult.error.message})`
+                    : `Discord's app.asar could not be read as an archive (${stubResult.error.message})`
             )
         );
     }

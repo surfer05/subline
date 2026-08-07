@@ -31,7 +31,12 @@
  * that leaves something behind.
  */
 
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync } from "node:fs";
+// realFs for everything that touches an ".asar" path: Electron treats those as
+// virtual archives rather than files, so restoring _app.asar over app.asar
+// fails inside the packaged app. `rmSync` stays on node:fs — it only ever
+// removes our own bundle directory, which has no ".asar" in its path.
+import { existsSync, readFileSync, renameSync, writeFileSync } from "../patcher/realFs.js";
 
 import { removeModBundle } from "../bundle/bundle.js";
 import type { DiscordInstall } from "../patcher/locate.js";
