@@ -38,7 +38,22 @@ import { buildOriginalDiscordAsar, makeDiscordFixture, makeModBundleFixture } fr
 import type { Fixture, ModBundleFixture } from "./fixture.js";
 
 const PRODUCT_VERSION = "0.1.0";
-const START = Date.parse("2026-08-07T09:00:00.000Z");
+/**
+ * The fixture's fake "now". RELATIVE to the real clock, never a fixed instant.
+ *
+ * These tests drive an injected clock, but `patchInstall` stamps the marker's
+ * `patchedAt` with the real `new Date()`, and `verifyOnce` measures the beacon
+ * against `max(patchedAt, launchedAt)`. So the beacon's `loadedAt` (written at
+ * START) has to sit AFTER real wall-clock time, or every beacon in this file
+ * reads as `stale-beacon` and the health assertions collapse to `unknown`.
+ *
+ * A hardcoded date satisfies that only until real time overtakes it — which is
+ * exactly what happened to the previous value (2026-08-07T09:00:00Z) at 09:00
+ * UTC on that day, failing four tests with no code change. Anchoring a day
+ * ahead of the real clock keeps the ordering the tests were written for and
+ * cannot expire.
+ */
+const START = Date.now() + 24 * 60 * 60 * 1000;
 const FEED = "https://github.com/subline/subline/releases/latest/download/subline-release.json";
 const ARTIFACT = "https://github.com/subline/subline/releases/download/v0.2.0/subline-mod.zip";
 
