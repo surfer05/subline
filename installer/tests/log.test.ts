@@ -5,7 +5,8 @@
 
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -102,6 +103,16 @@ describe("DiagnosticsLog", () => {
         expect(text).toContain("discord=0.0.406");
         expect(text).toContain("modBuild=abcd1234");
         expect(text).toContain("os=darwin");
+    });
+
+    it("records which filesystem module the run used", () => {
+        const log = new DiagnosticsLog({ dir, clock: () => clockValue, home: "/Users/testperson" });
+        log.writeHeader({ productVersion: "0.1.0", os: "win32", originalFs: false });
+        // A false here means Electron's asar interception is active, which
+        // changes what every later filesystem error in the log means. It was
+        // computed and thrown away, so a real Windows failure could not be
+        // diagnosed from the diagnostics bundle it produced.
+        expect(log.read()).toContain("originalFs=false");
     });
 
     it("appends entries in order", () => {
@@ -210,5 +221,40 @@ describe("DiagnosticsLog", () => {
 describe("redactHome", () => {
     it("is a no-op for an empty home, rather than replacing every character", () => {
         expect(redactHome("/Users/x/thing", "")).toBe("/Users/x/thing");
+    });
+});
+
+/**
+ * A source-level guard, for the same reason `realFs.test.ts` has one.
+ *
+ * Three separate debugging sessions were spent guessing at a failure whose
+ * errno the code already had and threw away: the screen said `IO_ERROR`, and so
+ * did the diagnostics bundle. `flow.ts` now routes every failure log through
+ * `errorFields`, which carries `path` and `cause` as well as `code`. This holds
+ * that, because the drift is one-line and invisible in review — someone writes
+ * `{ code: x.error.code }` because it is the obvious thing to write.
+ */
+describe("failure logs carry more than a code", () => {
+    const FLOW = readFileSync(
+        join(dirname(fileURLToPath(import.meta.url)), "..", "src", "app", "flow.ts"),
+        "utf8"
+    );
+
+    it("logs no error or warning with a bare `code:` object", () => {
+        // Matches `log.error("x", { code: ... })` / `log.warn(...)` where the
+        // object is built inline instead of by `errorFields`.
+        const offenders = [...FLOW.matchAll(/log\.(?:error|warn)\(\s*"([^"]+)"\s*,\s*\{([^}]*)\}/g)]
+            .filter(match => /\bcode:/.test(match[2] ?? ""))
+            .map(match => match[1]);
+
+        expect(offenders).toEqual([]);
+    });
+
+    it("errorFields is what carries the errno", () => {
+        // If this helper stops including `cause`, every call site silently
+        // reverts to the state that cost the three sessions.
+        const body = /function errorFields\(error: PatcherError\)[^}]*\{[\s\S]*?\n\}/.exec(FLOW)?.[0] ?? "";
+        expect(body).toContain("cause: error.cause");
+        expect(body).toContain("path: error.path");
     });
 });

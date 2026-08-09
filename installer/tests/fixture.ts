@@ -20,6 +20,7 @@ import {
 } from "../src/bundle/spec.js";
 import { HELPER_LABEL } from "../src/helper/launchAgent.js";
 import type { LaunchctlPort } from "../src/helper/launchAgent.js";
+import type { SchtasksPort } from "../src/helper/scheduledTask.js";
 import { buildAsar } from "../src/patcher/asar.js";
 import type { DiscordInstall } from "../src/patcher/locate.js";
 import { buildStubAsar } from "../src/patcher/stub.js";
@@ -322,6 +323,78 @@ export function makeFakeLaunchctl(overrides: Partial<FakeLaunchctl> = {}): FakeL
         async isLoaded(label: string) {
             fake.calls.push(`print ${label}`);
             return fake.loaded.has(label);
+        },
+        ...overrides
+    };
+    return fake;
+}
+
+/* ------------------------------------------------------------------------ *
+ * The Windows scheduler
+ * ------------------------------------------------------------------------ */
+
+export interface FakeSchtasks extends SchtasksPort {
+    calls: string[];
+    registered: Set<string>;
+    /** The XML handed to `/Create`, so a test can read what would be registered. */
+    lastXml: string | null;
+    failCreate: boolean;
+    failRemove: boolean;
+    /** Report the task as absent even after a successful create. */
+    lieAboutRegistered: boolean;
+}
+
+/**
+ * No test in this suite registers a real Scheduled Task, exactly as none
+ * registers a real LaunchAgent.
+ *
+ * `lastXml` is captured by READING the file schtasks was pointed at, rather
+ * than by intercepting the string before it is written. The encoding is part of
+ * what has to be right — `schtasks /XML` rejects UTF-8 on several Windows
+ * builds — and a fake that never touched the file could not catch a regression
+ * there.
+ */
+export function makeFakeSchtasks(overrides: Partial<FakeSchtasks> = {}): FakeSchtasks {
+    const fake: FakeSchtasks = {
+        calls: [],
+        registered: new Set<string>(),
+        lastXml: null,
+        failCreate: false,
+        failRemove: false,
+        lieAboutRegistered: false,
+        async create(name: string, xmlPath: string) {
+            fake.calls.push(`create ${name}`);
+            try {
+                const raw = readFileSync(xmlPath);
+                fake.lastXml = raw.subarray(0, 2).equals(Buffer.from([0xff, 0xfe]))
+                    ? raw.subarray(2).toString("utf16le")
+                    : raw.toString("utf8");
+            } catch {
+                fake.lastXml = null;
+            }
+            if (fake.failCreate) {
+                return {
+                    ok: false as const,
+                    error: { code: "HELPER_REGISTRATION_FAILED" as const, message: "schtasks said no" }
+                };
+            }
+            if (!fake.lieAboutRegistered) fake.registered.add(name);
+            return { ok: true as const, value: true as const };
+        },
+        async remove(name: string) {
+            fake.calls.push(`delete ${name}`);
+            if (fake.failRemove) {
+                return {
+                    ok: false as const,
+                    error: { code: "HELPER_REGISTRATION_FAILED" as const, message: "schtasks refused" }
+                };
+            }
+            fake.registered.delete(name);
+            return { ok: true as const, value: true as const };
+        },
+        async exists(name: string) {
+            fake.calls.push(`query ${name}`);
+            return fake.registered.has(name);
         },
         ...overrides
     };

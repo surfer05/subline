@@ -154,8 +154,30 @@ describe("locateDiscordInstalls", () => {
         const result = locateDiscordInstalls({ platform: "win32", searchRoots: [root] });
         expect(result.ok).toBe(true);
         if (!result.ok) return;
+        // Exactly ONE. Discord leaves the previous app-1.0.xxxx behind after an
+        // update; those are leftovers of a single install, not three Discords,
+        // and surfacing them made the GUI ask "Which Discord?" on a machine
+        // that only had one. Asserting value[0] alone did not catch that.
+        expect(result.value).toHaveLength(1);
         expect(result.value[0]!.rootPath).toBe(join(branchDir, "app-1.0.10"));
         expect(result.value[0]!.asarPath).toBe(join(branchDir, "app-1.0.10", "resources", "app.asar"));
+    });
+
+    it("falls back to the next-newest Windows folder when the newest is not a Discord", () => {
+        const root = tempRoot();
+        const branchDir = join(root, "Discord");
+        // A half-written folder from an update that never finished: it sorts
+        // first but has no asar to patch. Stopping at it would report the
+        // machine as having no usable Discord while a working one sits beside it.
+        mkdirSync(join(branchDir, "app-1.0.11", "resources"), { recursive: true });
+        mkdirSync(join(branchDir, "app-1.0.10", "resources"), { recursive: true });
+        writeFileSync(join(branchDir, "app-1.0.10", "resources", "app.asar"), buildOriginalDiscordAsar());
+
+        const result = locateDiscordInstalls({ platform: "win32", searchRoots: [root] });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value).toHaveLength(1);
+        expect(result.value[0]!.rootPath).toBe(join(branchDir, "app-1.0.10"));
     });
 
     it("uses /Applications on macOS and LOCALAPPDATA on Windows by default", () => {

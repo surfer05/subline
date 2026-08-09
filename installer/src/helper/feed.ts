@@ -37,7 +37,7 @@
  */
 
 /** `owner/name` on GitHub. The release script derives every URL from this. */
-export const RELEASE_REPOSITORY = "surfer05/vctranslate";
+export const RELEASE_REPOSITORY = "surfer05/subline";
 
 /** The asset name the feed URL resolves to. `packaging/manifest.ts` writes it. */
 export const RELEASE_MANIFEST_ASSET_NAME = "subline-release.json";

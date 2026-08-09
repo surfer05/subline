@@ -8,7 +8,7 @@
  * marker to notice that Discord updated and the injection was wiped.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "./realFs.js";
 
 import type { DiscordInstall } from "./locate.js";
 import type { Result } from "./result.js";

@@ -31,14 +31,24 @@ import { __resetWebpackCommon, __stubSetSelectedChannel, FluxDispatcher } from "
  * message, the real accessory — and reads what actually crossed IPC.
  */
 
-const CHANNEL = "c1";
+/**
+ * A realistic snowflake, not "c1".
+ *
+ * These identifiers are asserted ABSENT from the beacon by substring search,
+ * and a two-character id makes that assertion collide with any hex string by
+ * chance: a regenerated BUILD_ID of 2600030c17e4cd05 contains "c1" and failed
+ * this test with no leak of any kind. A short fixture id turns a real guarantee
+ * into a coin toss in both directions — it can also PASS while text leaks.
+ */
+const AUTHOR_NAME = "ana";
+const CHANNEL = "418299174392016896";
 const TEXT = "hola, nos vemos en el sitio de siempre";
 
 const discordMessage = (id: string, content: string, authorId = "u1") => ({
     id,
     channel_id: CHANNEL,
     content,
-    author: { id: authorId, username: "ana" }
+    author: { id: authorId, username: AUTHOR_NAME }
 });
 
 async function settle() {
@@ -331,8 +341,10 @@ describe("the beacon never carries a conversation", () => {
         expect(all).not.toContain("otro secreto");
         expect(all).not.toContain("the translated secret");
         expect(all).not.toContain("991827");
-        expect(all).not.toContain("ana");
-        expect(all).not.toContain("c1");
+        expect(all).not.toContain(AUTHOR_NAME);
+        // Referenced, not retyped: the literal "c1" here silently stopped
+        // tracking CHANNEL, so widening the fixture id fixed nothing.
+        expect(all).not.toContain(CHANNEL);
     });
 });
 

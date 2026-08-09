@@ -30,21 +30,25 @@ import { InstallFlow } from "../src/app/flow.js";
 import type { FlowState } from "../src/app/flow.js";
 import { uninstall } from "../src/app/uninstall.js";
 import { HELPER_FLAG, HELPER_LABEL, launchAgentPlistPath, readLaunchAgentPlist } from "../src/helper/launchAgent.js";
+import { HELPER_TASK_NAME } from "../src/helper/scheduledTask.js";
 import { installHelperFor, removeHelperFor } from "../src/main/ports.js";
 import type { UnpatchReport } from "../src/patcher/patch.js";
 import type { Result } from "../src/patcher/result.js";
-import { makeFakeLaunchctl } from "./fixture.js";
-import type { FakeLaunchctl } from "./fixture.js";
+import { makeFakeLaunchctl, makeFakeSchtasks } from "./fixture.js";
+import type { FakeLaunchctl, FakeSchtasks } from "./fixture.js";
 
 const UID = 501;
 const APP_PATH = "/Applications/Subline.app";
+const WINDOWS_EXE = "C:\\Users\\x\\AppData\\Local\\Programs\\Subline\\Subline.exe";
 
 let home: string;
 let launchctl: FakeLaunchctl;
+let schtasks: FakeSchtasks;
 
 beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "subline-wiring-"));
     launchctl = makeFakeLaunchctl();
+    schtasks = makeFakeSchtasks();
 });
 
 afterEach(() => {
@@ -52,6 +56,9 @@ afterEach(() => {
 });
 
 const wiring = () => ({ appPath: APP_PATH, uid: UID, launchctl });
+
+/** The Windows equivalent: an exe path, a scheduler, and a directory we own. */
+const windowsWiring = () => ({ ...wiring(), executablePath: WINDOWS_EXE, schtasks, workDir: home });
 
 /* ------------------------------------------------------------------------ *
  * installHelperFor
@@ -99,17 +106,74 @@ describe("registering the agent", () => {
         expect(existsSync(launchAgentPlistPath(home))).toBe(false);
     });
 
-    it("says `not applicable` on Windows rather than failing", async () => {
-        // Spec §5's Scheduled Task is not built. A named error here would put a
-        // warning screen in front of every Windows user for something that is not
-        // wrong with their machine.
-        const result = await installHelperFor(wiring(), "win32", home);
+    it("registers a Scheduled Task on Windows", async () => {
+        // This used to assert `applicable: false`, on the grounds that the
+        // Scheduled Task was not built yet — which made a gap look like a
+        // decision. Every Windows install silently had no helper, and would
+        // stop translating the first time Discord updated itself into a new
+        // app-1.0.xxxx directory, with no marker and no error anywhere.
+        const result = await installHelperFor(windowsWiring(), "win32", home);
         expect(result.ok).toBe(true);
-        if (!result.ok) throw new Error("unreachable");
-        expect(result.value.applicable).toBe(false);
-        expect(result.value.installed).toBe(false);
+        if (!result.ok) throw new Error(result.error.message);
+
+        expect(result.value.applicable).toBe(true);
+        expect(result.value.installed).toBe(true);
+        expect(result.value.label).toBe(HELPER_TASK_NAME);
+        expect(schtasks.registered.has(HELPER_TASK_NAME)).toBe(true);
+
+        // Nothing macOS-shaped happened on the way.
         expect(existsSync(launchAgentPlistPath(home))).toBe(false);
         expect(launchctl.calls).toEqual([]);
+    });
+
+    it("registers a task that runs the running executable with the helper flag", async () => {
+        await installHelperFor(windowsWiring(), "win32", home);
+        const xml = schtasks.lastXml ?? "";
+        expect(xml).toContain(`<Command>${WINDOWS_EXE}</Command>`);
+        expect(xml).toContain(`<Arguments>${HELPER_FLAG}</Arguments>`);
+        // Without the repetition the task runs only at logon, and a machine
+        // left on for a fortnight never repairs a Discord that updated on day one.
+        expect(xml).toContain("<Interval>PT1H</Interval>");
+        // The half that repairs a Discord which updated while the machine was off.
+        expect(xml).toContain("<LogonTrigger>");
+        expect(xml).toContain("<StartWhenAvailable>true</StartWhenAvailable>");
+    });
+
+    it("writes the task XML as UTF-16 with a BOM, matching its own declaration", async () => {
+        await installHelperFor(windowsWiring(), "win32", home);
+        // The fake decodes UTF-16LE only when it finds the BOM, so a readable
+        // document here IS the encoding assertion. `schtasks /XML` rejects UTF-8
+        // on several Windows builds with nothing but "the task XML is
+        // malformed", and a registration that fails on some machines but not
+        // others is the worst kind to be handed.
+        expect(schtasks.lastXml).toContain('encoding="UTF-16"');
+        expect(schtasks.lastXml).toContain('<Task version="1.2"');
+    });
+
+    it("reports failure when Windows does not list the task it just created", async () => {
+        schtasks.lieAboutRegistered = true;
+        const result = await installHelperFor(windowsWiring(), "win32", home);
+        expect(result.ok).toBe(false);
+        if (result.ok) throw new Error("expected a refusal");
+        // Same standard as the LaunchAgent: the query afterwards decides, never
+        // the create's own exit code.
+        expect(result.error.code).toBe("HELPER_REGISTRATION_FAILED");
+    });
+
+    it("fails loudly when the scheduler is not wired up at all", async () => {
+        // `applicable: false` here would be a lie — Windows HAS the mechanism —
+        // and it is exactly the shape the old bug took.
+        const result = await installHelperFor(wiring(), "win32", home);
+        expect(result.ok).toBe(false);
+        if (result.ok) throw new Error("expected a refusal");
+        expect(result.error.code).toBe("HELPER_REGISTRATION_FAILED");
+    });
+
+    it("leaves no task XML behind after registering", async () => {
+        await installHelperFor(windowsWiring(), "win32", home);
+        // A stale definition sitting beside a live task is a file whose reader
+        // has no way to tell whether it is what is actually registered.
+        expect(existsSync(join(home, "subline-helper-task.xml"))).toBe(false);
     });
 });
 
@@ -144,9 +208,34 @@ describe("removing the agent", () => {
         expect(existsSync(launchAgentPlistPath(home))).toBe(true);
     });
 
-    it("is `not applicable` on Windows, which uninstall reads as `no precondition`", async () => {
-        const removal = await removeHelperFor(wiring(), "win32", home);
-        expect(removal).toEqual({ applicable: false, removed: false, error: null });
+    it("deletes the Scheduled Task on Windows", async () => {
+        await installHelperFor(windowsWiring(), "win32", home);
+        expect(schtasks.registered.has(HELPER_TASK_NAME)).toBe(true);
+
+        const removal = await removeHelperFor(windowsWiring(), "win32", home);
+        expect(removal.applicable).toBe(true);
+        expect(removal.removed).toBe(true);
+        expect(removal.error).toBeNull();
+        // An uninstalled product whose task is still scheduled puts Discord
+        // straight back at the next interval — the same ordering hazard
+        // `uninstall.ts` names for the LaunchAgent.
+        expect(schtasks.registered.has(HELPER_TASK_NAME)).toBe(false);
+    });
+
+    it("reports `removed: false` on Windows when there was no task, not a failure", async () => {
+        // The honest answer for an uninstall run twice.
+        const removal = await removeHelperFor(windowsWiring(), "win32", home);
+        expect(removal.applicable).toBe(true);
+        expect(removal.removed).toBe(false);
+        expect(removal.error).toBeNull();
+    });
+
+    it("surfaces a scheduler refusal rather than reporting a clean removal", async () => {
+        await installHelperFor(windowsWiring(), "win32", home);
+        schtasks.failRemove = true;
+        const removal = await removeHelperFor(windowsWiring(), "win32", home);
+        expect(removal.removed).toBe(false);
+        expect(removal.error?.code).toBe("HELPER_REGISTRATION_FAILED");
     });
 });
 

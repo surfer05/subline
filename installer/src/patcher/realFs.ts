@@ -14,6 +14,23 @@ import * as nodeFs from "node:fs";
  * an open-syscall error — which the installer then reported to the user as
  * "Discord needs repairing", on a completely healthy install.
  *
+ * WORSE THAN A FAILED CALL: A LEAKED HANDLE. Electron's hooks route asar paths
+ * through `getOrCreateArchive`, which opens the archive and **caches it, with
+ * its file descriptor, for the lifetime of the process**. So a harmless-looking
+ * `existsSync(".../app.asar")` does not just answer a question — it takes a
+ * permanent handle on Discord's archive. On macOS that costs nothing, because
+ * POSIX renames open files happily. On Windows it is fatal: the later
+ * `renameSync(app.asar, _app.asar)` fails with a sharing violation, every time,
+ * and no retry can ever clear it because nothing releases the cache short of
+ * quitting. That was a real shipped failure — the installer held its own target
+ * open and blamed the filesystem.
+ *
+ * The consequence for call sites: it is not enough to use this module for the
+ * WRITES. Every read, probe and `existsSync` on an asar path has to come from
+ * here too. `tests/realFs.test.ts` enforces that nothing else in `patcher/`
+ * imports `node:fs` at all, because "which of these calls touches an asar path"
+ * is not a judgement anyone should have to re-make correctly on every edit.
+ *
  * WHY NO TEST CAUGHT IT. vitest runs in plain Node, where `node:fs` is not
  * patched, so every unit test passed against the real file while the packaged
  * app could not read it at all. This is a whole class of bug that unit tests
@@ -48,8 +65,10 @@ export const {
     closeSync,
     existsSync,
     openSync,
+    readdirSync,
     readFileSync,
     readSync,
+    realpathSync,
     renameSync,
     statSync,
     unlinkSync,

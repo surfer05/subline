@@ -76,6 +76,10 @@ const ACTION_LABELS: Record<FlowActionType, string> = {
     "choose-install": "Choose",
     "proceed-over-mod": "Replace it and continue",
     "quit-discord": "Quit Discord for me",
+    // Says what it does. "Try again" here would hide that this one does not ask
+    // Discord first — the user is consenting to the close, which is the whole
+    // reason a forced quit is allowed to exist at all.
+    "force-quit-discord": "Close Discord anyway",
     recheck: "Check again",
     "set-language": "Continue",
     "open-permission-settings": "Open System Settings",
@@ -89,7 +93,7 @@ const ACTION_LABELS: Record<FlowActionType, string> = {
 };
 
 /** Which action gets the filled button. One per screen, never two. */
-const PRIMARY: FlowActionType[] = ["next", "set-language", "proceed-over-mod", "quit-discord", "retry", "finish", "open-permission-settings"];
+const PRIMARY: FlowActionType[] = ["next", "set-language", "proceed-over-mod", "quit-discord", "force-quit-discord", "retry", "finish", "open-permission-settings"];
 
 let chosenLanguage: string | null = null;
 
@@ -127,7 +131,13 @@ function render(state: FlowState): void {
 
     errorBox.hidden = state.error === null;
     if (state.error !== null) {
-        errorBox.textContent = `${state.error.code}${state.error.path ? ` — ${state.error.path}` : ""}`;
+        // The cause carries Node's errno, and dropping it is how a real failure
+        // reached a user as a bare "IO_ERROR — <path>": enough to know something
+        // broke, not enough for anyone to say what. It is the last line because
+        // the code and path are what a user reads; the errno is what we do.
+        const cause = (state.error as { cause?: string }).cause;
+        errorBox.textContent = `${state.error.code}${state.error.path ? ` — ${state.error.path}` : ""}`
+            + (cause === undefined ? "" : `\n${cause}`);
     }
 
     extra.replaceChildren();
@@ -158,14 +168,13 @@ function renderExtra(state: FlowState): void {
         for (const option of state.languages as LanguageOption[]) {
             const node = document.createElement("option");
             node.value = option.code;
-            // The endonym leads. Someone who cannot read English must be able to
-            // find their own language in this list (§3a). The English name
-            // follows it only when it ADDS something — "Deutsch — German" helps,
-            // "English — English" just looks like a bug, and it is the first
-            // row an English-speaking user sees.
-            node.textContent = option.endonym === option.englishName
-                ? option.endonym
-                : `${option.endonym} — ${option.englishName}`;
+            // English names only, by the product owner's call: "Español —
+            // Spanish" reads as noise to someone who can read either half.
+            //
+            // This trades away what §3a wanted the endonym for — a user who
+            // reads no English finding their own language — so if that user
+            // ever shows up, this line is where they were lost, not the list.
+            node.textContent = option.englishName;
             if (option.code === state.language) node.selected = true;
             select.append(node);
         }

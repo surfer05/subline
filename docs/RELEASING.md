@@ -161,7 +161,7 @@ still fails on a machine with no network.
 The release script prints the command; it never runs it.
 
 ```sh
-gh release create v0.1.0 --repo surfer05/vctranslate \
+gh release create v0.1.0 --repo surfer05/subline \
   --title "Subline 0.1.0" --notes-file notes.md \
   release/subline-release.json \
   release/SHA256SUMS \
@@ -175,7 +175,7 @@ gh release create v0.1.0 --repo surfer05/vctranslate \
 name. It is what installed copies of Subline poll, at
 
 ```
-https://github.com/surfer05/vctranslate/releases/latest/download/subline-release.json
+https://github.com/surfer05/subline/releases/latest/download/subline-release.json
 ```
 
 which GitHub redirects to the newest published release's asset of that name. That
@@ -205,7 +205,7 @@ get ignored.
     "publishedAt": "2026-08-07T09:00:00.000Z",
     "artifact": {
         "name": "subline-mod-e3f2e5ef4a6e7ba6.zip",
-        "url": "https://github.com/surfer05/vctranslate/releases/download/v0.1.0/subline-mod-e3f2e5ef4a6e7ba6.zip",
+        "url": "https://github.com/surfer05/subline/releases/download/v0.1.0/subline-mod-e3f2e5ef4a6e7ba6.zip",
         "bytes": 812345,
         "sha256": "…64 hex…"
     },

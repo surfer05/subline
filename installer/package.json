@@ -5,11 +5,11 @@
   "type": "module",
   "description": "Subline — one-click Discord translation installer",
   "main": "dist/main/main.js",
-  "homepage": "https://github.com/surfer05/vctranslate",
+  "homepage": "https://github.com/surfer05/subline",
   "license": "GPL-3.0-or-later",
   "repository": {
     "type": "git",
-    "url": "https://github.com/surfer05/vctranslate.git"
+    "url": "https://github.com/surfer05/subline.git"
   },
   "scripts": {
     "build:mod": "node scripts/buildMod.mjs",

@@ -36,6 +36,8 @@ import {
     HELPER_LABEL, helperLaunchAgentSpec, installLaunchAgent, launchAgentPlistPath, removeLaunchAgent
 } from "../helper/launchAgent.js";
 import type { LaunchctlPort } from "../helper/launchAgent.js";
+import { helperScheduledTaskSpec, installScheduledTask, removeScheduledTask } from "../helper/scheduledTask.js";
+import type { SchtasksPort } from "../helper/scheduledTask.js";
 import { modBundleDirFor, productDirFor } from "../bundle/layout.js";
 import { locateDiscordInstalls } from "../patcher/locate.js";
 import type { DiscordBranch, DiscordInstall } from "../patcher/locate.js";
@@ -90,21 +92,40 @@ export interface HelperWiring {
     intervalSeconds?: number;
     /** The executable inside the bundle. Must match electron-builder's `productName`. */
     executableName?: string;
+    /**
+     * Windows only: the full path to `Subline.exe`.
+     *
+     * Separate from `appPath` rather than derived from it, because the two are
+     * not the same kind of thing — `appPath` is a bundle directory that macOS
+     * appends an executable to, and there is no bundle on Windows. Deriving one
+     * from the other means a regex that quietly yields a wrong-but-plausible
+     * path on the platform it was not written for, and a scheduled task that
+     * points at nothing fails silently at 3am rather than during an install.
+     */
+    executablePath?: string;
+    /** Windows only. Registers and queries the Scheduled Task. */
+    schtasks?: SchtasksPort;
+    /** Windows only: a directory we own, for the task XML hand-off file. */
+    workDir?: string;
 }
 
 /**
- * Register the LaunchAgent, or say honestly that there is nothing to register.
+ * Register the background helper, or say honestly that there is nothing to
+ * register.
  *
- * Windows returns `applicable: false` rather than an error: spec §5's Scheduled
- * Task is not built, and a named failure on a platform that never had the feature
- * would put a warning screen in front of every Windows user for something that is
- * not wrong with their machine.
+ * macOS gets a LaunchAgent, Windows a Scheduled Task; anything else gets
+ * `applicable: false`, because a named failure on a platform that never had the
+ * feature would put a warning screen in front of a user for something that is
+ * not wrong with their machine. Windows used to take that branch too, which
+ * meant every Windows install silently had no helper and stopped translating
+ * the first time Discord updated itself into a new `app-1.0.xxxx` directory.
  */
 export async function installHelperFor(
     wiring: HelperWiring,
     platform: NodeJS.Platform = process.platform,
     home: string = homedir()
 ): Promise<Result<HelperInstallOutcome>> {
+    if (platform === "win32") return installWindowsHelper(wiring);
     if (platform !== "darwin") {
         return ok({ applicable: false, installed: false, label: null, path: null });
     }
@@ -128,18 +149,60 @@ export async function installHelperFor(
 }
 
 /**
+ * The Windows registration.
+ *
+ * Missing wiring is an ERROR, not `applicable: false`. "Not applicable" is the
+ * honest answer on a platform with no such mechanism; on Windows the mechanism
+ * exists, so a silent false here would recreate exactly the hole `helper` being
+ * required was introduced to close — every test green, every install helperless,
+ * and the symptom only appearing weeks later when Discord updates.
+ */
+async function installWindowsHelper(wiring: HelperWiring): Promise<Result<HelperInstallOutcome>> {
+    if (wiring.schtasks === undefined || wiring.executablePath === undefined || wiring.workDir === undefined) {
+        return err<HelperInstallOutcome>(
+            "HELPER_REGISTRATION_FAILED",
+            "Subline cannot set up background updates on this system: the scheduler is not available."
+        );
+    }
+    const registered = await installScheduledTask({
+        spec: helperScheduledTaskSpec(wiring.executablePath, wiring.intervalSeconds),
+        workDir: wiring.workDir,
+        schtasks: wiring.schtasks,
+        platform: "win32"
+    });
+    if (!registered.ok) return registered as Result<HelperInstallOutcome>;
+    return ok({
+        applicable: true,
+        // Queried back after creation, never the exit code. See `scheduledTask.ts`.
+        installed: registered.value.registered,
+        label: registered.value.name,
+        path: registered.value.name
+    });
+}
+
+/**
  * Unregister it — §8 step 3, and `uninstall`'s required precondition.
  *
  * Returns the `HelperRemoval` shape `uninstall` demands rather than a raw result,
  * so the one caller that has to get this ordering right cannot assemble it
  * wrongly. `uninstall.ts` explains what a forgotten ordering costs: Discord
- * restored under a live agent is put straight back at the next interval.
+ * restored under a live helper is put straight back at the next interval —
+ * which is as true of a Scheduled Task as of a LaunchAgent.
  */
 export async function removeHelperFor(
-    wiring: Pick<HelperWiring, "uid" | "launchctl">,
+    wiring: Pick<HelperWiring, "uid" | "launchctl" | "schtasks">,
     platform: NodeJS.Platform = process.platform,
     home: string = homedir()
 ): Promise<HelperRemoval> {
+    if (platform === "win32") {
+        if (wiring.schtasks === undefined) return { applicable: false, removed: false, error: null };
+        const gone = await removeScheduledTask({ schtasks: wiring.schtasks, platform });
+        return {
+            applicable: true,
+            removed: gone.ok && gone.value,
+            error: gone.ok ? null : gone.error
+        };
+    }
     if (platform !== "darwin") return { applicable: false, removed: false, error: null };
     const removed = await removeLaunchAgent({
         plistPath: launchAgentPlistPath(home),
@@ -157,7 +220,8 @@ export async function removeHelperFor(
 /** `ps` on macOS, `tasklist` on Windows, parsed into the same shape. */
 export async function listProcesses(
     platform: NodeJS.Platform,
-    exec: (file: string, args: string[]) => Promise<{ stdout: string }>
+    exec: (file: string, args: string[]) => Promise<{ stdout: string }>,
+    log?: FlowLogger
 ): Promise<RunningProcess[]> {
     try {
         if (platform === "win32") {
@@ -166,11 +230,21 @@ export async function listProcesses(
         }
         const { stdout } = await exec("/bin/ps", ["-axo", "pid=,comm="]);
         return parsePsOutput(stdout);
-    } catch {
+    } catch (cause) {
         // A process table we cannot read is not a reason to fail an install. The
         // caller's next step is to ask the user to quit Discord anyway, and an
         // empty list means "we saw nothing running" — which the patcher itself
         // will catch if it is wrong, because it verifies its write.
+        //
+        // But it is logged, because an empty list is ALSO what a machine with no
+        // Discord running produces. Patching underneath a live Discord and
+        // "correctly saw nothing" would otherwise be one indistinguishable line
+        // in the log, and on Windows the resulting sharing violation surfaces
+        // nowhere near here.
+        log?.warn("processes.unreadable", {
+            platform,
+            cause: cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause)
+        });
         return [];
     }
 }
@@ -207,6 +281,33 @@ export async function requestQuit(
     }
     const appName = branch === "stable" ? "Discord" : processNameFor(branch, "darwin");
     await exec("/usr/bin/osascript", ["-e", `tell application "${appName}" to quit`]);
+}
+
+/**
+ * End Discord without asking — reached only from the button that says so.
+ *
+ * `/T` matters as much as `/F` on Windows: Electron runs several processes that
+ * all share the image name `Discord.exe`, and ending the parent alone can leave
+ * orphaned children holding the files we are about to rewrite. `pkill -x` on
+ * macOS matches the executable name exactly, so it will not catch unrelated
+ * processes that merely mention Discord in their command line.
+ */
+export async function forceQuit(
+    branch: DiscordBranch,
+    platform: NodeJS.Platform,
+    exec: (file: string, args: string[]) => Promise<{ stdout: string }>
+): Promise<void> {
+    if (platform === "win32") {
+        await exec("taskkill", ["/F", "/T", "/IM", processNameFor(branch, "win32")]);
+        // DiscordSystemHelper.exe outlives Discord.exe — it is not a child, so
+        // /T does not reach it — and it is loaded from the same app directory.
+        // Windows will not rename a file that anything holds a handle to, so a
+        // survivor here is an EBUSY on app.asar and a failed install. Its
+        // absence is not an error: most machines never run it.
+        await exec("taskkill", ["/F", "/IM", "DiscordSystemHelper.exe"]).catch(() => ({ stdout: "" }));
+        return;
+    }
+    await exec("/usr/bin/pkill", ["-x", processNameFor(branch, "darwin")]);
 }
 
 /** Open a URL with the platform's handler — used only for the System Settings deep link. */
@@ -282,12 +383,17 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
             locateDiscordInstalls({
                 platform,
                 ...(options.searchRoots === undefined ? {} : { searchRoots: options.searchRoots }),
-                ...(explicitPaths === undefined ? {} : { explicitPaths })
+                ...(explicitPaths === undefined ? {} : { explicitPaths }),
+                // "Discord not found" and "we could not read the folder Discord
+                // is in" are the same screen. This is the only place that can
+                // tell them apart, and it costs one log line to do so.
+                onIgnoredError: detail => options.log.warn("locate.skipped", detail)
             }),
         inspect: install => inspectInstall(install),
 
-        listProcesses: () => listProcesses(platform, exec),
+        listProcesses: () => listProcesses(platform, exec, options.log),
         requestQuit: branch => requestQuit(branch, platform, exec),
+        forceQuit: branch => forceQuit(branch, platform, exec),
 
         probePermission: install => probeAppManagement({ resourcesPath: install.resourcesPath, platform }),
         openPermissionSettings: () => openUrl(APP_MANAGEMENT_SETTINGS_URL, platform, exec),

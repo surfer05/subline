@@ -26,12 +26,13 @@ import type { FlowAction, FlowState } from "../app/flow.js";
 import { uninstall } from "../app/uninstall.js";
 import type { UninstallReport } from "../app/uninstall.js";
 import {
-    createHelperPorts, createLaunchctl, HELPER_FLAG, HELPER_LABEL, launchAgentPlistPath,
+    createHelperPorts, createLaunchctl, createSchtasks, HELPER_FLAG, HELPER_LABEL, launchAgentPlistPath,
     readPendingAlerts, releaseManifestUrl, runHelperOnce
 } from "../helper/index.js";
 import { productDirFor } from "../bundle/layout.js";
 import { locateDiscordInstalls } from "../patcher/locate.js";
 import { unpatchInstall } from "../patcher/patch.js";
+import { usingOriginalFs } from "../patcher/realFs.js";
 import { createFlowPorts, installHelperFor, logDirFor, removeHelperFor, uninstallPaths } from "./ports.js";
 import type { HelperWiring } from "./ports.js";
 
@@ -75,7 +76,8 @@ if (isHelperRun) {
             productVersion: app.getVersion(),
             os: process.platform,
             osVersion: process.getSystemVersion(),
-            arch: process.arch
+            arch: process.arch,
+            originalFs: usingOriginalFs
         });
         try {
             const report = await runHelperOnce(
@@ -155,7 +157,8 @@ if (!isHelperRun) app.whenReady().then(() => {
         productVersion: app.getVersion(),
         os: process.platform,
         osVersion: process.getSystemVersion(),
-        arch: process.arch
+        arch: process.arch,
+            originalFs: usingOriginalFs
     });
 
     flow = createFlow();
@@ -210,21 +213,37 @@ ipcMain.handle("diagnostics:read", () => log.read());
 /* ---- The helper's own surface ---------------------------------------- */
 
 const launchctl = createLaunchctl();
+const schtasks = createSchtasks();
 const helperPlistPath = (): string => launchAgentPlistPath(app.getPath("home"));
 
 /**
- * The one description of the agent Subline installs.
+ * The one description of the helper Subline installs, on both platforms.
  *
- * `app.getPath("exe")` is `<Subline.app>/Contents/MacOS/Subline`; the spec builder
- * wants the bundle, and appends the rest itself. Same bundle, different flag —
- * spec §2: a separate helper binary would be a different code-signing identity
- * and would raise its own App Management prompt weeks later, out of nowhere.
+ * macOS: `app.getPath("exe")` is `<Subline.app>/Contents/MacOS/Subline`; the spec
+ * builder wants the bundle and appends the rest itself. Same bundle, different
+ * flag — spec §2: a separate helper binary would be a different code-signing
+ * identity and would raise its own App Management prompt weeks later, out of
+ * nowhere.
+ *
+ * Windows: there is no bundle, so the executable path is passed WHOLE rather
+ * than reconstructed. The macOS regex above simply does not match there, which
+ * is why `executablePath` is its own field instead of something the Windows
+ * side re-derives from `appPath` and gets subtly wrong.
  */
 function helperWiring(): HelperWiring {
     return {
         appPath: app.getPath("exe").replace(/\/Contents\/MacOS\/[^/]+$/, ""),
         uid: userInfo().uid,
-        launchctl
+        launchctl,
+        executablePath: app.getPath("exe"),
+        schtasks,
+        // The task XML is handed to schtasks and then deleted. It lives in our
+        // own product directory rather than a temp dir, so nothing can sweep it
+        // away between writing it and registering it. `productDirFor` returns
+        // null on a platform we do not support, which leaves `workDir`
+        // undefined and makes the Windows branch report a named failure rather
+        // than writing the file somewhere arbitrary.
+        workDir: productDirFor() ?? undefined
     };
 }
 

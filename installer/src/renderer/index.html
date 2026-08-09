@@ -72,6 +72,10 @@
         color: var(--muted);
         font-size: 12.5px;
         margin-bottom: 16px;
+        /* The errno is appended on its own line. Without this it silently
+           collapses into the path and the detail we added is invisible. */
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
     }
     .ok { color: var(--ok); font-weight: 600; }
     .warn { color: var(--danger); font-weight: 600; }

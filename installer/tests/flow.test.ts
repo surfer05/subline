@@ -110,6 +110,7 @@ interface Script {
     inspect?: Result<InstallState> | ((install: DiscordInstall) => Result<InstallState>);
     processes?: Array<Array<{ pid: number; command: string }>>;
     requestQuit?: () => Promise<void>;
+    forceQuit?: () => Promise<void>;
     permission?: AppManagementStatus[];
     installBundle?: Result<InstalledModBundle>;
     patch?: Result<PatchReport> | (() => Result<PatchReport>);
@@ -181,6 +182,7 @@ function harness(script: Script = {}): Harness {
             return tables[index] ?? [];
         },
         requestQuit: script.requestQuit ?? (async () => {}),
+        forceQuit: script.forceQuit ?? (async () => {}),
 
         probePermission: () => {
             const statuses = script.permission ?? ["granted"];
@@ -614,12 +616,46 @@ describe("Discord running", () => {
         expect(state.step).toBe("choose-language");
     });
 
-    it("hands a stubborn Discord back to the user, and never offers to kill it", async () => {
-        const h = harness({ processes: [[DISCORD_PROCESS]] });
+    it("offers the forced close once asking has failed, without having taken it", async () => {
+        let forced = 0;
+        const h = harness({ processes: [[DISCORD_PROCESS]], forceQuit: async () => { forced += 1; } });
         await toDetection(h);
         const state = await h.flow.send({ type: "quit-discord" });
         expect(state.step).toBe("quit-blocked");
-        expect(state.detail).toContain("Subline will not force it to close");
+        // A way forward, which this screen used to lack: on Windows the polite
+        // request only minimises Discord to the tray, so "recheck" would find
+        // it running for ever and the user had nothing left to press.
+        expect(state.actions).toEqual(["force-quit-discord", "recheck", "cancel"]);
+        // Offered, not taken. Nothing was killed by arriving here.
+        expect(forced).toBe(0);
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("closes Discord and carries on when the user presses the forced close", async () => {
+        let forced = 0;
+        const h = harness({ forceQuit: async () => { forced += 1; } });
+        let call = 0;
+        // Running through the polite attempt and the first check of the forced
+        // one, then gone.
+        h.ports.listProcesses = async () => (++call <= 5 ? [DISCORD_PROCESS] : []);
+        await toDetection(h);
+        const blocked = await h.flow.send({ type: "quit-discord" });
+        expect(blocked.step).toBe("quit-blocked");
+
+        const state = await h.flow.send({ type: "force-quit-discord" });
+        expect(forced).toBe(1);
+        expect(state.step).toBe("choose-language");
+    });
+
+    it("does not offer the forced close a second time after it has already failed", async () => {
+        const h = harness({ processes: [[DISCORD_PROCESS]], forceQuit: async () => {} });
+        await toDetection(h);
+        await h.flow.send({ type: "quit-discord" });
+        const state = await h.flow.send({ type: "force-quit-discord" });
+        expect(state.step).toBe("quit-blocked");
+        expect(state.quit?.forced).toBe(true);
+        // Re-offering a button that has been proven not to work is a dead end
+        // that looks like a way out.
         expect(state.actions).toEqual(["recheck", "cancel"]);
         expect(h.patchCalls).toHaveLength(0);
     });
@@ -657,6 +693,21 @@ describe("Discord running", () => {
         const h = harness({ processes: [[helper]] });
         const state = await toDetection(h);
         expect(state.step).toBe("choose-language");
+    });
+
+    it("catches a Discord that came back while the user was choosing a language", async () => {
+        // Clear at step 5, running again by the time we write. Discord is in
+        // Startup on most Windows machines and relaunches itself after an
+        // update, and picking a language is not instant.
+        const h = harness({ processes: [[], [DISCORD_PROCESS]] });
+        const language = await toDetection(h);
+        expect(language.step).toBe("choose-language");
+
+        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        // Back to the screen that explains what to do — not a write failure
+        // that surfaces as an unexplained IO error on Windows.
+        expect(state.step).toBe("discord-running");
+        expect(h.patchCalls).toHaveLength(0);
     });
 });
 

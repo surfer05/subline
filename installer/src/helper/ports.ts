@@ -33,6 +33,7 @@ import { verifyOnce } from "../verify/verify.js";
 import type { Alert } from "./alerts.js";
 import type { HelperPorts } from "./helper.js";
 import type { LaunchctlPort } from "./launchAgent.js";
+import type { SchtasksPort } from "./scheduledTask.js";
 import { helperStatePathFor, readHelperState, writeHelperState } from "./state.js";
 import type { HelperState } from "./state.js";
 
@@ -208,6 +209,50 @@ export function createLaunchctl(exec: Exec = (file, args) => run(file, args)): L
     };
 }
 
+/**
+ * The Windows scheduler, as a port.
+ *
+ * `/F` on both Create and Delete: without it schtasks prompts on stdin, and a
+ * background process with no console waits for an answer that can never come.
+ * `exists` treats any non-zero exit as absent — schtasks distinguishes "not
+ * found" from other failures only in localised text, and guessing at translated
+ * strings is how a check silently inverts on a non-English Windows.
+ */
+export function createSchtasks(exec: Exec = (file, args) => run(file, args)): SchtasksPort {
+    return {
+        async create(name: string, xmlPath: string): Promise<Result<true>> {
+            try {
+                await exec("schtasks", ["/Create", "/TN", name, "/XML", xmlPath, "/F"]);
+                return ok(true);
+            } catch (cause) {
+                return err<true>("HELPER_REGISTRATION_FAILED", "Windows refused to register the Subline helper task.", {
+                    path: name,
+                    cause
+                });
+            }
+        },
+        async remove(name: string): Promise<Result<true>> {
+            try {
+                await exec("schtasks", ["/Delete", "/TN", name, "/F"]);
+                return ok(true);
+            } catch (cause) {
+                return err<true>("HELPER_REGISTRATION_FAILED", "Windows refused to remove the Subline helper task.", {
+                    path: name,
+                    cause
+                });
+            }
+        },
+        async exists(name: string): Promise<boolean> {
+            try {
+                await exec("schtasks", ["/Query", "/TN", name]);
+                return true;
+            } catch {
+                return false;
+            }
+        }
+    };
+}
+
 export function createHelperPorts(options: RealHelperPortsOptions): HelperPorts {
     const platform = options.platform ?? process.platform;
     const env = options.env ?? process.env;
@@ -295,8 +340,78 @@ export function createHelperPorts(options: RealHelperPortsOptions): HelperPorts 
         },
 
         verifyBeacon: verifyOptions => verifyOnce({ ...verifyOptions, platform, env, home }),
-        notify: alert => (platform === "darwin" ? notifyMac(alert, exec) : Promise.resolve())
+        notify: alert => notify(alert, platform, exec, options.log)
     };
+}
+
+/**
+ * Tell the user something, on whichever platform this is.
+ *
+ * A failure to notify NEVER fails the run — the helper's job is repairing
+ * Discord, and an undelivered message must not undo a completed repair. But it
+ * is logged, and that is the whole point: this used to be
+ * `platform === "darwin" ? notifyMac(...) : Promise.resolve()`, so on Windows
+ * every alert the helper ever raised was discarded by an expression that looked
+ * like a platform check and read, in the log, exactly like a successful
+ * notification. Nobody would have found that from the outside.
+ */
+export async function notify(
+    alert: Alert,
+    platform: NodeJS.Platform,
+    exec: Exec,
+    log?: FlowLogger
+): Promise<void> {
+    try {
+        if (platform === "darwin") await notifyMac(alert, exec);
+        else if (platform === "win32") await notifyWindows(alert, exec);
+        else {
+            log?.warn("notify.unsupported", { platform, code: alert.code });
+            return;
+        }
+        log?.info("notify.sent", { platform, code: alert.code });
+    } catch (cause) {
+        log?.warn("notify.failed", {
+            platform,
+            code: alert.code,
+            cause: cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause)
+        });
+    }
+}
+
+/**
+ * A Windows notification.
+ *
+ * A balloon tip through `System.Windows.Forms`, not a WinRT toast: a toast has
+ * to be raised under a registered AppUserModelID, and when it is not, Windows
+ * drops it silently rather than erroring — which is the exact failure mode this
+ * whole change exists to remove. The balloon has no such requirement.
+ *
+ * `-NonInteractive -NoProfile` because a background task inherits no console: a
+ * PowerShell that decides to prompt, or that runs a user profile script which
+ * does, would hang until the task's time limit rather than notify anybody.
+ *
+ * Quoting is done by REPLACING quotes, not escaping them. Our messages are
+ * fixed strings with scalars interpolated (spec §7 — never message text), so
+ * nothing is lost, and there is no escaping scheme to get subtly wrong inside a
+ * string that is already nested two levels deep.
+ */
+export async function notifyWindows(alert: Alert, exec: Exec): Promise<void> {
+    const safe = alert.message.replace(/['"`$]/g, " ").replace(/\s+/g, " ").trim();
+    await exec("powershell", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-WindowStyle", "Hidden",
+        "-Command",
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        + "$n = New-Object System.Windows.Forms.NotifyIcon;"
+        + "$n.Icon = [System.Drawing.SystemIcons]::Information;"
+        + "$n.Visible = $true;"
+        + `$n.ShowBalloonTip(10000, 'Subline', '${safe}', 'Info');`
+        // Long enough for the balloon to be seen, short enough that the task's
+        // ExecutionTimeLimit is never the thing that ends it.
+        + "Start-Sleep -Seconds 8;"
+        + "$n.Dispose()"
+    ]);
 }
 
 function emptyState(): HelperState {

@@ -8,8 +8,16 @@
  *
  * So the escalation is: ask nicely (AppleScript `quit`, which is the same thing
  * as choosing Quit from the menu), wait, and if it will not go, SAY SO and let
- * the user quit it themselves. There is no forced kill anywhere in this file,
- * and adding one later should require deleting this paragraph first.
+ * the user quit it themselves.
+ *
+ * A forced quit exists, but ONLY behind an explicit click. The rule above says
+ * never force-kill *silently*, and on Windows a strictly-polite escalation is a
+ * dead end: `taskkill` without `/F` posts WM_CLOSE, Discord answers it by
+ * minimising to the tray rather than exiting, and its windowless Electron
+ * children ignore it outright. The user is then told "Discord is still running"
+ * about a Discord they can see is closed, with no way forward. So `force: true`
+ * is offered as a separate, named action the user chooses — never a fallback
+ * this function takes on its own initiative.
  *
  * Everything here is pure given its ports. Enumerating processes and sending
  * the quit request are injected, so the escalation logic is testable without a
@@ -100,6 +108,8 @@ export interface QuitReport {
     clear: boolean;
     pids: number[];
     summary: string;
+    /** True when this run used the forced path. Never inferred — set from the caller's request. */
+    forced: boolean;
     /** Present when the quit request itself failed. */
     cause?: string;
 }
@@ -111,6 +121,13 @@ export interface QuitDiscordOptions {
     listProcesses: () => Promise<readonly RunningProcess[]>;
     /** Ask Discord to quit — AppleScript on macOS. MUST NOT kill. */
     requestQuit: () => Promise<void>;
+    /**
+     * End Discord without asking. Called ONLY when `force` is true, which only
+     * happens when the user clicked a button that says so.
+     */
+    forceQuit?: () => Promise<void>;
+    /** Set by the user's explicit choice. Never defaulted to true anywhere. */
+    force?: boolean;
     /** How long to wait for it to go away after asking. */
     gracePeriodMs?: number;
     pollIntervalMs?: number;
@@ -140,26 +157,69 @@ export async function isDiscordRunning(options: {
  * the strength of the request having been *sent* is the same class of mistake as
  * declaring an install successful because a file was written.
  */
+/**
+ * What to tell someone whose Discord did not go away.
+ *
+ * The Windows wording exists because the old single message was actively
+ * misleading there: it told the user to quit an app that LOOKS quit. Closing
+ * Discord's window on Windows minimises it to the tray, so "quit it yourself"
+ * reads as an accusation of not having done the thing they just did. Name the
+ * tray, and name the way out.
+ */
+function stillRunningSummary(platform: NodeJS.Platform, forced: boolean): string {
+    if (forced) {
+        return "Discord is still running even after being closed by force. Restarting your computer will clear it.";
+    }
+    if (platform === "win32") {
+        return (
+            "Discord is still running — closing its window only hides it in the system tray, near the clock. "
+            + "Right-click the Discord icon there and choose Quit, then continue. Or let Subline close it."
+        );
+    }
+    return (
+        "Discord is still running. Quit it yourself — from the Discord menu, or right-click its "
+        + "Dock icon and choose Quit — then continue. Or let Subline close it."
+    );
+}
+
 export async function quitDiscord(options: QuitDiscordOptions): Promise<QuitReport> {
     const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
     const clock = options.clock ?? Date.now;
     const grace = options.gracePeriodMs ?? DEFAULT_QUIT_GRACE_MS;
     const interval = options.pollIntervalMs ?? DEFAULT_QUIT_POLL_MS;
 
+    const forced = options.force === true;
+
     const running = await isDiscordRunning(options);
     if (running.length === 0) {
-        return { outcome: "not-running", clear: true, pids: [], summary: "Discord is not running." };
+        return { outcome: "not-running", clear: true, pids: [], summary: "Discord is not running.", forced };
     }
 
     const pids = running.map(process => process.pid);
+    // A forced run with no way to force is a bug, not a reason to quietly fall
+    // back to asking politely — the caller already told the user it would end
+    // Discord, and the polite path is what failed to.
+    const attempt = forced ? options.forceQuit : options.requestQuit;
+    if (attempt === undefined) {
+        return {
+            outcome: "quit-failed",
+            clear: false,
+            pids,
+            forced,
+            summary: "Subline cannot close Discord on this system. Quit Discord yourself, then continue."
+        };
+    }
     try {
-        await options.requestQuit();
+        await attempt();
     } catch (cause) {
         return {
             outcome: "quit-failed",
             clear: false,
             pids,
-            summary: "Subline could not ask Discord to quit. Quit Discord yourself, then continue.",
+            forced,
+            summary: forced
+                ? "Subline could not close Discord. Quit it yourself, then continue."
+                : "Subline could not ask Discord to quit. Quit Discord yourself, then continue.",
             cause: cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause)
         };
     }
@@ -168,17 +228,15 @@ export async function quitDiscord(options: QuitDiscordOptions): Promise<QuitRepo
     for (;;) {
         const remaining = await isDiscordRunning(options);
         if (remaining.length === 0) {
-            return { outcome: "quit", clear: true, pids, summary: "Discord has quit." };
+            return { outcome: "quit", clear: true, pids, summary: "Discord has quit.", forced };
         }
         if (clock() - startedAt >= grace) {
             return {
                 outcome: "still-running",
                 clear: false,
                 pids: remaining.map(process => process.pid),
-                // No kill offered. Deliberately.
-                summary:
-                    "Discord is still running. Quit it yourself — from the Discord menu, or right-click its "
-                    + "Dock icon and choose Quit — then continue. Subline will not force it to close."
+                forced,
+                summary: stillRunningSummary(options.platform, forced)
             };
         }
         await sleep(interval);

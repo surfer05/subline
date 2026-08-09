@@ -14,7 +14,7 @@
  * "unpatched" state rather than a marker pointing at nothing).
  */
 
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "./realFs.js";
 import { join } from "node:path";
 
 import type { Result } from "./result.js";

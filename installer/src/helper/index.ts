@@ -34,8 +34,16 @@ export {
 } from "./launchAgent.js";
 export type { InstallLaunchAgentOptions, LaunchAgentReport, LaunchAgentSpec, LaunchctlPort } from "./launchAgent.js";
 
-export { createHelperPorts, createLaunchctl, findBundleRoot, notifyMac, unpackArchive } from "./ports.js";
+export { createHelperPorts, createLaunchctl, createSchtasks, findBundleRoot, notifyMac, unpackArchive } from "./ports.js";
 export type { Exec, RealHelperPortsOptions } from "./ports.js";
+
+export {
+    HELPER_TASK_NAME, helperScheduledTaskSpec, installScheduledTask, isoDuration,
+    removeScheduledTask, renderScheduledTaskXml
+} from "./scheduledTask.js";
+export type {
+    InstallScheduledTaskOptions, ScheduledTaskReport, ScheduledTaskSpec, SchtasksPort
+} from "./scheduledTask.js";
 
 export {
     ALLOWED_RELEASE_HOSTS, assertTrustedUrl, checksumVerifier, DEFAULT_VERIFIERS, isNewerBuild,

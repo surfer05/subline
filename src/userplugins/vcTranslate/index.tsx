@@ -40,7 +40,22 @@ const logger = new Logger("VcTranslate");
 // exists so what they end up reading is right. Neither waits on the other.
 let fastBatcher: Batcher | null = null;
 let qualityBatcher: Batcher | null = null;
-let sessionFallback = false;   // set when the configured LLM engine (Claude/Gemini) is unusable this session
+let sessionFallback = false;   // set when the configured LLM engine is unusable this session
+/**
+ * Which engine+key `sessionFallback` was set against.
+ *
+ * The pin exists so a rejected key is not retried every batch. But it used to
+ * outlive the key itself: Vencord persists a settings field on every keystroke,
+ * so a batch firing while a key is half-pasted gets a 401, pins the session,
+ * and stays pinned after the correct key lands. The user is then left with a
+ * valid key, no LLM calls, no error on screen, and — because `effectiveEngine()`
+ * reports google — not even the quota indicator that would have hinted at it.
+ *
+ * Recording WHAT was rejected makes the pin mean "this credential is bad"
+ * rather than "this session is bad", so changing the key or the engine lifts
+ * it and nothing else does.
+ */
+let fallbackPinnedFor: string | null = null;
 let announcedMissingKey = false;   // one toast per session, never per batch
 let announcedCooldown = false;     // ditto, for a rate-limited quality tier
 
@@ -709,9 +724,30 @@ function channelActive(channelId: string): boolean {
     return Boolean(channel?.guild_id);
 }
 
+/** Identifies the credential a pin applies to. Never logged, never displayed. */
+function credentialFingerprint(): string {
+    const configured = settings.store.engine as EngineId;
+    return `${configured}:${apiKeyFor(configured).trim()}`;
+}
+
+/**
+ * Lift the pin when the credential it was set against is no longer configured.
+ *
+ * Called from the settings subscriber. Deliberately NOT "clear on any settings
+ * change": that would re-arm the rejected key every time an unrelated field was
+ * touched, and put the plugin back to retrying a known-bad key on every batch.
+ */
+function releaseFallbackIfCredentialChanged(): void {
+    if (!sessionFallback) return;
+    if (credentialFingerprint() === fallbackPinnedFor) return;
+    sessionFallback = false;
+    fallbackPinnedFor = null;
+}
+
 function fallBackToGoogle(reason: string) {
     if (sessionFallback) return;   // only announce once
     sessionFallback = true;
+    fallbackPinnedFor = credentialFingerprint();
     Toasts.show({
         id: Toasts.genId(),
         type: Toasts.Type.FAILURE,
@@ -1228,11 +1264,24 @@ async function forceQualityTranslate(message: Message): Promise<void> {
             text: message.content ?? "",
             replyToId: replyParentId(message)
         }],
-        // No conversation context: this is a deliberate, single-message,
-        // out-of-band request rather than a batch the conversation ring was
-        // built for. The LLM still translates it correctly without context —
-        // context only helps disambiguate, it is not required to answer.
-        context: [],
+        // The messages immediately BEFORE this one, read from the store.
+        //
+        // This used to send `context: []`, reasoning that a single out-of-band
+        // request does not need the conversation ring. That was wrong in the
+        // case it matters most. Romanized Maghrebi Arabic is where this plugin
+        // is weakest, and a real example had the author's own English
+        // rendering of the sentence one message above it — "when we type, we
+        // write in a mix of arabic and french". Without it, "ki nebdew
+        // nektbou" came back as "what's up" and the verb "write" vanished.
+        //
+        // Read from the store rather than from the live context ring: the ring
+        // is a window on what is arriving NOW, so forcing an old scroll-back
+        // message would hand the model a conversation that has nothing to do
+        // with it — worse than no context at all.
+        //
+        // This is also the request that can least afford to be wrong: the user
+        // clicked a button and is watching for the answer.
+        context: contextBefore(message, FORCED_CONTEXT_SIZE),
         targetLang: settings.store.targetLang
     };
     // Whichever way runTier settles — success, failure, cooldown block, a
@@ -1509,6 +1558,45 @@ function replyParentId(message: any): string | undefined {
     if (typeof ref === "string") return ref;
     const hydrated = message?.referenced_message?.id;
     return typeof hydrated === "string" ? hydrated : undefined;
+}
+
+/** How many preceding messages a forced translation gets as context. */
+const FORCED_CONTEXT_SIZE = 6;
+
+/**
+ * The messages immediately before `message` in its channel, oldest-first.
+ *
+ * Positioned by ID rather than by taking the newest N, because the whole point
+ * is the conversation around THIS message — which, for anything reached by
+ * scrolling back, is nowhere near the newest.
+ *
+ * Empty-content messages (embeds, attachments, joins) are dropped: they cost
+ * prompt tokens and carry nothing a translator can use. A message the store
+ * does not have — the target was never loaded, or Discord's internals moved —
+ * yields no context rather than throwing, because a forced translation with
+ * imperfect context is still far better than one that errors.
+ */
+function contextBefore(message: any, size: number): { author: string; text: string }[] {
+    const channelId = message?.channel_id;
+    if (typeof channelId !== "string") return [];
+
+    const store = MessageStore.getMessages(channelId);
+    if (!store || typeof store.toArray !== "function") return [];
+
+    let all: any[];
+    try {
+        all = store.toArray();
+    } catch {
+        return [];
+    }
+
+    const index = all.findIndex(m => m?.id === message.id);
+    if (index < 0) return [];
+
+    return all
+        .slice(Math.max(0, index - size), index)
+        .filter(m => typeof m?.content === "string" && m.content.trim() !== "")
+        .map(m => ({ author: m.author?.username ?? "unknown", text: m.content as string }));
 }
 
 function onMessageCreate({ message, optimistic }: { message: Message; optimistic?: boolean; }) {
@@ -2194,10 +2282,6 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
     }, []);
 
     const engine = effectiveEngine();
-    if (!isLlmEngine(engine)) return null;
-
-    const { label } = LLM_ENGINES[engine];
-    const quota = describeQuotaState(engine);
 
     const indicatorStyle = {
         fontSize: "0.85rem",
@@ -2205,6 +2289,36 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
         padding: "0 4px",
         whiteSpace: "nowrap"
     } as const;
+
+    /**
+     * A rejected key gets its OWN state rather than no indicator at all.
+     *
+     * `effectiveEngine()` reports google once the pin is set, so this component
+     * used to return null here — removing the only on-screen sign of the LLM
+     * tier at precisely the moment something was wrong with it. The subtitles
+     * kept appearing (Google still answers), so nothing looked broken; the
+     * upgrade simply never came, with no way to find out why short of reading
+     * the beacon file.
+     */
+    const configured = settings.store.engine as EngineId;
+    if (sessionFallback && isLlmEngine(configured)) {
+        return (
+            <div
+                style={indicatorStyle}
+                title={
+                    `${LLM_ENGINES[configured].label} rejected the API key, so Subline is using Google. `
+                    + "Correct the key in settings and the better translations resume — no restart needed."
+                }
+            >
+                ✦ key rejected
+            </div>
+        );
+    }
+
+    if (!isLlmEngine(engine)) return null;
+
+    const { label } = LLM_ENGINES[engine];
+    const quota = describeQuotaState(engine);
 
     if (quota.cooling) {
         const countdown = formatCountdown(quota.remainingMs);
@@ -2366,7 +2480,12 @@ export default definePlugin({
         const cacheReady = loadPersistedTranslations();
 
         rebuildBatcher();
-        onSettingsChanged(rebuildBatcher);
+        onSettingsChanged(() => {
+            // Order matters: lift a stale pin BEFORE rebuilding, so the new
+            // batcher is built for the engine the user now has credentials for.
+            releaseFallbackIfCredentialChanged();
+            rebuildBatcher();
+        });
         FluxDispatcher.subscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.subscribe("MESSAGE_UPDATE", onMessageUpdate);
         FluxDispatcher.subscribe("CHANNEL_SELECT", onChannelSelect);
@@ -2453,6 +2572,7 @@ export default definePlugin({
         // So toggling the plugin off/on after fixing a bad key retries
         // Claude instead of staying pinned to Google.
         sessionFallback = false;
+        fallbackPinnedFor = null;
         // Only the in-memory mirror. The persisted mark deliberately SURVIVES:
         // an exhausted quota is a fact about the API key, not about this
         // plugin session, so restarting Discord (or toggling the plugin off

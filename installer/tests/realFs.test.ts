@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -25,13 +25,25 @@ const SRC = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
  * Electron process. Only launching the app proves that.
  */
 
-/** Modules that read or write a path containing ".asar". */
-const ASAR_TOUCHING = [
-    "patcher/asar.ts",
-    "patcher/patch.ts",
-    "patcher/state.ts",
-    "app/uninstall.ts"
-];
+/**
+ * Modules outside `patcher/` that touch an ".asar" path, listed by hand.
+ *
+ * `patcher/` itself is ENUMERATED below rather than listed, and that difference
+ * is the whole lesson of this file. This used to be one hand-maintained list of
+ * "modules that touch asar paths" — and it omitted `patcher/locate.ts`, whose
+ * `existsSync(install.asarPath)` looked far too harmless to belong on it.
+ *
+ * Under Electron that call routes through the asar hook, which caches the
+ * opened archive AND ITS FILE DESCRIPTOR for the lifetime of the process. The
+ * installer therefore held Discord's own app.asar open, and every subsequent
+ * rename on Windows failed with a sharing violation. A read-only existence
+ * check took a permanent write-blocking handle.
+ *
+ * So the rule is no longer "list the modules that touch asar paths" — nobody
+ * gets that judgement right every time — but "no module in patcher/ may import
+ * node:fs at all". Keep additions here to files that genuinely live elsewhere.
+ */
+const ASAR_TOUCHING_OUTSIDE_PATCHER = ["app/uninstall.ts"];
 
 /** Calls that would hit Electron's patched module if imported from node:fs. */
 const ASAR_SENSITIVE = [
@@ -41,7 +53,18 @@ const ASAR_SENSITIVE = [
 ];
 
 describe("asar-touching modules use the unpatched filesystem", () => {
-    for (const rel of ASAR_TOUCHING) {
+    it("no module in patcher/ imports node:fs, whether or not it looks asar-related", () => {
+        const offenders = readdirSync(join(SRC, "patcher"))
+            .filter(name => name.endsWith(".ts") && name !== "realFs.ts")
+            .filter(name => /from "node:fs"/.test(readFileSync(join(SRC, "patcher", name), "utf8")));
+
+        // realFs.ts is the single permitted importer; it is what wraps the
+        // module. Everything else goes through it, including files whose fs use
+        // looks obviously safe — `locate.ts` looked obviously safe.
+        expect(offenders).toEqual([]);
+    });
+
+    for (const rel of ASAR_TOUCHING_OUTSIDE_PATCHER) {
         it(`${rel} takes its asar-sensitive fs calls from realFs`, () => {
             const source = readFileSync(join(SRC, rel), "utf8");
 

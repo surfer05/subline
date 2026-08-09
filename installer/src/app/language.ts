@@ -128,7 +128,13 @@ export function isKnownLanguage(code: string | null | undefined): boolean {
 }
 
 /**
- * The picker's rows, sorted by endonym in the user's own collation.
+ * The picker's rows, sorted by the name the picker actually SHOWS.
+ *
+ * That is the English name. Sorting by endonym while displaying English put
+ * German under D and Spanish under E — a list that is perfectly ordered by a
+ * key the reader cannot see is, to them, not sorted at all. The two must not
+ * drift apart again: if the renderer ever goes back to showing endonyms, this
+ * comparator moves with it.
  *
  * Any code ICU cannot name is dropped rather than shown raw — see `endonymOf`.
  */
@@ -142,7 +148,7 @@ export function languageOptions(codes: readonly string[] = SUPPORTED_LANGUAGE_CO
         if (endonym === null) continue;
         options.push({ code, endonym, englishName: englishNameOf(code) });
     }
-    return options.sort((a, b) => a.endonym.localeCompare(b.endonym));
+    return options.sort((a, b) => a.englishName.localeCompare(b.englishName, "en"));
 }
 
 /* ------------------------------------------------------------------------ *

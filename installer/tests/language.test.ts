@@ -99,9 +99,17 @@ describe("languageOptions", () => {
         expect(turkish).toEqual({ code: "tr", endonym: "Türkçe", englishName: "Turkish" });
     });
 
-    it("sorts by endonym", () => {
+    it("sorts by the English name, because that is the name the picker shows", () => {
+        const names = languageOptions(["tr", "ja", "de", "en"]).map(option => option.englishName);
+        expect(names).toEqual(["English", "German", "Japanese", "Turkish"]);
+    });
+
+    it("does not order by a key the reader cannot see", () => {
+        // The regression this replaces: sorted by endonym while displaying
+        // English names put German (Deutsch) above English and Spanish (Español)
+        // among the E's, so a correctly sorted list read as unsorted.
         const endonyms = languageOptions(["tr", "ja", "de", "en"]).map(option => option.endonym);
-        expect(endonyms).toEqual([...endonyms].sort((a, b) => a.localeCompare(b)));
+        expect(endonyms).not.toEqual([...endonyms].sort((a, b) => a.localeCompare(b)));
     });
 
     it("normalizes and de-duplicates the codes it is given", () => {

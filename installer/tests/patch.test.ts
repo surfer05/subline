@@ -7,6 +7,7 @@ import { beforeEach, afterEach, describe, expect, it } from "vitest";
 import { buildAsar } from "../src/patcher/asar.js";
 import { markerPathFor, readMarker } from "../src/patcher/marker.js";
 import { patchInstall, unpatchInstall } from "../src/patcher/patch.js";
+import { fsError } from "../src/patcher/result.js";
 import type { PatchOptions } from "../src/patcher/patch.js";
 import { inspectInstall } from "../src/patcher/state.js";
 import { buildStubAsar, readStub, STUB_PACKAGE_JSON, stubIndexSource } from "../src/patcher/stub.js";
@@ -678,5 +679,45 @@ describe("patch → unpatch → patch cycle", () => {
 
         expect(readdirSync(fixture.install.resourcesPath).sort()).toEqual(["app.asar", "build_info.json"]);
         expect(existsSync(join(fixture.install.resourcesPath, "_app.asar"))).toBe(false);
+    });
+});
+
+/**
+ * Errno mapping. These exist because a real Windows install failed with a bare
+ * "IO_ERROR — <path>" on screen: correct, useless, and indistinguishable from
+ * every other unanticipated failure.
+ */
+describe("fsError", () => {
+    const thrown = (code: string): NodeJS.ErrnoException =>
+        Object.assign(new Error(`${code}: something, rename 'a' -> 'b'`), { code });
+
+    it("names a locked file as its own failure, not a permission problem", () => {
+        const result = fsError(thrown("EBUSY"), "C:\\app.asar", "back up Discord's original app.asar");
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        // The remedy is the opposite of PERMISSION_DENIED's: nothing to grant,
+        // something to close. Sending a Windows user to System Settings' App
+        // Management — which does not exist there — is a dead end.
+        expect(result.error.code).toBe("FILE_IN_USE");
+        expect(result.error.message).toMatch(/tray/i);
+        expect(result.error.message).not.toMatch(/App Management/i);
+    });
+
+    it("puts the errno in the message when it has no named case", () => {
+        const result = fsError(thrown("ENOSPC"), "C:\\app.asar", "back up Discord's original app.asar");
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error.code).toBe("IO_ERROR");
+        // Without this the screenshot a user sends says nothing we can act on.
+        expect(result.error.message).toContain("ENOSPC");
+    });
+
+    it("still maps the cases that already had remedies", () => {
+        expect((fsError(thrown("EACCES"), "/a", "x") as { error: { code: string } }).error.code)
+            .toBe("PERMISSION_DENIED");
+        expect((fsError(thrown("EPERM"), "/a", "x") as { error: { code: string } }).error.code)
+            .toBe("PERMISSION_DENIED");
+        expect((fsError(thrown("EROFS"), "/a", "x") as { error: { code: string } }).error.code)
+            .toBe("READ_ONLY_VOLUME");
     });
 });

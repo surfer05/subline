@@ -22,6 +22,7 @@ import {
     logDirFor,
     openUrl,
     parseTasklistCsv,
+    forceQuit,
     requestQuit,
     uninstallPaths
 } from "../src/main/ports.js";
@@ -274,6 +275,56 @@ describe("requestQuit", () => {
         await requestQuit("stable", "win32", async (file, args) => { seen.push([file, ...args]); return { stdout: "" }; });
         expect(seen[0]).toEqual(["taskkill", "/IM", "Discord.exe"]);
         expect(seen[0]).not.toContain("/F");
+    });
+});
+
+describe("forceQuit", () => {
+    it("passes /F and /T on Windows", async () => {
+        const seen: string[][] = [];
+        await forceQuit("stable", "win32", async (file, args) => { seen.push([file, ...args]); return { stdout: "" }; });
+        // /T as well as /F: Electron's children all share the image name
+        // Discord.exe, and leaving one holding app.asar open defeats the patch
+        // this quit exists to make possible.
+        expect(seen[0]).toEqual(["taskkill", "/F", "/T", "/IM", "Discord.exe"]);
+    });
+
+    it("matches the executable name exactly on macOS", async () => {
+        const seen: string[][] = [];
+        await forceQuit("stable", "darwin", async (file, args) => { seen.push([file, ...args]); return { stdout: "" }; });
+        // -x, not a substring match: pkill without it would also kill a shell
+        // that merely has "Discord" in its command line.
+        expect(seen[0]).toEqual(["/usr/bin/pkill", "-x", "Discord"]);
+    });
+
+    it("targets the branch's own process on PTB and Canary", async () => {
+        const seen: string[] = [];
+        for (const branch of ["ptb", "canary"] as const) {
+            // Only the first call is the branch's own process; the second is the
+            // shared DiscordSystemHelper, which has no per-branch name.
+            await forceQuit(branch, "win32", async (_file, args) => { seen.push(args.at(-1) ?? ""); return { stdout: "" }; });
+        }
+        expect(seen).toEqual([
+            "DiscordPTB.exe", "DiscordSystemHelper.exe",
+            "DiscordCanary.exe", "DiscordSystemHelper.exe"
+        ]);
+    });
+
+    it("also ends DiscordSystemHelper, which /T does not reach", async () => {
+        const seen: string[][] = [];
+        await forceQuit("stable", "win32", async (file, args) => { seen.push([file, ...args]); return { stdout: "" }; });
+        // It is not a child of Discord.exe, so it survives the tree kill and
+        // keeps a handle on the app directory we are about to rename inside.
+        expect(seen[1]).toEqual(["taskkill", "/F", "/IM", "DiscordSystemHelper.exe"]);
+    });
+
+    it("does not fail the whole quit when the helper is not running", async () => {
+        // taskkill exits non-zero for "process not found", and most machines
+        // never run this helper at all. Treating that as a failed quit would
+        // block installs that had nothing wrong with them.
+        await expect(forceQuit("stable", "win32", async (_file, args) =>
+            args.includes("DiscordSystemHelper.exe")
+                ? Promise.reject(new Error("ERROR: not found"))
+                : { stdout: "" })).resolves.toBeUndefined();
     });
 });
 

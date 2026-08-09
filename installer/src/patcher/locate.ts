@@ -10,12 +10,15 @@
  * install is computed by a per-platform function rather than assumed.
  */
 
-import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "./realFs.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { Result } from "./result.js";
-import { err, ok } from "./result.js";
+import { err, errnoOf, ok } from "./result.js";
+
+/** Told when a filesystem error is deliberately ignored, so the log can name it. */
+export type IgnoredError = (detail: { path: string; operation: string; code: string }) => void;
 
 export type DiscordBranch = "stable" | "ptb" | "canary";
 
@@ -61,6 +64,18 @@ export interface LocateOptions {
     /** Paths the user picked by hand (spec §7: "Discord installed somewhere unusual"). */
     explicitPaths?: readonly string[];
     branches?: readonly DiscordBranch[];
+    /**
+     * Told about every filesystem error this search decides to ignore.
+     *
+     * Searching HAS to tolerate unreadable directories — a scan that aborted on
+     * the first permission refusal would find nothing on a machine with one odd
+     * folder. But that makes "we could not read it" and "it is not there" the
+     * same answer, and the user is shown "Discord not found" for a Discord that
+     * exists. Every swallowed error is reported here so the log can say which
+     * one actually happened, rather than leaving it to be guessed at later from
+     * a screenshot.
+     */
+    onIgnoredError?: (detail: { path: string; operation: string; code: string }) => void;
 }
 
 /** The standard places Discord lands, per platform. */
@@ -110,11 +125,13 @@ function looksLikeDiscord(install: DiscordInstall): boolean {
 }
 
 /** Windows keeps Discord in `app-1.0.xxxx`; the newest one is the live install (spec §5). */
-export function findWindowsAppDirs(branchDir: string): string[] {
+export function findWindowsAppDirs(branchDir: string, onIgnoredError?: IgnoredError): string[] {
     let entries: string[];
     try {
         entries = readdirSync(branchDir);
-    } catch {
+    } catch (cause) {
+        // A Discord directory we cannot list looks exactly like no Discord.
+        onIgnoredError?.({ path: branchDir, operation: "readdir", code: errnoOf(cause) ?? "UNKNOWN" });
         return [];
     }
     const versioned = entries
@@ -172,15 +189,24 @@ export function locateDiscordInstalls(options: LocateOptions = {}): Result<Disco
 
             if (platform === "darwin") {
                 const candidate = join(root, definition.macAppName);
-                if (!isDirectory(candidate)) continue;
+                if (!isDirectory(candidate, options.onIgnoredError)) continue;
                 const install = makeInstall(definition.branch, candidate, platform, false);
                 if (looksLikeDiscord(install)) add(install);
             } else if (platform === "win32") {
                 const branchDir = join(root, definition.windowsDirName);
-                if (!isDirectory(branchDir)) continue;
-                for (const appDir of findWindowsAppDirs(branchDir)) {
+                if (!isDirectory(branchDir, options.onIgnoredError)) continue;
+                // Windows keeps the previous `app-1.0.xxxx` beside the new one
+                // after an update, and Discord's launcher runs the HIGHEST
+                // version. Those leftovers are not separate installs. Offering
+                // them as a choice asks a question with no right answer, and
+                // patching the loser has no visible effect at all. Take the
+                // newest folder that is really a Discord and stop.
+                for (const appDir of findWindowsAppDirs(branchDir, options.onIgnoredError)) {
                     const install = makeInstall(definition.branch, appDir, platform, false);
-                    if (looksLikeDiscord(install)) add(install);
+                    if (looksLikeDiscord(install)) {
+                        add(install);
+                        break;
+                    }
                 }
             }
         }
@@ -229,10 +255,14 @@ export function branchFromPath(rootPath: string, platform: NodeJS.Platform): Dis
     return lower.includes(stable) ? "stable" : null;
 }
 
-function isDirectory(path: string): boolean {
+function isDirectory(path: string, onIgnoredError?: IgnoredError): boolean {
     try {
         return statSync(path).isDirectory();
-    } catch {
+    } catch (cause) {
+        const code = errnoOf(cause) ?? "UNKNOWN";
+        // ENOENT is the ordinary negative — the branch simply is not installed.
+        // Anything else is a real failure wearing the same answer.
+        if (code !== "ENOENT") onIgnoredError?.({ path, operation: "stat", code });
         return false;
     }
 }

@@ -2429,6 +2429,63 @@ describe("the force-quality popover action (⚡)", () => {
         settings.store.geminiApiKey = "AIza-test";
     }
 
+    it("sends the messages before it as context, so a short line is not read in isolation", async () => {
+        // The evidenced case: Tunisian Derja whose author had written the same
+        // sentence in English one message earlier. With no context, "ki nebdew
+        // nektbou" came back as "what's up" and the verb "write" disappeared.
+        // This used to send `context: []` on the grounds that a single
+        // out-of-band request does not need the conversation.
+        useGemini();
+        const target = discordMessage("3", "ki nebdew nektbou, na3mlou mix mta3 3arbi w francais");
+        stubMessages.set(CHANNEL, [
+            discordMessage("1", "sooo basically when we type, we write in a mix of arabic and french"),
+            discordMessage("2", "like this"),
+            target
+        ]);
+
+        forceButton(target)!.onClick();
+        await flush();
+
+        const req = requestAt(native.translateBatch.mock.calls.length - 1);
+        expect(req.messages).toHaveLength(1);
+        expect(req.context.map((c: any) => c.text)).toEqual([
+            "sooo basically when we type, we write in a mix of arabic and french",
+            "like this"
+        ]);
+    });
+
+    it("takes the messages before the TARGET, not the newest in the channel", async () => {
+        // A forced translation is most often reached by scrolling back. Handing
+        // the model whatever is arriving now would be worse than no context.
+        useGemini();
+        const target = discordMessage("2", "ki nebdew nektbou");
+        stubMessages.set(CHANNEL, [
+            discordMessage("1", "the sentence that explains it"),
+            target,
+            discordMessage("3", "something unrelated later"),
+            discordMessage("4", "and later still")
+        ]);
+
+        forceButton(target)!.onClick();
+        await flush();
+
+        const texts = requestAt(native.translateBatch.mock.calls.length - 1).context.map((c: any) => c.text);
+        expect(texts).toEqual(["the sentence that explains it"]);
+        expect(texts).not.toContain("something unrelated later");
+    });
+
+    it("sends no context rather than failing when the message is not in the store", async () => {
+        useGemini();
+        stubMessages.set(CHANNEL, []);
+        const orphan = discordMessage("99", "ki nebdew nektbou");
+
+        forceButton(orphan)!.onClick();
+        await flush();
+
+        // Imperfect context beats an error the user cannot act on.
+        expect(requestAt(native.translateBatch.mock.calls.length - 1).context).toEqual([]);
+    });
+
     it("is registered as its own popover button, separate from the 🌐 channel toggle", () => {
         expect(__getPopoverButton(FORCE_QUALITY_POPOVER_ID)).toBeDefined();
         useGemini();
@@ -2678,16 +2735,50 @@ describe("the quota indicator (chat-bar ✦)", () => {
         expect(render()).toBeNull();
     });
 
-    it("renders nothing once the session has fallen back to Google after a rejected key", async () => {
-        // Not one of the two states named in the design brief, but the same
-        // underlying question: effectiveEngine() reports "google" here too,
-        // so there is equally no quality-tier budget left to report.
+    it("says the key was rejected instead of disappearing", async () => {
+        // CHANGED: this used to assert `toBeNull()`, reasoning that
+        // effectiveEngine() reports "google" here so there is no quality budget
+        // to report. True, and exactly wrong for the reader — it removed the
+        // only on-screen sign of the LLM tier at the moment something was wrong
+        // with it. Google keeps answering, so nothing LOOKS broken; the upgrade
+        // simply never arrives. Diagnosing it took reading the beacon file.
         useGemini();
         native.translateBatch.mockResolvedValue({ ok: false, error: "401 unauthorized" });
         stubMessages.set(CHANNEL, [discordMessage("1", "hola")]);
         FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
         await settle();
-        expect(render()).toBeNull();
+        expect(text(render())).toBe("✦ key rejected");
+    });
+
+    it("goes back to reporting the quota once a different key is entered", async () => {
+        // The pin means "this credential is bad", not "this session is bad".
+        // Vencord persists a settings field on every keystroke, so a batch
+        // firing mid-paste rejects a PARTIAL key — and that must not outlive
+        // the moment the whole key lands.
+        useGemini();
+        native.translateBatch.mockResolvedValue({ ok: false, error: "401 unauthorized" });
+        stubMessages.set(CHANNEL, [discordMessage("1", "hola")]);
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        expect(text(render())).toBe("✦ key rejected");
+
+        settings.store.geminiApiKey = "a-different-and-complete-key";
+        await settle();
+        expect(text(render())).toBe("✦");
+    });
+
+    it("keeps the pin when an unrelated setting changes", async () => {
+        // Clearing on ANY settings change would re-arm the known-bad key and
+        // put the plugin back to spending a request on it every batch.
+        useGemini();
+        native.translateBatch.mockResolvedValue({ ok: false, error: "401 unauthorized" });
+        stubMessages.set(CHANNEL, [discordMessage("1", "hola")]);
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+
+        settings.store.catchUpCount = 5;
+        await settle();
+        expect(text(render())).toBe("✦ key rejected");
     });
 
     it("shows just the glyph — no number — when ready to send right now", () => {

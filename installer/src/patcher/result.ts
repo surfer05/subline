@@ -18,6 +18,13 @@ export type PatcherErrorCode =
     | "PERMISSION_DENIED"
     /** Target volume is mounted read-only (EROFS). */
     | "READ_ONLY_VOLUME"
+    /**
+     * Another process is holding the file open (EBUSY). Windows only, in
+     * practice: it refuses to rename a file that has a live handle, where macOS
+     * allows it. Distinct from PERMISSION_DENIED because the remedy is the
+     * opposite — nothing needs granting, something needs closing.
+     */
+    | "FILE_IN_USE"
     /** The install is in a half-patched / damaged state; refuse to make it worse. */
     | "BROKEN_INSTALL"
     /** Another client mod (Vencord, BetterDiscord, Equicord, …) owns this install. */
@@ -134,7 +141,18 @@ export function fsError<T>(cause: unknown, path: string, what: string): Result<T
             );
         case "EROFS":
             return err<T>("READ_ONLY_VOLUME", `Cannot ${what}: the volume is read-only.`, { path, cause });
+        case "EBUSY":
+            return err<T>(
+                "FILE_IN_USE",
+                `Cannot ${what}: another program still has Discord's files open. Close Discord completely — `
+                + "including any Discord icon in the system tray, near the clock — then try again.",
+                { path, cause }
+            );
         default:
-            return err<T>("IO_ERROR", `Failed to ${what}.`, { path, cause });
+            // The errno goes in the MESSAGE, not only into the cause the UI
+            // used to drop. An unnamed IO_ERROR is the one failure nobody can
+            // act on from a screenshot, and it is the failure most likely to
+            // reach a user, because every errno we did not anticipate lands here.
+            return err<T>("IO_ERROR", `Failed to ${what}${errno === undefined ? "" : ` (${errno})`}.`, { path, cause });
     }
 }

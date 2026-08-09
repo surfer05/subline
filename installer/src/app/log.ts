@@ -75,6 +75,16 @@ export interface DiagnosticsHeader {
     os: string;
     osVersion?: string;
     arch?: string;
+    /**
+     * Whether the unpatched `original-fs` was available (see `realFs.ts`).
+     *
+     * Recorded because a `false` here changes the meaning of every subsequent
+     * filesystem error in the log: it means Electron's asar interception is in
+     * play and the paths we touch are not the files we think they are. It was
+     * exported and never logged, so a real Windows failure could not be told
+     * apart from an ordinary one without another round trip to the user.
+     */
+    originalFs?: boolean;
 }
 
 export interface DiagnosticsLogOptions {
@@ -177,7 +187,8 @@ export class DiagnosticsLog {
             modVersion: header.modVersion ?? null,
             os: header.os,
             osVersion: header.osVersion ?? null,
-            arch: header.arch ?? null
+            arch: header.arch ?? null,
+            originalFs: header.originalFs ?? null
         };
         return formatEntry(this.clock(), "info", "subline.session", fields);
     }

@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subline — read every Discord message in your language</title>
+<meta name="description" content="Subline translates Discord messages inline, in the language you read. One click to install, and it patches your existing Discord rather than replacing it.">
+
+<meta property="og:title" content="Subline">
+<meta property="og:description" content="Read every Discord message in your language.">
+<meta property="og:type" content="website">
+
+<style>
+  :root {
+    --bg: #0d0e12;
+    --panel: #15171d;
+    --line: #262a33;
+    --fg: #e9eaee;
+    --muted: #9aa0ac;
+    --accent: #8b7bf7;
+    --ok: #57c98a;
+    --warn: #e0b341;
+    --radius: 12px;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #ffffff;
+      --panel: #f6f7f9;
+      --line: #e2e5ea;
+      --fg: #14161a;
+      --muted: #5c6370;
+      --accent: #5b46d9;
+      --ok: #1d8a52;
+      --warn: #8a6100;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 780px; margin: 0 auto; padding: 0 24px; }
+
+  header { padding: 88px 0 56px; }
+
+  .mark {
+    display: inline-flex; align-items: center; gap: 9px;
+    font-weight: 600; letter-spacing: -0.01em; margin-bottom: 40px;
+  }
+  .mark .glyph { color: var(--accent); font-size: 1.15rem; }
+
+  h1 {
+    font-size: clamp(2rem, 5.5vw, 3rem);
+    line-height: 1.12;
+    letter-spacing: -0.025em;
+    margin: 0 0 20px;
+    font-weight: 650;
+  }
+
+  .lede { font-size: 1.15rem; color: var(--muted); margin: 0 0 36px; max-width: 34em; }
+
+  h2 {
+    font-size: 1.3rem; letter-spacing: -0.015em; font-weight: 620;
+    margin: 56px 0 16px;
+  }
+  h3 { font-size: 1rem; font-weight: 620; margin: 28px 0 8px; }
+
+  p { margin: 0 0 16px; }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+  /* ---- the sample, which is the whole pitch ---- */
+  .sample {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 20px 22px;
+    margin: 0 0 40px;
+    font-size: 0.95rem;
+  }
+  .sample .row { margin-bottom: 16px; }
+  .sample .row:last-child { margin-bottom: 0; }
+  .sample .who { font-weight: 620; margin-right: 8px; }
+  .sample .orig { display: block; }
+  .sample .sub {
+    display: block; color: var(--muted); font-style: italic; margin-top: 3px;
+  }
+  .sample .tag { font-style: normal; color: var(--accent); }
+
+  /* ---- downloads ---- */
+  .downloads { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 14px; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 10px;
+    background: var(--accent); color: #fff;
+    border: 1px solid transparent; border-radius: 10px;
+    padding: 13px 20px; font-size: 0.98rem; font-weight: 560;
+    text-decoration: none; cursor: pointer;
+    transition: filter 0.15s ease;
+  }
+  .btn:hover { filter: brightness(1.09); }
+  .btn.secondary { background: transparent; color: var(--fg); border-color: var(--line); }
+  .btn small { font-weight: 400; opacity: 0.8; }
+
+  .note { font-size: 0.88rem; color: var(--muted); margin: 0 0 8px; }
+
+  /* ---- callouts ---- */
+  .callout {
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--warn);
+    background: var(--panel);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    padding: 18px 20px;
+    margin: 24px 0;
+  }
+  .callout h3 { margin-top: 0; }
+  .callout p:last-child { margin-bottom: 0; }
+
+  ol, ul { margin: 0 0 16px; padding-left: 22px; }
+  li { margin-bottom: 7px; }
+
+  code {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 5px; padding: 1px 5px;
+    font: 0.88em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  table { width: 100%; border-collapse: collapse; margin: 0 0 16px; font-size: 0.94rem; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 620; color: var(--muted); font-weight: 560; }
+
+  footer {
+    margin-top: 72px; padding: 28px 0 56px;
+    border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 0.88rem;
+  }
+  footer p { margin-bottom: 10px; }
+
+  .hr { height: 1px; background: var(--line); border: 0; margin: 56px 0 0; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<header>
+  <div class="mark"><span class="glyph">✦</span> Subline</div>
+  <h1>Read every Discord message in your language.</h1>
+  <p class="lede">
+    Subline adds a translation under messages that aren't in your language. It runs
+    inside the Discord you already have — same app, same account, same servers.
+  </p>
+
+  <div class="sample" aria-label="Example of what Subline looks like in Discord">
+    <div class="row">
+      <span class="who">emi</span><span class="orig">hablamos de la prostata y de los pokemon</span>
+      <span class="sub"><span class="tag">✦ es</span> · we talked about the prostate and about pokémon</span>
+    </div>
+    <div class="row">
+      <span class="who">anki</span><span class="orig">oi linda</span>
+      <span class="sub"><span class="tag">≈ pt</span> · hey beautiful</span>
+    </div>
+  </div>
+
+  <div class="downloads">
+    <a class="btn" id="dl-mac" href="#downloads">Download for macOS</a>
+    <a class="btn secondary" id="dl-win" href="#downloads">Download for Windows</a>
+  </div>
+  <p class="note" id="dl-note">Free. Open source. Works with your existing Discord install.</p>
+</header>
+
+<h2>How it works</h2>
+<ol>
+  <li>Download and open Subline.</li>
+  <li>It finds Discord, asks which language you read, and patches it.</li>
+  <li>Discord restarts. Translations start appearing under messages.</li>
+</ol>
+<p>
+  Subline modifies your existing Discord rather than installing a separate client, so
+  nothing about your account, servers or settings changes. It keeps a copy of the original
+  files and can put them back exactly — see <a href="#uninstall">uninstalling</a>.
+</p>
+
+<h2>Two speeds</h2>
+<p>
+  A fast translation appears almost immediately, then a better one replaces it if you've
+  set up an AI provider. The marker tells you which you're looking at:
+</p>
+<table>
+  <tr><th>≈</th><td><strong>Fast.</strong> Google Translate. Arrives in under a second, free, no setup. Good for getting the gist.</td></tr>
+  <tr><th>✦</th><td><strong>Better.</strong> An AI model that sees the surrounding conversation, so it handles slang, replies and mixed-language messages far better. Needs a free API key.</td></tr>
+</table>
+<p>
+  The fast one always arrives first, so you're never waiting. The better one quietly
+  replaces it when it lands, and never overwrites a good translation with a worse one.
+</p>
+
+<h2>What gets sent where</h2>
+<p>
+  Translating text means sending it somewhere. Being plain about that:
+</p>
+<ul>
+  <li>Messages in channels you've enabled are sent to <strong>Google Translate</strong>, and to your chosen <strong>AI provider</strong> if you've added a key.</li>
+  <li>Nothing is sent to us. Subline has no server and no account — your API key stays on your machine.</li>
+  <li><strong>Direct messages are off by default.</strong> Auto-translation covers server channels only; you have to switch on each private conversation yourself.</li>
+  <li>The diagnostics log records what failed, never what anyone said.</li>
+</ul>
+<p>
+  If a conversation is one you wouldn't want passing through a third-party API, don't
+  enable it. That decision stays yours per channel.
+</p>
+
+<h2 id="downloads">Installing</h2>
+
+<div class="callout">
+  <h3>Your computer will warn you about this app</h3>
+  <p>
+    Subline isn't code-signed yet — certificates cost several hundred dollars a year, and
+    this is a free project. The warning means "we can't confirm who wrote this", not
+    "this is known to be harmful". Here's exactly what you'll see and what to click.
+  </p>
+</div>
+
+<h3>macOS</h3>
+<ol>
+  <li>Open the downloaded <code>.dmg</code> and drag Subline to Applications.</li>
+  <li>Open it. macOS says <em>"Apple could not verify Subline is free of malware."</em> Click <strong>Done</strong>.</li>
+  <li>Go to <strong>System Settings → Privacy &amp; Security</strong>, scroll down, and click <strong>Open Anyway</strong> next to the message about Subline.</li>
+  <li>Subline will also ask for <strong>App Management</strong> permission — that's what lets it modify Discord. It can't work without it.</li>
+</ol>
+
+<h3>Windows</h3>
+<ol>
+  <li>Run the downloaded <code>.exe</code>.</li>
+  <li>Windows shows a blue <em>"Windows protected your PC"</em> screen. Click <strong>More info</strong>, then <strong>Run anyway</strong>.</li>
+  <li>Follow the installer, then let Subline walk you through the rest.</li>
+</ol>
+<p class="note">
+  If Discord is open, Subline will ask to close it first — it can't safely change files
+  that Discord is using.
+</p>
+
+<h2>Keeping it working</h2>
+<p>
+  Discord updates itself regularly, and every update wipes out modifications like this one.
+  Subline installs a small background task that notices and repairs it, so translation
+  doesn't silently stop working a few weeks after you install it.
+</p>
+
+<h2 id="uninstall">Uninstalling</h2>
+<p>
+  Open Subline and click <strong>Uninstall</strong>. It restores Discord's original files
+  byte for byte, removes the background task, and asks whether to keep your settings in
+  case you come back. Deleting the Subline app alone won't undo the patch — use the button.
+</p>
+
+<h2>Source</h2>
+<p>
+  Subline is built on <a href="https://github.com/Vendicated/Vencord" rel="noopener">Vencord</a>
+  and is licensed under the <strong>GPL-3.0</strong>. The full source, including the
+  installer, is at <a id="repo-link" href="https://github.com/surfer05/subline" rel="noopener">github.com/surfer05/subline</a>.
+</p>
+
+<hr class="hr">
+
+<footer>
+  <p>
+    Subline is an independent project. It is not affiliated with, endorsed by, or connected
+    to Discord Inc. "Discord" is a trademark of its owner.
+  </p>
+  <p>
+    Modifying the Discord client is against Discord's Terms of Service. Client mods are
+    widely used and action over them is rare, but the risk is yours to weigh, and you
+    should know it exists before installing.
+  </p>
+  <p>GPL-3.0 · <a href="https://github.com/surfer05/subline" rel="noopener">Source</a> · <a href="https://github.com/surfer05/subline/issues" rel="noopener">Report a problem</a></p>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var REPO = "surfer05/subline";
+  var RELEASES = "https://github.com/" + REPO + "/releases/latest";
+
+  var mac = document.getElementById("dl-mac");
+  var win = document.getElementById("dl-win");
+  var note = document.getElementById("dl-note");
+
+  // Default to the releases page. Every path below only ever REPLACES this with
+  // a more specific link, so a failed lookup, a blocked request or an offline
+  // visitor still lands somewhere that works rather than on a dead href.
+  mac.href = RELEASES;
+  win.href = RELEASES;
+
+  // Put the visitor's own platform first. Chromium exposes the real platform on
+  // navigator.userAgentData; everything else needs the UA string. Neither can
+  // distinguish Apple Silicon from Intel, which is why the Mac choice is asked
+  // rather than guessed.
+  var ua = navigator.userAgent || "";
+  var isWindows = /Windows/i.test(ua);
+  if (isWindows) {
+    win.classList.remove("secondary");
+    mac.classList.add("secondary");
+    win.parentNode.insertBefore(win, mac);
+  }
+
+  /**
+   * Resolve the real asset URLs from the latest release.
+   *
+   * Needed because GitHub's /releases/latest/download/<name> shortcut requires
+   * the literal asset name, and ours carry the version number — so any link
+   * hardcoded here would break on the next release and keep pointing at an
+   * older build. Failing quietly back to the releases page is deliberate: a
+   * visitor who can still click through to a download is fine; a broken button
+   * is not.
+   */
+  fetch("https://api.github.com/repos/" + REPO + "/releases/latest", {
+    headers: { Accept: "application/vnd.github+json" }
+  })
+    .then(function (res) { return res.ok ? res.json() : Promise.reject(res.status); })
+    .then(function (release) {
+      var assets = release.assets || [];
+      var find = function (test) {
+        for (var i = 0; i < assets.length; i++) if (test(assets[i].name)) return assets[i];
+        return null;
+      };
+
+      var exe = find(function (n) { return /\.exe$/i.test(n); });
+      var arm = find(function (n) { return /arm64.*\.dmg$/i.test(n); });
+      var intel = find(function (n) { return /(x64|x86_64|intel).*\.dmg$/i.test(n); });
+      var anyDmg = find(function (n) { return /\.dmg$/i.test(n); });
+
+      if (exe) win.href = exe.browser_download_url;
+
+      // Two Macs, and the browser cannot tell them apart. Rather than guess and
+      // hand half of visitors an app that will not open, offer both by name.
+      if (arm && intel) {
+        mac.href = arm.browser_download_url;
+        mac.innerHTML = "Download for Mac <small>· Apple Silicon</small>";
+
+        var second = document.createElement("a");
+        second.className = "btn secondary";
+        second.href = intel.browser_download_url;
+        second.innerHTML = "Mac <small>· Intel</small>";
+        mac.parentNode.appendChild(second);
+
+        note.textContent =
+          "Not sure which Mac you have? Apple menu → About This Mac. "
+          + "An Apple M-series chip means Apple Silicon.";
+      } else if (anyDmg) {
+        mac.href = anyDmg.browser_download_url;
+      }
+
+      if (release.tag_name) {
+        var version = document.createElement("span");
+        version.textContent = " Version " + release.tag_name + ".";
+        note.appendChild(version);
+      }
+    })
+    .catch(function () {
+      // Buttons already point at the releases page. Nothing to do.
+    });
+})();
+</script>
+
+</body>
+</html>

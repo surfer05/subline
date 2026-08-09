@@ -6,5 +6,11 @@ node_modules/
 # output, not a source.
 installer/build/
 
+# Compiled TypeScript. Produced by `pnpm build:app`; sources are in installer/src.
+installer/dist/
+
 # electron-builder output.
 installer/release/
+
+# Agent tooling scratch — never part of the product.
+.superpowers/

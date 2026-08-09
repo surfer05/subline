@@ -59,6 +59,28 @@ import type { AwaitVerifyOptions, VerificationReport } from "../verify/verify.js
  */
 const SETTLE_BEFORE_LAUNCH_MS = 2_500;
 
+/**
+ * Everything a `PatcherError` knows, as log fields.
+ *
+ * One function rather than a hand-written object at each call site, because the
+ * hand-written ones all drifted the same way: they logged `code` and dropped
+ * `path` and `cause`. `cause` is where Node's errno lives, so a real Windows
+ * install failed with `IO_ERROR` on screen AND `IO_ERROR` in the diagnostics
+ * bundle — the log knew no more than the screenshot, and the actual reason took
+ * three rounds and a PowerShell probe to find.
+ *
+ * Every failure log in this file goes through here. Adding a new one that does
+ * not is the regression to watch for.
+ */
+function errorFields(error: PatcherError): Record<string, string | null> {
+    return {
+        code: error.code,
+        message: error.message,
+        path: error.path ?? null,
+        cause: error.cause ?? null
+    };
+}
+
 /* ------------------------------------------------------------------------ *
  * States
  * ------------------------------------------------------------------------ */
@@ -114,6 +136,7 @@ export type FlowActionType =
     | "choose-install"
     | "proceed-over-mod"
     | "quit-discord"
+    | "force-quit-discord"
     | "recheck"
     | "set-language"
     | "open-permission-settings"
@@ -129,6 +152,7 @@ export type FlowAction =
     | { type: "choose-install"; rootPath: string }
     | { type: "proceed-over-mod" }
     | { type: "quit-discord" }
+    | { type: "force-quit-discord" }
     | { type: "recheck" }
     | { type: "set-language"; code: string }
     | { type: "open-permission-settings" }
@@ -218,6 +242,8 @@ export interface FlowPorts {
 
     listProcesses(): Promise<readonly RunningProcess[]>;
     requestQuit(branch: DiscordBranch): Promise<void>;
+    /** Only ever reached from the explicit force-quit-discord action. */
+    forceQuit(branch: DiscordBranch): Promise<void>;
 
     probePermission(install: DiscordInstall): AppManagementStatus;
     openPermissionSettings(): Promise<void>;
@@ -424,6 +450,7 @@ export class InstallFlow {
                 return this.checkRunning();
 
             case "quit-blocked":
+                if (action.type === "force-quit-discord") return this.quit(true);
                 return this.checkRunning();
 
             case "choose-language":
@@ -494,7 +521,7 @@ export class InstallFlow {
         // our mistake.
         const bundle = this.ports.inspectShippedBundle();
         if (!bundle.ok) {
-            this.ports.log.error("bundle.invalid", { code: bundle.error.code, message: bundle.error.message });
+            this.ports.log.error("bundle.invalid", errorFields(bundle.error));
             return this.set(state({
                 step: "mod-bundle-invalid",
                 detail: `${bundle.error.message} Re-download Subline.`,
@@ -508,7 +535,7 @@ export class InstallFlow {
             const error: PatcherError = located.ok
                 ? { code: "DISCORD_NOT_FOUND", message: "No Discord installation was found." }
                 : located.error;
-            this.ports.log.warn("discord.not-found", { code: error.code });
+            this.ports.log.warn("discord.not-found", errorFields(error));
             return this.set(state({
                 step: "discord-not-found",
                 detail: `${error.message} If Discord is installed somewhere unusual, choose it by hand.`,
@@ -660,30 +687,40 @@ export class InstallFlow {
         return this.languageStep();
     }
 
-    private async quit(): Promise<FlowState> {
+    private async quit(force = false): Promise<FlowState> {
         const install = this.chosenInstall;
         if (install === null) return this.detect();
 
-        this.set(state({ step: "discord-running", detail: "Asking Discord to quit…", busy: true, actions: [] }));
+        this.set(state({
+            step: "discord-running",
+            detail: force ? "Closing Discord…" : "Asking Discord to quit…",
+            busy: true,
+            actions: []
+        }));
         const report = await quitDiscord({
             branch: install.branch,
             platform: this.ports.platform,
             listProcesses: () => this.ports.listProcesses(),
             requestQuit: () => this.ports.requestQuit(install.branch),
+            forceQuit: () => this.ports.forceQuit(install.branch),
+            force,
             sleep: ms => this.ports.sleep(ms),
             clock: () => this.ports.now(),
             ...(this.ports.quitGracePeriodMs === undefined ? {} : { gracePeriodMs: this.ports.quitGracePeriodMs })
         });
-        this.ports.log.info("discord.quit", { outcome: report.outcome, clear: report.clear });
+        this.ports.log.info("discord.quit", { outcome: report.outcome, clear: report.clear, forced: report.forced });
 
         if (report.clear) return this.languageStep();
 
+        // The force button is offered only once. After a forced quit has also
+        // failed, showing it again would invite the user to press a button that
+        // has already been proven not to work.
         return this.set(state({
             step: "quit-blocked",
             detail: report.summary,
             install,
             quit: report,
-            actions: ["recheck", "cancel"]
+            actions: force ? ["recheck", "cancel"] : ["force-quit-discord", "recheck", "cancel"]
         }));
     }
 
@@ -712,7 +749,7 @@ export class InstallFlow {
     private async applyLanguage(code: string): Promise<FlowState> {
         const saved = this.ports.setLanguage(code);
         if (!saved.ok) {
-            this.ports.log.error("language.save-failed", { code: saved.error.code });
+            this.ports.log.error("language.save-failed", errorFields(saved.error));
             return this.languageStep(saved.error);
         }
         this.chosenLanguage = saved.value.code;
@@ -842,12 +879,25 @@ export class InstallFlow {
 
         this.set(state({ step: "patching", detail: "Adding Subline to Discord…", busy: true, actions: [] }));
 
+        // Discord is checked for at step 5, but the user then picks a language
+        // and may grant permission — minutes, in a slow case. Discord is in
+        // Startup on most machines and relaunches itself after an update, so by
+        // the time we write it can be back. On macOS that costs nothing;
+        // Windows refuses to rename a file anything holds open, and the user
+        // gets an unexplained write failure instead of the screen that tells
+        // them to close Discord. Checking here is cheap; the failure is not.
+        const stillRunning = await this.ports.listProcesses();
+        if (findDiscordProcesses(stillRunning, install.branch, this.ports.platform).length > 0) {
+            this.ports.log.warn("patch.discord-reappeared", { branch: install.branch });
+            return this.checkRunning();
+        }
+
         // The bundle goes to its runtime location FIRST, and the patch points at
         // that copy — never at a path inside our own app bundle. See
         // `modInstall.ts`: the wrong path here breaks Discord's ability to start.
         const installed = this.ports.installModBundle();
         if (!installed.ok) {
-            this.ports.log.error("bundle.install-failed", { code: installed.error.code });
+            this.ports.log.error("bundle.install-failed", errorFields(installed.error));
             return this.failPatch(installed.error);
         }
         this.installedBundle = installed.value;
@@ -862,7 +912,7 @@ export class InstallFlow {
             overwriteForeignMod: this.overwriteForeignMod
         });
         if (!patched.ok) {
-            this.ports.log.error("patch.failed", { code: patched.error.code, path: patched.error.path ?? null });
+            this.ports.log.error("patch.failed", errorFields(patched.error));
             return this.failPatch(patched.error);
         }
 
@@ -906,7 +956,7 @@ export class InstallFlow {
 
         const result = await this.ports.installHelper();
         if (!result.ok) {
-            this.ports.log.error("helper.install-failed", { code: result.error.code });
+            this.ports.log.error("helper.install-failed", errorFields(result.error));
             return this.set(state({
                 step: "helper-failed",
                 detail:
@@ -983,7 +1033,7 @@ export class InstallFlow {
         this.launchedAt = this.ports.now();
 
         if (!launched.ok) {
-            this.ports.log.warn("discord.launch-failed", { code: launched.error.code });
+            this.ports.log.warn("discord.launch-failed", errorFields(launched.error));
             return this.set(state({
                 step: "launch-failed",
                 detail:
