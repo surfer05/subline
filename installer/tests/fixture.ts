@@ -270,10 +270,6 @@ export function makeDiscordFixture(options: FixtureOptions = {}): Fixture {
     };
 }
 
-export function readBytes(path: string): Buffer {
-    return readFileSync(path);
-}
-
 /* ------------------------------------------------------------------------ *
  * A fake `launchctl`
  * ------------------------------------------------------------------------ */

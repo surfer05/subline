@@ -24,7 +24,6 @@ import { dirname, join } from "node:path";
 
 import { inspectModBundle, removeModBundle } from "../bundle/bundle.js";
 import type { ModBundle } from "../bundle/bundle.js";
-import { manifestPathFor } from "../bundle/spec.js";
 import type { Result } from "../patcher/result.js";
 import { err, fsError, ok } from "../patcher/result.js";
 

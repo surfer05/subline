@@ -89,6 +89,26 @@ const config = {
     files: ["dist/**/*", "package.json"],
 
     /**
+     * Ship one Chromium locale instead of fifty-five.
+     *
+     * Electron bundles a `.pak` per locale — 40 MB unpacked, against 480 KB for
+     * the one we use. They translate CHROMIUM's own strings (text-field context
+     * menus and the like), not ours: this window's interface is English, and the
+     * reading language the user picks decides what Discord's messages are
+     * translated INTO, nothing about this app.
+     *
+     * An explicit list rather than a post-build deletion hook, so the decision
+     * is visible where the rest of the packaging lives. If the installer's own
+     * interface is ever localised, this is the line that has to grow with it.
+     *
+     * Note what is deliberately NOT trimmed alongside it: the `.js.map` files
+     * are 280 KB in total, and readable stack traces have paid for themselves
+     * repeatedly here. Trading diagnosability for a tenth of a percent would be
+     * exactly the wrong compromise.
+     */
+    electronLanguages: ["en-US"],
+
+    /**
      * The mod bundle ships at `Contents/Resources/mod` and is COPIED OUT to
      * `~/Library/Application Support/Subline/mod` on install. It must never be
      * loaded from here — see `src/app/modInstall.ts`: App Translocation would make

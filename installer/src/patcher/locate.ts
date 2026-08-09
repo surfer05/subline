@@ -54,8 +54,6 @@ export interface DiscordInstall {
     fromExplicitPath: boolean;
 }
 
-export type SupportedPlatform = "darwin" | "win32";
-
 export interface LocateOptions {
     /** Defaults to `process.platform`. */
     platform?: NodeJS.Platform;

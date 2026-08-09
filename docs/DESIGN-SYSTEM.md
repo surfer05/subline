@@ -29,9 +29,9 @@ So: **one token file, imported by both surfaces, is the entire integration.**
 
 > Design the product surfaces for **Subline**, a Discord translation tool.
 >
-> **Read first:** `github.com/surfer05/subline` — specifically `docs/DESIGN-BRIEF.md`
-> (what the product is, who uses it, all 25 installer states, and the invariants a design
-> must not break) and `docs/DESIGN-SYSTEM.md` (the output contract below, §2–§5).
+> **Read first:** the attached repo — specifically `docs/DESIGN-BRIEF.md` (what the
+> product is, who uses it, all 25 installer states, and the invariants a design must not
+> break) and `docs/DESIGN-SYSTEM.md` (the output contract, §2–§5).
 >
 > **The core problem.** An unsigned app asks for permission to modify another app. macOS
 > says "Apple could not verify this app is free of malware", then asks for App Management.
@@ -150,32 +150,20 @@ behind a disclosure. It must stay copyable — hiding it cost days of debugging.
 
 Some steps take genuinely unknown time. No determinate bar for an indeterminate wait.
 
-## 5. File layout and sync
+## 5. Delivering the files
 
-Claude Design project structure:
+Organise the work so it maps onto the repo without renaming:
 
 ```
 tokens.css                     the contract in §2
-components/<name>/index.html   self-contained preview, first line:
-                               <!-- @dsCard group="Components" -->
-screens/<state>/index.html     one per installer state designed
-site/<section>/index.html      one per site section
+components/<name>.html         self-contained preview of one primitive
+screens/<state>.html           one per installer state designed
+site/<section>.html            one per site section
 ```
 
-Each preview is standalone: it links `tokens.css` and contains its own markup and styles.
-The `@dsCard` first-line comment is what the Design System pane indexes on.
+Each preview should be standalone — it links `tokens.css` and contains its own markup
+and styles, so it can be opened in a browser and read on its own.
 
-**Sync back into this repo** lands under `design/`, and the two surfaces consume it:
-
-```
-design/tokens.css              ← single source of truth
-design/components/…
-site/index.html                imports design/tokens.css
-installer/src/renderer/…       imports design/tokens.css
-```
-
-Neither surface may define a colour inline again. A design change is then: sync
-`design/`, rebuild, done.
-
-Sync is **incremental, one component at a time** — never a wholesale replace. The repo is
-the integration point, not the design tool.
+These land in the repo under `design/`, and both surfaces consume `design/tokens.css`.
+Neither surface may declare a colour inline again. Adopting a design change is then:
+drop in the new files, rebuild.

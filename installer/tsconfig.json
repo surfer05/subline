@@ -6,6 +6,11 @@
     "moduleResolution": "bundler",
     "types": ["node"],
     "strict": true,
+
+    // An unused import reached the shipped artefact once. It is invisible in
+    // review, tsc finds it for free, and the codebase passes cleanly today.
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": false,
     "noImplicitOverride": true,

@@ -22,7 +22,6 @@ import { APP_MANAGEMENT_SETTINGS_URL, probeAppManagement } from "../app/appManag
 import type { FlowLogger, FlowPorts, HelperInstallOutcome } from "../app/flow.js";
 import type { HelperRemoval } from "../app/uninstall.js";
 import {
-    defaultLanguage,
     discordSettingsPathFor,
     readDiscordLocale,
     setTargetLanguage,
@@ -442,15 +441,4 @@ export function logDirFor(
     if (platform === "darwin") return join(home, "Library", "Logs", "Subline");
     if (platform === "win32" && env.LOCALAPPDATA) return join(env.LOCALAPPDATA, "Subline", "logs");
     return join(home, ".subline", "logs");
-}
-
-export function defaultLanguageFor(
-    platform: NodeJS.Platform = process.platform,
-    env: NodeJS.ProcessEnv = process.env,
-    home: string = homedir()
-): string {
-    return defaultLanguage({
-        discordLocale: readDiscordLocale(discordSettingsPathFor(platform, env, home)),
-        systemLocale: systemLocale()
-    });
 }
