@@ -11,19 +11,7 @@
       content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:;">
 <title>Subline</title>
 <link rel="stylesheet" href="./design.css">
-<style>
-    /*
-     * The window chrome only. Everything with a colour in it comes from
-     * design.css — see docs/DESIGN-SYSTEM.md §5: this surface declares no
-     * colour of its own, so a design change is a rebuild rather than an edit.
-     */
-    html, body { height: 100%; }
-    body { margin: 0; background: var(--bg); }
-    .win { height: 100vh; border: 0; border-radius: 0; box-shadow: none; }
-    /* The traffic lights belong to the real title bar on macOS, and to nothing
-       on Windows. The previews draw them; a live window must not. */
-    .bar .lights { display: none; }
-</style>
+<link rel="stylesheet" href="./app.css">
 </head>
 <body>
     <div class="win" role="group" aria-label="Subline installer">

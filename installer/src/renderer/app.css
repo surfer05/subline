@@ -1,0 +1,70 @@
+/*
+ * Window rules — everything that is true of the live app and false of a preview.
+ *
+ * A SEPARATE FILE, not a <style> block, and that is not a style preference: the
+ * page sets `style-src 'self'`, which blocks inline stylesheets outright. When
+ * these rules lived in a <style> tag the browser dropped all of them without a
+ * word, `design.css`'s preview chrome stayed in force, and the app rendered as
+ * a bordered card floating on a desk with the footer cropped off. Loaded after
+ * design.css so it wins on order.
+ *
+ * `design.css` is generated from design/, where every screen and component is a
+ * standalone page: it carries page padding, a --desk background, a centred
+ * 720x620 card with a border and a shadow, and the layout chrome each component
+ * preview needs to display itself. All of that is correct there and wrong here,
+ * because here the OS window IS the card.
+ */
+
+html, body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    min-height: 0;
+    /* The window is exactly the size of its content. Anything that scrolls the
+       BODY is a bug — only the main region is allowed to. */
+    overflow: hidden;
+    background: var(--bg);
+}
+
+.win {
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+/* Only the middle region scrolls; the title bar and the footer stay put. */
+.body {
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+/*
+ * Preview-page chrome that the merged stylesheet brings along. These wrap the
+ * specimens in design/components/*, and none of them is ever emitted by the
+ * renderer — but a stray rule matching one would reintroduce the padding and
+ * fixed widths that cropped the window.
+ */
+.sheet, .deck, .spec, .stage, .kicker, .lbl.spec-lbl {
+    max-width: none;
+}
+
+/* The traffic lights belong to the real title bar on macOS, and to nothing on
+   Windows. The previews draw their own; a live window must not. */
+.bar .lights { display: none; }
+
+/*
+ * The wordmark sits centred, not left.
+ *
+ * With `titleBarStyle: "hiddenInset"` macOS draws its close/minimise/zoom
+ * buttons over the top-left of our own content — the design's preview draws
+ * fake lights there instead, so the collision only exists in the real window.
+ * Centring avoids reserving a platform-specific inset that Windows would then
+ * have to undo.
+ */
+.bar {
+    justify-content: center;
+}

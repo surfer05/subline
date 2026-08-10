@@ -131,6 +131,16 @@ function createWindow(): void {
     window = new BrowserWindow({
         width: 720,
         height: 620,
+        // The 720×620 in the design is the CONTENT, not the frame. Without this
+        // the title bar eats into it and every screen is short by its height.
+        useContentSize: true,
+        // A run-once installer has nothing to reveal at a larger size: the
+        // layout is fixed, so dragging the corner only produces dead space or a
+        // scrollbar. It was resizable by default, and that is exactly what it
+        // looked like — a card adrift in an oversized window.
+        resizable: false,
+        maximizable: false,
+        fullscreenable: false,
         show: false,
         titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
         webPreferences: {
