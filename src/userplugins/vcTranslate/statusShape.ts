@@ -113,8 +113,17 @@ export function tierForEngine(engine: EngineId): BeaconTier {
 export const BEACON_ERROR_CODES = [
     /** 429. The engine is over quota — possibly for a model the key cannot use at all. */
     "rate-limited",
-    /** 401/403. The key is wrong; the session has fallen back to Google. */
+    /** 401. The key itself was rejected; the session has fallen back to Google. */
     "auth-rejected",
+    /**
+     * 403. The request never got as far as the key — the network, region or ISP
+     * is blocked. Separate from auth-rejected because the remedy is the
+     * opposite: nothing is wrong with the key, and telling someone to fix one
+     * that works sends them to replace a perfectly good credential. Observed
+     * live: Groq answered 403 to an UNAUTHENTICATED request from the same
+     * machine, which is proof the key was never consulted.
+     */
+    "access-blocked",
     /** The IPC call itself rejected — the native half never answered. */
     "ipc-failed",
     /** Anything else an engine reported. */

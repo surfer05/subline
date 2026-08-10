@@ -56,6 +56,8 @@ let sessionFallback = false;   // set when the configured LLM engine is unusable
  * it and nothing else does.
  */
 let fallbackPinnedFor: string | null = null;
+/** Why the pin was set, so the indicator does not have to guess. */
+let fallbackKind: FallbackKind = "key";
 let announcedMissingKey = false;   // one toast per session, never per batch
 let announcedCooldown = false;     // ditto, for a rate-limited quality tier
 
@@ -744,9 +746,12 @@ function releaseFallbackIfCredentialChanged(): void {
     fallbackPinnedFor = null;
 }
 
-function fallBackToGoogle(reason: string) {
+type FallbackKind = "key" | "blocked";
+
+function fallBackToGoogle(reason: string, kind: FallbackKind = "key") {
     if (sessionFallback) return;   // only announce once
     sessionFallback = true;
+    fallbackKind = kind;
     fallbackPinnedFor = credentialFingerprint();
     Toasts.show({
         id: Toasts.genId(),
@@ -906,7 +911,10 @@ function hasQualityVerdict(key: string): boolean {
 function beaconErrorCode(res: { error: string } | null): BeaconErrorCode {
     if (res === null) return "ipc-failed";
     if (/\bHTTP 429\b/.test(res.error)) return "rate-limited";
-    if (/\bHTTP 40[13]\b/.test(res.error)) return "auth-rejected";
+    if (/\bHTTP 401\b/.test(res.error)) return "auth-rejected";
+    // 403 is NOT an auth failure. It is the network, region or ISP being
+    // refused before the key is ever looked at.
+    if (/\bHTTP 403\b/.test(res.error)) return "access-blocked";
     return "engine-error";
 }
 
@@ -1109,12 +1117,22 @@ async function runTier(
                         engine, res.retryAfterMs, res.quotaLimitPerMinute, res.quotaModel
                     );
                 }
-                // An auth failure means the key is wrong, not that the network
-                // blipped — retrying it every batch would be pure noise, so
-                // fall back to Google for the rest of the session. Worth
-                // telling the user about exactly once.
-                if (isLlmEngine(engine) && /\b40[13]\b/.test(res.error)) {
-                    fallBackToGoogle(`${LLM_ENGINES[engine].label} rejected the API key`);
+                // Retrying either of these every batch would be pure noise, so
+                // both fall back to Google for the rest of the session — but
+                // they are told apart, because the remedies are opposites.
+                //
+                // 403 means the request was refused before the key was
+                // consulted: a VPN, a region, an ISP. Reporting it as a
+                // rejected key sends the user to replace a credential that
+                // works. Observed live — Groq answered 403 to an
+                // UNAUTHENTICATED request from the same machine.
+                if (isLlmEngine(engine) && /\b403\b/.test(res.error)) {
+                    fallBackToGoogle(
+                        `cannot reach ${LLM_ENGINES[engine].label} from this network`,
+                        "blocked"
+                    );
+                } else if (isLlmEngine(engine) && /\b401\b/.test(res.error)) {
+                    fallBackToGoogle(`${LLM_ENGINES[engine].label} rejected the API key`, "key");
                 }
             }
 
@@ -2306,11 +2324,15 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
             <div
                 style={indicatorStyle}
                 title={
-                    `${LLM_ENGINES[configured].label} rejected the API key, so Subline is using Google. `
-                    + "Correct the key in settings and the better translations resume — no restart needed."
+                    fallbackKind === "blocked"
+                        ? `Subline could not reach ${LLM_ENGINES[configured].label} from this network — a VPN, `
+                          + "region or ISP is refusing the connection, and the API key is not the problem. "
+                          + "Google is being used meanwhile."
+                        : `${LLM_ENGINES[configured].label} rejected the API key, so Subline is using Google. `
+                          + "Correct the key in settings and the better translations resume — no restart needed."
                 }
             >
-                ✦ key rejected
+                {fallbackKind === "blocked" ? "✦ blocked" : "✦ key rejected"}
             </div>
         );
     }

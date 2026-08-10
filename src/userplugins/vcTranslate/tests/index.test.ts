@@ -2735,6 +2735,17 @@ describe("the quota indicator (chat-bar ✦)", () => {
         expect(render()).toBeNull();
     });
 
+    it("says blocked, not key rejected, when the network is what was refused", async () => {
+        // A 403 never reaches the key. Telling the user their key was rejected
+        // points them at the one thing that is not wrong.
+        useGemini();
+        native.translateBatch.mockResolvedValue({ ok: false, error: "HTTP 403 Access denied" });
+        stubMessages.set(CHANNEL, [discordMessage("1", "hola")]);
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        expect(text(render())).toBe("✦ blocked");
+    });
+
     it("says the key was rejected instead of disappearing", async () => {
         // CHANGED: this used to assert `toBeNull()`, reasoning that
         // effectiveEngine() reports "google" here so there is no quality budget

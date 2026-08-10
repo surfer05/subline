@@ -269,6 +269,18 @@ describe("the plugin reports what it actually did", () => {
         expect(everythingWritten()).not.toContain("quota exceeded");
     });
 
+    it("records a 403 as blocked access, not as a rejected key", async () => {
+        // The remedies are opposites. Groq answered 403 to an UNAUTHENTICATED
+        // request from the same machine — proof the key was never consulted —
+        // while the plugin reported "rejected the API key" and sent the user
+        // off to replace a credential that worked.
+        await start();
+        respondWith({ ok: false, error: "groq: HTTP 403 Access denied. Please check your network settings." });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("9", TEXT) });
+        await settle();
+        expect(lastBeacon()!.lastError).toMatchObject({ code: "access-blocked" });
+    });
+
     it("distinguishes a rejected key from a rate limit and from a dead IPC call", async () => {
         await start();
         respondWith({ ok: false, error: "google: HTTP 401" });
