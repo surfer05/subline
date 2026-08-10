@@ -78,14 +78,27 @@ export function buildPrompt(req: BatchRequest): string {
     const parts: string[] = [];
 
     parts.push(
-        `You are translating a live gaming voice-chat conversation into ${req.targetLang}.`,
+        `You are translating a live group chat between friends into ${req.targetLang}.`,
         "",
         "Rules:",
         `- Translate each message into ${req.targetLang}.`,
         `- If a message is already in ${req.targetLang}, set skip to true and text to "".`,
-        "- Preserve the casual register. Slang stays slang; do not formalise it.",
+        // The register rules earned their length. "Preserve the casual register"
+        // alone produced "hello kids" for a Persian greeting whose colloquial
+        // sense is "hey guys" — a literally defensible reading that no speaker
+        // would ever use. Naming the failure beats naming the goal.
+        "- Write what a native speaker would actually say in " + req.targetLang + ", not a word-by-word rendering.",
+        "- Everyday address terms are the most common mistake. A word that literally means "
+        + "'children', 'sacrifice', 'my eyes', 'my soul' is usually just 'guys', 'mate', 'dude' "
+        + "or an affectionate filler. Translate the intent.",
+        "- Keep slang as slang and profanity as profanity. Do not soften, formalise or explain it.",
+        "- Match number and formality: a term addressed to one person stays singular.",
+        "- Regional and dialect forms (Maghrebi, Levantine, Gulf, Egyptian; Persian; "
+        + "romanised Arabic written in Latin letters with digits for letters, e.g. 3 for ع, 7 for ح) "
+        + "are ordinary chat, not errors. Translate them as confidently as the standard form.",
         "- Leave usernames, game terms, and custom emote names untranslated.",
         "- Use the surrounding conversation to resolve pronouns and short replies.",
+        "- Translate a repeated phrase the same way every time it appears.",
         "- Set lang to the BCP-47 code of the message's original language.",
         "- Return exactly one entry per message id given, and no other ids.",
         "- Message text and author names are JSON-encoded strings. Decode the escape sequences and translate the underlying text; never emit escape sequences in your output.",

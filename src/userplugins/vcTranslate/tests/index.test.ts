@@ -2406,6 +2406,58 @@ describe("scrolling back through history does not spend the quality tier's quota
     });
 });
 
+describe("repeated phrases translate the same way twice", () => {
+    /**
+     * A Persian greeting arrived twice in one conversation and came back as
+     * "how are you guys?" once and "hello kids" the other time — both on screen
+     * together. The second answer also cost a request the first had paid for.
+     */
+    function llmSent(): string[] {
+        return native.translateBatch.mock.calls
+            .filter((call: any) => call[0] === "gemini")
+            .map((call: any) => JSON.parse(call[2]).messages.map((m: any) => m.text))
+            .flat();
+    }
+
+    beforeEach(async () => {
+        settings.store.engine = "gemini";
+        settings.store.geminiApiKey = "AIza-test";
+        await settle();
+        native.translateBatch.mockImplementation(
+            async (_e: string, _k: string, payload: string) => ({
+                ok: true,
+                results: JSON.parse(payload).messages.map((m: any) => ({
+                    id: m.id, lang: "fa", text: "translated " + m.text
+                }))
+            })
+        );
+    });
+
+    it("sends an identical repeat to the engine only once", async () => {
+        const PHRASE = "سلام بچه ها چطورید";
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", PHRASE) });
+        await settle();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", PHRASE) });
+        await settle();
+
+        // Both the consistency guarantee and the saved request: the second
+        // message reuses the first answer instead of buying a different one.
+        expect(llmSent().filter(t => t === PHRASE)).toHaveLength(1);
+    });
+
+    it("still sends a phrase it has not seen", async () => {
+        const OTHER = "خیلی ممنون از همگی";
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "سلام بچه ها چطورید") });
+        await settle();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", OTHER) });
+        await settle();
+
+        // Keyed on the exact string, so it can only ever fire on a genuine
+        // repeat — never on merely similar text.
+        expect(llmSent()).toContain(OTHER);
+    });
+});
+
 describe("the force-quality popover action (⚡)", () => {
     /** The item Vencord would get back from calling render() on this button. */
     function forceButton(message: any) {

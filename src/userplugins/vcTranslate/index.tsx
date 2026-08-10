@@ -56,6 +56,45 @@ let sessionFallback = false;   // set when the configured LLM engine is unusable
  * it and nothing else does.
  */
 let fallbackPinnedFor: string | null = null;
+
+/**
+ * Quality translations already produced this session, keyed by exact source
+ * text and target language.
+ *
+ * TWO PROBLEMS, ONE MAP. A Persian greeting arrived twice in one conversation
+ * and came back as "how are you guys?" once and "hello kids" the other time —
+ * two answers to one question, in a chat where both were on screen together.
+ * And the second answer cost a request the first had already paid for.
+ *
+ * Only LLM results go in. Google's are cheap enough that the round trip is not
+ * worth avoiding, and its habit of echoing short or romanised text back
+ * unchanged would poison the map with non-translations.
+ *
+ * Keyed on the EXACT string, so it can only ever fire on a genuine repeat.
+ * That is deliberately conservative: the same words in a different
+ * conversation could warrant a different reading, and this trades that
+ * possibility away for consistency the reader can see.
+ */
+const qualityPhrases = new Map<string, StoredTranslation>();
+
+/** Bounded: a long session in a busy server must not grow this without limit. */
+const MAX_CACHED_PHRASES = 500;
+
+function phraseKey(text: string, targetLang: string): string {
+    return `${targetLang}\u0000${text.trim()}`;
+}
+
+function rememberPhrase(text: string, targetLang: string, value: StoredTranslation): void {
+    if (!isRealTranslation(value)) return;
+    if (ENGINE_RANK[value.via] < 1) return;   // quality tier only
+    if (qualityPhrases.size >= MAX_CACHED_PHRASES) {
+        // Oldest first — Map preserves insertion order, and a chat's repeats
+        // cluster in time, so the recent end is the useful end.
+        const oldest = qualityPhrases.keys().next();
+        if (!oldest.done) qualityPhrases.delete(oldest.value);
+    }
+    qualityPhrases.set(phraseKey(text, targetLang), value);
+}
 /** Why the pin was set, so the indicator does not have to guess. */
 let fallbackKind: FallbackKind = "key";
 let announcedMissingKey = false;   // one toast per session, never per batch
@@ -1215,7 +1254,12 @@ async function runTier(
             // (approximate) instead of claiming ✦. Routed through
             // writeResult(): the two tiers write the same key from different
             // latencies, so this write has to ask whether it is an improvement.
-            writeResult(key, { lang: r.lang, text: r.text, via: engine, conf: r.conf });
+            const value: StoredTranslation = { lang: r.lang, text: r.text, via: engine, conf: r.conf };
+            writeResult(key, value);
+            // Recorded from the SENT text, so the lookup in enqueue() keys on
+            // exactly what a later identical message will present.
+            const sent = req.messages.find(m => m.id === r.id);
+            if (sent !== undefined) rememberPhrase(sent.text, req.targetLang, value);
         }
     } finally {
         // Fires once this flush has fully settled, whichever way it went
@@ -1453,9 +1497,21 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true) {
 
     let wentQuality = false;
     if (allowQuality && qualityBatcher && !inFlightQuality.has(pending.id) && needsQuality(key)) {
-        inFlightQuality.add(pending.id);
-        qualityBatcher.add(pending);
-        wentQuality = true;
+        // An identical line already translated by the quality tier this
+        // session: reuse the answer rather than buying a second, possibly
+        // different one. Still routed through writeResult, so it cannot
+        // replace anything better and the beacon counts it like any other.
+        const seen = qualityPhrases.get(phraseKey(pending.text, settings.store.targetLang));
+        if (seen !== undefined) {
+            writeResult(key, seen);
+            if (settings.store.debugLogging) {
+                logger.debug(`[enqueue] ${pending.id}: reused a cached quality phrase`);
+            }
+        } else {
+            inFlightQuality.add(pending.id);
+            qualityBatcher.add(pending);
+            wentQuality = true;
+        }
     }
     // No `else`. Two ways to reach one: qualityBatcher is null (no LLM
     // configured), in which case there is no second ring to feed at all —
@@ -2595,6 +2651,10 @@ export default definePlugin({
         // Claude instead of staying pinned to Google.
         sessionFallback = false;
         fallbackPinnedFor = null;
+        // Session-scoped by design: a new session may have a different engine,
+        // model or target language, and answers from the old one should not
+        // silently survive into it.
+        qualityPhrases.clear();
         // Only the in-memory mirror. The persisted mark deliberately SURVIVES:
         // an exhausted quota is a fact about the API key, not about this
         // plugin session, so restarting Discord (or toggling the plugin off
