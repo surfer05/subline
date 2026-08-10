@@ -1,10 +1,12 @@
 {
-  "name": "discord-translate",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "stamp": "node scripts/stampBuild.mjs",
-    "stamp:check": "node scripts/stampBuild.mjs --check"
-  }
+    "name": "discord-translate",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "stamp": "node scripts/stampBuild.mjs",
+        "stamp:check": "node scripts/stampBuild.mjs --check",
+        "build:site": "node scripts/buildSite.mjs",
+        "check:design": "node scripts/buildSite.mjs --check"
+    }
 }

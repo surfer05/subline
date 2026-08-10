@@ -1,0 +1,56 @@
+<!-- @dsCard group="Components" title="Buttons" viewport="1000x700" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subline — Buttons</title>
+<link rel="stylesheet" href="../../tokens.css">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-sans);-webkit-font-smoothing:antialiased;line-height:1.55}
+.sheet{max-width:1000px;margin:0 auto;padding:56px 34px 90px}
+.hd{padding-bottom:30px;border-bottom:1px solid var(--line-strong)}
+.kicker{font-family:var(--font-mono);font-size:10px;letter-spacing:.19em;text-transform:uppercase;color:var(--muted);margin:0}
+.hd h1{font-family:var(--font-serif);font-size:38px;line-height:1.08;letter-spacing:-.018em;font-weight:400;margin:16px 0 0}
+.deck{font-size:16.5px;line-height:1.6;color:var(--muted);max-width:46ch;margin:14px 0 0;text-wrap:pretty}
+.spec{display:grid;grid-template-columns:186px 1fr;gap:38px;padding:34px 0;border-bottom:1px solid var(--line);align-items:start}
+.spec:last-child{border-bottom:0}
+.lbl{font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg);margin:0}
+.note{font-size:12.5px;line-height:1.6;color:var(--muted);margin:10px 0 0;text-wrap:pretty}
+.stage{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:26px}
+.stage.plain{background:none;border:0;padding:0}
+@media (max-width:760px){.spec{grid-template-columns:1fr;gap:16px}.sheet{padding:40px 22px 70px}}
+
+.btn{font-family:inherit;font-size:13.5px;font-weight:500;line-height:1.4;padding:9px 18px;
+  border-radius:var(--radius-sm);border:1px solid transparent;background:none;color:var(--fg);cursor:pointer}
+.btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.btn-primary{background:var(--accent);color:var(--accent-fg)}
+.btn-primary:hover{filter:brightness(1.12)}
+.btn-secondary{background:var(--bg);border-color:var(--line-strong)}
+.btn-secondary:hover{border-color:var(--muted)}
+.btn-quiet{color:var(--muted);padding-inline:10px}
+.btn-quiet:hover{color:var(--fg)}
+.btn-danger{color:var(--danger);border-color:color-mix(in oklab,var(--danger) 34%,transparent)}
+.btn-danger:hover{background:var(--danger-weak)}
+.btn[disabled]{opacity:.45;cursor:default}
+.btn-lg{font-size:15px;padding:12px 22px;border-radius:var(--radius)}
+.panel{background:var(--bg);border:1px solid var(--line);border-radius:var(--radius)}
+.grp{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.mono{font-family:var(--font-mono);font-size:12px}
+</style>
+</head>
+<body><div class="sheet">
+<header class="hd"><p class="kicker">Primitive</p><h1>Buttons</h1><p class="deck">One primary per screen, and it is always the action that moves forward.</p></header>
+<section class="spec"><div><p class="lbl">variants</p><p class="note">Destructive actions are named for what they cost and never take the primary slot — except where the destruction is the choice being made.</p></div><div class="stage"><div class="grp">
+<button class="btn btn-primary">Continue</button><button class="btn btn-secondary">Check again</button><button class="btn btn-quiet">Cancel</button><button class="btn btn-danger">Replace Vencord and continue</button><button class="btn btn-primary" disabled>Continue</button></div></div></section>
+<section class="spec"><div><p class="lbl">large</p><p class="note">Site only. The installer never needs this size.</p></div><div class="stage"><div class="grp"><button class="btn btn-primary btn-lg">Download for Mac</button><button class="btn btn-secondary btn-lg">Windows</button></div></div></section>
+<section class="spec"><div><p class="lbl">footer</p><p class="note">The only arrangement the installer uses. Persistent quiet actions left, decision right.</p></div><div class="stage"><div class="panel" style="padding:13px 22px;display:flex;justify-content:space-between;align-items:center;gap:16px">
+<div class="grp"><button class="btn btn-quiet">Copy diagnostics</button><button class="btn btn-quiet">Uninstall</button></div>
+<div class="grp"><button class="btn btn-quiet">Cancel</button><button class="btn btn-primary">Continue</button></div></div></div></section>
+<section class="spec"><div><p class="lbl">refusal footer</p><p class="note">No primary at all. Cancel stays quiet and does not inherit the slot by default.</p></div><div class="stage"><div class="panel" style="padding:13px 22px;display:flex;justify-content:space-between;align-items:center;gap:16px">
+<div class="grp"><button class="btn btn-quiet">Copy diagnostics</button></div>
+<div class="grp"><button class="btn btn-quiet">Close</button></div></div></div></section>
+</div></body>
+</html>

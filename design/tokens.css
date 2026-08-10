@@ -1,0 +1,107 @@
+/* Subline — design tokens · "Paper"
+   Single source of truth. Both surfaces (installer renderer + site) import this
+   and define no colour of their own.
+
+   Contract: docs/DESIGN-SYSTEM.md §2. The list is additive — never rename or drop.
+   No external requests: system font stacks only (strict CSP). --font-serif resolves
+   to a face that ships with macOS and Windows, and falls back to Georgia. */
+
+:root {
+  color-scheme: light dark;
+
+  /* surfaces */
+  --bg:            #faf7f0;   /* page / window background — warm stock */
+  --panel:         #fffdf7;   /* raised block: sample, callout, list rows */
+  --line:          #e4dccb;   /* borders and rules */
+  --line-strong:   #cfc5ae;   /* emphasised rule, input borders */
+  --desk:          #eae3d4;   /* ground behind the installer window (previews) */
+
+  /* text */
+  --fg:            #1c1813;   /* primary text — warm ink */
+  --muted:         #6b6355;   /* secondary text, captions, help */
+
+  /* meaning — semantics, not decoration */
+  --accent:        #14544f;   /* primary action, brand */
+  --accent-fg:     #fbf8f1;   /* text on --accent */
+  --ok:            #1a6b41;   /* verified success — §4.1 */
+  --warn:          #8a6410;   /* recoverable problem, caution */
+  --danger:        #8a2f24;   /* destructive or hard failure */
+
+  /* tinted grounds for the above (additive) */
+  --accent-weak:   #e3ece9;
+  --ok-weak:       #e5efe6;
+  --warn-weak:     #f5ecd8;
+  --danger-weak:   #f6e6e1;
+
+  /* form */
+  --radius:        4px;
+  --radius-sm:     3px;
+  --focus:         #14544f;
+  --shadow-1:      0 1px 0 rgba(255,255,255,.7) inset, 0 12px 30px rgba(60, 50, 30, .14);
+
+  --font-sans:  -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI",
+                system-ui, "Helvetica Neue", Arial, sans-serif;
+  --font-serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua",
+                Georgia, "Times New Roman", serif;
+  --font-mono:  ui-monospace, SFMono-Regular, "SF Mono", Menlo, "Cascadia Mono",
+                "Segoe UI Mono", Consolas, monospace;
+}
+
+/* Dark: OS-driven … */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:          #17140e;
+    --panel:       #1e1a13;
+    --line:        #2e291f;
+    --line-strong: #453f32;
+    --desk:        #0f0d09;
+
+    --fg:          #ece5d6;
+    --muted:       #9a9284;
+
+    --accent:      #5fb3aa;
+    --accent-fg:   #0b1a19;
+    --ok:          #6ec08a;
+    --warn:        #d4a640;
+    --danger:      #e8796a;
+
+    --accent-weak: #16302e;
+    --ok-weak:     #17291e;
+    --warn-weak:   #2c2413;
+    --danger-weak: #301c18;
+
+    --focus:       #5fb3aa;
+    --shadow-1:    0 1px 0 rgba(255,255,255,.03) inset, 0 14px 34px rgba(0, 0, 0, .55);
+  }
+}
+
+/* … and the same values under an explicit attribute, so a future in-app
+   theme toggle needs no redesign. */
+:root[data-theme="dark"] {
+  --bg:          #17140e;
+  --panel:       #1e1a13;
+  --line:        #2e291f;
+  --line-strong: #453f32;
+  --desk:        #0f0d09;
+
+  --fg:          #ece5d6;
+  --muted:       #9a9284;
+
+  --accent:      #5fb3aa;
+  --accent-fg:   #0b1a19;
+  --ok:          #6ec08a;
+  --warn:        #d4a640;
+  --danger:      #e8796a;
+
+  --accent-weak: #16302e;
+  --ok-weak:     #17291e;
+  --warn-weak:   #2c2413;
+  --danger-weak: #301c18;
+
+  --focus:       #5fb3aa;
+  --shadow-1:    0 1px 0 rgba(255,255,255,.03) inset, 0 14px 34px rgba(0, 0, 0, .55);
+}
+
+/* --ok and --danger are never carried by hue alone. Every verdict pairs its colour
+   with a distinct shape: filled disc + tick (ok), dashed ring (unconfirmed),
+   filled square + cross (danger). See components/verdict. */

@@ -1,0 +1,71 @@
+<!-- @dsCard group="Site" title="Hero" viewport="980x820" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subline — Hero</title>
+<link rel="stylesheet" href="../../tokens.css">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-sans);-webkit-font-smoothing:antialiased;line-height:1.6}
+.wrap{max-width:880px;margin:0 auto;padding:60px 30px}
+h2.sec{font-family:var(--font-serif);font-size:32px;line-height:1.14;letter-spacing:-.015em;font-weight:400;margin:0;max-width:22ch}
+.kicker{font-family:var(--font-mono);font-size:10px;letter-spacing:.19em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+p.lead{font-size:16px;color:var(--muted);max-width:60ch;margin:16px 0 0;text-wrap:pretty}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius)}
+.btn{font-family:inherit;font-size:15px;font-weight:500;padding:12px 22px;border-radius:var(--radius);
+  border:1px solid transparent;background:none;color:var(--fg);cursor:pointer;text-decoration:none;display:inline-block}
+.btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.btn-primary{background:var(--accent);color:var(--accent-fg)}
+.btn-primary:hover{filter:brightness(1.12)}
+.btn-secondary{background:var(--panel);border-color:var(--line-strong)}
+.btn-secondary:hover{border-color:var(--muted)}
+a{color:var(--accent)}
+a:hover{color:var(--fg)}
+.mono{font-family:var(--font-mono);font-size:12.5px}
+.fine{font-size:12.5px;color:var(--muted)}
+.wm-sm{font-family:var(--font-serif);font-size:17px;font-weight:400;letter-spacing:-.01em;display:inline-block;
+  padding-bottom:3px;border-bottom:1.5px solid var(--accent);line-height:1}
+@media (max-width:640px){.wrap{padding:44px 20px}h2.sec{font-size:25px}}
+
+.hero h1{font-family:var(--font-serif);font-size:50px;line-height:1.04;letter-spacing:-.02em;font-weight:400;margin:22px 0 0;max-width:17ch}
+.cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-top:30px}
+.chat{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:16px 20px;margin-top:44px;max-width:600px}
+.m{display:grid;grid-template-columns:36px 1fr;gap:14px;padding:8px 0}
+.av{width:36px;height:36px;border-radius:50%;background:var(--line)}
+.nm{font-size:14px;font-weight:600}
+.tm{font-size:11px;font-weight:400;color:var(--muted);margin-left:7px}
+.tx{font-size:15px;line-height:1.42;margin-top:1px}
+.sl{margin-top:3px;font-size:13.5px;line-height:1.35;color:var(--muted);display:flex;gap:7px;
+  align-items:baseline;padding-left:9px;border-left:2px solid var(--line-strong)}
+.gl{font-family:var(--font-mono);font-size:11px;color:var(--accent);flex:none}
+.lc{font-family:var(--font-mono);font-size:11px;letter-spacing:.03em;flex:none;opacity:.85}
+.cap{font-size:12.5px;color:var(--muted);margin:12px 0 0;display:flex;gap:8px;align-items:baseline}
+@media (max-width:640px){.hero h1{font-size:34px}}
+</style>
+</head>
+<body><div class="wrap">
+<div class="hero">
+<span class="wm-sm">subline</span>
+<h1>Read what your friends are actually saying.</h1>
+<p class="lead">Subline puts a translation underneath any Discord message written in a language you don't read. It runs inside the Discord you already have — same app, same account, same servers. Nothing to learn, nothing to switch to.</p>
+<div class="cta">
+  <a class="btn btn-primary" href="#downloads">Download for Mac</a>
+  <a class="btn btn-secondary" href="#downloads">Windows</a>
+  <span class="fine">Free · open source · GPL-3.0</span>
+</div>
+<div class="chat" aria-label="Example of a translated conversation">
+  <div class="m"><div class="av"></div><div><div class="nm">rafa<span class="tm">20:14</span></div>
+    <div class="tx">bora marcar? tô livre depois das 8</div>
+    <div class="sl"><span class="gl">○</span><span class="lc">pt</span><span>shall we make a plan? I'm free after 8</span></div></div></div>
+  <div class="m"><div class="av"></div><div><div class="nm">yasmine<span class="tm">20:15</span></div>
+    <div class="tx">لما نبدأ نكتب، بنعمل خليط من العربي والفرنسي</div>
+    <div class="sl"><span class="gl">●</span><span class="lc">ar</span><span>when we start writing, we end up mixing Arabic and French</span></div></div></div>
+</div>
+<p class="cap"><span class="gl" style="font-family:var(--font-mono);color:var(--accent)">○</span> Quick, within a second. <span class="gl" style="font-family:var(--font-mono);color:var(--accent);margin-left:10px">●</span> Careful, a few seconds later, if you add a free key.</p>
+<p class="fine" style="margin-top:26px">Subline is an independent project. It is not made by, endorsed by, or affiliated with Discord.</p>
+</div></div></body>
+</html>

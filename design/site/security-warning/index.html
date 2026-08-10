@@ -1,0 +1,76 @@
+<!-- @dsCard group="Site" title="Security warning walkthrough" viewport="980x900" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subline — Security warning walkthrough</title>
+<link rel="stylesheet" href="../../tokens.css">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-sans);-webkit-font-smoothing:antialiased;line-height:1.6}
+.wrap{max-width:880px;margin:0 auto;padding:60px 30px}
+h2.sec{font-family:var(--font-serif);font-size:32px;line-height:1.14;letter-spacing:-.015em;font-weight:400;margin:0;max-width:22ch}
+.kicker{font-family:var(--font-mono);font-size:10px;letter-spacing:.19em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+p.lead{font-size:16px;color:var(--muted);max-width:60ch;margin:16px 0 0;text-wrap:pretty}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius)}
+.btn{font-family:inherit;font-size:15px;font-weight:500;padding:12px 22px;border-radius:var(--radius);
+  border:1px solid transparent;background:none;color:var(--fg);cursor:pointer;text-decoration:none;display:inline-block}
+.btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.btn-primary{background:var(--accent);color:var(--accent-fg)}
+.btn-primary:hover{filter:brightness(1.12)}
+.btn-secondary{background:var(--panel);border-color:var(--line-strong)}
+.btn-secondary:hover{border-color:var(--muted)}
+a{color:var(--accent)}
+a:hover{color:var(--fg)}
+.mono{font-family:var(--font-mono);font-size:12.5px}
+.fine{font-size:12.5px;color:var(--muted)}
+.wm-sm{font-family:var(--font-serif);font-size:17px;font-weight:400;letter-spacing:-.01em;display:inline-block;
+  padding-bottom:3px;border-bottom:1.5px solid var(--accent);line-height:1}
+@media (max-width:640px){.wrap{padding:44px 20px}h2.sec{font-size:25px}}
+
+.tabs{display:flex;gap:6px;margin:26px 0 20px}
+.tab{font-family:inherit;font-size:13px;padding:7px 14px;border-radius:999px;border:1px solid var(--line);
+  background:var(--panel);color:var(--muted);cursor:pointer}
+.tab[aria-selected="true"]{background:var(--accent-weak);border-color:color-mix(in oklab,var(--accent) 40%,var(--line));color:var(--fg)}
+ol.steps{list-style:none;counter-reset:s;margin:0;padding:0}
+ol.steps > li{counter-increment:s;display:grid;grid-template-columns:30px 1fr;gap:16px;padding:18px 0;
+  border-top:1px solid var(--line)}
+ol.steps > li:first-child{border-top:0}
+ol.steps > li::before{content:counter(s,decimal-leading-zero);font-family:var(--font-mono);font-size:10px;letter-spacing:.1em;
+  color:var(--muted);padding-top:4px}
+ol.steps h3{margin:0;font-family:var(--font-serif);font-size:17px;font-weight:400}
+ol.steps p{margin:6px 0 0;font-size:14px;color:var(--muted);max-width:60ch;text-wrap:pretty}
+blockquote.os{margin:10px 0 0;padding:12px 14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--radius-sm);font-size:13.5px;max-width:60ch}
+blockquote.os .src{display:block;font-family:var(--font-mono);font-size:10.5px;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+.why{border-left:3px solid var(--accent);background:var(--accent-weak);padding:16px 18px;
+  border-radius:var(--radius-sm);margin-top:30px;max-width:64ch}
+.why h3{margin:0 0 6px;font-family:var(--font-serif);font-size:17px;font-weight:400}
+.why p{margin:0;font-size:13.5px;color:var(--muted)}
+</style>
+</head>
+<body><div class="wrap">
+<p class="kicker">Installing</p>
+<h2 class="sec">Your computer will warn you. Here is exactly what it says, and why.</h2>
+<p class="lead">Subline is not code-signed. Signing means paying Apple or Microsoft a few hundred dollars a year for a certificate, and this project doesn't take money yet. The warnings below are what an unsigned app looks like. They are not a judgement about this app in particular — your computer has not examined it and is telling you so.</p>
+<div class="tabs" role="tablist"><button class="tab" role="tab" aria-selected="true">macOS</button><button class="tab" role="tab" aria-selected="false">Windows</button></div>
+<ol class="steps">
+  <li><div><h3>Open the downloaded file, then drag Subline to Applications.</h3>
+    <p>Ordinary so far.</p></div></li>
+  <li><div><h3>Double-click Subline. macOS refuses and shows this.</h3>
+    <blockquote class="os"><span class="src">macOS says</span>"Subline" Not Opened — Apple could not verify "Subline" is free of malware that may harm your Mac or compromise your privacy.</blockquote>
+    <p>Read it precisely: <em>could not verify</em>, not <em>found malware</em>. macOS is saying it has no certificate to check against, because none was bought.</p></div></li>
+  <li><div><h3>Open System Settings › Privacy &amp; Security and scroll down.</h3>
+    <blockquote class="os"><span class="src">macOS says</span>"Subline" was blocked to protect your Mac. &nbsp;<b>Open Anyway</b></blockquote>
+    <p>Click <b>Open Anyway</b>, then confirm with your password or Touch ID. You only do this once, for this app.</p></div></li>
+  <li><div><h3>Subline asks for App Management permission.</h3>
+    <p>This is the real ask, and it is the one worth thinking about. It is the right to modify another installed app — Subline needs it to add its translation file inside Discord. You can withdraw it at any time in the same Settings pane, and Subline will simply stop updating itself.</p></div></li>
+  <li><div><h3>That's the last of it.</h3>
+    <p>Discord closes, reopens, and translations start appearing. Nothing further is ever asked.</p></div></li>
+</ol>
+<div class="why"><h3>If you'd rather not take our word for it</h3>
+<p>The source is public and the whole change to Discord is one file. You can read it, build Subline yourself, and skip every warning above — a signed app you didn't read is not safer than an unsigned one you did.</p></div></div></body>
+</html>

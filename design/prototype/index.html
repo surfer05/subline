@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subline — installer prototype</title>
+<link rel="stylesheet" href="../tokens.css">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0}
+body{min-height:100vh;padding:24px;background:var(--desk);font-family:var(--font-sans);color:var(--fg);
+  -webkit-font-smoothing:antialiased;line-height:1.5}
+
+/* scenario strip — outside the window, not part of the product */
+.strip{width:720px;margin:0 auto 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.strip p{margin:0;font-family:var(--font-mono);font-size:9.5px;letter-spacing:.19em;text-transform:uppercase;
+  color:var(--muted)}
+.strip .seg{display:flex;border:1px solid var(--line-strong);border-radius:var(--radius-sm);overflow:hidden}
+.strip .seg button{font-family:var(--font-mono);font-size:10px;letter-spacing:.06em;padding:6px 11px;border:0;
+  white-space:nowrap;background:var(--bg);color:var(--muted);cursor:pointer}
+.strip .seg button + button{border-left:1px solid var(--line)}
+.strip .seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-fg)}
+
+.win{width:720px;height:620px;margin:0 auto;background:var(--bg);border:1px solid var(--line-strong);
+  border-radius:5px;box-shadow:var(--shadow-1);overflow:hidden;display:grid;grid-template-rows:46px minmax(0,1fr) auto}
+.bar{display:flex;align-items:center;justify-content:space-between;padding:0 20px;border-bottom:1px solid var(--line)}
+.lights{display:flex;gap:8px}
+.lights i{width:11px;height:11px;border-radius:50%;background:var(--line-strong);display:block}
+.mark{font-size:12px;letter-spacing:.09em;color:var(--muted);padding-bottom:2px;border-bottom:1px solid currentColor;line-height:1}
+
+.screen{display:none;grid-row:2 / span 2;grid-template-rows:minmax(0,1fr) auto;min-height:0}
+.screen[data-on]{display:grid}
+.body{padding:28px 42px 10px;overflow:auto}
+.eyebrow{font-family:var(--font-mono);font-size:10px;letter-spacing:.19em;text-transform:uppercase;color:var(--muted);margin:0}
+h1{font-family:var(--font-serif);font-size:30px;line-height:1.16;letter-spacing:-.012em;font-weight:400;margin:14px 0 0;max-width:21ch}
+.lede{font-size:14.5px;line-height:1.62;color:var(--muted);margin:13px 0 0;max-width:54ch;text-wrap:pretty}
+.body > *:not(.eyebrow):not(h1):not(.lede){margin-top:24px}
+.foot{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:15px 24px 15px 42px;border-top:1px solid var(--line)}
+.foot div{display:flex;align-items:center;gap:8px}
+
+.btn{font-family:inherit;font-size:13.5px;font-weight:500;line-height:1.4;padding:9px 18px;border-radius:var(--radius-sm);
+  border:1px solid transparent;background:none;color:var(--fg);cursor:pointer}
+.btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.btn-primary{background:var(--accent);color:var(--accent-fg)}
+.btn-primary:hover{filter:brightness(1.12)}
+.btn-secondary{background:var(--panel);border-color:var(--line-strong)}
+.btn-secondary:hover{border-color:var(--muted)}
+.btn-quiet{color:var(--muted);padding-inline:10px}
+.btn-quiet:hover{color:var(--fg)}
+.btn-danger{color:var(--danger);border-color:color-mix(in oklab,var(--danger) 34%,transparent)}
+.btn-danger:hover{background:var(--danger-weak)}
+.btn[disabled]{opacity:.45;cursor:default}
+
+.rows{list-style:none;margin:0;padding:0;border-top:1px solid var(--line-strong);border-bottom:1px solid var(--line-strong)}
+.rows > li{display:grid;grid-template-columns:34px 1fr;gap:8px;padding:15px 2px;border-top:1px solid var(--line);font-size:13.5px;line-height:1.55}
+.rows > li:first-child{border-top:0}
+.rows .n{font-family:var(--font-mono);font-size:10px;letter-spacing:.1em;color:var(--muted);padding-top:4px}
+.rows b{font-weight:600;display:block;letter-spacing:-.005em}
+.rows p{margin:3px 0 0;color:var(--muted);text-wrap:pretty}
+.note{font-size:12.5px;color:var(--muted);line-height:1.55;margin:16px 0 0;max-width:56ch}
+
+.verdict{display:grid;grid-template-columns:32px 1fr;gap:16px;padding:18px 20px;border-radius:var(--radius);border:1px solid var(--line);background:var(--panel)}
+.verdict h2{margin:0;font-family:var(--font-serif);font-size:18px;font-weight:400;letter-spacing:-.005em}
+.verdict p{margin:7px 0 0;font-size:13.5px;line-height:1.6;color:var(--muted);text-wrap:pretty}
+.vm{width:32px;height:32px;display:grid;place-items:center;font-size:15px;line-height:1}
+.vm-ok{border-radius:50%;background:var(--ok);color:var(--bg)}
+.vm-ring{border-radius:50%;border:2px dashed var(--warn);color:var(--warn);font-size:11px}
+.vm-stop{border-radius:3px;background:var(--danger);color:var(--bg)}
+.v-ok{background:var(--ok-weak);border-color:color-mix(in oklab,var(--ok) 26%,var(--line))}
+.v-warn{background:var(--warn-weak);border-color:color-mix(in oklab,var(--warn) 26%,var(--line))}
+.v-stop{background:var(--danger-weak);border-color:color-mix(in oklab,var(--danger) 26%,var(--line))}
+
+.err{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);overflow:hidden}
+.err > summary{list-style:none;cursor:pointer;padding:11px 15px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12.5px;color:var(--muted)}
+.err > summary::-webkit-details-marker{display:none}
+.err > summary code{font-family:var(--font-mono);font-size:11.5px;color:var(--fg)}
+.err[open] > summary{border-bottom:1px solid var(--line)}
+.err dl{margin:0;padding:13px 15px;display:grid;grid-template-columns:64px 1fr;gap:6px 12px;font-size:11.5px;font-family:var(--font-mono)}
+.err dt{color:var(--muted)}
+.err dd{margin:0;word-break:break-all;user-select:all}
+.err .errfoot{padding:0 15px 13px}
+
+.trail{display:flex;align-items:center;gap:10px;font-size:11.5px;color:var(--muted);font-family:var(--font-mono);letter-spacing:.04em}
+.trail i{width:6px;height:6px;border-radius:50%;background:var(--line-strong);display:block}
+.trail i.on{background:var(--accent)}
+.trail i.now{background:var(--accent);box-shadow:0 0 0 4px var(--accent-weak)}
+.bar-i{height:2px;background:var(--line);overflow:hidden;margin-top:15px}
+.bar-i span{display:block;height:100%;width:34%;background:var(--accent);animation:slide 1.5s ease-in-out infinite}
+@keyframes slide{0%{transform:translateX(-105%)}100%{transform:translateX(320%)}}
+.spin{width:14px;height:14px;border-radius:50%;border:2px solid var(--line-strong);border-top-color:var(--accent);
+  animation:spin .8s linear infinite;display:inline-block;vertical-align:-3px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.work{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
+
+.sample{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:15px 17px}
+.sample .who{font-weight:600;font-size:12.5px;margin-bottom:2px}
+.sample .msg{font-size:14.5px;line-height:1.45}
+.sub{margin-top:4px;font-size:13px;line-height:1.4;color:var(--muted);display:flex;gap:7px;align-items:baseline;
+  padding-left:9px;border-left:2px solid var(--line-strong)}
+.sub .g{font-family:var(--font-mono);font-size:11px;color:var(--accent)}
+.sub .lc{font-family:var(--font-mono);font-size:11px;letter-spacing:.03em}
+
+/* the macOS dialog, drawn as the system would — it is not ours */
+.os{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(28,24,19,.28)}
+.os[data-on]{display:flex}
+.osbox{width:290px;background:#f2f1ee;border-radius:12px;padding:20px 18px 14px;text-align:center;
+  box-shadow:0 20px 50px rgba(0,0,0,.34);color:#111;font-size:12.5px}
+.osbox .ic{width:46px;height:46px;border-radius:10px;background:#d8d5cf;margin:0 auto 12px}
+.osbox b{display:block;font-size:13px;margin-bottom:6px}
+.osbox p{margin:0 0 14px;color:#3a3a3a;line-height:1.4}
+.osbox .acts{display:grid;gap:6px}
+.osbox button{font-family:inherit;font-size:12.5px;padding:6px 12px;border-radius:6px;border:1px solid #c8c5bf;
+  background:#fff;cursor:pointer;color:#111}
+.osbox button.pri{background:#3d6fd8;border-color:#3d6fd8;color:#fff}
+.stagewrap{position:relative}
+</style>
+</head>
+<body>
+<template id="__bundler_thumbnail">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="#faf7f0"/><text x="100" y="112" text-anchor="middle" font-family="Georgia,serif" font-size="44" fill="#1c1813">sub</text><rect x="58" y="124" width="84" height="3" fill="#14544f"/></svg>
+</template>
+
+<div class="strip">
+  <p>Enter as</p>
+  <div class="seg" role="group" aria-label="Scenario">
+    <button data-flow="clean" aria-pressed="true">Clean install</button>
+    <button data-flow="fail" aria-pressed="false">Patch fails</button>
+    <button data-flow="bd" aria-pressed="false">BetterDiscord present</button>
+    <button data-flow="have" aria-pressed="false">Already installed</button>
+  </div>
+</div>
+
+<div class="stagewrap" style="width:720px;margin:0 auto">
+<div class="win">
+  <header class="bar"><span class="lights"><i></i><i></i><i></i></span><span class="mark">subline</span></header>
+
+  <!-- welcome -->
+  <section class="screen" id="welcome" data-on>
+    <div class="body">
+      <p class="eyebrow">Step one of four</p>
+      <h1>Read what your friends are actually saying.</h1>
+      <p class="lede">Subline puts a translation underneath any message written in a language you don't read — inside the Discord you already use. Same app, same account, same servers.</p>
+      <ul class="rows">
+        <li><span class="n">01</span><div><b>Two things ahead will look alarming.</b><p>They are the ordinary cost of an app that hasn't paid Apple's yearly signing fee. Each one is shown to you before it happens.</p></div></li>
+        <li><span class="n">02</span><div><b>Subline changes Discord, and nothing else.</b><p>One file, inside Discord's own folder. Not your other apps, your files, or your account.</p></div></li>
+        <li><span class="n">03</span><div><b>All of it comes back off.</b><p>Uninstalling restores Discord to the exact bytes it shipped with.</p></div></li>
+      </ul>
+    </div>
+    <div class="foot"><div><button class="btn btn-quiet">Copy diagnostics</button></div>
+      <div><button class="btn btn-quiet" data-go="cancelled">Cancel</button><button class="btn btn-primary" data-go="tiers">Continue</button></div></div>
+  </section>
+
+  <!-- tiers -->
+  <section class="screen" id="tiers">
+    <div class="body">
+      <p class="eyebrow">Step two of four</p>
+      <h1>Two speeds of translation</h1>
+      <p class="lede">Quick arrives almost immediately. Careful replaces it a few seconds later, if you set up a key. You can do that now, or any time later.</p>
+      <ul class="rows">
+        <li><span class="n">○</span><div><b>Quick · free, no account</b><p>Google Translate. Good enough to follow a conversation. This is on from the moment you finish.</p></div></li>
+        <li><span class="n">●</span><div><b>Careful · free key, two minutes to set up</b><p>An AI model that reads the rest of the conversation, so slang, mixed languages and jokes survive. It quietly replaces the quick line when it's ready.</p></div></li>
+      </ul>
+      <div class="sample">
+        <div class="who">rafa</div>
+        <div class="msg">bora marcar? tô livre depois das 8</div>
+        <div class="sub"><span class="g">●</span><span class="lc">pt</span><span>shall we make a plan? I'm free after 8</span></div>
+      </div>
+    </div>
+    <div class="foot"><div><button class="btn btn-quiet" data-go="welcome">Back</button></div>
+      <div><button class="btn btn-secondary" data-go="permission-explain">Skip for now</button><button class="btn btn-primary" data-go="permission-explain">Set up Careful</button></div></div>
+  </section>
+
+  <!-- permission-explain -->
+  <section class="screen" id="permission-explain">
+    <div class="body">
+      <p class="eyebrow">Step four of four</p>
+      <h1>macOS needs your permission</h1>
+      <p class="lede">Discord is an app, and changing an app needs your say-so. macOS calls that App Management. The next screen is the system's, not ours.</p>
+      <ul class="rows">
+        <li><span class="n">→</span><div><b>What we do with it</b><p>Add one translation file inside Discord. That's the whole of it.</p></div></li>
+        <li><span class="n">←</span><div><b>How you take it back</b><p>System Settings › Privacy &amp; Security › App Management. Turn Subline off, any time.</p></div></li>
+      </ul>
+      <p class="note">macOS will show its own dialog when you continue. Choosing <b>Open System Settings</b> there is the one that works.</p>
+    </div>
+    <div class="foot"><div><button class="btn btn-quiet" data-go="tiers">Back</button></div>
+      <div><button class="btn btn-quiet" data-go="cancelled">Not now</button><button class="btn btn-primary" id="ask">Continue</button></div></div>
+  </section>
+
+  <!-- patching -->
+  <section class="screen" id="patching">
+    <div class="body">
+      <p class="eyebrow">Working</p>
+      <h1>Adding Subline to Discord</h1>
+      <p class="lede">Discord is closed while this happens. It'll start again on its own.</p>
+      <div class="work">
+        <div class="trail"><i class="on"></i><i class="on"></i><i class="now"></i><i></i><i></i><span style="margin-left:6px">step 3 of 5 · writing files</span></div>
+        <div class="bar-i"><span></span></div>
+      </div>
+      <p class="note">This usually takes a few seconds. No time estimate is shown because we genuinely don't have one.</p>
+    </div>
+    <div class="foot"><div></div><div><button class="btn btn-quiet" disabled>Cancel</button></div></div>
+  </section>
+
+  <!-- verifying -->
+  <section class="screen" id="verifying">
+    <div class="body">
+      <p class="eyebrow">Working</p>
+      <h1>Checking it actually works</h1>
+      <p class="lede">Discord is open. We're waiting for a real message in another language to arrive, so we can confirm a translation renders rather than assume it.</p>
+      <div class="work"><div class="trail"><span class="spin"></span><span>Listening for a foreign-language message</span></div><div class="bar-i"><span></span></div></div>
+      <p class="note">This can take seconds or minutes depending on your servers. You can stop waiting — everything is already installed.</p>
+    </div>
+    <div class="foot"><div></div><div><button class="btn btn-secondary" data-go="done-unconfirmed">Stop waiting</button></div></div>
+  </section>
+
+  <!-- done — confirmed -->
+  <section class="screen" id="done-confirmed">
+    <div class="body">
+      <p class="eyebrow">Finished</p>
+      <h1>It's working</h1>
+      <div class="verdict v-ok"><span class="vm vm-ok" aria-hidden="true">✓</span>
+        <div><h2>Confirmed working</h2><p>We watched a translation render in Discord just now. Not an assumption — an observation.</p></div></div>
+      <div class="sample">
+        <div class="who">rafa · #general</div>
+        <div class="msg">bora marcar? tô livre depois das 8</div>
+        <div class="sub"><span class="g">○</span><span class="lc">pt</span><span>shall we make a plan? I'm free after 8</span></div>
+      </div>
+      <p class="note">Careful translation isn't set up yet — quick translations only. You can add a key from the Subline menu in Discord whenever you like.</p>
+    </div>
+    <div class="foot"><div><button class="btn btn-quiet" data-go="uninstall-confirm">Uninstall</button></div>
+      <div><button class="btn btn-primary" data-go="closed">Done</button></div></div>
+  </section>
+
+  <!-- done — unconfirmed -->
+  <section class="screen" id="done-unconfirmed">
+    <div class="body">
+      <p class="eyebrow">Finished</p>
+      <h1>Installed</h1>
+      <div class="verdict v-warn"><span class="vm vm-ring" aria-hidden="true">?</span>
+        <div><h2>Installed, not yet confirmed</h2><p>Every file was written correctly and Discord restarted. We haven't seen a translation happen yet, because no message in another language has arrived while we watched.</p></div></div>
+      <ul class="rows">
+        <li><span class="n">01</span><div><b>Open a server where people write in another language.</b><p>The translation appears under the message, on its own line.</p></div></li>
+        <li><span class="n">02</span><div><b>If nothing appears after a few messages, come back and press Check again.</b><p>Nothing needs reinstalling first.</p></div></li>
+      </ul>
+    </div>
+    <div class="foot"><div><button class="btn btn-quiet">Copy diagnostics</button></div>
+      <div><button class="btn btn-secondary" data-go="verifying">Check again</button><button class="btn btn-primary" data-go="closed">Done</button></div></div>
+  </section>
+
+  <!-- patch-failed -->
+  <section class="screen" id="patch-failed">
+    <div class="body">
+      <p class="eyebrow">Stopped</p>
+      <h1>Could not install</h1>
+      <p class="lede">Something went wrong while writing to Discord, and we stopped. Discord has been left exactly as it was — half-finished installs get rolled back.</p>
+      <details class="err" open><summary><span>What went wrong · <code>E_ASAR_WRITE_DENIED</code></span><span>▾</span></summary>
+        <dl><dt>code</dt><dd>E_ASAR_WRITE_DENIED</dd><dt>path</dt><dd>/Applications/Discord.app/Contents/Resources/app.asar</dd><dt>cause</dt><dd>EACCES: permission denied, open 'app.asar'</dd><dt>version</dt><dd>Subline 1.4.2 · Discord 0.0.309 · macOS 15.5</dd></dl>
+        <div class="errfoot"><button class="btn btn-secondary" data-copy>Copy all four lines</button></div></details>
+      <p class="note">Most often this means Discord reopened mid-install, or the app was moved while we were writing. Trying again is safe.</p>
+    </div>
+    <div class="foot"><div><button class="btn btn-quiet">Copy diagnostics</button></div>
+      <div><button class="btn btn-quiet" data-go="cancelled">Cancel</button><button class="btn btn-primary" id="retry">Try again</button></div></div>
+  </section>
+
+  <!-- betterdiscord-blocked -->
+  <section class="screen" id="betterdiscord-blocked">
+    <div class="body">
+      <p class="eyebrow">Can't continue</p>
+      <h1>BetterDiscord is installed</h1>
+      <div class="verdict v-stop"><span class="vm vm-stop" aria-hidden="true">✕</span>
+        <div><h2>Subline can't be installed alongside it</h2><p>Both work by rewriting the same part of Discord. Installing Subline now would break BetterDiscord, or be silently undone by it, or leave Discord in a state neither can fix. There is no version of this that ends well, so we stop here.</p></div></div>
+      <ul class="rows">
+        <li><span class="n">01</span><div><b>Remove BetterDiscord using its own uninstaller.</b><p>Not by deleting files by hand — that leaves the same conflict behind.</p></div></li>
+        <li><span class="n">02</span><div><b>Open Subline again.</b><p>It'll pick up from here. Nothing has been changed on this machine.</p></div></li>
+      </ul>
+    </div>
+    <div class="foot"><div><button class="btn btn-quiet">Copy diagnostics</button></div>
+      <div><button class="btn btn-quiet" data-go="cancelled">Close</button></div></div>
+  </section>
+
+  <!-- already-installed -->
+  <section class="screen" id="already-installed">
+    <div class="body">
+      <p class="eyebrow">Status</p>
+      <h1>Subline is set up</h1>
+      <p class="lede">Nothing to do here. This window is just the status page — close it and carry on.</p>
+      <div class="verdict v-ok"><span class="vm vm-ok" aria-hidden="true">✓</span>
+        <div><h2>Active in Discord</h2><p>Last confirmed translating 2 hours ago.</p></div></div>
+      <ul class="rows">
+        <li><span class="n">·</span><div><b>Reading language</b><p>English</p></div></li>
+        <li><span class="n">·</span><div><b>Translation</b><p>Quick only — Careful is not set up</p></div></li>
+        <li><span class="n">·</span><div><b>Self-repair after Discord updates</b><p>On</p></div></li>
+      </ul>
+    </div>
+    <div class="foot"><div><button class="btn btn-quiet">Copy diagnostics</button><button class="btn btn-danger" data-go="uninstall-confirm">Uninstall</button></div>
+      <div><button class="btn btn-primary" data-go="closed">Done</button></div></div>
+  </section>
+
+  <!-- uninstall — confirm -->
+  <section class="screen" id="uninstall-confirm">
+    <div class="body">
+      <p class="eyebrow">Needs a decision</p>
+      <h1>Remove Subline from Discord?</h1>
+      <p class="lede">Discord closes for a moment, its original file is put back, and it starts again. Translations stop appearing.</p>
+      <ul class="rows">
+        <li><span class="n">·</span><div><b>Your Discord account, servers and settings are untouched.</b><p>Only the file Subline added is removed.</p></div></li>
+        <li><span class="n">·</span><div><b>Your reading language and API key are forgotten.</b><p>Reinstalling later starts from the beginning.</p></div></li>
+      </ul>
+    </div>
+    <div class="foot"><div></div>
+      <div><button class="btn btn-quiet" data-go="already-installed">Keep Subline</button><button class="btn btn-danger" data-go="uninstalled">Remove Subline</button></div></div>
+  </section>
+
+  <!-- uninstalled -->
+  <section class="screen" id="uninstalled">
+    <div class="body">
+      <p class="eyebrow">Finished</p>
+      <h1>Subline is removed</h1>
+      <div class="verdict v-ok"><span class="vm vm-ok" aria-hidden="true">✓</span>
+        <div><h2>Discord is back to original</h2><p>The file Subline added has been removed and Discord's own file restored. We checked the bytes match what it shipped with.</p></div></div>
+      <p class="note">You can delete the Subline app itself from Applications, and turn its App Management permission back off in System Settings. Neither is required — with nothing installed, it does nothing.</p>
+    </div>
+    <div class="foot"><div><button class="btn btn-quiet">Copy diagnostics</button></div>
+      <div><button class="btn btn-secondary" data-go="welcome">Install again</button><button class="btn btn-primary" data-go="closed">Close</button></div></div>
+  </section>
+
+  <!-- closed — prototype end state, not a product screen -->
+  <section class="screen" id="closed">
+    <div class="body">
+      <p class="eyebrow">End of flow</p>
+      <h1>The window closes here.</h1>
+      <p class="lede">Nothing follows this in the product — Subline quits and Discord carries on. This screen exists only so the prototype has somewhere to land.</p>
+    </div>
+    <div class="foot"><div></div><div><button class="btn btn-secondary" data-go="welcome">Start again</button></div></div>
+  </section>
+
+  <!-- cancelled -->
+  <section class="screen" id="cancelled">
+    <div class="body">
+      <p class="eyebrow">Stopped</p>
+      <h1>Cancelled</h1>
+      <div class="verdict"><span class="vm" style="border-radius:3px;border:1px solid var(--line-strong);color:var(--muted)" aria-hidden="true">·</span>
+        <div><h2>Nothing was changed</h2><p>Discord is exactly as it was. No files written, no permissions kept, nothing left running in the background.</p></div></div>
+      <p class="note">Open Subline again whenever you want to pick this up. It starts from the beginning; there's no half-finished state to clean up.</p>
+    </div>
+    <div class="foot"><div></div><div><button class="btn btn-secondary" data-go="welcome">Start again</button><button class="btn btn-primary" data-go="welcome">Close</button></div></div>
+  </section>
+</div>
+
+<!-- the system's dialog, not ours -->
+<div class="os" id="os">
+  <div class="osbox" role="dialog" aria-label="System permission request">
+    <div class="ic"></div>
+    <b>"Subline" would like to manage apps on this Mac.</b>
+    <p>This app will be able to modify other applications, including updating and deleting them.</p>
+    <div class="acts"><button class="pri" id="allow">Open System Settings</button><button id="deny">Don't Allow</button></div>
+  </div>
+</div>
+</div>
+
+<script>
+(function(){
+  var timers=[], flow='clean';
+  function clear(){ timers.forEach(clearTimeout); timers=[]; }
+  function go(id){
+    clear();
+    document.querySelectorAll('.screen').forEach(function(s){
+      if(s.id===id) s.setAttribute('data-on',''); else s.removeAttribute('data-on');
+    });
+    var b=document.querySelector('#'+id+' .body'); if(b) b.scrollTop=0;
+    if(id==='patching') timers.push(setTimeout(function(){ go(flow==='fail'?'patch-failed':'verifying'); }, 2400));
+    if(id==='verifying') timers.push(setTimeout(function(){ go('done-confirmed'); }, 3200));
+  }
+  document.addEventListener('click', function(e){
+    var t=e.target.closest('[data-go]'); if(t) go(t.dataset.go);
+    var c=e.target.closest('[data-copy]'); if(c){ c.textContent='Copied'; setTimeout(function(){ c.textContent='Copy all four lines'; },1400); }
+  });
+  document.getElementById('ask').addEventListener('click', function(){ document.getElementById('os').setAttribute('data-on',''); });
+  document.getElementById('allow').addEventListener('click', function(){ document.getElementById('os').removeAttribute('data-on'); go('patching'); });
+  document.getElementById('deny').addEventListener('click', function(){ document.getElementById('os').removeAttribute('data-on'); });
+  document.getElementById('retry').addEventListener('click', function(){ flow='clean'; go('patching'); });
+
+  document.querySelectorAll('.seg button').forEach(function(b){
+    b.addEventListener('click', function(){
+      flow=b.dataset.flow;
+      document.querySelectorAll('.seg button').forEach(function(o){ o.setAttribute('aria-pressed', String(o===b)); });
+      go(flow==='bd' ? 'betterdiscord-blocked' : flow==='have' ? 'already-installed' : 'welcome');
+    });
+  });
+})();
+</script>
+</body>
+</html>

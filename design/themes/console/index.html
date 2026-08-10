@@ -1,0 +1,90 @@
+<!-- @dsCard group="Themes" title="Console" viewport="1180x760" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subline theme — Console</title>
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0}
+body{background:#07090a;padding:26px;font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;-webkit-font-smoothing:antialiased}
+.hd{display:flex;align-items:baseline;gap:14px;margin:0 0 18px;color:#8b989c;max-width:1120px}
+.hd b{font-size:15px;font-weight:600;letter-spacing:-.01em}
+.hd span{font-size:12.5px;opacity:.72}
+.row{display:flex;gap:22px;align-items:flex-start}
+.win{width:720px;height:620px;flex:none;overflow:hidden;display:grid;grid-template-rows:46px minmax(0,1fr) auto}
+.side{width:378px;flex:none;display:grid;gap:14px}
+
+.win{background:#0e1214;border:1px solid #1e272b;border-radius:8px;color:#dde5e6;box-shadow:0 18px 44px rgba(0,0,0,.55)}
+.bar{display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid #1a2225;
+  font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10.5px;letter-spacing:.14em;color:#5f7175;text-transform:uppercase}
+.lights{display:flex;gap:8px}
+.lights i{width:10px;height:10px;border-radius:50%;background:#263237;display:block}
+.body{padding:0;overflow:auto;display:grid;grid-template-columns:56px 1fr}
+.rail{border-right:1px solid #1a2225;padding:26px 0;display:flex;flex-direction:column;align-items:center;gap:14px;
+  font-family:ui-monospace,Menlo,monospace;font-size:9.5px;color:#3f5155}
+.rail i{width:7px;height:7px;border-radius:50%;background:#222e32;display:block}
+.rail i.now{background:#37d6a8;box-shadow:0 0 0 4px rgba(55,214,168,.14)}
+.main{padding:26px 30px 14px}
+.eyebrow{font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:#37d6a8;margin:0}
+h1{font-size:26px;line-height:1.16;letter-spacing:-.018em;font-weight:600;margin:12px 0 0;max-width:22ch}
+.lede{font-size:14px;line-height:1.6;color:#8b989c;margin:12px 0 0;max-width:54ch}
+.facts{list-style:none;margin:22px 0 0;padding:0;border:1px solid #1e272b;border-radius:6px;background:#121819}
+.facts li{display:grid;grid-template-columns:40px 1fr;gap:10px;padding:13px 15px;border-top:1px solid #1a2225;font-size:13px;line-height:1.5}
+.facts li:first-child{border-top:0}
+.facts .n{font-family:ui-monospace,Menlo,monospace;font-size:10px;color:#37d6a8;padding-top:3px}
+.facts b{font-weight:600;display:block}
+.facts p{margin:3px 0 0;color:#7d8b8e}
+.foot{display:flex;align-items:center;justify-content:space-between;padding:13px 18px;border-top:1px solid #1a2225}
+.btn{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;letter-spacing:.04em;padding:9px 16px;border-radius:5px;
+  border:1px solid transparent;background:none;color:#dde5e6;cursor:pointer}
+.p{background:#37d6a8;color:#04120d;font-weight:600}
+.s{border-color:#2a3539;background:#151c1e}
+.q{color:#6d7d81}
+.d{color:#ff7b6b;border-color:#3d2724}
+.card{background:#0e1214;border:1px solid #1e272b;border-radius:8px;padding:15px 16px;color:#dde5e6}
+.card h3{margin:0;font-size:14.5px;font-weight:600}
+.card p{margin:5px 0 0;font-size:12.5px;color:#7d8b8e;line-height:1.5}
+.vr{display:grid;grid-template-columns:30px 1fr;gap:13px;align-items:start}
+.vm{width:30px;height:30px;display:grid;place-items:center;font-size:14px}
+.ok{border-radius:50%;background:#37d6a8;color:#04120d}
+.un{border-radius:50%;border:2px dashed #e0a72f;color:#e0a72f;font-size:11px}
+.err{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8b989c;display:grid;grid-template-columns:64px 1fr;gap:5px 10px;margin-top:12px}
+.err b{color:#ff7b6b;font-weight:400}
+.sub{font-size:13px;color:#8b989c;padding-left:9px;border-left:2px solid #26332f;display:flex;gap:7px;margin-top:4px}
+.g{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#37d6a8}
+.lc{font-family:ui-monospace,Menlo,monospace;font-size:11px;opacity:.8}
+.msg{font-size:14.5px;line-height:1.4}
+.who{font-size:12.5px;font-weight:600}
+.btns{display:flex;flex-wrap:wrap;gap:8px}
+
+</style>
+</head>
+<body>
+<div class="hd"><b>Console</b><span>Shows its work. Dark, monospaced structure, everything labelled and countable — the aesthetic of a tool you can audit.</span></div>
+<div class="row">
+<div class="win"><div class="bar"><span class="lights"><i></i><i></i><i></i></span><span>subline · install</span></div>
+<div class="body">
+<div class="rail"><i class="now"></i><i></i><i></i><i></i><span>01/04</span></div>
+<div class="main">
+<p class="eyebrow">Before anything is changed</p>
+<h1>Read what your friends are actually saying.</h1>
+<p class="lede">Subline puts a translation underneath any message written in a language you don't read — inside the Discord you already use. Same app, same account, same servers.</p>
+<ul class="facts">
+<li><span class="n">[01]</span><div><b>Two things ahead will look alarming.</b><p>The ordinary cost of an app that hasn't paid Apple's yearly signing fee. Each is shown to you before it happens.</p></div></li>
+<li><span class="n">[02]</span><div><b>Subline changes Discord, and nothing else.</b><p>One file, inside Discord's own folder. Not your other apps, files, or account.</p></div></li>
+<li><span class="n">[03]</span><div><b>All of it comes back off.</b><p>Uninstalling restores Discord to the exact bytes it shipped with.</p></div></li>
+</ul>
+</div></div>
+<div class="foot"><button class="btn q">copy diagnostics</button><span><button class="btn q">cancel</button> <button class="btn p">continue</button></span></div></div>
+<div class="side"><div class="card"><div class="vr"><span class="vm ok">✓</span><div><h3>Confirmed working</h3><p>A translation was observed rendering in Discord. Not an assumption.</p></div></div></div>
+<div class="card"><div class="vr"><span class="vm un">?</span><div><h3>Installed, not yet confirmed</h3><p>Files written. No foreign-language message arrived while we watched.</p></div></div></div>
+<div class="card"><h3 style="font-size:13px">Could not install</h3>
+<div class="err"><span>code</span><b>E_ASAR_WRITE_DENIED</b><span>path</span><span>/Applications/Discord.app/…/app.asar</span><span>cause</span><span>EACCES: permission denied</span></div></div>
+<div class="card"><div class="who">rafa</div><div class="msg">bora marcar? tô livre depois das 8</div>
+<div class="sub"><span class="g">○</span><span class="lc">pt</span><span>shall we make a plan? I'm free after 8</span></div></div>
+<div class="card btns"><button class="btn p">continue</button><button class="btn s">check again</button><button class="btn q">cancel</button><button class="btn d">replace vencord</button></div></div>
+</div>
+</body>
+</html>

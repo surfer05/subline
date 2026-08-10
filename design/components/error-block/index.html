@@ -1,0 +1,66 @@
+<!-- @dsCard group="Components" title="Error detail" viewport="1000x760" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subline — Error detail</title>
+<link rel="stylesheet" href="../../tokens.css">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-sans);-webkit-font-smoothing:antialiased;line-height:1.55}
+.sheet{max-width:1000px;margin:0 auto;padding:56px 34px 90px}
+.hd{padding-bottom:30px;border-bottom:1px solid var(--line-strong)}
+.kicker{font-family:var(--font-mono);font-size:10px;letter-spacing:.19em;text-transform:uppercase;color:var(--muted);margin:0}
+.hd h1{font-family:var(--font-serif);font-size:38px;line-height:1.08;letter-spacing:-.018em;font-weight:400;margin:16px 0 0}
+.deck{font-size:16.5px;line-height:1.6;color:var(--muted);max-width:46ch;margin:14px 0 0;text-wrap:pretty}
+.spec{display:grid;grid-template-columns:186px 1fr;gap:38px;padding:34px 0;border-bottom:1px solid var(--line);align-items:start}
+.spec:last-child{border-bottom:0}
+.lbl{font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg);margin:0}
+.note{font-size:12.5px;line-height:1.6;color:var(--muted);margin:10px 0 0;text-wrap:pretty}
+.stage{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:26px}
+.stage.plain{background:none;border:0;padding:0}
+@media (max-width:760px){.spec{grid-template-columns:1fr;gap:16px}.sheet{padding:40px 22px 70px}}
+
+.btn{font-family:inherit;font-size:13.5px;font-weight:500;line-height:1.4;padding:9px 18px;
+  border-radius:var(--radius-sm);border:1px solid transparent;background:none;color:var(--fg);cursor:pointer}
+.btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.btn-primary{background:var(--accent);color:var(--accent-fg)}
+.btn-primary:hover{filter:brightness(1.12)}
+.btn-secondary{background:var(--bg);border-color:var(--line-strong)}
+.btn-secondary:hover{border-color:var(--muted)}
+.btn-quiet{color:var(--muted);padding-inline:10px}
+.btn-quiet:hover{color:var(--fg)}
+.btn-danger{color:var(--danger);border-color:color-mix(in oklab,var(--danger) 34%,transparent)}
+.btn-danger:hover{background:var(--danger-weak)}
+.btn[disabled]{opacity:.45;cursor:default}
+.btn-lg{font-size:15px;padding:12px 22px;border-radius:var(--radius)}
+.panel{background:var(--bg);border:1px solid var(--line);border-radius:var(--radius)}
+.grp{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.mono{font-family:var(--font-mono);font-size:12px}
+
+.err{border:1px solid var(--line);border-radius:var(--radius);background:var(--bg);overflow:hidden}
+.err > summary{list-style:none;cursor:pointer;padding:11px 14px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12.5px;color:var(--muted)}
+.err > summary::-webkit-details-marker{display:none}
+.err > summary code{font-family:var(--font-mono);font-size:11.5px;color:var(--fg)}
+.err > summary .chev{font-size:10px}
+.err[open] > summary{border-bottom:1px solid var(--line)}
+.err dl{margin:0;padding:12px 14px;display:grid;grid-template-columns:70px 1fr;gap:6px 12px;font-size:11.5px;font-family:var(--font-mono)}
+.err dt{color:var(--muted)}
+.err dd{margin:0;word-break:break-all;user-select:all}
+.err .errfoot{padding:0 14px 12px}
+.warnband{border-left:3px solid var(--warn);background:var(--warn-weak);padding:12px 14px;border-radius:var(--radius-sm);font-size:13px}
+</style>
+</head>
+<body><div class="sheet">
+<header class="hd"><p class="kicker">Primitive</p><h1>Error detail</h1><p class="deck">Code, path, cause. De-emphasised, folded away, and never dropped — hiding it cost days of debugging.</p></header>
+<section class="spec"><div><p class="lbl">closed</p><p class="note">The default. The code stays visible in the summary, so a screenshot of it is still useful.</p></div><div class="stage"><details class="err"><summary><span>Details · <code>E_LAUNCHD_DENIED</code></span><span class="chev">▸</span></summary>
+<dl><dt>code</dt><dd>E_LAUNCHD_DENIED</dd><dt>path</dt><dd>~/Library/LaunchAgents/dev.subline.helper.plist</dd><dt>cause</dt><dd>Operation not permitted</dd></dl>
+<div class="errfoot"><button class="btn btn-secondary">Copy</button></div></details></div></section>
+<section class="spec"><div><p class="lbl">open</p><p class="note">Where the failure is the whole screen. Every line is selectable.</p></div><div class="stage"><details class="err" open><summary><span>What went wrong · <code>E_ASAR_WRITE_DENIED</code></span><span class="chev">▾</span></summary>
+<dl><dt>code</dt><dd>E_ASAR_WRITE_DENIED</dd><dt>path</dt><dd>/Applications/Discord.app/Contents/Resources/app.asar</dd><dt>cause</dt><dd>EACCES: permission denied, open 'app.asar'</dd><dt>version</dt><dd>Subline 1.4.2 · Discord 0.0.309 · macOS 15.5</dd></dl>
+<div class="errfoot"><button class="btn btn-secondary">Copy all four lines</button></div></details></div></section>
+<section class="spec"><div><p class="lbl">inline caution</p><p class="note">For a consequence, not a failure. No code, because there isn't one.</p></div><div class="stage"><p class="warnband" style="margin:0">Forcing Discord closed will discard anything you haven't sent. We'll offer this once.</p></div></section>
+</div></body>
+</html>

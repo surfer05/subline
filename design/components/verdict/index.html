@@ -1,0 +1,68 @@
+<!-- @dsCard group="Components" title="Verdict block" viewport="1000x820" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subline — Verdict block</title>
+<link rel="stylesheet" href="../../tokens.css">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-sans);-webkit-font-smoothing:antialiased;line-height:1.55}
+.sheet{max-width:1000px;margin:0 auto;padding:56px 34px 90px}
+.hd{padding-bottom:30px;border-bottom:1px solid var(--line-strong)}
+.kicker{font-family:var(--font-mono);font-size:10px;letter-spacing:.19em;text-transform:uppercase;color:var(--muted);margin:0}
+.hd h1{font-family:var(--font-serif);font-size:38px;line-height:1.08;letter-spacing:-.018em;font-weight:400;margin:16px 0 0}
+.deck{font-size:16.5px;line-height:1.6;color:var(--muted);max-width:46ch;margin:14px 0 0;text-wrap:pretty}
+.spec{display:grid;grid-template-columns:186px 1fr;gap:38px;padding:34px 0;border-bottom:1px solid var(--line);align-items:start}
+.spec:last-child{border-bottom:0}
+.lbl{font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg);margin:0}
+.note{font-size:12.5px;line-height:1.6;color:var(--muted);margin:10px 0 0;text-wrap:pretty}
+.stage{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:26px}
+.stage.plain{background:none;border:0;padding:0}
+@media (max-width:760px){.spec{grid-template-columns:1fr;gap:16px}.sheet{padding:40px 22px 70px}}
+
+.btn{font-family:inherit;font-size:13.5px;font-weight:500;line-height:1.4;padding:9px 18px;
+  border-radius:var(--radius-sm);border:1px solid transparent;background:none;color:var(--fg);cursor:pointer}
+.btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.btn-primary{background:var(--accent);color:var(--accent-fg)}
+.btn-primary:hover{filter:brightness(1.12)}
+.btn-secondary{background:var(--bg);border-color:var(--line-strong)}
+.btn-secondary:hover{border-color:var(--muted)}
+.btn-quiet{color:var(--muted);padding-inline:10px}
+.btn-quiet:hover{color:var(--fg)}
+.btn-danger{color:var(--danger);border-color:color-mix(in oklab,var(--danger) 34%,transparent)}
+.btn-danger:hover{background:var(--danger-weak)}
+.btn[disabled]{opacity:.45;cursor:default}
+.btn-lg{font-size:15px;padding:12px 22px;border-radius:var(--radius)}
+.panel{background:var(--bg);border:1px solid var(--line);border-radius:var(--radius)}
+.grp{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.mono{font-family:var(--font-mono);font-size:12px}
+
+.verdict{display:grid;grid-template-columns:34px 1fr;gap:16px;padding:18px;border-radius:var(--radius);border:1px solid var(--line);background:var(--bg)}
+.verdict h2{margin:0;font-family:var(--font-serif);font-size:18px;font-weight:400;letter-spacing:-.005em}
+.verdict p{margin:6px 0 0;font-size:13.5px;line-height:1.55;color:var(--muted);text-wrap:pretty}
+.vm{width:34px;height:34px;display:grid;place-items:center;font-size:16px;line-height:1}
+.vm-ok{border-radius:50%;background:var(--ok);color:var(--bg)}
+.vm-ring{border-radius:50%;border:2px dashed var(--warn);color:var(--warn);font-size:11px}
+.vm-stop{border-radius:3px;background:var(--danger);color:var(--bg)}
+.vm-flat{border-radius:3px;border:1px solid var(--line-strong);color:var(--muted)}
+.v-ok{background:var(--ok-weak);border-color:color-mix(in oklab,var(--ok) 30%,var(--line))}
+.v-warn{background:var(--warn-weak);border-color:color-mix(in oklab,var(--warn) 30%,var(--line))}
+.v-stop{background:var(--danger-weak);border-color:color-mix(in oklab,var(--danger) 30%,var(--line))}
+.col{display:grid;gap:14px}
+</style>
+</head>
+<body><div class="sheet">
+<header class="hd"><p class="kicker">Primitive</p><h1>Verdict block</h1><p class="deck">One heading of outcome, one line of consequence. Shape carries the meaning before colour does.</p></header>
+<section class="spec"><div><p class="lbl">four outcomes</p><p class="note">Filled disc, dashed ring, filled square, hairline square. Four shapes before four colours.</p></div><div class="stage"><div class="col">
+<div class="verdict v-ok"><span class="vm vm-ok" aria-hidden="true">✓</span><div><h2>Confirmed working</h2><p>We watched a translation render in Discord just now. Not an assumption — an observation.</p></div></div>
+<div class="verdict v-warn"><span class="vm vm-ring" aria-hidden="true">?</span><div><h2>Installed, not yet confirmed</h2><p>Every file was written correctly. No message in another language arrived while we watched.</p></div></div>
+<div class="verdict v-stop"><span class="vm vm-stop" aria-hidden="true">✕</span><div><h2>Can't be installed alongside it</h2><p>A hard refusal. This block never appears with a way past it.</p></div></div>
+<div class="verdict v-flat"><span class="vm vm-flat" aria-hidden="true">·</span><div><h2>Nothing was changed</h2><p>Neither good news nor bad — cancelled, or a state we can't see into.</p></div></div></div></div></section>
+<section class="spec"><div><p class="lbl">greyscale</p><p class="note">The two endings still separate with hue removed, which is the point.</p></div><div class="stage"><div class="col" style="filter:grayscale(1)">
+<div class="verdict v-ok"><span class="vm vm-ok" aria-hidden="true">✓</span><div><h2>Confirmed working</h2></div></div>
+<div class="verdict v-warn"><span class="vm vm-ring" aria-hidden="true">?</span><div><h2>Installed, not yet confirmed</h2></div></div></div></div></section>
+</div></body>
+</html>

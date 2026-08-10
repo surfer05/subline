@@ -1,0 +1,81 @@
+<!-- @dsCard group="Components" title="In-Discord subtitle" viewport="1000x900" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subline — In-Discord subtitle</title>
+<link rel="stylesheet" href="../../tokens.css">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-sans);-webkit-font-smoothing:antialiased;line-height:1.55}
+.sheet{max-width:1000px;margin:0 auto;padding:56px 34px 90px}
+.hd{padding-bottom:30px;border-bottom:1px solid var(--line-strong)}
+.kicker{font-family:var(--font-mono);font-size:10px;letter-spacing:.19em;text-transform:uppercase;color:var(--muted);margin:0}
+.hd h1{font-family:var(--font-serif);font-size:38px;line-height:1.08;letter-spacing:-.018em;font-weight:400;margin:16px 0 0}
+.deck{font-size:16.5px;line-height:1.6;color:var(--muted);max-width:46ch;margin:14px 0 0;text-wrap:pretty}
+.spec{display:grid;grid-template-columns:186px 1fr;gap:38px;padding:34px 0;border-bottom:1px solid var(--line);align-items:start}
+.spec:last-child{border-bottom:0}
+.lbl{font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg);margin:0}
+.note{font-size:12.5px;line-height:1.6;color:var(--muted);margin:10px 0 0;text-wrap:pretty}
+.stage{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:26px}
+.stage.plain{background:none;border:0;padding:0}
+@media (max-width:760px){.spec{grid-template-columns:1fr;gap:16px}.sheet{padding:40px 22px 70px}}
+
+.btn{font-family:inherit;font-size:13.5px;font-weight:500;line-height:1.4;padding:9px 18px;
+  border-radius:var(--radius-sm);border:1px solid transparent;background:none;color:var(--fg);cursor:pointer}
+.btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.btn-primary{background:var(--accent);color:var(--accent-fg)}
+.btn-primary:hover{filter:brightness(1.12)}
+.btn-secondary{background:var(--bg);border-color:var(--line-strong)}
+.btn-secondary:hover{border-color:var(--muted)}
+.btn-quiet{color:var(--muted);padding-inline:10px}
+.btn-quiet:hover{color:var(--fg)}
+.btn-danger{color:var(--danger);border-color:color-mix(in oklab,var(--danger) 34%,transparent)}
+.btn-danger:hover{background:var(--danger-weak)}
+.btn[disabled]{opacity:.45;cursor:default}
+.btn-lg{font-size:15px;padding:12px 22px;border-radius:var(--radius)}
+.panel{background:var(--bg);border:1px solid var(--line);border-radius:var(--radius)}
+.grp{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.mono{font-family:var(--font-mono);font-size:12px}
+
+.chat{background:#1d2023;border-radius:var(--radius);padding:14px 18px;color:#dcdee0}
+.chat.light{background:#fff;color:#1c1e21;border:1px solid var(--line)}
+.m{display:grid;grid-template-columns:38px 1fr;gap:14px;padding:7px 0}
+.av{width:38px;height:38px;border-radius:50%;background:#3a3f45}
+.chat.light .av{background:#d9dde1}
+.nm{font-size:14px;font-weight:600;line-height:1.3}
+.tm{font-size:11px;font-weight:400;color:#8b9096;margin-left:7px}
+.tx{font-size:15px;line-height:1.42;margin-top:1px}
+.sl{margin-top:3px;font-size:13.5px;line-height:1.35;color:#9aa0a6;display:flex;gap:7px;align-items:baseline;padding-left:9px;border-left:2px solid #3a4145}
+.chat.light .sl{color:#5b666d;border-left-color:var(--line-strong)}
+.gl{font-family:var(--font-mono);font-size:11px;color:#5fb3b5;flex:none}
+.chat.light .gl{color:#0f6e72}
+.lc{font-family:var(--font-mono);font-size:11px;letter-spacing:.03em;flex:none;opacity:.8}
+.lc.unsure{border-bottom:1px dotted currentColor}
+.quota{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:#9aa0a6;background:#26292d;border-radius:999px;padding:5px 11px}
+.chat.light .quota{background:var(--panel);color:var(--muted);border:1px solid var(--line)}
+.key{list-style:none;padding:0;margin:0;display:grid;gap:8px}
+.key li{display:grid;grid-template-columns:34px 1fr;gap:12px;padding:12px 14px;border:1px solid var(--line);border-radius:var(--radius);background:var(--bg);font-size:13.5px;align-items:baseline}
+.key .k{font-family:var(--font-mono);font-size:12px;color:var(--accent)}
+</style>
+</head>
+<body><div class="sheet">
+<header class="hd"><p class="kicker">Primitive</p><h1>In-Discord subtitle</h1><p class="deck">The surface people actually see. A clearly separate second line that borrows Discord's rhythm and none of its brand.</p></header>
+<section class="spec"><div><p class="lbl">in place</p><p class="note">One step down in size, one step back in contrast, a hairline rule to the left. It reads as an aside, not as something the sender wrote.</p></div><div class="stage"><div class="chat">
+<div class="m"><div class="av"></div><div><div class="nm">rafa<span class="tm">Today at 20:14</span></div><div class="tx">bora marcar? tô livre depois das 8</div>
+<div class="sl"><span class="gl" title="Quick translation">○</span><span class="lc">pt</span><span>shall we make a plan? I'm free after 8</span></div></div></div>
+<div class="m"><div class="av"></div><div><div class="nm">yasmine<span class="tm">Today at 20:15</span></div><div class="tx">لما نبدأ نكتب، بنعمل خليط من العربي والفرنسي</div>
+<div class="sl"><span class="gl" title="Careful translation">●</span><span class="lc">ar</span><span>when we start writing, we end up mixing Arabic and French</span></div></div></div>
+<div class="m"><div class="av"></div><div><div class="nm">kev<span class="tm">Today at 20:16</span></div><div class="tx">lol same fr</div>
+<div class="sl"><span class="gl" title="Quick translation">○</span><span class="lc unsure" title="We're not certain this is Dutch">nl?</span><span>lol same for real</span></div></div></div></div></div></section>
+<section class="spec"><div><p class="lbl">the markers</p><p class="note">Hollow filling in is a shape change, not a colour change, so the upgrade is legible in greyscale. Hovering either one names it in words.</p></div><div class="stage"><ul class="key">
+<li><span class="k">○</span><div><b>Quick</b> — arrives within a second. Hollow: provisional, may still change.</div></li>
+<li><span class="k">●</span><div><b>Careful</b> — replaces the quick line in place. Filled: settled.</div></li>
+<li><span class="k">nl?</span><div><b>Unsure of the language.</b> The translation is still shown; the doubt is about where it came from.</div></li></ul></div></section>
+<section class="spec"><div><p class="lbl">chat-bar</p><p class="note">Replaces <span class="mono">✦ 3</span>, which the person who built it read as "3 calls remaining" and was wrong. A number with no noun attached cannot be guessed at.</p></div><div class="stage"><div style="display:grid;gap:12px">
+<div class="chat" style="padding:14px 18px"><span class="quota"><span class="gl">●</span> Careful translation: 3 messages left today</span></div>
+<div class="chat light" style="padding:14px 18px"><span class="quota"><span class="gl">●</span> Careful translation: 3 messages left today</span></div></div></div></section>
+</div></body>
+</html>

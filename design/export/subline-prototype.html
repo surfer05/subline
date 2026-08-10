@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Subline — installer prototype</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #faf9f5; display: flex; align-items: center; justify-content: center; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+    #__bundler_loading { position: fixed; bottom: 20px; right: 20px; font: 13px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; color: #666; background: #fff; padding: 8px 14px; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,0.12); z-index: 10000; }
+    #__bundler_thumbnail { position: fixed; inset: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: #faf9f5; z-index: 9999; }
+    #__bundler_thumbnail svg { width: 100%; height: 100%; object-fit: contain; }
+    #__bundler_placeholder { color: #999; font-size: 14px; }
+  </style>
+  <noscript>
+    <style>#__bundler_loading { display: none; }</style>
+    <div style="position:fixed;bottom:12px;left:12px;font:13px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;color:#999;background:rgba(255,255,255,0.9);padding:6px 12px;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,0.08);z-index:10000;">
+      This page requires JavaScript to display.
+    </div>
+  </noscript>
+</head>
+<body>
+  <div id="__bundler_thumbnail">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="#faf7f0"></rect><text x="100" y="112" text-anchor="middle" font-family="Georgia,serif" font-size="44" fill="#1c1813">sub</text><rect x="58" y="124" width="84" height="3" fill="#14544f"></rect></svg>
+</div>
+  <div id="__bundler_loading">Unpacking...</div>
+
+  <script>
+    
+document.addEventListener('DOMContentLoaded', async function() {
+  const loading = document.getElementById('__bundler_loading');
+  function setStatus(msg) { if (loading) loading.textContent = msg; }
+
+  const FONT_MIME = /^(font[/]|application[/](x-)?font-|application[/]vnd\.ms-fontobject)/i;
+  const MIME_TOKEN = /^[\w.+-]+[/][\w.+-]+$/;
+  function toBase64(bytes) {
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(bin);
+  }
+
+  // Error sink persists across replaceWith since it's on window, not the DOM.
+  window.addEventListener('error', function(e) {
+    // Failed resource loads (CSP-blocked links, scripts, images) fire plain
+    // events at the element — warn only; real JS errors carry message/error.
+    if (!e.message && !e.error && e.target && e.target !== window) {
+      console.warn('[bundle] resource failed to load:',
+        e.target.tagName, String(e.target.src || e.target.href || ''));
+      return;
+    }
+    var p = document.body || document.documentElement;
+    var d = document.getElementById('__bundler_err') || p.appendChild(document.createElement('div'));
+    d.id = '__bundler_err';
+    d.style.cssText = 'position:fixed;bottom:12px;left:12px;right:12px;font:12px/1.4 ui-monospace,monospace;background:#2a1215;color:#ff8a80;padding:10px 14px;border-radius:8px;border:1px solid #5c2b2e;z-index:99999;white-space:pre-wrap;max-height:40vh;overflow:auto';
+    d.textContent = (d.textContent ? d.textContent + String.fromCharCode(10) : '') +
+      '[bundle] ' + (e.message || e.type) +
+      (e.filename ? ' (' + e.filename.slice(0, 60) + ':' + e.lineno + ')' : '');
+  }, true);
+
+  try {
+    const manifestEl = document.querySelector('script[type="__bundler/manifest"]');
+    const templateEl = document.querySelector('script[type="__bundler/template"]');
+    if (!manifestEl || !templateEl) {
+      setStatus('Error: missing bundle data');
+      console.error('[bundler] Missing script tags — manifestEl:', !!manifestEl, 'templateEl:', !!templateEl);
+      return;
+    }
+
+    const manifest = JSON.parse(manifestEl.textContent);
+    let template = JSON.parse(templateEl.textContent);
+
+    // Nested page bundles (iframe targets). Each ships ONCE, in the ROOT
+    // document's manifest; frame srcs carry an about:blank#<uuid> marker
+    // instead of a substitutable uuid. Every document mints the blobs for
+    // its OWN frames — from local text at the root, or text obtained from
+    // its DIRECT parent over the relay protocol below — so each frame
+    // navigation stays same-origin with its initiator and a deduped page
+    // loads at any depth on any host, including a file:// download's
+    // opaque origins (where a blob minted by one document cannot be
+    // navigated to by another).
+    const pageOrderEl = document.querySelector('script[type="__bundler/page_order"]');
+    const pageOrder = pageOrderEl ? JSON.parse(pageOrderEl.textContent) : [];
+    const pageSet = new Set(pageOrder);
+    const pageTexts = {};
+
+    // ── Nested-page text protocol (parent-chain relay) ──
+    // Page bundles ship once, in the ROOT document's manifest. Every
+    // document mints the blobs for its OWN frames, obtaining page text
+    // through a strict parent-chain relay: a document only ever SENDS to
+    // its direct parent (which, for every document the publisher's own
+    // runtime minted, is another publisher document) and only ACCEPTS
+    // text from that direct parent; requests from below are honored only
+    // for the document's own child frames, and the ROOT never sends
+    // upward at all. That last rule is load-bearing: the artifact host's
+    // frame-ancestors allows claude.ai (and friends) to frame an
+    // artifact, so window.top can be a FOREIGN document — a top-addressed
+    // protocol would hand page uuids to that ancestor and accept forged
+    // "page text" from it, minting attacker HTML as an artifact-origin
+    // blob document. The chain never touches the ancestor: requests stop
+    // at the root, replies are origin-addressed per hop (never '*' when
+    // an origin exists), and both directions are origin-gated (on https
+    // a foreign sender's origin can never equal this document's; in
+    // opaque contexts — file:// — everything serializes as 'null', where
+    // an embedded EXTERNAL frame still fails the gate by carrying its
+    // own real origin, and a sandboxed child of such a frame is excluded
+    // by the own-child-frames check plus uuid unguessability). Shape is
+    // deny-by-default: one request form, one reply form, no error
+    // replies.
+    // window.origin is the SERIALIZED SECURITY origin ('null' in opaque
+    // contexts such as a sandboxed preview iframe) — location.origin is
+    // computed from the URL and stays 'https://…' even when the document
+    // is sandboxed, which would misgate every opaque chain.
+    const OWN_TARGET = /^https?:[/][/]/.test(window.origin || '')
+      ? window.origin
+      : '*';
+    function trustedOrigin(e) {
+      if (e.origin === window.origin) return true; // https chains; opaque==opaque
+      // file:// trees: Chrome serializes the file document's origin as
+      // 'file://' while the blob: documents it mints serialize as 'null',
+      // so the two legitimate shapes can never string-match — accept the
+      // pair in both directions. https origins never serialize as either,
+      // and sender identity (own child frame / direct parent) is checked
+      // separately.
+      return (
+        (e.origin === 'null' &&
+          (window.origin === 'file://' ||
+            window.location.protocol === 'file:')) ||
+        (/^file:/.test(e.origin) && window.origin === 'null')
+      );
+    }
+    // Non-empty only in the root document (nested bundles ship an empty
+    // island), so it doubles as the root marker: the root answers from
+    // local text and treats a miss as authoritative — never relaying to
+    // its (possibly foreign) parent.
+    const isPageRoot = pageOrder.length > 0;
+    const blobUrls = {};
+    const resourceBlobs = {};
+    const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    const pendingFrames = {}; // uuid -> [{el, frag}] awaiting text for own frames
+    const pendingRelays = {}; // uuid -> [childWindow] awaiting text to pass down
+    function mountPage(el, frag, text) {
+      const pageBlob = new Blob([text], { type: 'text/html' });
+      const u = URL.createObjectURL(pageBlob);
+      resourceBlobs[u] = pageBlob;
+      el.src = u + frag;
+    }
+    function deliverPage(uuid, text) {
+      const frames = pendingFrames[uuid];
+      delete pendingFrames[uuid];
+      if (frames) for (const f of frames) mountPage(f.el, f.frag, text);
+      const relays = pendingRelays[uuid];
+      delete pendingRelays[uuid];
+      if (relays) {
+        for (const cw of relays) {
+          try { cw.postMessage({ __bundler_page: uuid, __bundler_text: text }, OWN_TARGET); } catch (err) { /* gone */ }
+        }
+      }
+    }
+    function ownFrameWindows() {
+      const out = [];
+      for (const f of Array.from(document.querySelectorAll('iframe'))) {
+        try { if (f.contentWindow) out.push(f.contentWindow); } catch (err) { /* detached */ }
+      }
+      return out;
+    }
+    window.addEventListener('message', function (e) {
+      const d = e.data;
+      if (!d || typeof d !== 'object' || !e.source) return;
+      // Origin gate first; the structural checks below (own-child-frames
+      // for requests, direct-parent + solicited-uuid for replies, the
+      // root's never-relay rule) are what hold in fully opaque chains
+      // where origin strings can't discriminate — a sandboxed root's
+      // FOREIGN wrapper still fails all three even though both serialize
+      // as real-vs-'null' rather than matching.
+      if (!trustedOrigin(e)) return;
+      if (typeof d.__bundler_need === 'string' && UUID_SHAPE.test(d.__bundler_need)) {
+        // Requests are honored only for this document's own child frames.
+        if (ownFrameWindows().indexOf(e.source) < 0) return;
+        const uuid = d.__bundler_need;
+        const text = pageTexts[uuid];
+        if (typeof text === 'string') {
+          try { e.source.postMessage({ __bundler_page: uuid, __bundler_text: text }, OWN_TARGET); } catch (err) { /* gone */ }
+          return;
+        }
+        if (isPageRoot || window.parent === window) return; // authoritative miss
+        const waiting = pendingRelays[uuid];
+        if (waiting) {
+          if (waiting.indexOf(e.source) < 0) waiting.push(e.source);
+          return;
+        }
+        // Never-answered uuids would otherwise accumulate forever under a
+        // request spray; past the cap (far above any real page count) new
+        // relays are dropped rather than remembered.
+        if (Object.keys(pendingRelays).length >= 128) return;
+        pendingRelays[uuid] = [e.source];
+        window.parent.postMessage({ __bundler_need: uuid }, OWN_TARGET);
+      } else if (
+        typeof d.__bundler_page === 'string' &&
+        UUID_SHAPE.test(d.__bundler_page) &&
+        typeof d.__bundler_text === 'string'
+      ) {
+        // The shape test is load-bearing beyond tidiness: the solicited
+        // check below uses the in operator, which matches prototype keys
+        // ('__proto__', 'constructor') — an unshaped key would reach
+        // deliverPage and throw, painting the error banner.
+        // Text is accepted only from the direct parent — the document
+        // that minted this one.
+        if (e.source !== window.parent || window.parent === window) return;
+        if (!(d.__bundler_page in pendingFrames) && !(d.__bundler_page in pendingRelays)) return;
+        deliverPage(d.__bundler_page, d.__bundler_text);
+      }
+    });
+
+    const uuids = Object.keys(manifest);
+    setStatus('Unpacking ' + uuids.length + ' assets...');
+
+    await Promise.all(uuids.map(async (uuid) => {
+      const entry = manifest[uuid];
+      try {
+        const binaryStr = atob(entry.data);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+
+        let finalBytes = bytes;
+        if (entry.compressed) {
+          if (typeof DecompressionStream !== 'undefined') {
+            const ds = new DecompressionStream('gzip');
+            const writer = ds.writable.getWriter();
+            const reader = ds.readable.getReader();
+            writer.write(bytes);
+            writer.close();
+            const chunks = [];
+            let totalLen = 0;
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              chunks.push(value);
+              totalLen += value.length;
+            }
+            finalBytes = new Uint8Array(totalLen);
+            let offset = 0;
+            for (const chunk of chunks) { finalBytes.set(chunk, offset); offset += chunk.length; }
+          } else {
+            console.warn('DecompressionStream not available, asset ' + uuid + ' may not render');
+          }
+        }
+
+        if (pageSet.has(uuid)) {
+          pageTexts[uuid] = new TextDecoder().decode(finalBytes);
+          return;
+        }
+        if (FONT_MIME.test(entry.mime) && MIME_TOKEN.test(entry.mime)) {
+          // Strict artifact hosts allow font-src data: but not blob:.
+          blobUrls[uuid] = 'data:' + entry.mime + ';base64,' +
+            (entry.compressed ? toBase64(finalBytes) : entry.data);
+        } else {
+          const blob = new Blob([finalBytes], { type: entry.mime });
+          blobUrls[uuid] = URL.createObjectURL(blob);
+          resourceBlobs[blobUrls[uuid]] = blob;
+        }
+      } catch (err) {
+        console.error('Failed to decode asset ' + uuid + ':', err);
+        const blob = new Blob([], { type: entry.mime });
+        blobUrls[uuid] = URL.createObjectURL(blob);
+        resourceBlobs[blobUrls[uuid]] = blob;
+      }
+    }));
+
+    const extResEl = document.querySelector('script[type="__bundler/ext_resources"]');
+    const extResources = extResEl ? JSON.parse(extResEl.textContent) : [];
+    const resourceMap = {};
+    for (const entry of extResources) {
+      if (blobUrls[entry.uuid]) resourceMap[entry.id] = blobUrls[entry.uuid];
+    }
+
+    // Artifact-host CSP (connect-src 'self') refuses fetch() of blob: URLs —
+    // consumers read these Blobs directly. Survives the swap like the error sink.
+    window.__resourceBlobs = resourceBlobs;
+
+    setStatus('Rendering...');
+    // Page uuids have no blob here — they ride inside about:blank#<uuid>
+    // frame markers the pass below resolves after the swap.
+    for (const uuid of uuids) {
+      if (pageSet.has(uuid)) continue;
+      template = template.split(uuid).join(blobUrls[uuid]);
+    }
+
+    // Strip integrity + crossorigin — blob URLs from a file:// document inherit
+    // a null origin, so crossorigin forces a CORS fetch that SRI then rejects.
+    // The manifest bytes are ours; SRI protects against CDN compromise, not this.
+    template = template.replace(/\s+integrity="[^"]*"/gi, '').replace(/\s+crossorigin="[^"]*"/gi, '');
+
+    const resourceScript = '<script>window.__resources = ' +
+      JSON.stringify(resourceMap).replace(/<\//g, '<\\/') +
+      ';</' + 'script>';
+    // Inject after <head> so the DOCTYPE stays first; prepending the script
+    // would push the parser into quirks mode. DOMParser always emits a <head>
+    // (synthesizing one if the source HTML omitted it) but may carry
+    // attributes through, so match the full opening tag. slice() rather than
+    // replace() keeps us clear of $-pattern substitution in resourceScript.
+    const headOpen = template.match(/<head[^>]*>/i);
+    if (headOpen) {
+      const i = headOpen.index + headOpen[0].length;
+      template = template.slice(0, i) + resourceScript + template.slice(i);
+    }
+
+    // Parse the template and swap the root element. Scripts inserted via
+    // DOMParser/replaceWith are inert per spec — re-create each with
+    // createElement so they execute, awaiting onload for src scripts to
+    // preserve ordering (React before ReactDOM before Babel before text/babel).
+    const doc = new DOMParser().parseFromString(template, 'text/html');
+    document.documentElement.replaceWith(doc.documentElement);
+
+    // Resolve page-frame markers: mint this document's own blob for each
+    // framed page — from local text when this is the root, otherwise by
+    // asking the direct parent over the relay protocol above. An
+    // unanswered request leaves the frame on about:blank, the same
+    // degraded state as a refused embed.
+    {
+      const MARKER = /^about:blank#([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(#.*)?$/;
+      const needed = [];
+      for (const el of Array.from(document.querySelectorAll('iframe'))) {
+        const m = MARKER.exec(el.getAttribute('src') || '');
+        if (!m) continue;
+        const text = pageTexts[m[1]];
+        if (typeof text === 'string') {
+          mountPage(el, m[2] || '', text);
+        } else if (window.parent !== window && !isPageRoot) {
+          const had = pendingFrames[m[1]];
+          (pendingFrames[m[1]] = had || []).push({ el: el, frag: m[2] || '' });
+          if (!had) needed.push(m[1]);
+        }
+      }
+      for (const uuid of needed) {
+        window.parent.postMessage({ __bundler_need: uuid }, OWN_TARGET);
+      }
+    }
+
+    const dead = Array.from(document.scripts);
+    for (const old of dead) {
+      const s = document.createElement('script');
+      for (const a of old.attributes) s.setAttribute(a.name, a.value);
+      s.textContent = old.textContent;
+      // text/babel scripts with a src: read and inline. transformScriptTags
+      // does XHR against the src, but blob:null/ from a file:// origin is
+      // silently dropped. Inlining makes it a plain inline babel script,
+      // which transformScriptTags handles unconditionally.
+      if ((s.type === 'text/babel' || s.type === 'text/jsx') && s.src) {
+        const pre = resourceBlobs[s.src.split('#')[0]];
+        s.textContent = pre ? await pre.text() : await (await fetch(s.src)).text();
+        s.removeAttribute('src');
+      }
+      const p = s.src ? new Promise(function(r) { s.onload = s.onerror = r; }) : null;
+      old.replaceWith(s);
+      if (p) await p;
+    }
+    // Babel standalone auto-transforms type=text/babel on DOMContentLoaded,
+    // which fired before we swapped the document. Trigger manually if present.
+    if (window.Babel && typeof window.Babel.transformScriptTags === 'function') {
+      window.Babel.transformScriptTags();
+    }
+  } catch (err) {
+    setStatus('Error unpacking: ' + err.message);
+    console.error('Bundle unpack error:', err);
+  }
+});
+
+  </script>
+
+  <script type="__bundler/manifest">
+{}
+  </script>
+
+  <script type="__bundler/ext_resources">
+[]
+  </script>
+
+  <script type="__bundler/page_order">
+[]
+  </script>
+
+  <script type="__bundler/template">
+"<!DOCTYPE html>\n<html lang=\"en\"><head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>Subline — installer prototype<\u002Ftitle>\n<style>/* Subline — design tokens · \"Paper\"\n   Single source of truth. Both surfaces (installer renderer + site) import this\n   and define no colour of their own.\n\n   Contract: docs/DESIGN-SYSTEM.md §2. The list is additive — never rename or drop.\n   No external requests: system font stacks only (strict CSP). --font-serif resolves\n   to a face that ships with macOS and Windows, and falls back to Georgia. */\n\n:root {\n  color-scheme: light dark;\n\n  /* surfaces */\n  --bg:            #faf7f0;   /* page / window background — warm stock */\n  --panel:         #fffdf7;   /* raised block: sample, callout, list rows */\n  --line:          #e4dccb;   /* borders and rules */\n  --line-strong:   #cfc5ae;   /* emphasised rule, input borders */\n  --desk:          #eae3d4;   /* ground behind the installer window (previews) */\n\n  /* text */\n  --fg:            #1c1813;   /* primary text — warm ink */\n  --muted:         #6b6355;   /* secondary text, captions, help */\n\n  /* meaning — semantics, not decoration */\n  --accent:        #14544f;   /* primary action, brand */\n  --accent-fg:     #fbf8f1;   /* text on --accent */\n  --ok:            #1a6b41;   /* verified success — §4.1 */\n  --warn:          #8a6410;   /* recoverable problem, caution */\n  --danger:        #8a2f24;   /* destructive or hard failure */\n\n  /* tinted grounds for the above (additive) */\n  --accent-weak:   #e3ece9;\n  --ok-weak:       #e5efe6;\n  --warn-weak:     #f5ecd8;\n  --danger-weak:   #f6e6e1;\n\n  /* form */\n  --radius:        4px;\n  --radius-sm:     3px;\n  --focus:         #14544f;\n  --shadow-1:      0 1px 0 rgba(255,255,255,.7) inset, 0 12px 30px rgba(60, 50, 30, .14);\n\n  --font-sans:  -apple-system, BlinkMacSystemFont, \"Segoe UI Variable Text\", \"Segoe UI\",\n                system-ui, \"Helvetica Neue\", Arial, sans-serif;\n  --font-serif: \"Iowan Old Style\", \"Palatino Linotype\", Palatino, \"Book Antiqua\",\n                Georgia, \"Times New Roman\", serif;\n  --font-mono:  ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, \"Cascadia Mono\",\n                \"Segoe UI Mono\", Consolas, monospace;\n}\n\n/* Dark: OS-driven … */\n@media (prefers-color-scheme: dark) {\n  :root:not([data-theme=\"light\"]) {\n    --bg:          #17140e;\n    --panel:       #1e1a13;\n    --line:        #2e291f;\n    --line-strong: #453f32;\n    --desk:        #0f0d09;\n\n    --fg:          #ece5d6;\n    --muted:       #9a9284;\n\n    --accent:      #5fb3aa;\n    --accent-fg:   #0b1a19;\n    --ok:          #6ec08a;\n    --warn:        #d4a640;\n    --danger:      #e8796a;\n\n    --accent-weak: #16302e;\n    --ok-weak:     #17291e;\n    --warn-weak:   #2c2413;\n    --danger-weak: #301c18;\n\n    --focus:       #5fb3aa;\n    --shadow-1:    0 1px 0 rgba(255,255,255,.03) inset, 0 14px 34px rgba(0, 0, 0, .55);\n  }\n}\n\n/* … and the same values under an explicit attribute, so a future in-app\n   theme toggle needs no redesign. */\n:root[data-theme=\"dark\"] {\n  --bg:          #17140e;\n  --panel:       #1e1a13;\n  --line:        #2e291f;\n  --line-strong: #453f32;\n  --desk:        #0f0d09;\n\n  --fg:          #ece5d6;\n  --muted:       #9a9284;\n\n  --accent:      #5fb3aa;\n  --accent-fg:   #0b1a19;\n  --ok:          #6ec08a;\n  --warn:        #d4a640;\n  --danger:      #e8796a;\n\n  --accent-weak: #16302e;\n  --ok-weak:     #17291e;\n  --warn-weak:   #2c2413;\n  --danger-weak: #301c18;\n\n  --focus:       #5fb3aa;\n  --shadow-1:    0 1px 0 rgba(255,255,255,.03) inset, 0 14px 34px rgba(0, 0, 0, .55);\n}\n\n/* --ok and --danger are never carried by hue alone. Every verdict pairs its colour\n   with a distinct shape: filled disc + tick (ok), dashed ring (unconfirmed),\n   filled square + cross (danger). See components/verdict. */\n<\u002Fstyle>\n<style>\n*,*::before,*::after{box-sizing:border-box}\nhtml,body{margin:0}\nbody{min-height:100vh;padding:24px;background:var(--desk);font-family:var(--font-sans);color:var(--fg);\n  -webkit-font-smoothing:antialiased;line-height:1.5}\n\n/* scenario strip — outside the window, not part of the product */\n.strip{width:720px;margin:0 auto 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}\n.strip p{margin:0;font-family:var(--font-mono);font-size:9.5px;letter-spacing:.19em;text-transform:uppercase;\n  color:var(--muted)}\n.strip .seg{display:flex;border:1px solid var(--line-strong);border-radius:var(--radius-sm);overflow:hidden}\n.strip .seg button{font-family:var(--font-mono);font-size:10px;letter-spacing:.06em;padding:6px 11px;border:0;\n  white-space:nowrap;background:var(--bg);color:var(--muted);cursor:pointer}\n.strip .seg button + button{border-left:1px solid var(--line)}\n.strip .seg button[aria-pressed=\"true\"]{background:var(--accent);color:var(--accent-fg)}\n\n.win{width:720px;height:620px;margin:0 auto;background:var(--bg);border:1px solid var(--line-strong);\n  border-radius:5px;box-shadow:var(--shadow-1);overflow:hidden;display:grid;grid-template-rows:46px minmax(0,1fr) auto}\n.bar{display:flex;align-items:center;justify-content:space-between;padding:0 20px;border-bottom:1px solid var(--line)}\n.lights{display:flex;gap:8px}\n.lights i{width:11px;height:11px;border-radius:50%;background:var(--line-strong);display:block}\n.mark{font-size:12px;letter-spacing:.09em;color:var(--muted);padding-bottom:2px;border-bottom:1px solid currentColor;line-height:1}\n\n.screen{display:none;grid-row:2 / span 2;grid-template-rows:minmax(0,1fr) auto;min-height:0}\n.screen[data-on]{display:grid}\n.body{padding:28px 42px 10px;overflow:auto}\n.eyebrow{font-family:var(--font-mono);font-size:10px;letter-spacing:.19em;text-transform:uppercase;color:var(--muted);margin:0}\nh1{font-family:var(--font-serif);font-size:30px;line-height:1.16;letter-spacing:-.012em;font-weight:400;margin:14px 0 0;max-width:21ch}\n.lede{font-size:14.5px;line-height:1.62;color:var(--muted);margin:13px 0 0;max-width:54ch;text-wrap:pretty}\n.body > *:not(.eyebrow):not(h1):not(.lede){margin-top:24px}\n.foot{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:15px 24px 15px 42px;border-top:1px solid var(--line)}\n.foot div{display:flex;align-items:center;gap:8px}\n\n.btn{font-family:inherit;font-size:13.5px;font-weight:500;line-height:1.4;padding:9px 18px;border-radius:var(--radius-sm);\n  border:1px solid transparent;background:none;color:var(--fg);cursor:pointer}\n.btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}\n.btn-primary{background:var(--accent);color:var(--accent-fg)}\n.btn-primary:hover{filter:brightness(1.12)}\n.btn-secondary{background:var(--panel);border-color:var(--line-strong)}\n.btn-secondary:hover{border-color:var(--muted)}\n.btn-quiet{color:var(--muted);padding-inline:10px}\n.btn-quiet:hover{color:var(--fg)}\n.btn-danger{color:var(--danger);border-color:color-mix(in oklab,var(--danger) 34%,transparent)}\n.btn-danger:hover{background:var(--danger-weak)}\n.btn[disabled]{opacity:.45;cursor:default}\n\n.rows{list-style:none;margin:0;padding:0;border-top:1px solid var(--line-strong);border-bottom:1px solid var(--line-strong)}\n.rows > li{display:grid;grid-template-columns:34px 1fr;gap:8px;padding:15px 2px;border-top:1px solid var(--line);font-size:13.5px;line-height:1.55}\n.rows > li:first-child{border-top:0}\n.rows .n{font-family:var(--font-mono);font-size:10px;letter-spacing:.1em;color:var(--muted);padding-top:4px}\n.rows b{font-weight:600;display:block;letter-spacing:-.005em}\n.rows p{margin:3px 0 0;color:var(--muted);text-wrap:pretty}\n.note{font-size:12.5px;color:var(--muted);line-height:1.55;margin:16px 0 0;max-width:56ch}\n\n.verdict{display:grid;grid-template-columns:32px 1fr;gap:16px;padding:18px 20px;border-radius:var(--radius);border:1px solid var(--line);background:var(--panel)}\n.verdict h2{margin:0;font-family:var(--font-serif);font-size:18px;font-weight:400;letter-spacing:-.005em}\n.verdict p{margin:7px 0 0;font-size:13.5px;line-height:1.6;color:var(--muted);text-wrap:pretty}\n.vm{width:32px;height:32px;display:grid;place-items:center;font-size:15px;line-height:1}\n.vm-ok{border-radius:50%;background:var(--ok);color:var(--bg)}\n.vm-ring{border-radius:50%;border:2px dashed var(--warn);color:var(--warn);font-size:11px}\n.vm-stop{border-radius:3px;background:var(--danger);color:var(--bg)}\n.v-ok{background:var(--ok-weak);border-color:color-mix(in oklab,var(--ok) 26%,var(--line))}\n.v-warn{background:var(--warn-weak);border-color:color-mix(in oklab,var(--warn) 26%,var(--line))}\n.v-stop{background:var(--danger-weak);border-color:color-mix(in oklab,var(--danger) 26%,var(--line))}\n\n.err{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);overflow:hidden}\n.err > summary{list-style:none;cursor:pointer;padding:11px 15px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12.5px;color:var(--muted)}\n.err > summary::-webkit-details-marker{display:none}\n.err > summary code{font-family:var(--font-mono);font-size:11.5px;color:var(--fg)}\n.err[open] > summary{border-bottom:1px solid var(--line)}\n.err dl{margin:0;padding:13px 15px;display:grid;grid-template-columns:64px 1fr;gap:6px 12px;font-size:11.5px;font-family:var(--font-mono)}\n.err dt{color:var(--muted)}\n.err dd{margin:0;word-break:break-all;user-select:all}\n.err .errfoot{padding:0 15px 13px}\n\n.trail{display:flex;align-items:center;gap:10px;font-size:11.5px;color:var(--muted);font-family:var(--font-mono);letter-spacing:.04em}\n.trail i{width:6px;height:6px;border-radius:50%;background:var(--line-strong);display:block}\n.trail i.on{background:var(--accent)}\n.trail i.now{background:var(--accent);box-shadow:0 0 0 4px var(--accent-weak)}\n.bar-i{height:2px;background:var(--line);overflow:hidden;margin-top:15px}\n.bar-i span{display:block;height:100%;width:34%;background:var(--accent);animation:slide 1.5s ease-in-out infinite}\n@keyframes slide{0%{transform:translateX(-105%)}100%{transform:translateX(320%)}}\n.spin{width:14px;height:14px;border-radius:50%;border:2px solid var(--line-strong);border-top-color:var(--accent);\n  animation:spin .8s linear infinite;display:inline-block;vertical-align:-3px}\n@keyframes spin{to{transform:rotate(360deg)}}\n.work{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px}\n\n.sample{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:15px 17px}\n.sample .who{font-weight:600;font-size:12.5px;margin-bottom:2px}\n.sample .msg{font-size:14.5px;line-height:1.45}\n.sub{margin-top:4px;font-size:13px;line-height:1.4;color:var(--muted);display:flex;gap:7px;align-items:baseline;\n  padding-left:9px;border-left:2px solid var(--line-strong)}\n.sub .g{font-family:var(--font-mono);font-size:11px;color:var(--accent)}\n.sub .lc{font-family:var(--font-mono);font-size:11px;letter-spacing:.03em}\n\n/* the macOS dialog, drawn as the system would — it is not ours */\n.os{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(28,24,19,.28)}\n.os[data-on]{display:flex}\n.osbox{width:290px;background:#f2f1ee;border-radius:12px;padding:20px 18px 14px;text-align:center;\n  box-shadow:0 20px 50px rgba(0,0,0,.34);color:#111;font-size:12.5px}\n.osbox .ic{width:46px;height:46px;border-radius:10px;background:#d8d5cf;margin:0 auto 12px}\n.osbox b{display:block;font-size:13px;margin-bottom:6px}\n.osbox p{margin:0 0 14px;color:#3a3a3a;line-height:1.4}\n.osbox .acts{display:grid;gap:6px}\n.osbox button{font-family:inherit;font-size:12.5px;padding:6px 12px;border-radius:6px;border:1px solid #c8c5bf;\n  background:#fff;cursor:pointer;color:#111}\n.osbox button.pri{background:#3d6fd8;border-color:#3d6fd8;color:#fff}\n.stagewrap{position:relative}\n<\u002Fstyle>\n<\u002Fhead>\n<body>\n\n\n<div class=\"strip\">\n  <p>Enter as<\u002Fp>\n  <div class=\"seg\" role=\"group\" aria-label=\"Scenario\">\n    <button data-flow=\"clean\" aria-pressed=\"true\">Clean install<\u002Fbutton>\n    <button data-flow=\"fail\" aria-pressed=\"false\">Patch fails<\u002Fbutton>\n    <button data-flow=\"bd\" aria-pressed=\"false\">BetterDiscord present<\u002Fbutton>\n    <button data-flow=\"have\" aria-pressed=\"false\">Already installed<\u002Fbutton>\n  <\u002Fdiv>\n<\u002Fdiv>\n\n<div class=\"stagewrap\" style=\"width:720px;margin:0 auto\">\n<div class=\"win\">\n  <header class=\"bar\"><span class=\"lights\"><i><\u002Fi><i><\u002Fi><i><\u002Fi><\u002Fspan><span class=\"mark\">subline<\u002Fspan><\u002Fheader>\n\n  <!-- welcome -->\n  <section class=\"screen\" id=\"welcome\" data-on=\"\">\n    <div class=\"body\">\n      <p class=\"eyebrow\">Step one of four<\u002Fp>\n      <h1>Read what your friends are actually saying.<\u002Fh1>\n      <p class=\"lede\">Subline puts a translation underneath any message written in a language you don't read — inside the Discord you already use. Same app, same account, same servers.<\u002Fp>\n      <ul class=\"rows\">\n        <li><span class=\"n\">01<\u002Fspan><div><b>Two things ahead will look alarming.<\u002Fb><p>They are the ordinary cost of an app that hasn't paid Apple's yearly signing fee. Each one is shown to you before it happens.<\u002Fp><\u002Fdiv><\u002Fli>\n        <li><span class=\"n\">02<\u002Fspan><div><b>Subline changes Discord, and nothing else.<\u002Fb><p>One file, inside Discord's own folder. Not your other apps, your files, or your account.<\u002Fp><\u002Fdiv><\u002Fli>\n        <li><span class=\"n\">03<\u002Fspan><div><b>All of it comes back off.<\u002Fb><p>Uninstalling restores Discord to the exact bytes it shipped with.<\u002Fp><\u002Fdiv><\u002Fli>\n      <\u002Ful>\n    <\u002Fdiv>\n    <div class=\"foot\"><div><button class=\"btn btn-quiet\">Copy diagnostics<\u002Fbutton><\u002Fdiv>\n      <div><button class=\"btn btn-quiet\" data-go=\"cancelled\">Cancel<\u002Fbutton><button class=\"btn btn-primary\" data-go=\"tiers\">Continue<\u002Fbutton><\u002Fdiv><\u002Fdiv>\n  <\u002Fsection>\n\n  <!-- tiers -->\n  <section class=\"screen\" id=\"tiers\">\n    <div class=\"body\">\n      <p class=\"eyebrow\">Step two of four<\u002Fp>\n      <h1>Two speeds of translation<\u002Fh1>\n      <p class=\"lede\">Quick arrives almost immediately. Careful replaces it a few seconds later, if you set up a key. You can do that now, or any time later.<\u002Fp>\n      <ul class=\"rows\">\n        <li><span class=\"n\">○<\u002Fspan><div><b>Quick · free, no account<\u002Fb><p>Google Translate. Good enough to follow a conversation. This is on from the moment you finish.<\u002Fp><\u002Fdiv><\u002Fli>\n        <li><span class=\"n\">●<\u002Fspan><div><b>Careful · free key, two minutes to set up<\u002Fb><p>An AI model that reads the rest of the conversation, so slang, mixed languages and jokes survive. It quietly replaces the quick line when it's ready.<\u002Fp><\u002Fdiv><\u002Fli>\n      <\u002Ful>\n      <div class=\"sample\">\n        <div class=\"who\">rafa<\u002Fdiv>\n        <div class=\"msg\">bora marcar? tô livre depois das 8<\u002Fdiv>\n        <div class=\"sub\"><span class=\"g\">●<\u002Fspan><span class=\"lc\">pt<\u002Fspan><span>shall we make a plan? I'm free after 8<\u002Fspan><\u002Fdiv>\n      <\u002Fdiv>\n    <\u002Fdiv>\n    <div class=\"foot\"><div><button class=\"btn btn-quiet\" data-go=\"welcome\">Back<\u002Fbutton><\u002Fdiv>\n      <div><button class=\"btn btn-secondary\" data-go=\"permission-explain\">Skip for now<\u002Fbutton><button class=\"btn btn-primary\" data-go=\"permission-explain\">Set up Careful<\u002Fbutton><\u002Fdiv><\u002Fdiv>\n  <\u002Fsection>\n\n  <!-- permission-explain -->\n  <section class=\"screen\" id=\"permission-explain\">\n    <div class=\"body\">\n      <p class=\"eyebrow\">Step four of four<\u002Fp>\n      <h1>macOS needs your permission<\u002Fh1>\n      <p class=\"lede\">Discord is an app, and changing an app needs your say-so. macOS calls that App Management. The next screen is the system's, not ours.<\u002Fp>\n      <ul class=\"rows\">\n        <li><span class=\"n\">→<\u002Fspan><div><b>What we do with it<\u002Fb><p>Add one translation file inside Discord. That's the whole of it.<\u002Fp><\u002Fdiv><\u002Fli>\n        <li><span class=\"n\">←<\u002Fspan><div><b>How you take it back<\u002Fb><p>System Settings › Privacy &amp; Security › App Management. Turn Subline off, any time.<\u002Fp><\u002Fdiv><\u002Fli>\n      <\u002Ful>\n      <p class=\"note\">macOS will show its own dialog when you continue. Choosing <b>Open System Settings<\u002Fb> there is the one that works.<\u002Fp>\n    <\u002Fdiv>\n    <div class=\"foot\"><div><button class=\"btn btn-quiet\" data-go=\"tiers\">Back<\u002Fbutton><\u002Fdiv>\n      <div><button class=\"btn btn-quiet\" data-go=\"cancelled\">Not now<\u002Fbutton><button class=\"btn btn-primary\" id=\"ask\">Continue<\u002Fbutton><\u002Fdiv><\u002Fdiv>\n  <\u002Fsection>\n\n  <!-- patching -->\n  <section class=\"screen\" id=\"patching\">\n    <div class=\"body\">\n      <p class=\"eyebrow\">Working<\u002Fp>\n      <h1>Adding Subline to Discord<\u002Fh1>\n      <p class=\"lede\">Discord is closed while this happens. It'll start again on its own.<\u002Fp>\n      <div class=\"work\">\n        <div class=\"trail\"><i class=\"on\"><\u002Fi><i class=\"on\"><\u002Fi><i class=\"now\"><\u002Fi><i><\u002Fi><i><\u002Fi><span style=\"margin-left:6px\">step 3 of 5 · writing files<\u002Fspan><\u002Fdiv>\n        <div class=\"bar-i\"><span><\u002Fspan><\u002Fdiv>\n      <\u002Fdiv>\n      <p class=\"note\">This usually takes a few seconds. No time estimate is shown because we genuinely don't have one.<\u002Fp>\n    <\u002Fdiv>\n    <div class=\"foot\"><div><\u002Fdiv><div><button class=\"btn btn-quiet\" disabled=\"\">Cancel<\u002Fbutton><\u002Fdiv><\u002Fdiv>\n  <\u002Fsection>\n\n  <!-- verifying -->\n  <section class=\"screen\" id=\"verifying\">\n    <div class=\"body\">\n      <p class=\"eyebrow\">Working<\u002Fp>\n      <h1>Checking it actually works<\u002Fh1>\n      <p class=\"lede\">Discord is open. We're waiting for a real message in another language to arrive, so we can confirm a translation renders rather than assume it.<\u002Fp>\n      <div class=\"work\"><div class=\"trail\"><span class=\"spin\"><\u002Fspan><span>Listening for a foreign-language message<\u002Fspan><\u002Fdiv><div class=\"bar-i\"><span><\u002Fspan><\u002Fdiv><\u002Fdiv>\n      <p class=\"note\">This can take seconds or minutes depending on your servers. You can stop waiting — everything is already installed.<\u002Fp>\n    <\u002Fdiv>\n    <div class=\"foot\"><div><\u002Fdiv><div><button class=\"btn btn-secondary\" data-go=\"done-unconfirmed\">Stop waiting<\u002Fbutton><\u002Fdiv><\u002Fdiv>\n  <\u002Fsection>\n\n  <!-- done — confirmed -->\n  <section class=\"screen\" id=\"done-confirmed\">\n    <div class=\"body\">\n      <p class=\"eyebrow\">Finished<\u002Fp>\n      <h1>It's working<\u002Fh1>\n      <div class=\"verdict v-ok\"><span class=\"vm vm-ok\" aria-hidden=\"true\">✓<\u002Fspan>\n        <div><h2>Confirmed working<\u002Fh2><p>We watched a translation render in Discord just now. Not an assumption — an observation.<\u002Fp><\u002Fdiv><\u002Fdiv>\n      <div class=\"sample\">\n        <div class=\"who\">rafa · #general<\u002Fdiv>\n        <div class=\"msg\">bora marcar? tô livre depois das 8<\u002Fdiv>\n        <div class=\"sub\"><span class=\"g\">○<\u002Fspan><span class=\"lc\">pt<\u002Fspan><span>shall we make a plan? I'm free after 8<\u002Fspan><\u002Fdiv>\n      <\u002Fdiv>\n      <p class=\"note\">Careful translation isn't set up yet — quick translations only. You can add a key from the Subline menu in Discord whenever you like.<\u002Fp>\n    <\u002Fdiv>\n    <div class=\"foot\"><div><button class=\"btn btn-quiet\" data-go=\"uninstall-confirm\">Uninstall<\u002Fbutton><\u002Fdiv>\n      <div><button class=\"btn btn-primary\" data-go=\"closed\">Done<\u002Fbutton><\u002Fdiv><\u002Fdiv>\n  <\u002Fsection>\n\n  <!-- done — unconfirmed -->\n  <section class=\"screen\" id=\"done-unconfirmed\">\n    <div class=\"body\">\n      <p class=\"eyebrow\">Finished<\u002Fp>\n      <h1>Installed<\u002Fh1>\n      <div class=\"verdict v-warn\"><span class=\"vm vm-ring\" aria-hidden=\"true\">?<\u002Fspan>\n        <div><h2>Installed, not yet confirmed<\u002Fh2><p>Every file was written correctly and Discord restarted. We haven't seen a translation happen yet, because no message in another language has arrived while we watched.<\u002Fp><\u002Fdiv><\u002Fdiv>\n      <ul class=\"rows\">\n        <li><span class=\"n\">01<\u002Fspan><div><b>Open a server where people write in another language.<\u002Fb><p>The translation appears under the message, on its own line.<\u002Fp><\u002Fdiv><\u002Fli>\n        <li><span class=\"n\">02<\u002Fspan><div><b>If nothing appears after a few messages, come back and press Check again.<\u002Fb><p>Nothing needs reinstalling first.<\u002Fp><\u002Fdiv><\u002Fli>\n      <\u002Ful>\n    <\u002Fdiv>\n    <div class=\"foot\"><div><button class=\"btn btn-quiet\">Copy diagnostics<\u002Fbutton><\u002Fdiv>\n      <div><button class=\"btn btn-secondary\" data-go=\"verifying\">Check again<\u002Fbutton><button class=\"btn btn-primary\" data-go=\"closed\">Done<\u002Fbutton><\u002Fdiv><\u002Fdiv>\n  <\u002Fsection>\n\n  <!-- patch-failed -->\n  <section class=\"screen\" id=\"patch-failed\">\n    <div class=\"body\">\n      <p class=\"eyebrow\">Stopped<\u002Fp>\n      <h1>Could not install<\u002Fh1>\n      <p class=\"lede\">Something went wrong while writing to Discord, and we stopped. Discord has been left exactly as it was — half-finished installs get rolled back.<\u002Fp>\n      <details class=\"err\" open=\"\"><summary><span>What went wrong · <code>E_ASAR_WRITE_DENIED<\u002Fcode><\u002Fspan><span>▾<\u002Fspan><\u002Fsummary>\n        <dl><dt>code<\u002Fdt><dd>E_ASAR_WRITE_DENIED<\u002Fdd><dt>path<\u002Fdt><dd>/Applications/Discord.app/Contents/Resources/app.asar<\u002Fdd><dt>cause<\u002Fdt><dd>EACCES: permission denied, open 'app.asar'<\u002Fdd><dt>version<\u002Fdt><dd>Subline 1.4.2 · Discord 0.0.309 · macOS 15.5<\u002Fdd><\u002Fdl>\n        <div class=\"errfoot\"><button class=\"btn btn-secondary\" data-copy=\"\">Copy all four lines<\u002Fbutton><\u002Fdiv><\u002Fdetails>\n      <p class=\"note\">Most often this means Discord reopened mid-install, or the app was moved while we were writing. Trying again is safe.<\u002Fp>\n    <\u002Fdiv>\n    <div class=\"foot\"><div><button class=\"btn btn-quiet\">Copy diagnostics<\u002Fbutton><\u002Fdiv>\n      <div><button class=\"btn btn-quiet\" data-go=\"cancelled\">Cancel<\u002Fbutton><button class=\"btn btn-primary\" id=\"retry\">Try again<\u002Fbutton><\u002Fdiv><\u002Fdiv>\n  <\u002Fsection>\n\n  <!-- betterdiscord-blocked -->\n  <section class=\"screen\" id=\"betterdiscord-blocked\">\n    <div class=\"body\">\n      <p class=\"eyebrow\">Can't continue<\u002Fp>\n      <h1>BetterDiscord is installed<\u002Fh1>\n      <div class=\"verdict v-stop\"><span class=\"vm vm-stop\" aria-hidden=\"true\">✕<\u002Fspan>\n        <div><h2>Subline can't be installed alongside it<\u002Fh2><p>Both work by rewriting the same part of Discord. Installing Subline now would break BetterDiscord, or be silently undone by it, or leave Discord in a state neither can fix. There is no version of this that ends well, so we stop here.<\u002Fp><\u002Fdiv><\u002Fdiv>\n      <ul class=\"rows\">\n        <li><span class=\"n\">01<\u002Fspan><div><b>Remove BetterDiscord using its own uninstaller.<\u002Fb><p>Not by deleting files by hand — that leaves the same conflict behind.<\u002Fp><\u002Fdiv><\u002Fli>\n        <li><span class=\"n\">02<\u002Fspan><div><b>Open Subline again.<\u002Fb><p>It'll pick up from here. Nothing has been changed on this machine.<\u002Fp><\u002Fdiv><\u002Fli>\n      <\u002Ful>\n    <\u002Fdiv>\n    <div class=\"foot\"><div><button class=\"btn btn-quiet\">Copy diagnostics<\u002Fbutton><\u002Fdiv>\n      <div><button class=\"btn btn-quiet\" data-go=\"cancelled\">Close<\u002Fbutton><\u002Fdiv><\u002Fdiv>\n  <\u002Fsection>\n\n  <!-- already-installed -->\n  <section class=\"screen\" id=\"already-installed\">\n    <div class=\"body\">\n      <p class=\"eyebrow\">Status<\u002Fp>\n      <h1>Subline is set up<\u002Fh1>\n      <p class=\"lede\">Nothing to do here. This window is just the status page — close it and carry on.<\u002Fp>\n      <div class=\"verdict v-ok\"><span class=\"vm vm-ok\" aria-hidden=\"true\">✓<\u002Fspan>\n        <div><h2>Active in Discord<\u002Fh2><p>Last confirmed translating 2 hours ago.<\u002Fp><\u002Fdiv><\u002Fdiv>\n      <ul class=\"rows\">\n        <li><span class=\"n\">·<\u002Fspan><div><b>Reading language<\u002Fb><p>English<\u002Fp><\u002Fdiv><\u002Fli>\n        <li><span class=\"n\">·<\u002Fspan><div><b>Translation<\u002Fb><p>Quick only — Careful is not set up<\u002Fp><\u002Fdiv><\u002Fli>\n        <li><span class=\"n\">·<\u002Fspan><div><b>Self-repair after Discord updates<\u002Fb><p>On<\u002Fp><\u002Fdiv><\u002Fli>\n      <\u002Ful>\n    <\u002Fdiv>\n    <div class=\"foot\"><div><button class=\"btn btn-quiet\">Copy diagnostics<\u002Fbutton><button class=\"btn btn-danger\" data-go=\"uninstall-confirm\">Uninstall<\u002Fbutton><\u002Fdiv>\n      <div><button class=\"btn btn-primary\" data-go=\"closed\">Done<\u002Fbutton><\u002Fdiv><\u002Fdiv>\n  <\u002Fsection>\n\n  <!-- uninstall — confirm -->\n  <section class=\"screen\" id=\"uninstall-confirm\">\n    <div class=\"body\">\n      <p class=\"eyebrow\">Needs a decision<\u002Fp>\n      <h1>Remove Subline from Discord?<\u002Fh1>\n      <p class=\"lede\">Discord closes for a moment, its original file is put back, and it starts again. Translations stop appearing.<\u002Fp>\n      <ul class=\"rows\">\n        <li><span class=\"n\">·<\u002Fspan><div><b>Your Discord account, servers and settings are untouched.<\u002Fb><p>Only the file Subline added is removed.<\u002Fp><\u002Fdiv><\u002Fli>\n        <li><span class=\"n\">·<\u002Fspan><div><b>Your reading language and API key are forgotten.<\u002Fb><p>Reinstalling later starts from the beginning.<\u002Fp><\u002Fdiv><\u002Fli>\n      <\u002Ful>\n    <\u002Fdiv>\n    <div class=\"foot\"><div><\u002Fdiv>\n      <div><button class=\"btn btn-quiet\" data-go=\"already-installed\">Keep Subline<\u002Fbutton><button class=\"btn btn-danger\" data-go=\"uninstalled\">Remove Subline<\u002Fbutton><\u002Fdiv><\u002Fdiv>\n  <\u002Fsection>\n\n  <!-- uninstalled -->\n  <section class=\"screen\" id=\"uninstalled\">\n    <div class=\"body\">\n      <p class=\"eyebrow\">Finished<\u002Fp>\n      <h1>Subline is removed<\u002Fh1>\n      <div class=\"verdict v-ok\"><span class=\"vm vm-ok\" aria-hidden=\"true\">✓<\u002Fspan>\n        <div><h2>Discord is back to original<\u002Fh2><p>The file Subline added has been removed and Discord's own file restored. We checked the bytes match what it shipped with.<\u002Fp><\u002Fdiv><\u002Fdiv>\n      <p class=\"note\">You can delete the Subline app itself from Applications, and turn its App Management permission back off in System Settings. Neither is required — with nothing installed, it does nothing.<\u002Fp>\n    <\u002Fdiv>\n    <div class=\"foot\"><div><button class=\"btn btn-quiet\">Copy diagnostics<\u002Fbutton><\u002Fdiv>\n      <div><button class=\"btn btn-secondary\" data-go=\"welcome\">Install again<\u002Fbutton><button class=\"btn btn-primary\" data-go=\"closed\">Close<\u002Fbutton><\u002Fdiv><\u002Fdiv>\n  <\u002Fsection>\n\n  <!-- closed — prototype end state, not a product screen -->\n  <section class=\"screen\" id=\"closed\">\n    <div class=\"body\">\n      <p class=\"eyebrow\">End of flow<\u002Fp>\n      <h1>The window closes here.<\u002Fh1>\n      <p class=\"lede\">Nothing follows this in the product — Subline quits and Discord carries on. This screen exists only so the prototype has somewhere to land.<\u002Fp>\n    <\u002Fdiv>\n    <div class=\"foot\"><div><\u002Fdiv><div><button class=\"btn btn-secondary\" data-go=\"welcome\">Start again<\u002Fbutton><\u002Fdiv><\u002Fdiv>\n  <\u002Fsection>\n\n  <!-- cancelled -->\n  <section class=\"screen\" id=\"cancelled\">\n    <div class=\"body\">\n      <p class=\"eyebrow\">Stopped<\u002Fp>\n      <h1>Cancelled<\u002Fh1>\n      <div class=\"verdict\"><span class=\"vm\" style=\"border-radius:3px;border:1px solid var(--line-strong);color:var(--muted)\" aria-hidden=\"true\">·<\u002Fspan>\n        <div><h2>Nothing was changed<\u002Fh2><p>Discord is exactly as it was. No files written, no permissions kept, nothing left running in the background.<\u002Fp><\u002Fdiv><\u002Fdiv>\n      <p class=\"note\">Open Subline again whenever you want to pick this up. It starts from the beginning; there's no half-finished state to clean up.<\u002Fp>\n    <\u002Fdiv>\n    <div class=\"foot\"><div><\u002Fdiv><div><button class=\"btn btn-secondary\" data-go=\"welcome\">Start again<\u002Fbutton><button class=\"btn btn-primary\" data-go=\"welcome\">Close<\u002Fbutton><\u002Fdiv><\u002Fdiv>\n  <\u002Fsection>\n<\u002Fdiv>\n\n<!-- the system's dialog, not ours -->\n<div class=\"os\" id=\"os\">\n  <div class=\"osbox\" role=\"dialog\" aria-label=\"System permission request\">\n    <div class=\"ic\"><\u002Fdiv>\n    <b>\"Subline\" would like to manage apps on this Mac.<\u002Fb>\n    <p>This app will be able to modify other applications, including updating and deleting them.<\u002Fp>\n    <div class=\"acts\"><button class=\"pri\" id=\"allow\">Open System Settings<\u002Fbutton><button id=\"deny\">Don't Allow<\u002Fbutton><\u002Fdiv>\n  <\u002Fdiv>\n<\u002Fdiv>\n<\u002Fdiv>\n\n<script>\n(function(){\n  var timers=[], flow='clean';\n  function clear(){ timers.forEach(clearTimeout); timers=[]; }\n  function go(id){\n    clear();\n    document.querySelectorAll('.screen').forEach(function(s){\n      if(s.id===id) s.setAttribute('data-on',''); else s.removeAttribute('data-on');\n    });\n    var b=document.querySelector('#'+id+' .body'); if(b) b.scrollTop=0;\n    if(id==='patching') timers.push(setTimeout(function(){ go(flow==='fail'?'patch-failed':'verifying'); }, 2400));\n    if(id==='verifying') timers.push(setTimeout(function(){ go('done-confirmed'); }, 3200));\n  }\n  document.addEventListener('click', function(e){\n    var t=e.target.closest('[data-go]'); if(t) go(t.dataset.go);\n    var c=e.target.closest('[data-copy]'); if(c){ c.textContent='Copied'; setTimeout(function(){ c.textContent='Copy all four lines'; },1400); }\n  });\n  document.getElementById('ask').addEventListener('click', function(){ document.getElementById('os').setAttribute('data-on',''); });\n  document.getElementById('allow').addEventListener('click', function(){ document.getElementById('os').removeAttribute('data-on'); go('patching'); });\n  document.getElementById('deny').addEventListener('click', function(){ document.getElementById('os').removeAttribute('data-on'); });\n  document.getElementById('retry').addEventListener('click', function(){ flow='clean'; go('patching'); });\n\n  document.querySelectorAll('.seg button').forEach(function(b){\n    b.addEventListener('click', function(){\n      flow=b.dataset.flow;\n      document.querySelectorAll('.seg button').forEach(function(o){ o.setAttribute('aria-pressed', String(o===b)); });\n      go(flow==='bd' ? 'betterdiscord-blocked' : flow==='have' ? 'already-installed' : 'welcome');\n    });\n  });\n})();\n<\u002Fscript>\n\n\n<\u002Fbody><\u002Fhtml>"
+  </script>
+</body>
+</html>

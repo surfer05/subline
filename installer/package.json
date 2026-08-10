@@ -1,43 +1,44 @@
 {
-  "name": "@subline/installer",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "description": "Subline — one-click Discord translation installer",
-  "main": "dist/main/main.js",
-  "homepage": "https://github.com/surfer05/subline",
-  "license": "GPL-3.0-or-later",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/surfer05/subline.git"
-  },
-  "scripts": {
-    "build:mod": "node scripts/buildMod.mjs",
-    "build:app": "tsc -p tsconfig.build.json && node scripts/copyRenderer.mjs",
-    "start": "pnpm build:app && electron .",
-    "//pack:dir": "Packaging is a CONFIG step, not a rewrite: build:mod produces build/mod, build:app produces dist, and electron-builder copies both. Named pack:dir because `pnpm pack` is one of pnpm's own builtins and would shadow it. CSC_IDENTITY_AUTO_DISCOVERY=false is belt-and-braces on top of electron-builder.js's `identity: null` default: an unsigned local build must never reach the keychain.",
-    "pack:dir": "pnpm build:mod && pnpm build:app && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir",
-    "dist": "pnpm build:mod && pnpm build:app && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder",
-    "//dist:mac": "UNSIGNED. Signing is opt-in and belongs to the release engineer: `SUBLINE_SIGN=1 SUBLINE_NOTARIZE=1 pnpm dist:mac`, with the credentials in docs/RELEASING.md. The default must never touch the keychain.",
-    "dist:mac": "pnpm build:mod && pnpm build:app && electron-builder --mac",
-    "//dist:win": "Unsigned, deliberately — spec §1 and §10. See docs/RELEASING.md for what SmartScreen does about it.",
-    "dist:win": "pnpm build:mod && pnpm build:app && electron-builder --win",
-    "//release": "Clean checkout → signed, notarized, stapled artefacts + the release manifest. One command. Needs the credentials named in docs/RELEASING.md.",
-    "release": "node scripts/release.mjs",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.renderer.json",
-    "mutate": "node scripts/mutate.mjs"
-  },
-  "//engines": "buildMod.mjs imports src/bundle/spec.ts directly, so that the checks the build runs and the checks the installer runs are the same code. packaging/hooks.mjs does the same. Node strips TypeScript types without a flag from 22.18 on.",
-  "engines": {
-    "node": ">=22.18"
-  },
-  "devDependencies": {
-    "@types/node": "^22.10.0",
-    "electron": "^33",
-    "electron-builder": "^25",
-    "typescript": "^5.7.0",
-    "vitest": "^4.1.10"
-  }
+    "name": "@subline/installer",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "description": "Subline — one-click Discord translation installer",
+    "main": "dist/main/main.js",
+    "homepage": "https://github.com/surfer05/subline",
+    "license": "GPL-3.0-or-later",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/surfer05/subline.git"
+    },
+    "scripts": {
+        "build:mod": "node scripts/buildMod.mjs",
+        "build:app": "tsc -p tsconfig.build.json && node scripts/copyRenderer.mjs",
+        "start": "pnpm build:app && electron .",
+        "//pack:dir": "Packaging is a CONFIG step, not a rewrite: build:mod produces build/mod, build:app produces dist, and electron-builder copies both. Named pack:dir because `pnpm pack` is one of pnpm's own builtins and would shadow it. CSC_IDENTITY_AUTO_DISCOVERY=false is belt-and-braces on top of electron-builder.js's `identity: null` default: an unsigned local build must never reach the keychain.",
+        "pack:dir": "pnpm build:mod && pnpm build:app && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir",
+        "dist": "pnpm build:mod && pnpm build:app && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder",
+        "//dist:mac": "UNSIGNED. Signing is opt-in and belongs to the release engineer: `SUBLINE_SIGN=1 SUBLINE_NOTARIZE=1 pnpm dist:mac`, with the credentials in docs/RELEASING.md. The default must never touch the keychain.",
+        "dist:mac": "pnpm build:mod && pnpm build:app && electron-builder --mac",
+        "//dist:win": "Unsigned, deliberately — spec §1 and §10. See docs/RELEASING.md for what SmartScreen does about it.",
+        "dist:win": "pnpm build:mod && pnpm build:app && electron-builder --win",
+        "//release": "Clean checkout → signed, notarized, stapled artefacts + the release manifest. One command. Needs the credentials named in docs/RELEASING.md.",
+        "release": "node scripts/release.mjs",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "typecheck": "tsc --noEmit && tsc -p tsconfig.renderer.json",
+        "mutate": "node scripts/mutate.mjs",
+        "build:site": "node ../scripts/buildSite.mjs"
+    },
+    "//engines": "buildMod.mjs imports src/bundle/spec.ts directly, so that the checks the build runs and the checks the installer runs are the same code. packaging/hooks.mjs does the same. Node strips TypeScript types without a flag from 22.18 on.",
+    "engines": {
+        "node": ">=22.18"
+    },
+    "devDependencies": {
+        "@types/node": "^22.10.0",
+        "electron": "^33",
+        "electron-builder": "^25",
+        "typescript": "^5.7.0",
+        "vitest": "^4.1.10"
+    }
 }

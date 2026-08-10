@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subline — design set</title>
+<link rel="stylesheet" href="tokens.css">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{font-family:var(--font-sans);color:var(--fg);background:var(--desk);-webkit-font-smoothing:antialiased;
+  line-height:1.5;overflow:hidden}
+.app{display:grid;grid-template-columns:266px minmax(0,1fr);height:100vh}
+
+aside{background:var(--bg);border-right:1px solid var(--line-strong);display:flex;flex-direction:column;min-height:0}
+.brand{padding:22px 22px 18px;border-bottom:1px solid var(--line)}
+.wm{font-family:var(--font-serif);font-size:23px;font-weight:400;letter-spacing:-.012em;line-height:1;
+  display:inline-block;padding-bottom:4px;border-bottom:1.5px solid var(--accent)}
+.brand p{margin:12px 0 0;font-family:var(--font-mono);font-size:10px;letter-spacing:.19em;
+  text-transform:uppercase;color:var(--muted)}
+nav{overflow:auto;padding:8px 0 30px;flex:1;min-height:0}
+.grp{padding:0}
+.grp h2{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.19em;text-transform:uppercase;
+  color:var(--muted);font-weight:400;margin:0;padding:18px 22px 7px}
+.grp ul{list-style:none;margin:0;padding:0}
+.it{display:block;width:100%;text-align:left;font-family:inherit;background:none;border:0;cursor:pointer;
+  padding:7px 22px;color:var(--fg);border-left:2px solid transparent}
+.it b{display:block;font-size:13px;font-weight:500;letter-spacing:-.005em}
+.it span{display:block;font-family:var(--font-mono);font-size:10px;color:var(--muted);margin-top:1px}
+.it:hover{background:var(--panel)}
+.it[aria-current="true"]{background:var(--accent-weak);border-left-color:var(--accent)}
+.it:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
+
+main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.top{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:0 20px;height:52px;
+  background:var(--bg);border-bottom:1px solid var(--line-strong)}
+.ttl{display:flex;align-items:baseline;gap:12px;min-width:0}
+.ttl b{font-size:14px;font-weight:600;letter-spacing:-.005em;white-space:nowrap}
+.ttl code{font-family:var(--font-mono);font-size:10.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tools{display:flex;align-items:center;gap:14px;flex:none}
+.seg{display:flex;border:1px solid var(--line-strong);border-radius:var(--radius-sm);overflow:hidden}
+.seg button{font-family:var(--font-mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+  padding:6px 11px;border:0;background:var(--bg);color:var(--muted);cursor:pointer}
+.seg button + button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-fg)}
+.open{font-family:var(--font-mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--muted);text-decoration:none}
+.open:hover{color:var(--fg)}
+.view{flex:1;min-height:0;background:var(--desk)}
+iframe{width:100%;height:100%;border:0;display:block;background:var(--desk)}
+a{color:var(--accent)}
+a:hover{color:var(--fg)}
+@media (max-width:820px){.app{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}
+  aside{border-right:0;border-bottom:1px solid var(--line-strong);max-height:38vh}}
+</style>
+</head>
+<body>
+<div class="app">
+<aside>
+  <div class="brand"><span class="wm">subline</span><p>Design set</p></div>
+  <nav id="nav">
+<section class="grp"><h2>Prototype</h2><ul>
+<li><button class="it" data-src="prototype/index.html" data-title="Clickable prototype"><b>Clickable prototype</b><span>the seven screens, wired</span></button></li>
+</ul></section>
+<section class="grp"><h2>Theme</h2><ul>
+<li><button class="it" data-src="themes/paper/index.html" data-title="Paper"><b>Paper</b><span>chosen direction</span></button></li>
+<li><button class="it" data-src="themes/console/index.html" data-title="Console"><b>Console</b><span>not taken</span></button></li>
+<li><button class="it" data-src="themes/signal/index.html" data-title="Signal"><b>Signal</b><span>not taken</span></button></li>
+</ul></section>
+<section class="grp"><h2>Contract</h2><ul>
+<li><button class="it" data-src="tokens.css" data-title="tokens.css"><b>tokens.css</b><span>the token set, both schemes</span></button></li>
+</ul></section>
+<section class="grp"><h2>Primitives</h2><ul>
+<li><button class="it" data-src="components/wordmark/index.html" data-title="Wordmark"><b>Wordmark</b><span>identity, palette</span></button></li>
+<li><button class="it" data-src="components/buttons/index.html" data-title="Buttons"><b>Buttons</b><span>variants, footer composition</span></button></li>
+<li><button class="it" data-src="components/verdict/index.html" data-title="Verdict block"><b>Verdict block</b><span>four outcomes, four shapes</span></button></li>
+<li><button class="it" data-src="components/error-block/index.html" data-title="Error detail"><b>Error detail</b><span>code, path, cause</span></button></li>
+<li><button class="it" data-src="components/list/index.html" data-title="List"><b>List</b><span>steps, facts, choices</span></button></li>
+<li><button class="it" data-src="components/select/index.html" data-title="Select"><b>Select</b><span>native, drawn chevron</span></button></li>
+<li><button class="it" data-src="components/progress/index.html" data-title="Progress"><b>Progress</b><span>never faked</span></button></li>
+<li><button class="it" data-src="components/subtitle/index.html" data-title="In-Discord subtitle"><b>In-Discord subtitle</b><span>the line, the markers</span></button></li>
+</ul></section>
+<section class="grp"><h2>Installer · the path</h2><ul>
+<li><button class="it" data-src="screens/welcome/index.html" data-title="welcome"><b>welcome</b><span>step 1</span></button></li>
+<li><button class="it" data-src="screens/tiers/index.html" data-title="tiers"><b>tiers</b><span>step 2</span></button></li>
+<li><button class="it" data-src="screens/choose-language/index.html" data-title="choose-language"><b>choose-language</b><span>step 3</span></button></li>
+<li><button class="it" data-src="screens/permission-explain/index.html" data-title="permission-explain"><b>permission-explain</b><span>step 4</span></button></li>
+<li><button class="it" data-src="screens/permission-waiting/index.html" data-title="permission-waiting"><b>permission-waiting</b><span>waiting on you</span></button></li>
+<li><button class="it" data-src="screens/patching/index.html" data-title="patching"><b>patching</b><span>working</span></button></li>
+<li><button class="it" data-src="screens/verifying/index.html" data-title="verifying"><b>verifying</b><span>working</span></button></li>
+</ul></section>
+<section class="grp"><h2>Installer · outcomes</h2><ul>
+<li><button class="it" data-src="screens/done-confirmed/index.html" data-title="done — confirmed"><b>done — confirmed</b><span>observed working</span></button></li>
+<li><button class="it" data-src="screens/done-unconfirmed/index.html" data-title="done — unconfirmed"><b>done — unconfirmed</b><span>not an error</span></button></li>
+<li><button class="it" data-src="screens/already-installed/index.html" data-title="already-installed"><b>already-installed</b><span>status, not a dead end</span></button></li>
+<li><button class="it" data-src="screens/cancelled/index.html" data-title="cancelled"><b>cancelled</b><span>reassurance</span></button></li>
+</ul></section>
+<section class="grp"><h2>Installer · refusals</h2><ul>
+<li><button class="it" data-src="screens/betterdiscord-blocked/index.html" data-title="betterdiscord-blocked"><b>betterdiscord-blocked</b><span>no way past</span></button></li>
+<li><button class="it" data-src="screens/mod-conflict/index.html" data-title="mod-conflict"><b>mod-conflict</b><span>destructive, and says so</span></button></li>
+<li><button class="it" data-src="screens/discord-not-found/index.html" data-title="discord-not-found"><b>discord-not-found</b><span>where we looked</span></button></li>
+<li><button class="it" data-src="screens/choose-install/index.html" data-title="choose-install"><b>choose-install</b><span>rare</span></button></li>
+<li><button class="it" data-src="screens/discord-running/index.html" data-title="discord-running"><b>discord-running</b><span>consent to quit</span></button></li>
+<li><button class="it" data-src="screens/quit-blocked/index.html" data-title="quit-blocked"><b>quit-blocked</b><span>offered once</span></button></li>
+</ul></section>
+<section class="grp"><h2>Installer · failures</h2><ul>
+<li><button class="it" data-src="screens/permission-blocked/index.html" data-title="permission-blocked"><b>permission-blocked</b><span>deep link</span></button></li>
+<li><button class="it" data-src="screens/patch-failed/index.html" data-title="patch-failed"><b>patch-failed</b><span>code, path, cause</span></button></li>
+<li><button class="it" data-src="screens/helper-failed/index.html" data-title="helper-failed"><b>helper-failed</b><span>partial success</span></button></li>
+<li><button class="it" data-src="screens/launch-failed/index.html" data-title="launch-failed"><b>launch-failed</b><span>installed, not launched</span></button></li>
+<li><button class="it" data-src="screens/broken-install/index.html" data-title="broken-install"><b>broken-install</b><span>repair offered</span></button></li>
+<li><button class="it" data-src="screens/broken-install-unreadable/index.html" data-title="broken-install — unreadable"><b>broken-install — unreadable</b><span>repair withheld</span></button></li>
+<li><button class="it" data-src="screens/mod-bundle-invalid/index.html" data-title="mod-bundle-invalid"><b>mod-bundle-invalid</b><span>our own fault</span></button></li>
+</ul></section>
+<section class="grp"><h2>Site</h2><ul>
+<li><button class="it" data-src="site/hero/index.html" data-title="Hero"><b>Hero</b><span>translated sample</span></button></li>
+<li><button class="it" data-src="site/downloads/index.html" data-title="Downloads"><b>Downloads</b><span>arch asked, not detected</span></button></li>
+<li><button class="it" data-src="site/security-warning/index.html" data-title="Security warnings"><b>Security warnings</b><span>conversion-critical</span></button></li>
+<li><button class="it" data-src="site/privacy/index.html" data-title="Privacy"><b>Privacy</b><span>the honest version</span></button></li>
+</ul></section>
+  </nav>
+</aside>
+<main>
+  <div class="top">
+    <div class="ttl"><b id="t">welcome</b><code id="p">screens/welcome/index.html</code></div>
+    <div class="tools">
+      <div class="seg" role="group" aria-label="Colour scheme">
+        <button data-scheme="system" aria-pressed="true">System</button>
+        <button data-scheme="light" aria-pressed="false">Light</button>
+        <button data-scheme="dark" aria-pressed="false">Dark</button>
+      </div>
+      <a class="open" id="open" href="screens/welcome/index.html" target="_blank" rel="noopener">Open ↗</a>
+    </div>
+  </div>
+  <div class="view"><iframe id="v" src="screens/welcome/index.html" title="Preview"></iframe></div>
+</main>
+</div>
+<script>
+(function(){
+  var v=document.getElementById('v'),t=document.getElementById('t'),p=document.getElementById('p'),
+      open=document.getElementById('open'),items=[].slice.call(document.querySelectorAll('.it')),scheme='system';
+  function paint(){
+    var r=document.documentElement;
+    if(scheme==='system')r.removeAttribute('data-theme');else r.setAttribute('data-theme',scheme);
+    try{
+      var d=v.contentDocument;
+      if(d&&d.documentElement){
+        if(scheme==='system')d.documentElement.removeAttribute('data-theme');
+        else d.documentElement.setAttribute('data-theme',scheme);
+      }
+    }catch(e){}
+  }
+  function select(el){
+    items.forEach(function(i){i.setAttribute('aria-current',i===el?'true':'false');});
+    var src=el.dataset.src;
+    v.src=src;t.textContent=el.dataset.title;p.textContent=src;open.href=src;
+    try{localStorage.setItem('subline.preview',src);}catch(e){}
+  }
+  items.forEach(function(el){el.addEventListener('click',function(){select(el);});});
+  v.addEventListener('load',paint);
+  document.querySelectorAll('.seg button').forEach(function(b){
+    b.addEventListener('click',function(){
+      scheme=b.dataset.scheme;
+      document.querySelectorAll('.seg button').forEach(function(o){o.setAttribute('aria-pressed',String(o===b));});
+      paint();
+    });
+  });
+  document.addEventListener('keydown',function(e){
+    if(e.metaKey||e.ctrlKey||e.altKey)return;
+    var k=e.key,dir=(k==='ArrowDown'||k==='j')?1:(k==='ArrowUp'||k==='k')?-1:0;
+    if(!dir)return;
+    var i=items.findIndex(function(x){return x.getAttribute('aria-current')==='true';});
+    var n=items[Math.max(0,Math.min(items.length-1,i+dir))];
+    if(n){
+      e.preventDefault();select(n);
+      var nv=document.getElementById('nav'),top=n.offsetTop,bot=top+n.offsetHeight;
+      if(top<nv.scrollTop)nv.scrollTop=top-8;
+      else if(bot>nv.scrollTop+nv.clientHeight)nv.scrollTop=bot-nv.clientHeight+8;
+    }
+  });
+  var saved=null;try{saved=localStorage.getItem('subline.preview');}catch(e){}
+  var start=items.filter(function(x){return x.dataset.src===saved;})[0]
+    ||items.filter(function(x){return x.dataset.src==='screens/welcome/index.html';})[0];
+  if(start)select(start);
+})();
+</script>
+</body>
+</html>

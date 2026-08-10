@@ -1,0 +1,61 @@
+<!-- @dsCard group="Components" title="Progress" viewport="1000x640" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subline — Progress</title>
+<link rel="stylesheet" href="../../tokens.css">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-sans);-webkit-font-smoothing:antialiased;line-height:1.55}
+.sheet{max-width:1000px;margin:0 auto;padding:56px 34px 90px}
+.hd{padding-bottom:30px;border-bottom:1px solid var(--line-strong)}
+.kicker{font-family:var(--font-mono);font-size:10px;letter-spacing:.19em;text-transform:uppercase;color:var(--muted);margin:0}
+.hd h1{font-family:var(--font-serif);font-size:38px;line-height:1.08;letter-spacing:-.018em;font-weight:400;margin:16px 0 0}
+.deck{font-size:16.5px;line-height:1.6;color:var(--muted);max-width:46ch;margin:14px 0 0;text-wrap:pretty}
+.spec{display:grid;grid-template-columns:186px 1fr;gap:38px;padding:34px 0;border-bottom:1px solid var(--line);align-items:start}
+.spec:last-child{border-bottom:0}
+.lbl{font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg);margin:0}
+.note{font-size:12.5px;line-height:1.6;color:var(--muted);margin:10px 0 0;text-wrap:pretty}
+.stage{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:26px}
+.stage.plain{background:none;border:0;padding:0}
+@media (max-width:760px){.spec{grid-template-columns:1fr;gap:16px}.sheet{padding:40px 22px 70px}}
+
+.btn{font-family:inherit;font-size:13.5px;font-weight:500;line-height:1.4;padding:9px 18px;
+  border-radius:var(--radius-sm);border:1px solid transparent;background:none;color:var(--fg);cursor:pointer}
+.btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.btn-primary{background:var(--accent);color:var(--accent-fg)}
+.btn-primary:hover{filter:brightness(1.12)}
+.btn-secondary{background:var(--bg);border-color:var(--line-strong)}
+.btn-secondary:hover{border-color:var(--muted)}
+.btn-quiet{color:var(--muted);padding-inline:10px}
+.btn-quiet:hover{color:var(--fg)}
+.btn-danger{color:var(--danger);border-color:color-mix(in oklab,var(--danger) 34%,transparent)}
+.btn-danger:hover{background:var(--danger-weak)}
+.btn[disabled]{opacity:.45;cursor:default}
+.btn-lg{font-size:15px;padding:12px 22px;border-radius:var(--radius)}
+.panel{background:var(--bg);border:1px solid var(--line);border-radius:var(--radius)}
+.grp{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.mono{font-family:var(--font-mono);font-size:12px}
+
+.trail{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--muted);font-family:var(--font-mono);letter-spacing:.02em}
+.trail i{width:6px;height:6px;border-radius:50%;background:var(--line-strong);display:block}
+.trail i.on{background:var(--accent)}
+.trail i.now{background:var(--accent);box-shadow:0 0 0 4px var(--accent-weak)}
+.bar-i{height:3px;border-radius:2px;background:var(--line);overflow:hidden;margin-top:14px}
+.bar-i span{display:block;height:100%;width:34%;border-radius:2px;background:var(--accent);animation:slide 1.5s ease-in-out infinite}
+@keyframes slide{0%{transform:translateX(-105%)}100%{transform:translateX(320%)}}
+.spin{width:15px;height:15px;border-radius:50%;border:2px solid var(--line-strong);border-top-color:var(--accent);animation:spin .8s linear infinite;display:inline-block;vertical-align:-3px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.box{padding:16px}
+</style>
+</head>
+<body><div class="sheet">
+<header class="hd"><p class="kicker">Primitive</p><h1>Progress</h1><p class="deck">Two honest signals and never a third. There is no percentage anywhere in the installer.</p></header>
+<section class="spec"><div><p class="lbl">known steps</p><p class="note">The count is real; the duration is not. The trail counts, the segment only says something is happening.</p></div><div class="stage"><div class="panel box"><div class="trail"><i class="on"></i><i class="on"></i><i class="now"></i><i></i><i></i><span style="margin-left:6px">step 3 of 5 · writing files</span></div><div class="bar-i"><span></span></div></div></div></section>
+<section class="spec"><div><p class="lbl">unknowable</p><p class="note">Waiting for a real foreign-language message to arrive. No fraction of this exists, so none is drawn.</p></div><div class="stage"><div class="panel box"><div class="trail"><span class="spin"></span><span>Listening for a foreign-language message</span></div><div class="bar-i"><span></span></div></div></div></section>
+<section class="spec"><div><p class="lbl">waiting on you</p><p class="note">Nothing to click. The screen moves on by itself and says so.</p></div><div class="stage"><div class="panel box"><div class="trail"><span class="spin"></span><span>Watching System Settings — this screen moves on by itself</span></div></div></div></section>
+</div></body>
+</html>

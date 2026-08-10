@@ -125,20 +125,13 @@ function render(state: FlowState): void {
     detail.textContent = state.detail;
     if (state.busy) {
         const spinner = document.createElement("span");
-        spinner.className = "spinner";
+        spinner.className = "spin";
         detail.prepend(spinner, document.createTextNode(" "));
     }
 
     errorBox.hidden = state.error === null;
-    if (state.error !== null) {
-        // The cause carries Node's errno, and dropping it is how a real failure
-        // reached a user as a bare "IO_ERROR — <path>": enough to know something
-        // broke, not enough for anyone to say what. It is the last line because
-        // the code and path are what a user reads; the errno is what we do.
-        const cause = (state.error as { cause?: string }).cause;
-        errorBox.textContent = `${state.error.code}${state.error.path ? ` — ${state.error.path}` : ""}`
-            + (cause === undefined ? "" : `\n${cause}`);
-    }
+    errorBox.replaceChildren();
+    if (state.error !== null) renderError(state.error);
 
     extra.replaceChildren();
     renderExtra(state);
@@ -148,7 +141,7 @@ function render(state: FlowState): void {
 function renderExtra(state: FlowState): void {
     if (state.step === "choose-install" && state.installs) {
         const list = document.createElement("ul");
-        list.className = "list";
+        list.className = "rows panel pick";
         for (const install of state.installs) {
             const item = document.createElement("li");
             const button = document.createElement("button");
@@ -162,9 +155,13 @@ function renderExtra(state: FlowState): void {
 
     if (state.step === "choose-language" && state.languages) {
         chosenLanguage = state.language ?? null;
+        const field = document.createElement("div");
+        field.className = "fld";
         const label = document.createElement("label");
+        label.className = "lbl";
         label.textContent = "Translate messages into";
         const select = document.createElement("select");
+        select.className = "sel";
         for (const option of state.languages as LanguageOption[]) {
             const node = document.createElement("option");
             node.value = option.code;
@@ -179,36 +176,120 @@ function renderExtra(state: FlowState): void {
             select.append(node);
         }
         select.onchange = () => { chosenLanguage = select.value; };
-        extra.append(label, select);
+        field.append(label, select);
+        extra.append(field);
     }
 
     if (state.step === "discord-running" && state.processes) {
         const note = document.createElement("p");
-        note.className = "sub";
+        note.className = "note";
         note.textContent = `Running as process ${state.processes.map(p => p.pid).join(", ")}.`;
         extra.append(note);
     }
 
     if (state.step === "done" && state.verification) {
-        const verdict = document.createElement("p");
         // THE ONLY PLACE A TICK IS DRAWN, and it reads `confirmed` — never
-        // "we got to the last screen".
-        verdict.className = state.verification.confirmed ? "ok" : "warn";
-        verdict.textContent = state.verification.confirmed
-            ? "✓ Translation is working."
-            : "Installed — but we could not confirm it is working.";
-        const status = document.createElement("p");
-        status.className = "sub";
-        status.textContent = `Status: ${state.verification.status}`;
-        extra.append(verdict, status);
+        // "we got to the last screen". The two endings are different shapes as
+        // well as different colours (✓ against a ring), because the design
+        // contract requires them to survive greyscale — see §4.1.
+        const confirmed = state.verification.confirmed;
+        extra.append(verdictBlock({
+            tone: confirmed ? "ok" : "warn",
+            glyph: confirmed ? "✓" : "?",
+            heading: confirmed ? "Confirmed working" : "Installed, not yet confirmed",
+            body: confirmed
+                ? "We watched a translation render in Discord just now. Not an assumption — an observation."
+                : "Every file was written correctly. No message in another language arrived while we watched.",
+            status: state.verification.status
+        }));
     }
 
     if (state.permissionSettingsUrl !== undefined && state.step !== "done") {
         const hint = document.createElement("p");
-        hint.className = "sub";
+        hint.className = "note";
         hint.textContent = "System Settings › Privacy & Security › App Management";
         extra.append(hint);
     }
+}
+
+
+/**
+ * The failure detail, as a disclosure that stays copyable.
+ *
+ * Invariant §4.3: every failure carries a code, a path and an underlying cause,
+ * and all of it must remain selectable. The cause is where Node's errno lives —
+ * dropping it is how a real Windows failure reached a user as a bare
+ * "IO_ERROR", with the diagnostics bundle knowing no more than the screenshot
+ * did. It is a <details> rather than a wall of text so the code leads and the
+ * rest is there when someone needs it.
+ */
+function renderError(error: { code: string; message?: string; path?: string; cause?: string }): void {
+    const details = document.createElement("details");
+    details.className = "err";
+
+    const summary = document.createElement("summary");
+    const label = document.createElement("span");
+    label.append("What went wrong · ");
+    const code = document.createElement("code");
+    code.textContent = error.code;
+    label.append(code);
+    const chevron = document.createElement("span");
+    chevron.className = "chev";
+    chevron.textContent = "▸";
+    summary.append(label, chevron);
+
+    const list = document.createElement("dl");
+    const row = (term: string, value: string): void => {
+        const dt = document.createElement("dt");
+        dt.textContent = term;
+        const dd = document.createElement("dd");
+        dd.textContent = value;
+        list.append(dt, dd);
+    };
+    row("code", error.code);
+    if (error.message !== undefined) row("message", error.message);
+    if (error.path !== undefined) row("path", error.path);
+    if (error.cause !== undefined) row("cause", error.cause);
+
+    details.append(summary, list);
+    errorBox.append(details);
+}
+
+/**
+ * The end-of-run verdict.
+ *
+ * Two outcomes, and they differ by SHAPE as well as colour — a tick against a
+ * ring — because §4.1 requires the confirmed and unconfirmed endings to survive
+ * greyscale. Nothing here decides which one is shown; that is
+ * `verification.confirmed`, and only `verifyOnce` sets it.
+ */
+function verdictBlock(spec: {
+    tone: "ok" | "warn";
+    glyph: string;
+    heading: string;
+    body: string;
+    status: string;
+}): HTMLElement {
+    const block = document.createElement("div");
+    block.className = `verdict v-${spec.tone}`;
+
+    const mark = document.createElement("span");
+    mark.className = `vm ${spec.tone === "ok" ? "vm-ok" : "vm-ring"}`;
+    mark.setAttribute("aria-hidden", "true");
+    mark.textContent = spec.glyph;
+
+    const copy = document.createElement("div");
+    const heading = document.createElement("h2");
+    heading.textContent = spec.heading;
+    const body = document.createElement("p");
+    body.textContent = spec.body;
+    const status = document.createElement("p");
+    status.className = "note";
+    status.textContent = `Status: ${spec.status}`;
+    copy.append(heading, body, status);
+
+    block.append(mark, copy);
+    return block;
 }
 
 function renderActions(state: FlowState): void {
@@ -218,7 +299,7 @@ function renderActions(state: FlowState): void {
         if (action === "choose-install") continue;
         const button = document.createElement("button");
         button.textContent = ACTION_LABELS[action];
-        if (PRIMARY.includes(action)) button.className = "primary";
+        button.className = PRIMARY.includes(action) ? "btn btn-primary" : "btn btn-secondary";
         button.disabled = state.busy;
         button.onclick = () => void onAction(action);
         actionBar.append(button);

@@ -1,0 +1,69 @@
+<!-- @dsCard group="Site" title="Privacy" viewport="980x820" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subline — Privacy</title>
+<link rel="stylesheet" href="../../tokens.css">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-sans);-webkit-font-smoothing:antialiased;line-height:1.6}
+.wrap{max-width:880px;margin:0 auto;padding:60px 30px}
+h2.sec{font-family:var(--font-serif);font-size:32px;line-height:1.14;letter-spacing:-.015em;font-weight:400;margin:0;max-width:22ch}
+.kicker{font-family:var(--font-mono);font-size:10px;letter-spacing:.19em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+p.lead{font-size:16px;color:var(--muted);max-width:60ch;margin:16px 0 0;text-wrap:pretty}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius)}
+.btn{font-family:inherit;font-size:15px;font-weight:500;padding:12px 22px;border-radius:var(--radius);
+  border:1px solid transparent;background:none;color:var(--fg);cursor:pointer;text-decoration:none;display:inline-block}
+.btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.btn-primary{background:var(--accent);color:var(--accent-fg)}
+.btn-primary:hover{filter:brightness(1.12)}
+.btn-secondary{background:var(--panel);border-color:var(--line-strong)}
+.btn-secondary:hover{border-color:var(--muted)}
+a{color:var(--accent)}
+a:hover{color:var(--fg)}
+.mono{font-family:var(--font-mono);font-size:12.5px}
+.fine{font-size:12.5px;color:var(--muted)}
+.wm-sm{font-family:var(--font-serif);font-size:17px;font-weight:400;letter-spacing:-.01em;display:inline-block;
+  padding-bottom:3px;border-bottom:1.5px solid var(--accent);line-height:1}
+@media (max-width:640px){.wrap{padding:44px 20px}h2.sec{font-size:25px}}
+
+table.pv{width:100%;border-collapse:collapse;margin-top:24px;font-size:14px}
+table.pv th{text-align:left;font-family:var(--font-mono);font-size:10.5px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--muted);font-weight:400;padding:0 14px 10px 0;border-bottom:1px solid var(--line)}
+table.pv td{padding:14px 14px 14px 0;border-bottom:1px solid var(--line);vertical-align:top;color:var(--muted)}
+table.pv td:first-child{color:var(--fg);font-weight:600;white-space:nowrap}
+table.pv td b{color:var(--fg);font-weight:600}
+.plain{border-left:3px solid var(--warn);background:var(--warn-weak);padding:16px 18px;
+  border-radius:var(--radius-sm);margin-top:30px;max-width:64ch}
+.plain h3{margin:0 0 6px;font-family:var(--font-serif);font-size:17px;font-weight:400}
+.plain p{margin:0;font-size:13.5px;color:var(--muted)}
+ul.off{list-style:none;padding:0;margin:26px 0 0;max-width:64ch}
+ul.off li{display:grid;grid-template-columns:20px 1fr;gap:12px;padding:11px 0;border-top:1px solid var(--line);font-size:14px}
+ul.off li:first-child{border-top:0}
+ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);padding-top:3px}
+@media (max-width:640px){table.pv td:first-child{white-space:normal}}
+</style>
+</head>
+<body><div class="wrap">
+<p class="kicker">Privacy</p>
+<h2 class="sec">Where your messages go</h2>
+<p class="lead">Translation cannot happen without sending the text somewhere. Here is every place it goes, in plain terms. We would rather you decide against Subline knowing this than install it without.</p>
+<table class="pv">
+<thead><tr><th>What</th><th>Goes where</th><th>Kept?</th></tr></thead>
+<tbody>
+<tr><td>Message text</td><td>Google Translate for a <b>Quick</b> translation. Anthropic's API for a <b>Careful</b> one, if you've added a key.</td><td>Not by us. We store nothing and run no server.</td></tr>
+<tr><td>Who sent it</td><td>Nowhere. Names, avatars, server and channel names are never sent.</td><td>—</td></tr>
+<tr><td>Your API key</td><td>Stays on your computer, in Discord's own settings storage. Sent only to Anthropic, only by you.</td><td>On your machine.</td></tr>
+<tr><td>Usage data</td><td>None collected. No analytics, no crash reporting, no telemetry of any kind.</td><td>—</td></tr>
+</tbody></table>
+<ul class="off">
+  <li><span class="t">off</span><div><b>Direct messages are not translated unless you turn them on.</b> Off by default, per conversation, and it stays off until you say otherwise.</div></li>
+  <li><span class="t">off</span><div><b>Messages already in your reading language are never sent anywhere.</b> Detection happens on your computer first.</div></li>
+  <li><span class="t">you</span><div><b>You can switch translation off per channel.</b> Nothing leaves your machine from a channel you've disabled.</div></li>
+</ul>
+<div class="plain"><h3>The honest part</h3>
+<p>Google and Anthropic have their own terms, and once text reaches them it is governed by those, not by us. If a conversation is sensitive enough that a third party reading it would matter, turn Subline off for that channel — or don't install it. That is a real trade, and it is yours to make.</p></div></div></body>
+</html>
