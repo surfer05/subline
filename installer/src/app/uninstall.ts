@@ -299,7 +299,22 @@ export function uninstall(ports: UninstallPorts, options: UninstallOptions): Uni
         if (!removed.ok) problems.push(removed.error);
         else settingsRemoved = removed.value;
 
-        if (ports.productDir !== null && existsSync(ports.productDir)) {
+        // THE BUNDLE LIVES INSIDE THIS DIRECTORY. `modBundleDirFor` is
+        // `productDir/mod`, so removing the product directory wholesale
+        // deletes the very thing step 2 has just decided to keep.
+        //
+        // That is not hypothetical. A restore failed with the file in use, step
+        // 2 kept the bundle so the still-patched Discord could start, and then
+        // this ran and deleted it — leaving a stub in Discord's app.asar
+        // pointing at a module that no longer existed. Discord refused to start
+        // at all, with "Cannot find module .../Subline/mod/patcher.js". An
+        // uninstall that fails must leave things working; this one broke the
+        // application it had failed to release.
+        if (modBundleKeptForSafety) {
+            ports.log.warn("uninstall.product-data-kept", {
+                reason: "the mod bundle inside it is still required by a patched Discord"
+            });
+        } else if (ports.productDir !== null && existsSync(ports.productDir)) {
             try {
                 rmSync(ports.productDir, { recursive: true, force: true });
                 productDataRemoved = true;

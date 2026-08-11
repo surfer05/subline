@@ -195,6 +195,41 @@ describe("uninstall", () => {
         expect(existsSync(modDir)).toBe(false);
     });
 
+    it("keeps it even when asked to remove settings, because the bundle lives inside that folder", () => {
+        // THE REGRESSION. The test above passed with keepSettings defaulting to
+        // true, so the settings step never ran. With it false, step 3 removed
+        // the product directory wholesale — and modBundleDirFor is
+        // productDir/mod, so it deleted the bundle step 2 had just decided to
+        // keep. The result on a real machine was Discord refusing to start:
+        // "Cannot find module .../Subline/mod/patcher.js", a stub pointing at
+        // a module that no longer existed. An uninstall that fails must leave
+        // things working.
+        const report = uninstall(
+            ports({ unpatch: install => unpatchFail("FILE_IN_USE", "Discord is using app.asar.") }),
+            { installs: [INSTALL], helper: HELPER_GONE, keepSettings: false }
+        );
+
+        expect(report.discordRestored).toBe(false);
+        expect(report.modBundleKeptForSafety).toBe(true);
+        // The patched Discord can still start.
+        expect(existsSync(join(modDir, "patcher.js"))).toBe(true);
+        expect(existsSync(manifestPathFor(modDir))).toBe(true);
+        // And the folder that contains it survived with it.
+        expect(report.productDataRemoved).toBe(false);
+        expect(existsSync(productDir)).toBe(true);
+    });
+
+    it("does remove the product folder once every Discord is restored", () => {
+        const report = uninstall(ports(), {
+            installs: [INSTALL],
+            helper: HELPER_GONE,
+            keepSettings: false
+        });
+        expect(report.discordRestored).toBe(true);
+        expect(report.productDataRemoved).toBe(true);
+        expect(existsSync(productDir)).toBe(false);
+    });
+
     it("KEEPS the bundle when any Discord is still patched — deleting it would stop Discord starting", () => {
         const report = uninstall(
             ports({
