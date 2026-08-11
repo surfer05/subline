@@ -32,11 +32,14 @@ import {
     readPendingAlerts, releaseManifestUrl, runHelperOnce
 } from "../helper/index.js";
 import { productDirFor } from "../bundle/layout.js";
-import { findDiscordProcesses } from "../app/discordProcess.js";
+import { findDiscordProcesses, quitDiscord } from "../app/discordProcess.js";
 import { locateDiscordInstalls } from "../patcher/locate.js";
 import { unpatchInstall } from "../patcher/patch.js";
 import { usingOriginalFs } from "../patcher/realFs.js";
-import { createFlowPorts, installHelperFor, listProcesses, logDirFor, removeHelperFor, uninstallPaths } from "./ports.js";
+import {
+    createFlowPorts, forceQuit, installHelperFor, listProcesses, logDirFor, removeHelperFor,
+    requestQuit, uninstallPaths
+} from "./ports.js";
 import type { HelperWiring } from "./ports.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -284,7 +287,10 @@ ipcMain.handle("helper:status", async () => ({
 /** What the helper had to say while the app was closed (see `alerts.ts`). */
 ipcMain.handle("helper:alerts", () => readPendingAlerts(productDirFor()));
 
-ipcMain.handle("uninstall:run", async (_event, options: { keepSettings: boolean }): Promise<UninstallReport> => {
+ipcMain.handle("uninstall:run", async (
+    _event,
+    options: { keepSettings: boolean; closeDiscord?: "ask" | "force" }
+): Promise<UninstallReport> => {
     // §8 step 3 FIRST. Restoring Discord under a live helper would have the
     // helper put the patch straight back at its next interval. `removeHelperFor`
     // returns the precondition `uninstall` requires, so this call site cannot
@@ -300,8 +306,35 @@ ipcMain.handle("uninstall:run", async (_event, options: { keepSettings: boolean 
     // arrives already resolved. Without it the failure surfaced as FILE_IN_USE
     // from deep inside the restore, which is a filesystem error standing in for
     // a fact the user could have been told first.
-    const processes = await listProcesses(process.platform, execFileAsync, log);
+    // Uninstall may be asked to close Discord on the user's behalf, exactly as
+    // the install flow does — "one click to install, one click to remove" is not
+    // met by handing someone a file error and letting them work out that the
+    // remedy is to quit an app they believe is already closed.
+    //
+    // Two strengths, and the second is only ever reached from a button that
+    // says so: "ask" is the polite request, "force" is the consented close for
+    // the Windows case where the polite one merely hides Discord in the tray.
     const branches = new Set(installs.map(install => install.branch));
+    if (options.closeDiscord !== undefined) {
+        for (const branch of branches) {
+            const report = await quitDiscord({
+                branch,
+                platform: process.platform,
+                listProcesses: () => listProcesses(process.platform, execFileAsync, log),
+                requestQuit: () => requestQuit(branch, process.platform, execFileAsync),
+                forceQuit: () => forceQuit(branch, process.platform, execFileAsync),
+                force: options.closeDiscord === "force"
+            });
+            log.info("uninstall.quit-discord", {
+                branch,
+                outcome: report.outcome,
+                clear: report.clear,
+                forced: report.forced
+            });
+        }
+    }
+
+    const processes = await listProcesses(process.platform, execFileAsync, log);
     const discordRunning = [...branches]
         .flatMap(branch => findDiscordProcesses(processes, branch, process.platform));
 

@@ -23,7 +23,8 @@ contextBridge.exposeInMainWorld("subline", {
     pickDiscord: () => ipcRenderer.invoke("flow:pick-discord"),
     copyDiagnostics: () => ipcRenderer.invoke("diagnostics:copy"),
     readDiagnostics: () => ipcRenderer.invoke("diagnostics:read"),
-    uninstall: (options: { keepSettings: boolean }) => ipcRenderer.invoke("uninstall:run", options),
+    uninstall: (options: { keepSettings: boolean; closeDiscord?: "ask" | "force" }) =>
+        ipcRenderer.invoke("uninstall:run", options),
     openUrl: (url: string) => ipcRenderer.invoke("shell:open", url),
     onState: (handler: (state: unknown) => void) => {
         const listener = (_event: unknown, state: unknown): void => handler(state);

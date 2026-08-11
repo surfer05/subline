@@ -23,7 +23,7 @@ interface SublineApi {
     pickDiscord(): Promise<string | null>;
     copyDiagnostics(): Promise<number>;
     readDiagnostics(): Promise<string>;
-    uninstall(options: { keepSettings: boolean }): Promise<UninstallReport>;
+    uninstall(options: { keepSettings: boolean; closeDiscord?: "ask" | "force" }): Promise<UninstallReport>;
     openUrl(url: string): Promise<boolean>;
     onState(handler: (state: FlowState) => void): () => void;
 }
@@ -336,18 +336,74 @@ document.getElementById("copy-diagnostics")?.addEventListener("click", () => {
     });
 });
 
+/**
+ * Failures an open Discord causes, and which nothing but closing it will fix.
+ *
+ * DISCORD_RUNNING is the one we check for up front. FILE_IN_USE is the same
+ * situation discovered the hard way — Windows refusing to rename a file that is
+ * held open — and it is listed because a user who sees it can do exactly the
+ * same thing about it.
+ */
+const CLOSING_DISCORD_WOULD_HELP = ["DISCORD_RUNNING", "FILE_IN_USE"];
+
+/**
+ * Show what an uninstall did, and — when the obstacle is a running Discord —
+ * offer to remove it rather than describing it.
+ *
+ * "One click to install, one click to remove" is not met by handing somebody a
+ * file error and leaving them to work out that the remedy is to quit an app
+ * they believe is already closed. The escalation matches the install flow's:
+ * ask Discord politely, and only if that fails offer the forced close, on a
+ * button that says so. On Windows the polite request merely hides Discord in
+ * the system tray, which is why the second step has to exist at all.
+ */
+function showUninstall(report: UninstallReport, escalation: "ask" | "force" | null): void {
+    detail.textContent = report.summary;
+    stepName.textContent = report.clean ? "Removed" : "Not fully removed";
+    extra.replaceChildren();
+    actionBar.replaceChildren();
+
+    errorBox.hidden = report.problems.length === 0;
+    errorBox.replaceChildren();
+    const first = report.problems[0];
+    if (first !== undefined) renderError(first);
+
+    if (first === undefined || !CLOSING_DISCORD_WOULD_HELP.includes(first.code)) return;
+
+    const button = document.createElement("button");
+    button.className = "btn btn-primary";
+    button.textContent = escalation === "force"
+        ? "Close Discord anyway and remove"
+        : "Quit Discord and remove";
+    button.onclick = () => {
+        button.disabled = true;
+        // Politely first. A second failure means the polite request was not
+        // enough — which on Windows usually means the tray — so the next press
+        // is the consented forced close, and there is no third.
+        const next = escalation ?? "ask";
+        void runUninstall(lastKeepSettings, next, next === "ask" ? "force" : null);
+    };
+    actionBar.append(button);
+}
+
+let lastKeepSettings = true;
+
+function runUninstall(
+    keepSettings: boolean,
+    closeDiscord: "ask" | "force" | null,
+    nextEscalation: "ask" | "force" | null
+): Promise<void> {
+    lastKeepSettings = keepSettings;
+    return api
+        .uninstall(closeDiscord === null ? { keepSettings } : { keepSettings, closeDiscord })
+        .then(report => showUninstall(report, nextEscalation));
+}
+
 document.getElementById("uninstall")?.addEventListener("click", () => {
     const keepSettings = !confirm(
         "Remove your settings as well?\n\nOK removes them. Cancel keeps them, so reinstalling picks up where you left off."
     );
-    void api.uninstall({ keepSettings }).then(report => {
-        detail.textContent = report.summary;
-        stepName.textContent = report.clean ? "Removed" : "Not fully removed";
-        extra.replaceChildren();
-        actionBar.replaceChildren();
-        errorBox.hidden = report.problems.length === 0;
-        errorBox.textContent = report.problems.map(problem => problem.code).join(", ");
-    });
+    void runUninstall(keepSettings, null, "ask");
 });
 
 api.onState(render);
