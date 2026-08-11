@@ -232,6 +232,13 @@ const config = {
         allowElevation: false,
         allowToChangeInstallationDirectory: true,
         deleteAppDataOnUninstall: false,
+        /**
+         * Replaces the default "app is running" check — see the file for what
+         * it was doing to people. In short: it showed an unclearable modal on a
+         * machine with no Subline process running, twice, once after a reboot,
+         * and the only escape was deleting the install folder from a terminal.
+         */
+        include: "installer.nsh",
         artifactName: "${productName}-Setup-${version}.${ext}"
     }
 };

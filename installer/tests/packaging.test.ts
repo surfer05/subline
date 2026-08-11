@@ -77,7 +77,7 @@ interface PackagingConfig {
         certificateSubjectName?: string;
         certificatePassword?: string;
     };
-    nsis: { perMachine: boolean; allowElevation: boolean; oneClick: boolean };
+    nsis: { perMachine: boolean; allowElevation: boolean; oneClick: boolean; include?: string };
 }
 
 /**
@@ -447,6 +447,30 @@ describe("checksums", () => {
  * ------------------------------------------------------------------------ */
 
 describe("the packaging configuration is internally consistent", () => {
+    it("the custom NSIS include is a path that actually resolves", () => {
+        // `nsis.include` resolves relative to directories.buildResources, NOT to
+        // the project root. Getting that wrong is silent: electron-builder does
+        // not warn about an include it cannot find, it simply builds an
+        // installer without the customisation — which is how a build shipped
+        // still carrying the "Subline cannot be closed" dialog this file exists
+        // to remove. Nothing about the artefact reveals the difference.
+        expect(config.nsis.include).toBeDefined();
+        const resolved = join(INSTALLER_DIR, config.directories.buildResources, config.nsis.include as string);
+        expect(existsSync(resolved)).toBe(true);
+    });
+
+    it("that include overrides the running-app check", () => {
+        const nsh = readFileSync(
+            join(INSTALLER_DIR, config.directories.buildResources, config.nsis.include as string),
+            "utf8"
+        );
+        // The macro name is electron-builder's, not ours: misspell it and the
+        // file is included, compiles cleanly, and overrides nothing.
+        expect(nsh).toContain("!macro customCheckAppRunning");
+        expect(nsh).toContain("!macroend");
+    });
+
+
     it("names entitlements files that exist", () => {
         const { mac } = config;
         expect(existsSync(join(INSTALLER_DIR, mac.entitlements))).toBe(true);
