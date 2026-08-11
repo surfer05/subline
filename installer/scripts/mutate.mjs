@@ -353,6 +353,22 @@ const MUTATIONS = [
 
     /* ---- uninstall.ts ---- */
     {
+        // The one that shipped. Step 2 kept the bundle; step 3 deleted the
+        // folder containing it, and Discord would not start afterwards.
+        name: "uninstall: removes the product folder that HOLDS the kept bundle",
+        file: "src/app/uninstall.ts",
+        find: "        if (modBundleKeptForSafety) {",
+        with: "        if (false) {",
+        expect: "keeps it even when asked to remove settings"
+    },
+    {
+        name: "uninstall: proceeds with Discord still running",
+        file: "src/app/uninstall.ts",
+        find: "    if (running.length > 0) {",
+        with: "    if (false) {",
+        expect: "refuses while Discord is running"
+    },
+    {
         name: "uninstall: removes the mod bundle even with a Discord still patched",
         file: "src/app/uninstall.ts",
         find: "    if (!discordRestored) {",
@@ -1074,8 +1090,8 @@ const MUTATIONS = [
     {
         name: "feed: releases are published to a repository that is not ours",
         file: "src/helper/feed.ts",
-        find: "export const RELEASE_REPOSITORY = \"surfer05/vctranslate\";",
-        with: "export const RELEASE_REPOSITORY = \"surfer05/subline\";",
+        find: "export const RELEASE_REPOSITORY = \"surfer05/subline\";",
+        with: "export const RELEASE_REPOSITORY = \"surfer05/someone-else\";",
         expect: "repository this code is actually in"
     },
 
@@ -1125,18 +1141,18 @@ const MUTATIONS = [
 
     /* ---- src/main/ports.ts ---- */
     {
-        name: "ports: Windows is told its helper failed to install",
+        name: "ports: Windows silently gets no helper again",
         file: "src/main/ports.ts",
-        find: "    if (platform !== \"darwin\") {\n        return ok({ applicable: false, installed: false, label: null, path: null });",
-        with: "    if (false) {\n        return ok({ applicable: false, installed: false, label: null, path: null });",
-        expect: "on Windows rather than failing"
+        find: "    if (platform === \"win32\") return installWindowsHelper(wiring);",
+        with: "    if (false) return installWindowsHelper(wiring);",
+        expect: "registers a Scheduled Task on Windows"
     },
     {
-        name: "ports: removal on Windows pretends there was an agent",
+        name: "ports: uninstall leaves the Windows scheduled task registered",
         file: "src/main/ports.ts",
-        find: "    if (platform !== \"darwin\") return { applicable: false, removed: false, error: null };",
-        with: "    if (false) return { applicable: false, removed: false, error: null };",
-        expect: "on Windows, which uninstall reads as"
+        find: "        const gone = await removeScheduledTask({ schtasks: wiring.schtasks, platform });",
+        with: "        const gone = { ok: true, value: true };",
+        expect: "deletes the Scheduled Task on Windows"
     },
     {
         name: "ports: removed reports the call succeeded, not that anything went",

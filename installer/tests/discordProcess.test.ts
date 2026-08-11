@@ -232,6 +232,11 @@ describe("quitDiscord", () => {
         delete options.forceQuit;
         const report = await quitDiscord(options);
         expect(report.outcome).toBe("quit-failed");
+        // `clear` is what the caller acts on: a true here would let the patcher
+        // write underneath a Discord that is still running. Asserted on BOTH
+        // quit-failed paths, because a mutation flipping this one survived while
+        // the other path's test carried the only check.
+        expect(report.clear).toBe(false);
         expect(h.quitRequests).toBe(0);
     });
 

@@ -394,3 +394,91 @@ describe("removePluginSettings", () => {
         expect(existsSync(`${settingsPath}.subline-tmp`)).toBe(false);
     });
 });
+
+/* ------------------------------------------------------------------------ *
+ * The invariant
+ * ------------------------------------------------------------------------ */
+
+/**
+ * ONE RULE, ACROSS EVERY OUTCOME: an uninstall must never leave Discord unable
+ * to start.
+ *
+ * Discord starts iff its `app.asar` is the original, OR our stub is still there
+ * AND the bundle that stub requires still exists. There is no third state, and
+ * the failure that produced this block was precisely the fourth: a stub with no
+ * bundle, which Discord answers with "Cannot find module …/Subline/mod/patcher.js"
+ * and then refuses to open at all.
+ *
+ * Every earlier test asserted a property of ONE path. This one sweeps the
+ * combinations, because the bug lived in the interaction between two steps that
+ * were each individually correct — step 2 kept the bundle, step 3 deleted the
+ * folder containing it, and the only test covering step 2 never ran step 3.
+ */
+describe("whatever happens, Discord can still start", () => {
+    const OUTCOMES = [
+        { name: "restore succeeded", unpatch: (i: DiscordInstall) => unpatchOk(i) },
+        {
+            name: "restore refused — file in use",
+            unpatch: () => unpatchFail("FILE_IN_USE", "Discord is using app.asar.")
+        },
+        {
+            name: "restore refused — permission",
+            unpatch: () => unpatchFail("PERMISSION_DENIED", "Not allowed.")
+        },
+        {
+            name: "restore refused — backup missing",
+            unpatch: () => unpatchFail("BACKUP_MISSING", "_app.asar is gone.")
+        }
+    ];
+
+    const HELPERS = [
+        { name: "helper gone", helper: HELPER_GONE },
+        { name: "no helper on this platform", helper: { applicable: false, removed: false, error: null } }
+    ];
+
+    for (const outcome of OUTCOMES) {
+        for (const helper of HELPERS) {
+            for (const keepSettings of [true, false]) {
+                it(`${outcome.name}, ${helper.name}, keepSettings=${keepSettings}`, () => {
+                    const report = uninstall(
+                        ports({ unpatch: outcome.unpatch }),
+                        { installs: [INSTALL], helper: helper.helper, keepSettings }
+                    );
+
+                    // THE INVARIANT. If Discord was not returned to its original
+                    // state, whatever it still requires to start must still be
+                    // on disk.
+                    if (!report.discordRestored) {
+                        expect(existsSync(join(modDir, "patcher.js"))).toBe(true);
+                        expect(existsSync(manifestPathFor(modDir))).toBe(true);
+                        expect(report.modBundleRemoved).toBe(false);
+                        expect(report.productDataRemoved).toBe(false);
+                    }
+
+                    // And a report that claims to be clean must have earned it.
+                    if (report.clean) {
+                        expect(report.discordRestored).toBe(true);
+                        expect(report.problems).toEqual([]);
+                    }
+                });
+            }
+        }
+    }
+
+    it("refuses before touching anything when Discord is running", () => {
+        // The precondition has to hold across the same matrix: nothing removed,
+        // nothing restored, everything retryable.
+        for (const keepSettings of [true, false]) {
+            const report = uninstall(ports(), {
+                installs: [INSTALL],
+                helper: HELPER_GONE,
+                keepSettings,
+                discordRunning: [{ pid: 1 }]
+            });
+            expect(report.problems[0]?.code).toBe("DISCORD_RUNNING");
+            expect(existsSync(join(modDir, "patcher.js"))).toBe(true);
+            expect(existsSync(productDir)).toBe(true);
+            expect(report.clean).toBe(false);
+        }
+    });
+});
