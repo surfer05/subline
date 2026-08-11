@@ -101,19 +101,19 @@ export function isoDuration(seconds: number): string {
  * makes two machines impossible to compare.
  */
 export function renderScheduledTaskXml(spec: ScheduledTaskSpec): string {
-    const repetition =
-        `      <Repetition>\n`
-        + `        <Interval>${isoDuration(spec.intervalSeconds)}</Interval>\n`
-        // No <Duration>, which Task Scheduler reads as "repeat indefinitely".
-        // A bounded duration would stop the helper after a day and leave the
-        // next Discord update unrepaired.
-        + `        <StopAtDurationEnd>false</StopAtDurationEnd>\n`
-        + `      </Repetition>\n`;
-
+    // The hourly repetition rides on the TIME trigger only. A <Repetition>
+    // inside <LogonTrigger> is accepted by some Windows builds and rejected by
+    // others, and it buys nothing: the time trigger already repeats forever, so
+    // the logon trigger's whole job is the single run after a boot.
     const logonTrigger = spec.runAtLogon
-        ? `    <LogonTrigger>\n      <Enabled>true</Enabled>\n${repetition}    </LogonTrigger>\n`
+        ? `    <LogonTrigger>\n      <Enabled>true</Enabled>\n    </LogonTrigger>\n`
         : "";
 
+    // <Settings> is a SEQUENCE, not a bag: Task Scheduler validates the order
+    // and rejects the whole document with nothing but "the task XML is
+    // malformed" when it is wrong. Only the settings that earn their place are
+    // emitted, in schema order — every one left out has a default we are happy
+    // with, and each one included is another chance to get the order wrong.
     return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -124,7 +124,11 @@ export function renderScheduledTaskXml(spec: ScheduledTaskSpec): string {
 ${logonTrigger}    <TimeTrigger>
       <StartBoundary>2020-01-01T00:00:00</StartBoundary>
       <Enabled>true</Enabled>
-${repetition}    </TimeTrigger>
+      <Repetition>
+        <Interval>${isoDuration(spec.intervalSeconds)}</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </TimeTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
@@ -136,15 +140,9 @@ ${repetition}    </TimeTrigger>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
     <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
     <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
-    <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
-    <Priority>7</Priority>
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -159,6 +157,8 @@ ${repetition}    </TimeTrigger>
 export interface SchtasksPort {
     /** `schtasks /Create /TN <name> /XML <path> /F` */
     create(name: string, xmlPath: string): Promise<Result<true>>;
+    /** Flags only, no XML — the fallback. See `createSimple` in ports.ts. */
+    createSimple(name: string, command: string): Promise<Result<true>>;
     /** `schtasks /Delete /TN <name> /F` */
     remove(name: string): Promise<Result<true>>;
     /** `schtasks /Query /TN <name>` — is it registered right now? */
@@ -178,6 +178,12 @@ export interface ScheduledTaskReport {
     /** True when a previous registration was replaced. */
     replaced: boolean;
     registered: boolean;
+    /**
+     * True when the precise definition was refused and the flags-only fallback
+     * was used instead. Recorded rather than hidden: it means the helper runs
+     * hourly but not at logon, and does not catch up a missed window.
+     */
+    simplified?: boolean;
 }
 
 /**
@@ -227,8 +233,30 @@ export async function installScheduledTask(
         // Reporting the registration result matters more than the tidy-up.
     }
 
+    // A rejected document must not mean no helper. Task Scheduler answers an
+    // XML it dislikes with nothing more useful than "the task XML is malformed",
+    // and the difference between a precise definition and a working one is not
+    // worth a user losing self-repair entirely. So: try the definition we want,
+    // and if Windows will not take it, register the one it certainly will.
     if (!created.ok) {
-        return err<ScheduledTaskReport>("HELPER_REGISTRATION_FAILED", created.error.message, { path: spec.name });
+        const simple = await schtasks.createSimple(
+            spec.name,
+            `"${spec.executablePath}" ${spec.arguments.join(" ")}`
+        );
+        if (simple.ok && await schtasks.exists(spec.name)) {
+            return ok({ name: spec.name, replaced, registered: true, simplified: true });
+        }
+    }
+
+    if (!created.ok) {
+        // Re-wrapped WITH the cause. Dropping it here is how a real failure
+        // reached a user as "Windows refused to register the Subline helper
+        // task" and nothing else — schtasks had said exactly why on stderr, and
+        // this line threw it away one level above the port that captured it.
+        return err<ScheduledTaskReport>("HELPER_REGISTRATION_FAILED", created.error.message, {
+            path: spec.name,
+            ...(created.error.cause === undefined ? {} : { cause: created.error.cause })
+        });
     }
 
     // CONFIRMED, not assumed — the same standard `installLaunchAgent` and the
@@ -243,7 +271,7 @@ export async function installScheduledTask(
         );
     }
 
-    return ok({ name: spec.name, replaced, registered });
+    return ok({ name: spec.name, replaced, registered, simplified: false });
 }
 
 /**

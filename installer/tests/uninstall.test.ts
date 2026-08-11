@@ -205,7 +205,7 @@ describe("uninstall", () => {
         // a module that no longer existed. An uninstall that fails must leave
         // things working.
         const report = uninstall(
-            ports({ unpatch: install => unpatchFail("FILE_IN_USE", "Discord is using app.asar.") }),
+            ports({ unpatch: () => unpatchFail("FILE_IN_USE", "Discord is using app.asar.") }),
             { installs: [INSTALL], helper: HELPER_GONE, keepSettings: false }
         );
 
@@ -416,7 +416,7 @@ describe("removePluginSettings", () => {
  */
 describe("whatever happens, Discord can still start", () => {
     const OUTCOMES = [
-        { name: "restore succeeded", unpatch: (i: DiscordInstall) => unpatchOk(i) },
+        { name: "restore succeeded", unpatch: unpatchOk },
         {
             name: "restore refused — file in use",
             unpatch: () => unpatchFail("FILE_IN_USE", "Discord is using app.asar.")

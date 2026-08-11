@@ -231,6 +231,26 @@ export function createSchtasks(exec: Exec = (file, args) => run(file, args)): Sc
                 });
             }
         },
+        /**
+         * Register without an XML document.
+         *
+         * The fallback for when Task Scheduler refuses the precise definition.
+         * It loses StartWhenAvailable and the at-logon run — a machine switched
+         * off at the scheduled hour simply waits for the next one — but it uses
+         * only flags that every supported Windows accepts, and a helper that
+         * repairs Discord an hour late beats no helper at all.
+         */
+        async createSimple(name: string, command: string): Promise<Result<true>> {
+            try {
+                await exec("schtasks", ["/Create", "/TN", name, "/TR", command, "/SC", "HOURLY", "/F"]);
+                return ok(true);
+            } catch (cause) {
+                return err<true>("HELPER_REGISTRATION_FAILED", "Windows refused the simplified helper task too.", {
+                    path: name,
+                    cause
+                });
+            }
+        },
         async remove(name: string): Promise<Result<true>> {
             try {
                 await exec("schtasks", ["/Delete", "/TN", name, "/F"]);

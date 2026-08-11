@@ -152,12 +152,41 @@ describe("registering", () => {
 
     it("removes the hand-off XML even when registration fails", async () => {
         schtasks.failCreate = true;
+        // Both paths refused, so this really is a failure rather than a
+        // fallback — otherwise the assertion below tests the wrong branch.
+        schtasks.failCreateSimple = true;
         const result = await install();
         expect(result.ok).toBe(false);
         // A leftover definition next to a task that does not exist is worse
         // than no file at all: the next reader cannot tell which is true.
         expect(readdirSync(workDir)).toEqual([]);
         expect(existsSync(join(workDir, "subline-helper-task.xml"))).toBe(false);
+    });
+
+    it("falls back to a flags-only task when Windows refuses the XML", async () => {
+        // Task Scheduler answers an XML it dislikes with "the task XML is
+        // malformed" and nothing else. A user losing self-repair entirely over
+        // a schema quibble is a worse outcome than a helper that runs hourly
+        // but not at logon.
+        schtasks.failCreate = true;
+        const result = await install();
+
+        expect(result.ok).toBe(true);
+        if (!result.ok) throw new Error(result.error.message);
+        expect(result.value.registered).toBe(true);
+        expect(result.value.simplified).toBe(true);
+        expect(schtasks.calls).toContain(`create-simple ${HELPER_TASK_NAME}`);
+        // It still runs the right thing.
+        expect(schtasks.lastSimpleCommand).toContain(EXE);
+        expect(schtasks.lastSimpleCommand).toContain("--helper");
+    });
+
+    it("does not fall back when the XML was accepted", async () => {
+        const result = await install();
+        expect(result.ok).toBe(true);
+        if (!result.ok) throw new Error(result.error.message);
+        expect(result.value.simplified).toBe(false);
+        expect(schtasks.calls.some(call => call.startsWith("create-simple"))).toBe(false);
     });
 
     it("does not report success from the create's exit code alone", async () => {

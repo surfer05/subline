@@ -335,7 +335,11 @@ export interface FakeSchtasks extends SchtasksPort {
     /** The XML handed to `/Create`, so a test can read what would be registered. */
     lastXml: string | null;
     failCreate: boolean;
+    /** Refuse the flags-only fallback as well. */
+    failCreateSimple: boolean;
     failRemove: boolean;
+    /** The command handed to the fallback, so a test can see what would run. */
+    lastSimpleCommand: string | null;
     /** Report the task as absent even after a successful create. */
     lieAboutRegistered: boolean;
 }
@@ -356,6 +360,8 @@ export function makeFakeSchtasks(overrides: Partial<FakeSchtasks> = {}): FakeSch
         registered: new Set<string>(),
         lastXml: null,
         failCreate: false,
+        failCreateSimple: false,
+        lastSimpleCommand: null,
         failRemove: false,
         lieAboutRegistered: false,
         async create(name: string, xmlPath: string) {
@@ -372,6 +378,18 @@ export function makeFakeSchtasks(overrides: Partial<FakeSchtasks> = {}): FakeSch
                 return {
                     ok: false as const,
                     error: { code: "HELPER_REGISTRATION_FAILED" as const, message: "schtasks said no" }
+                };
+            }
+            if (!fake.lieAboutRegistered) fake.registered.add(name);
+            return { ok: true as const, value: true as const };
+        },
+        async createSimple(name: string, command: string) {
+            fake.calls.push(`create-simple ${name}`);
+            fake.lastSimpleCommand = command;
+            if (fake.failCreateSimple) {
+                return {
+                    ok: false as const,
+                    error: { code: "HELPER_REGISTRATION_FAILED" as const, message: "schtasks said no again" }
                 };
             }
             if (!fake.lieAboutRegistered) fake.registered.add(name);

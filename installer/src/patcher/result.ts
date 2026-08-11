@@ -117,8 +117,14 @@ export function err<T>(
 }
 
 function describeCause(cause: unknown): string {
-    if (cause instanceof Error) return `${cause.name}: ${cause.message}`;
-    return String(cause);
+    if (!(cause instanceof Error)) return String(cause);
+    // A rejected child process carries what the command actually SAID on
+    // stderr, and Node does not always fold it into the message. That text is
+    // the whole diagnostic value — "schtasks refused" is not actionable,
+    // "ERROR: Cannot create a file when that file already exists" is.
+    const stderr = (cause as { stderr?: unknown }).stderr;
+    const detail = typeof stderr === "string" && stderr.trim() !== "" ? ` — ${stderr.trim()}` : "";
+    return `${cause.name}: ${cause.message}${detail}`;
 }
 
 /** Node's errno, when the thrown value carries one. */
