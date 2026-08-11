@@ -16,7 +16,9 @@
  */
 
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron";
+import { execFile } from "node:child_process";
 import { userInfo } from "node:os";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -30,13 +32,16 @@ import {
     readPendingAlerts, releaseManifestUrl, runHelperOnce
 } from "../helper/index.js";
 import { productDirFor } from "../bundle/layout.js";
+import { findDiscordProcesses } from "../app/discordProcess.js";
 import { locateDiscordInstalls } from "../patcher/locate.js";
 import { unpatchInstall } from "../patcher/patch.js";
 import { usingOriginalFs } from "../patcher/realFs.js";
-import { createFlowPorts, installHelperFor, logDirFor, removeHelperFor, uninstallPaths } from "./ports.js";
+import { createFlowPorts, installHelperFor, listProcesses, logDirFor, removeHelperFor, uninstallPaths } from "./ports.js";
 import type { HelperWiring } from "./ports.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+const execFileAsync = promisify(execFile);
 
 let window: BrowserWindow | null = null;
 let flow: InstallFlow | null = null;
@@ -288,14 +293,27 @@ ipcMain.handle("uninstall:run", async (_event, options: { keepSettings: boolean 
 
     const located = locateDiscordInstalls({ platform: process.platform });
     const installs = located.ok ? located.value : [];
+
+    // Restoring Discord renames _app.asar back over app.asar, and Windows
+    // refuses to rename a file a running process holds open. Looked up here
+    // because `uninstall` does no I/O of its own — the same reason `helper`
+    // arrives already resolved. Without it the failure surfaced as FILE_IN_USE
+    // from deep inside the restore, which is a filesystem error standing in for
+    // a fact the user could have been told first.
+    const processes = await listProcesses(process.platform, execFileAsync, log);
+    const branches = new Set(installs.map(install => install.branch));
+    const discordRunning = [...branches]
+        .flatMap(branch => findDiscordProcesses(processes, branch, process.platform));
+
     log.info("uninstall.start", {
         installs: installs.length,
         keepSettings: options.keepSettings,
-        helperRemoved: helper.removed
+        helperRemoved: helper.removed,
+        discordRunning: discordRunning.length
     });
     return uninstall(
         { unpatch: (install, opts) => unpatchInstall(install, opts), ...uninstallPaths(), log },
-        { installs, keepSettings: options.keepSettings, helper }
+        { installs, keepSettings: options.keepSettings, helper, discordRunning }
     );
 });
 

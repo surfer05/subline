@@ -86,6 +86,14 @@ export interface UninstallOptions {
     keepSettings?: boolean;
     /** The result of stopping the background helper, which must already have happened. */
     helper: HelperRemoval;
+    /**
+     * Discord processes seen just before this call, if the caller looked.
+     *
+     * Computed by the caller for the same reason `helper` is: this function does
+     * no I/O of its own. Undefined means "not checked", which is how every
+     * existing caller behaved and stays valid.
+     */
+    discordRunning?: readonly { pid: number }[];
 }
 
 export interface RestoreOutcome {
@@ -201,6 +209,39 @@ export function uninstall(ports: UninstallPorts, options: UninstallOptions): Uni
                 + "restart your Mac and try again."
         };
     }
+    // 0b. THE SECOND PRECONDITION. Restoring Discord means renaming _app.asar
+    //     back over app.asar, and Windows refuses to rename a file a running
+    //     process holds open. Without this the attempt got as far as touching
+    //     Discord's folder and failed with FILE_IN_USE — a filesystem error
+    //     standing in for a fact the user could have been told plainly, and
+    //     acted on, before anything was tried.
+    //
+    //     The install flow checks this twice. Uninstall did not check at all.
+    const running = options.discordRunning ?? [];
+    if (running.length > 0) {
+        const error: PatcherError = {
+            code: "DISCORD_RUNNING",
+            message: "Discord is running, so its files cannot be changed back."
+        };
+        ports.log.error("uninstall.discord-running", { pids: running.map(p => p.pid).join(",") });
+        return {
+            restores: [],
+            helperStopped,
+            discordRestored: false,
+            modBundleRemoved: false,
+            modBundleKeptForSafety: true,
+            settingsRemoved: false,
+            productDataRemoved: false,
+            translationCache: "left-in-discord-storage",
+            problems: [error],
+            clean: false,
+            summary:
+                "Quit Discord first — on Windows, check the system tray near the clock. Its files cannot be "
+                + "put back while it is using them. Nothing has been changed, so Discord keeps working exactly "
+                + "as it does now."
+        };
+    }
+
     ports.log.info("uninstall.helper-stopped", {
         applicable: options.helper.applicable,
         removed: options.helper.removed

@@ -134,6 +134,37 @@ describe("uninstall — the background helper must be stopped first (§8 step 3)
         expect(report.discordRestored).toBe(true);
     });
 
+    it("refuses while Discord is running, before touching anything", () => {
+        // Windows will not rename a file a running process holds open, so the
+        // restore failed from deep inside with FILE_IN_USE — a filesystem error
+        // standing in for a fact we could check first and the user could act on.
+        // Install guards this twice; uninstall did not guard it at all.
+        const report = uninstall(ports(), {
+            installs: [INSTALL],
+            helper: HELPER_GONE,
+            discordRunning: [{ pid: 4242 }]
+        });
+
+        expect(report.problems[0]?.code).toBe("DISCORD_RUNNING");
+        expect(report.clean).toBe(false);
+        expect(report.discordRestored).toBe(false);
+        expect(report.summary).toMatch(/quit discord/i);
+        // Named, so a Windows user is sent to the one place it hides.
+        expect(report.summary).toMatch(/tray/i);
+        // Nothing was deleted, so the user can retry from exactly here.
+        expect(existsSync(manifestPathFor(modDir))).toBe(true);
+        expect(existsSync(join(productDir, "status.json"))).toBe(true);
+    });
+
+    it("proceeds when Discord is not running", () => {
+        const report = uninstall(ports(), {
+            installs: [INSTALL],
+            helper: HELPER_GONE,
+            discordRunning: []
+        });
+        expect(report.discordRestored).toBe(true);
+    });
+
     it("records that the helper is gone", () => {
         const report = uninstall(ports(), { installs: [INSTALL], helper: HELPER_GONE });
         expect(report.helperStopped).toBe(true);

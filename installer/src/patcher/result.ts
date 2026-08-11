@@ -25,6 +25,14 @@ export type PatcherErrorCode =
      * opposite — nothing needs granting, something needs closing.
      */
     | "FILE_IN_USE"
+    /**
+     * Discord is running, so its files cannot be changed.
+     *
+     * Not an I/O failure: it is a fact we can check BEFORE touching anything,
+     * and the remedy is one the user can act on. Uninstall used to discover it
+     * the hard way, as a FILE_IN_USE from a rename Windows refused.
+     */
+    | "DISCORD_RUNNING"
     /** The install is in a half-patched / damaged state; refuse to make it worse. */
     | "BROKEN_INSTALL"
     /** Another client mod (Vencord, BetterDiscord, Equicord, …) owns this install. */
