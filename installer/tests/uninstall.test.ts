@@ -281,6 +281,27 @@ describe("uninstall", () => {
         expect(existsSync(productDir)).toBe(false);
     });
 
+    it("says settings were kept when they were kept", () => {
+        const report = uninstall(ports(), { installs: [INSTALL], keepSettings: true, helper: HELPER_GONE });
+        expect(report.settingsRemoved).toBe(false);
+        expect(report.summary).toContain("were kept");
+        expect(report.summary).not.toContain("were removed");
+    });
+
+    it("never claims a removal that did not happen", () => {
+        // The summary used to read `keepSettings` — the REQUEST — so a removal
+        // that was asked for and then did not happen still announced "your
+        // settings were removed". A screen telling someone something untrue
+        // about their own machine is worse than one that says nothing.
+        const report = uninstall(
+            ports({ productDir: null, vencordSettingsPath: join(root, "nowhere", "settings.json") }),
+            { installs: [INSTALL], keepSettings: false, helper: HELPER_GONE }
+        );
+        expect(report.settingsRemoved).toBe(false);
+        expect(report.productDataRemoved).toBe(false);
+        expect(report.summary).not.toContain("Your settings were removed");
+    });
+
     it("is honest that the translation cache is not ours to delete", () => {
         const report = uninstall(ports(), { installs: [INSTALL], keepSettings: false, helper: HELPER_GONE });
         expect(report.translationCache).toBe("left-in-discord-storage");

@@ -357,7 +357,7 @@ const CLOSING_DISCORD_WOULD_HELP = ["DISCORD_RUNNING", "FILE_IN_USE"];
  * button that says so. On Windows the polite request merely hides Discord in
  * the system tray, which is why the second step has to exist at all.
  */
-function showUninstall(report: UninstallReport, escalation: "ask" | "force" | null): void {
+function showUninstall(report: UninstallReport, mayRetry: boolean): void {
     detail.textContent = report.summary;
     stepName.textContent = report.clean ? "Removed" : "Not fully removed";
     extra.replaceChildren();
@@ -369,19 +369,18 @@ function showUninstall(report: UninstallReport, escalation: "ask" | "force" | nu
     if (first !== undefined) renderError(first);
 
     if (first === undefined || !CLOSING_DISCORD_WOULD_HELP.includes(first.code)) return;
+    // Offered ONCE. The main process escalates from a polite request to a
+    // forced close inside that single press, so a second failure means
+    // something other than an open Discord is holding the files, and another
+    // button would only repeat work that has already been done.
+    if (!mayRetry) return;
 
     const button = document.createElement("button");
     button.className = "btn btn-primary";
-    button.textContent = escalation === "force"
-        ? "Close Discord anyway and remove"
-        : "Quit Discord and remove";
+    button.textContent = "Quit Discord and remove";
     button.onclick = () => {
         button.disabled = true;
-        // Politely first. A second failure means the polite request was not
-        // enough — which on Windows usually means the tray — so the next press
-        // is the consented forced close, and there is no third.
-        const next = escalation ?? "ask";
-        void runUninstall(lastKeepSettings, next, next === "ask" ? "force" : null);
+        void runUninstall(lastKeepSettings, "ask", false);
     };
     actionBar.append(button);
 }
@@ -391,19 +390,19 @@ let lastKeepSettings = true;
 function runUninstall(
     keepSettings: boolean,
     closeDiscord: "ask" | "force" | null,
-    nextEscalation: "ask" | "force" | null
+    mayRetry: boolean
 ): Promise<void> {
     lastKeepSettings = keepSettings;
     return api
         .uninstall(closeDiscord === null ? { keepSettings } : { keepSettings, closeDiscord })
-        .then(report => showUninstall(report, nextEscalation));
+        .then(report => showUninstall(report, mayRetry));
 }
 
 document.getElementById("uninstall")?.addEventListener("click", () => {
     const keepSettings = !confirm(
         "Remove your settings as well?\n\nOK removes them. Cancel keeps them, so reinstalling picks up where you left off."
     );
-    void runUninstall(keepSettings, null, "ask");
+    void runUninstall(keepSettings, null, true);
 });
 
 api.onState(render);

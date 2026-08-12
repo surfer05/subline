@@ -337,7 +337,16 @@ export function uninstall(ports: UninstallPorts, options: UninstallOptions): Uni
         translationCache: "left-in-discord-storage",
         problems,
         clean,
-        summary: summarize({ restores, discordRestored, problems, keepSettings, modBundleKeptForSafety })
+        summary: summarize({
+            restores,
+            discordRestored,
+            problems,
+            // Either counts: a machine with no settings file still had its
+            // product folder removed, and "nothing was there to delete" is not
+            // the same statement as "we kept your settings".
+            settingsRemoved: settingsRemoved || productDataRemoved,
+            modBundleKeptForSafety
+        })
     };
 }
 
@@ -345,7 +354,8 @@ function summarize(input: {
     restores: RestoreOutcome[];
     discordRestored: boolean;
     problems: PatcherError[];
-    keepSettings: boolean;
+    /** What ACTUALLY happened, not what was asked for. */
+    settingsRemoved: boolean;
     modBundleKeptForSafety: boolean;
 }): string {
     if (input.restores.length === 0) {
@@ -366,9 +376,13 @@ function summarize(input: {
             + "keeps working exactly as it does now. The diagnostics log has the details.";
     }
 
-    const tail = input.keepSettings
-        ? " Your settings and cached translations were kept, so reinstalling picks up where you left off."
-        : " Your settings were removed. Cached translations live inside Discord's own storage and are no longer "
-          + "read by anything.";
+    // Reads the OUTCOME, not the request. It used to read `keepSettings`, so a
+    // removal that was asked for and then did not happen still announced "your
+    // settings were removed" — a screen telling the user something about their
+    // own machine that was not true.
+    const tail = input.settingsRemoved
+        ? " Your settings were removed. Cached translations live inside Discord's own storage and are no longer "
+          + "read by anything."
+        : " Your settings and cached translations were kept, so reinstalling picks up where you left off.";
     return `Discord has been put back to normal and Subline has been removed.${tail}`;
 }

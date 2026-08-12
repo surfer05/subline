@@ -317,20 +317,43 @@ ipcMain.handle("uninstall:run", async (
     const branches = new Set(installs.map(install => install.branch));
     if (options.closeDiscord !== undefined) {
         for (const branch of branches) {
-            const report = await quitDiscord({
+            const quit = (force: boolean) => quitDiscord({
                 branch,
                 platform: process.platform,
                 listProcesses: () => listProcesses(process.platform, execFileAsync, log),
                 requestQuit: () => requestQuit(branch, process.platform, execFileAsync),
                 forceQuit: () => forceQuit(branch, process.platform, execFileAsync),
-                force: options.closeDiscord === "force"
+                force
             });
+
+            // ONE PRESS, NOT TWO. The button that reaches here says "Quit
+            // Discord and remove", so closing Discord is what the user has
+            // already agreed to — making them press a second button to grant
+            // permission they just gave is friction, not consent. On Windows
+            // the polite request almost always fails anyway, because closing
+            // Discord's window only hides it in the tray.
+            //
+            // The escalation itself is unchanged: ask first, force only if
+            // asking did not work. Nothing is force-closed that would have
+            // closed politely.
+            let report = await quit(options.closeDiscord === "force");
             log.info("uninstall.quit-discord", {
                 branch,
                 outcome: report.outcome,
                 clear: report.clear,
                 forced: report.forced
             });
+
+            if (!report.clear && !report.forced) {
+                report = await quit(true);
+                log.info("uninstall.quit-discord", {
+                    branch,
+                    outcome: report.outcome,
+                    clear: report.clear,
+                    forced: report.forced,
+                    escalated: true
+                });
+            }
         }
     }
 
