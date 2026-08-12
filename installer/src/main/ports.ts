@@ -13,7 +13,7 @@
  * runnable from a plain Node process, which is how the ports get tested at all.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -326,8 +326,26 @@ async function launchDiscord(
 ): Promise<Result<true>> {
     try {
         if (platform === "win32") {
-            await exec("cmd", ["/c", "start", "", join(install.rootPath, processNameFor(install.branch, "win32"))]);
+            // SPAWNED AND ABANDONED, not exec'd and awaited.
+            //
+            // `execFile` resolves when the child's stdio pipes close, not when
+            // the child exits — and Discord inherits those pipes, so the promise
+            // waited for Discord to be closed by the user. The install screen
+            // sat on "Starting Discord…" for as long as Discord stayed open,
+            // never reaching verification, with everything already correctly
+            // patched behind it.
+            //
+            // `detached` puts Discord in its own process group so it survives
+            // this installer exiting; `stdio: "ignore"` is what actually frees
+            // us; `unref()` stops Node keeping the event loop alive for it.
+            const child = spawn(join(install.rootPath, processNameFor(install.branch, "win32")), [], {
+                detached: true,
+                stdio: "ignore"
+            });
+            child.unref();
         } else {
+            // `open` returns as soon as it has asked Launch Services to start
+            // the app, so macOS never had this problem.
             await exec("/usr/bin/open", ["-a", install.rootPath]);
         }
         return ok(true);
