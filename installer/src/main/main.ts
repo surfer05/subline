@@ -45,11 +45,46 @@ import type { HelperWiring } from "./ports.js";
 const here = dirname(fileURLToPath(import.meta.url));
 
 const execFileAsync = promisify(execFile);
-
 let window: BrowserWindow | null = null;
 let flow: InstallFlow | null = null;
 
 const log = new DiagnosticsLog({ dir: logDirFor() });
+
+/**
+ * Nothing fails without leaving a record.
+ *
+ * Electron shows "A JavaScript error occurred in the main process" for an
+ * uncaught throw and writes nothing anywhere — the user gets a stack trace in a
+ * dialog they cannot copy, and the diagnostics log, which is the one thing we
+ * ask them to send, has no idea anything happened. An unhandled rejection is
+ * worse: no dialog at all, just a step that never advances, which is exactly
+ * what "stuck on Starting Discord" looked like.
+ *
+ * Registered before anything else can throw, and deliberately does NOT exit:
+ * the flow may still be usable, and quitting would destroy the window holding
+ * the Copy diagnostics button.
+ */
+function describeCrash(cause: unknown): Record<string, string> {
+    if (cause instanceof Error) {
+        return {
+            name: cause.name,
+            message: cause.message,
+            // The stack is the whole point — this is the one place a bare stack
+            // is more useful than a named error, because by definition nobody
+            // anticipated reaching here.
+            stack: (cause.stack ?? "").split("\n").slice(0, 12).join(" | ")
+        };
+    }
+    return { name: "non-error", message: String(cause) };
+}
+
+process.on("uncaughtException", (cause: unknown) => {
+    log.error("main.uncaught-exception", describeCrash(cause));
+});
+
+process.on("unhandledRejection", (cause: unknown) => {
+    log.error("main.unhandled-rejection", describeCrash(cause));
+});
 
 /**
  * Where the mod's own releases are published (spec §10: GitHub Releases).

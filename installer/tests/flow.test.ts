@@ -616,73 +616,90 @@ describe("Discord running", () => {
         expect(state.step).toBe("choose-language");
     });
 
-    it("offers the forced close once asking has failed, without having taken it", async () => {
-        let forced = 0;
-        const h = harness({ processes: [[DISCORD_PROCESS]], forceQuit: async () => { forced += 1; } });
-        await toDetection(h);
-        const state = await h.flow.send({ type: "quit-discord" });
-        expect(state.step).toBe("quit-blocked");
-        // A way forward, which this screen used to lack: on Windows the polite
-        // request only minimises Discord to the tray, so "recheck" would find
-        // it running for ever and the user had nothing left to press.
-        expect(state.actions).toEqual(["force-quit-discord", "recheck", "cancel"]);
-        // Offered, not taken. Nothing was killed by arriving here.
-        expect(forced).toBe(0);
-        expect(h.patchCalls).toHaveLength(0);
-    });
-
-    it("closes Discord and carries on when the user presses the forced close", async () => {
+    it("forces the close in the SAME press when asking does not work", async () => {
+        // CHANGED: this used to assert a second button and `forced === 0`. The
+        // button says "Quit Discord for me", so closing Discord is what the user
+        // already agreed to — a second screen to grant permission they just
+        // gave is friction, not consent. On Windows the polite request nearly
+        // always fails (closing the window only hides Discord in the tray), so
+        // that second screen was the common path, not the rare one.
         let forced = 0;
         const h = harness({ forceQuit: async () => { forced += 1; } });
         let call = 0;
-        // Running through the polite attempt and the first check of the forced
-        // one, then gone.
+        // Present through the polite attempt, gone once it has been forced.
         h.ports.listProcesses = async () => (++call <= 5 ? [DISCORD_PROCESS] : []);
         await toDetection(h);
-        const blocked = await h.flow.send({ type: "quit-discord" });
-        expect(blocked.step).toBe("quit-blocked");
 
-        const state = await h.flow.send({ type: "force-quit-discord" });
+        const state = await h.flow.send({ type: "quit-discord" });
         expect(forced).toBe(1);
         expect(state.step).toBe("choose-language");
     });
 
-    it("does not offer the forced close a second time after it has already failed", async () => {
-        const h = harness({ processes: [[DISCORD_PROCESS]], forceQuit: async () => {} });
+    it("asks before forcing — a Discord that quits politely is never killed", async () => {
+        // The escalation is unchanged in substance: force is a fallback, not
+        // the first move.
+        let forced = 0;
+        const h = harness({
+            processes: [[DISCORD_PROCESS], [DISCORD_PROCESS], []],
+            forceQuit: async () => { forced += 1; }
+        });
         await toDetection(h);
-        await h.flow.send({ type: "quit-discord" });
-        const state = await h.flow.send({ type: "force-quit-discord" });
+
+        const state = await h.flow.send({ type: "quit-discord" });
+        expect(state.step).toBe("choose-language");
+        expect(forced).toBe(0);
+    });
+
+    it("stops after the forced close also fails, rather than looping", async () => {
+        let forced = 0;
+        const h = harness({ processes: [[DISCORD_PROCESS]], forceQuit: async () => { forced += 1; } });
+        await toDetection(h);
+
+        const state = await h.flow.send({ type: "quit-discord" });
         expect(state.step).toBe("quit-blocked");
         expect(state.quit?.forced).toBe(true);
-        // Re-offering a button that has been proven not to work is a dead end
-        // that looks like a way out.
+        // Tried once. Something other than a cooperative Discord is holding
+        // those files, and a button proven not to work is a dead end wearing a
+        // way out.
+        expect(forced).toBe(1);
         expect(state.actions).toEqual(["recheck", "cancel"]);
         expect(h.patchCalls).toHaveLength(0);
     });
 
     it("recovers when the user quits Discord themselves", async () => {
-        // Running for every check up to and including the one that gives up,
-        // then gone — the user quit it themselves while we were on the blocked
-        // screen.
-        let call = 0;
+        // Present until the blocked screen is reached, then gone — the user
+        // quit it by hand while looking at it. A flag rather than a call count,
+        // because the number of polls is an implementation detail and pinning
+        // it made this test fail for a change that did not affect it.
+        let stillRunning = true;
         const h = harness();
-        h.ports.listProcesses = async () => (++call <= 4 ? [DISCORD_PROCESS] : []);
+        h.ports.listProcesses = async () => (stillRunning ? [DISCORD_PROCESS] : []);
         await toDetection(h);
+
         const blocked = await h.flow.send({ type: "quit-discord" });
         expect(blocked.step).toBe("quit-blocked");
+
+        stillRunning = false;
         const state = await h.flow.send({ type: "recheck" });
         expect(state.step).toBe("choose-language");
     });
 
-    it("reports a failed quit request with its own outcome", async () => {
+    it("escalates when the quit request itself fails, rather than stopping there", async () => {
+        // CHANGED: this used to assert the run ended on `quit-failed`. A refused
+        // request is exactly the case where the forced close is worth trying —
+        // stopping at the refusal is what left Windows users at a dead end.
+        let forced = 0;
         const h = harness({
             processes: [[DISCORD_PROCESS]],
-            requestQuit: async () => { throw new Error("osascript refused"); }
+            requestQuit: async () => { throw new Error("osascript refused"); },
+            forceQuit: async () => { forced += 1; }
         });
         await toDetection(h);
         const state = await h.flow.send({ type: "quit-discord" });
+
+        expect(forced).toBe(1);
         expect(state.step).toBe("quit-blocked");
-        expect(state.quit?.outcome).toBe("quit-failed");
+        expect(state.quit?.forced).toBe(true);
     });
 
     it("ignores a Discord helper process — it is not the app", async () => {

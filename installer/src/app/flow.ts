@@ -396,7 +396,9 @@ export class InstallFlow {
             case "welcome":
                 return this.set(state({
                     step: "tiers",
-                    detail: "≈ is free, instant, and needs no account. ✦ is better and needs a free Google key — you can set it up now or any time later from settings.",
+                    detail: "≈ is Google Translate: instant, free, no account. ✦ is an AI model that reads the "
+                        + "conversation around a message, so slang and replies come out right. It needs a free key, "
+                        + "which the next step can set up for you — or skip it and add one later.",
                     actions: ["next", "cancel"]
                 }));
 
@@ -687,7 +689,21 @@ export class InstallFlow {
         return this.languageStep();
     }
 
-    private async quit(force = false): Promise<FlowState> {
+    /**
+     * Ask Discord to quit, and force it if asking did not work.
+     *
+     * ONE PRESS. The button says "Quit Discord for me", so closing Discord is
+     * what the user has already agreed to — sending them to a second screen to
+     * grant permission they just gave is friction, not consent. On Windows the
+     * polite request nearly always fails, because closing Discord's window only
+     * hides it in the system tray, so that second screen was the common path
+     * rather than the rare one.
+     *
+     * The escalation itself is unchanged: nothing is force-closed that would
+     * have closed politely. `escalate: false` is how the caller says "this WAS
+     * the forced attempt", so a failure there does not loop.
+     */
+    private async quit(force = false, escalate = true): Promise<FlowState> {
         const install = this.chosenInstall;
         if (install === null) return this.detect();
 
@@ -712,15 +728,18 @@ export class InstallFlow {
 
         if (report.clear) return this.languageStep();
 
-        // The force button is offered only once. After a forced quit has also
-        // failed, showing it again would invite the user to press a button that
-        // has already been proven not to work.
+        // Asking was not enough, so take the step the button already promised.
+        if (!force && escalate) return this.quit(true, false);
+
+        // Only reached when the forced close ALSO failed, which means something
+        // other than a cooperative Discord is holding those files. Offering the
+        // button again would invite a press already proven not to work.
         return this.set(state({
             step: "quit-blocked",
             detail: report.summary,
             install,
             quit: report,
-            actions: force ? ["recheck", "cancel"] : ["force-quit-discord", "recheck", "cancel"]
+            actions: ["recheck", "cancel"]
         }));
     }
 
