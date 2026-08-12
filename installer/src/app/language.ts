@@ -330,3 +330,124 @@ export function readTargetLanguage(settingsPath: string | null): string | null {
         return null;
     }
 }
+
+/* ------------------------------------------------------------------------ *
+ * The quality tier's API key
+ * ------------------------------------------------------------------------ */
+
+/** Vencord settings keys the quality tier reads. */
+export const ENGINE_KEY = "engine";
+export const GROQ_API_KEY = "groqApiKey";
+
+export interface SetApiKeyReport {
+    path: string;
+    /** The settings file did not exist and was created. */
+    created: boolean;
+    /** How long the stored key is. NEVER the key itself — see below. */
+    keyLength: number;
+}
+
+/**
+ * Merge a patch into our own object inside Vencord's settings file.
+ *
+ * Shared by the language and the key so there is ONE implementation of
+ * read-parse-merge-write. The parts that matter and would otherwise be copied
+ * subtly wrong: an unreadable settings file is refused rather than overwritten
+ * (it belongs to Vencord, and replacing it would lose every other plugin's
+ * settings), and the write is write-then-rename so a crash mid-write cannot
+ * leave a truncated JSON file that Vencord then refuses to load.
+ */
+function updatePluginSettings(
+    settingsPath: string,
+    patch: (existing: Record<string, unknown>) => Record<string, unknown>,
+    what: string
+): Result<{ created: boolean; existing: Record<string, unknown> }> {
+    const created = !existsSync(settingsPath);
+    let root: Record<string, unknown> = {};
+
+    if (!created) {
+        let text: string;
+        try {
+            text = readFileSync(settingsPath, "utf8");
+        } catch (cause) {
+            return fsError(cause, settingsPath, "read Vencord's settings");
+        }
+        try {
+            const parsed: unknown = JSON.parse(text);
+            if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("not an object");
+            root = parsed as Record<string, unknown>;
+        } catch (cause) {
+            return err(
+                "IO_ERROR",
+                `Vencord's settings file at ${settingsPath} could not be read as JSON, so nothing was saved. `
+                + "Subline will not overwrite it.",
+                { path: settingsPath, cause }
+            );
+        }
+    }
+
+    const plugins = (typeof root.plugins === "object" && root.plugins !== null && !Array.isArray(root.plugins))
+        ? root.plugins as Record<string, unknown>
+        : {};
+    const existing = (typeof plugins[PLUGIN_SETTINGS_KEY] === "object" && plugins[PLUGIN_SETTINGS_KEY] !== null)
+        ? plugins[PLUGIN_SETTINGS_KEY] as Record<string, unknown>
+        : {};
+
+    plugins[PLUGIN_SETTINGS_KEY] = patch(existing);
+    root.plugins = plugins;
+
+    try {
+        mkdirSync(dirname(settingsPath), { recursive: true });
+        const temp = `${settingsPath}.subline-tmp`;
+        writeFileSync(temp, `${JSON.stringify(root, null, 4)}\n`, "utf8");
+        renameSync(temp, settingsPath);
+    } catch (cause) {
+        return fsError(cause, settingsPath, what);
+    }
+
+    return ok({ created, existing });
+}
+
+/**
+ * Store the quality tier's API key, from the installer.
+ *
+ * WHY THE INSTALLER WRITES THIS AT ALL. The key otherwise has to be pasted into
+ * Vencord's plugin settings inside Discord — a screen listing dozens of plugins
+ * a Subline user never installed, reached by a path nobody could guess. The
+ * product owner, having built it: "the user won't know what to do, literally no
+ * way to guess". A setup that ends with the better tier off and no findable way
+ * to turn it on is a setup that did not finish.
+ *
+ * The key is TRIMMED. A pasted key arriving with a trailing space is rejected
+ * by the provider with a 401, which the plugin reports as a rejected key —
+ * sending somebody to replace a credential that was correct.
+ *
+ * `engine` is set alongside it, because a key with no engine selected changes
+ * nothing: the plugin would go on using Google and the user would have handed
+ * over a key for no visible result.
+ *
+ * NOTHING HERE RETURNS OR LOGS THE KEY. The report carries its LENGTH, which is
+ * enough to tell "pasted" from "pasted half of it" in a log that spec §7
+ * forbids putting secrets in.
+ */
+export function setApiKey(settingsPath: string | null, rawKey: string): Result<SetApiKeyReport> {
+    const key = rawKey.trim();
+    if (key === "") {
+        return err<SetApiKeyReport>("IO_ERROR", "No key was given, so nothing was saved.");
+    }
+    if (settingsPath === null) {
+        return err<SetApiKeyReport>(
+            "IO_ERROR",
+            "Could not work out where Vencord keeps its settings on this platform, so the key was not saved."
+        );
+    }
+
+    const written = updatePluginSettings(
+        settingsPath,
+        existing => ({ ...existing, enabled: true, [ENGINE_KEY]: "groq", [GROQ_API_KEY]: key }),
+        "save the key into Vencord's settings"
+    );
+    if (!written.ok) return written as Result<SetApiKeyReport>;
+
+    return ok({ path: settingsPath, created: written.value.created, keyLength: key.length });
+}

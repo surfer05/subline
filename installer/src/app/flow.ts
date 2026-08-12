@@ -41,7 +41,7 @@ import { awaitAppManagement } from "./appManagement.js";
 import type { QuitReport, RunningProcess } from "./discordProcess.js";
 import { findDiscordProcesses, quitDiscord } from "./discordProcess.js";
 import { defaultLanguage, endonymOf, languageOptions } from "./language.js";
-import type { LanguageOption, SetTargetLanguageReport } from "./language.js";
+import type { LanguageOption, SetApiKeyReport, SetTargetLanguageReport } from "./language.js";
 import type { ModBundle } from "../bundle/bundle.js";
 import type { DiscordBranch, DiscordInstall } from "../patcher/locate.js";
 import type { PatchReport } from "../patcher/patch.js";
@@ -58,6 +58,9 @@ import type { AwaitVerifyOptions, VerificationReport } from "../verify/verify.js
  * users who actually went through the permission step.
  */
 const SETTLE_BEFORE_LAUNCH_MS = 2_500;
+
+/** Where a free key comes from. Shown on the key step so nobody has to search. */
+export const KEY_SIGNUP_URL = "https://console.groq.com/keys";
 
 /**
  * Everything a `PatcherError` knows, as log fields.
@@ -111,6 +114,15 @@ export type FlowStep =
     | "quit-blocked"
     /* §3 step 6 / §3a. */
     | "choose-language"
+    /**
+     * The quality tier's key, offered once, skippable.
+     *
+     * Exists because the alternative was Vencord's plugin settings inside
+     * Discord — dozens of plugins a Subline user never installed, reached by a
+     * path nobody could guess. A setup that ends with the better tier off and
+     * no findable way to switch it on has not finished.
+     */
+    | "choose-key"
     /* §3 step 7 / §4. */
     | "permission-explain"
     | "permission-waiting"
@@ -139,6 +151,8 @@ export type FlowActionType =
     | "force-quit-discord"
     | "recheck"
     | "set-language"
+    | "set-key"
+    | "skip-key"
     | "open-permission-settings"
     | "retry"
     | "skip-helper"
@@ -155,6 +169,8 @@ export type FlowAction =
     | { type: "force-quit-discord" }
     | { type: "recheck" }
     | { type: "set-language"; code: string }
+    | { type: "set-key"; key: string }
+    | { type: "skip-key" }
     | { type: "open-permission-settings" }
     | { type: "retry" }
     | { type: "skip-helper" }
@@ -189,6 +205,8 @@ export interface FlowState {
     permissionStatus?: AppManagementStatus;
     /** Deep link to the exact System Settings pane (§4). */
     permissionSettingsUrl?: string;
+    /** Where to get a key, for the `choose-key` step. */
+    keySignupUrl?: string;
     bundle?: ModBundle;
     patch?: PatchReport;
     /** What happened to the background helper (§3 step 8b). */
@@ -252,6 +270,8 @@ export interface FlowPorts {
     discordLocale(): string | null;
     systemLocale(): string | null;
     setLanguage(code: string): Result<SetTargetLanguageReport>;
+    /** Writes the quality tier's key. Never returns the key itself. */
+    setApiKey(key: string): Result<SetApiKeyReport>;
 
     patch(install: DiscordInstall, options: { modBundleDir: string; overwriteForeignMod: boolean }): Result<PatchReport>;
     /**
@@ -458,6 +478,17 @@ export class InstallFlow {
             case "choose-language":
                 if (action.type !== "set-language") return this.current;
                 return this.applyLanguage(action.code);
+
+            case "choose-key":
+                if (action.type === "set-key") return this.applyKey(action.key);
+                if (action.type === "skip-key") {
+                    // Skipping is a real answer, not a failure. Google still
+                    // translates everything; the better tier simply stays off
+                    // until somebody adds a key.
+                    this.ports.log.info("key.skipped");
+                    return this.permissionStep();
+                }
+                return this.current;
 
             case "permission-explain":
                 return this.waitForPermission();
@@ -773,6 +804,35 @@ export class InstallFlow {
         }
         this.chosenLanguage = saved.value.code;
         this.ports.log.info("language.saved", { lang: saved.value.code, created: saved.value.created });
+        return this.keyStep();
+    }
+
+    /* -------------------------------------------------------------------- *
+     * The quality tier's key — optional, offered once
+     * -------------------------------------------------------------------- */
+
+    private keyStep(error: PatcherError | null = null): FlowState {
+        return this.set(state({
+            step: "choose-key",
+            detail: "Paste a free key to turn on the better translations, or skip — Subline still translates "
+                + "everything with Google either way, and you can add a key later.",
+            keySignupUrl: KEY_SIGNUP_URL,
+            error,
+            actions: ["set-key", "skip-key", "cancel"]
+        }));
+    }
+
+    private async applyKey(key: string): Promise<FlowState> {
+        const saved = this.ports.setApiKey(key);
+        if (!saved.ok) {
+            // The key itself is never logged — see setApiKey. A refusal here is
+            // almost always an empty paste or an unwritable settings file, and
+            // both are things the user can act on from the message.
+            this.ports.log.error("key.save-failed", errorFields(saved.error));
+            return this.keyStep(saved.error);
+        }
+        // LENGTH, never the key. Enough to tell "pasted" from "pasted half".
+        this.ports.log.info("key.saved", { keyLength: saved.value.keyLength, created: saved.value.created });
         return this.permissionStep();
     }
 

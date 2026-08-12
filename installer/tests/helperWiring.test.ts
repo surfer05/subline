@@ -64,6 +64,20 @@ const windowsWiring = () => ({ ...wiring(), executablePath: WINDOWS_EXE, schtask
  * installHelperFor
  * ------------------------------------------------------------------------ */
 
+
+/**
+ * Choose a language and move past the optional key step.
+ *
+ * The key step sits between the language and the patch, so almost every test
+ * that used to go straight from `set-language` to patching now has one more
+ * state to cross. Routed through here rather than repeated inline, so adding
+ * another optional step later is one edit and not forty.
+ */
+async function setLanguage(flow: { send: (a: any) => Promise<any> }, code = "tr"): Promise<any> {
+    const next = await flow.send({ type: "set-language", code });
+    return next.step === "choose-key" ? flow.send({ type: "skip-key" }) : next;
+}
+
 describe("registering the agent", () => {
     it("writes the plist under the given home and registers it", async () => {
         const result = await installHelperFor(wiring(), "darwin", home);
@@ -369,7 +383,7 @@ describe("the install flow installs the helper", () => {
     async function toDone(h: Harness): Promise<FlowState> {
         await h.flow.send({ type: "next" });
         await h.flow.send({ type: "next" });
-        return h.flow.send({ type: "set-language", code: "en" });
+        return setLanguage(h.flow, "en");
     }
 
     it("registers it once, between patching and launching", async () => {

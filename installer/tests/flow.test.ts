@@ -119,6 +119,7 @@ interface Script {
     verify?: VerificationReport;
     discordLocale?: string | null;
     setLanguage?: Result<{ path: string; code: string; previous: string | null; created: boolean }>;
+    setApiKey?: Result<{ path: string; created: boolean; keyLength: number }>;
     platform?: NodeJS.Platform;
 }
 
@@ -129,6 +130,7 @@ interface Harness {
     settingsOpened: number;
     patchCalls: Array<{ modBundleDir: string; overwriteForeignMod: boolean }>;
     languageWrites: string[];
+    keyWrites: string[];
     verifyCalls: Array<{ expectedBuildId: string; patchedAt: number; launchedAt: number }>;
     helperInstalls: number;
     launched: number;
@@ -149,6 +151,7 @@ function harness(script: Script = {}): Harness {
         settingsOpened: 0,
         patchCalls: [],
         languageWrites: [],
+        keyWrites: [],
         verifyCalls: [],
         helperInstalls: 0,
         launched: 0,
@@ -194,6 +197,13 @@ function harness(script: Script = {}): Harness {
 
         discordLocale: () => (script.discordLocale === undefined ? "tr" : script.discordLocale),
         systemLocale: () => "en-GB",
+        setApiKey: (key: string) => {
+            h.keyWrites.push(key);
+            return script.setApiKey ?? {
+                ok: true,
+                value: { path: "/settings.json", created: false, keyLength: key.trim().length }
+            };
+        },
         setLanguage: (code: string) => {
             h.languageWrites.push(code);
             return script.setLanguage ?? {
@@ -255,6 +265,20 @@ async function toDetection(h: Harness): Promise<FlowState> {
  * The happy path
  * ------------------------------------------------------------------------ */
 
+
+/**
+ * Choose a language and move past the optional key step.
+ *
+ * The key step sits between the language and the patch, so almost every test
+ * that used to go straight from `set-language` to patching now has one more
+ * state to cross. Routed through here rather than repeated inline, so adding
+ * another optional step later is one edit and not forty.
+ */
+async function setLanguage(flow: { send: (a: any) => Promise<any> }, code = "tr"): Promise<any> {
+    const next = await flow.send({ type: "set-language", code });
+    return next.step === "choose-key" ? flow.send({ type: "skip-key" }) : next;
+}
+
 describe("the happy path", () => {
     it("walks welcome → tiers → language → patch → verify → confirmed", async () => {
         const h = harness();
@@ -267,7 +291,7 @@ describe("the happy path", () => {
         const language = await h.flow.send({ type: "next" });
         expect(language.step).toBe("choose-language");
 
-        const done = await h.flow.send({ type: "set-language", code: "tr" });
+        const done = await setLanguage(h.flow, "tr");
         expect(done.step).toBe("done");
         expect(isConfirmedSuccess(done)).toBe(true);
         expect(h.launched).toBe(1);
@@ -276,14 +300,14 @@ describe("the happy path", () => {
     it("patches against the RUNTIME bundle directory, never a path inside the app", async () => {
         const h = harness();
         await toDetection(h);
-        await h.flow.send({ type: "set-language", code: "tr" });
+        await setLanguage(h.flow, "tr");
         expect(h.patchCalls).toEqual([{ modBundleDir: RUNTIME_MOD_DIR, overwriteForeignMod: false }]);
     });
 
     it("hands verification the build id from the patch it just made", async () => {
         const h = harness();
         await toDetection(h);
-        await h.flow.send({ type: "set-language", code: "tr" });
+        await setLanguage(h.flow, "tr");
         expect(h.verifyCalls).toHaveLength(1);
         expect(h.verifyCalls[0]?.expectedBuildId).toBe(BUILD_ID);
         expect(h.verifyCalls[0]?.launchedAt).toBeGreaterThanOrEqual(h.verifyCalls[0]?.patchedAt ?? 0);
@@ -292,7 +316,7 @@ describe("the happy path", () => {
     it("skips the permission screen entirely on Windows", async () => {
         const h = harness({ platform: "win32", permission: ["not-required"] });
         await toDetection(h);
-        const done = await h.flow.send({ type: "set-language", code: "en" });
+        const done = await setLanguage(h.flow, "en");
         expect(done.step).toBe("done");
         expect(h.settingsOpened).toBe(0);
     });
@@ -330,7 +354,7 @@ describe("the language step", () => {
     it("stores the bare code when the user picks a region-qualified one", async () => {
         const h = harness();
         await toDetection(h);
-        await h.flow.send({ type: "set-language", code: "pt-BR" });
+        await setLanguage(h.flow, "pt-BR");
         expect(h.languageWrites).toEqual(["pt-BR"]);
         // The port normalizes; the flow records what came back, not what went in.
         expect(h.logged.some(entry => entry.event === "language.saved" && entry.fields.lang === "pt")).toBe(true);
@@ -341,7 +365,7 @@ describe("the language step", () => {
             setLanguage: { ok: false, error: fail("IO_ERROR", "Vencord's settings file could not be read as JSON") }
         });
         await toDetection(h);
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
         expect(state.step).toBe("choose-language");
         expect(state.error?.code).toBe("IO_ERROR");
         expect(h.patchCalls).toHaveLength(0);
@@ -536,7 +560,7 @@ describe("an existing Vencord install", () => {
         const h = harness({ inspect: { ok: true, value: installState("patched-by-other", "equicord") } });
         await toDetection(h);
         await h.flow.send({ type: "proceed-over-mod" });
-        await h.flow.send({ type: "set-language", code: "tr" });
+        await setLanguage(h.flow, "tr");
         expect(h.patchCalls[0]?.overwriteForeignMod).toBe(true);
     });
 
@@ -586,7 +610,7 @@ describe("our own mod bundle being broken", () => {
             installBundle: { ok: false, error: fail("MOD_BUNDLE_INVALID", "The Subline mod did not survive being copied.") }
         });
         await toDetection(h);
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
         expect(state.step).toBe("patch-failed");
         expect(state.error?.code).toBe("MOD_BUNDLE_INVALID");
         expect(h.patchCalls).toHaveLength(0);
@@ -720,7 +744,7 @@ describe("Discord running", () => {
         const language = await toDetection(h);
         expect(language.step).toBe("choose-language");
 
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
         // Back to the screen that explains what to do — not a write failure
         // that surfaces as an unexplained IO error on Windows.
         expect(state.step).toBe("discord-running");
@@ -732,11 +756,84 @@ describe("Discord running", () => {
  * §4 — App Management
  * ------------------------------------------------------------------------ */
 
+describe("the optional key step", () => {
+    /**
+     * The step exists because the alternative was Vencord's plugin settings
+     * inside Discord — dozens of plugins a Subline user never installed, by a
+     * path nobody could guess. A setup that ends with the better tier off and
+     * no findable way to switch it on has not finished.
+     */
+    async function toKeyStep(h: Harness) {
+        await toDetection(h);
+        return h.flow.send({ type: "set-language", code: "tr" });
+    }
+
+    it("is offered after the language, before anything is patched", async () => {
+        const h = harness();
+        const state = await toKeyStep(h);
+        expect(state.step).toBe("choose-key");
+        expect(state.actions).toEqual(["set-key", "skip-key", "cancel"]);
+        // Nothing has been written to Discord yet.
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("tells the user where to get one", async () => {
+        const h = harness();
+        const state = await toKeyStep(h);
+        // Without this the step is a text box with no way to fill it.
+        expect(state.keySignupUrl).toBeDefined();
+    });
+
+    it("saves the key and carries on", async () => {
+        const h = harness();
+        await toKeyStep(h);
+        const state = await h.flow.send({ type: "set-key", key: "gsk_abcdefghijklmnop" });
+
+        expect(h.keyWrites).toEqual(["gsk_abcdefghijklmnop"]);
+        expect(state.step).toBe("done");
+    });
+
+    it("skipping is a normal answer, not a failure", async () => {
+        const h = harness();
+        await toKeyStep(h);
+        const state = await h.flow.send({ type: "skip-key" });
+
+        expect(h.keyWrites).toEqual([]);
+        expect(state.step).toBe("done");
+        // Google still translates everything, so this is not an error state.
+        expect(state.error).toBeNull();
+    });
+
+    it("stays on the step when the key cannot be saved", async () => {
+        const h = harness({ setApiKey: { ok: false, error: fail("IO_ERROR", "settings are read-only") } });
+        await toKeyStep(h);
+        const state = await h.flow.send({ type: "set-key", key: "gsk_x" });
+
+        expect(state.step).toBe("choose-key");
+        expect(state.error?.code).toBe("IO_ERROR");
+        // Still skippable — a failure to store a key must not trap the install.
+        expect(state.actions).toContain("skip-key");
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("never puts the key in the log", async () => {
+        const h = harness();
+        await toKeyStep(h);
+        await h.flow.send({ type: "set-key", key: "gsk_SUPERSECRETVALUE" });
+
+        const logged = JSON.stringify(h.logged);
+        expect(logged).not.toContain("gsk_SUPERSECRETVALUE");
+        // The LENGTH is recorded, which is what distinguishes "pasted" from
+        // "pasted half of it" without storing a secret.
+        expect(logged).toContain("keyLength");
+    });
+});
+
 describe("macOS App Management", () => {
     it("explains BEFORE attempting, rather than reporting a failed patch", async () => {
         const h = harness({ permission: ["blocked"] });
         await toDetection(h);
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
 
         expect(state.step).toBe("permission-explain");
         // Nothing was attempted: no patch, and the user has not yet been sent anywhere.
@@ -759,7 +856,7 @@ describe("macOS App Management", () => {
     it("carries the exact deep link spec §4 names", async () => {
         const h = harness({ permission: ["blocked"] });
         await toDetection(h);
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
         expect(state.permissionSettingsUrl)
             .toBe("x-apple.systempreferences:com.apple.preference.security?Privacy_AppBundles");
     });
@@ -767,7 +864,7 @@ describe("macOS App Management", () => {
     it("polls for the grant and continues automatically — no quit, no re-run", async () => {
         const h = harness({ permission: ["blocked", "blocked", "blocked", "granted"] });
         await toDetection(h);
-        await h.flow.send({ type: "set-language", code: "tr" });
+        await setLanguage(h.flow, "tr");
         const state = await h.flow.send({ type: "next" });
 
         expect(state.step).toBe("done");
@@ -782,7 +879,7 @@ describe("macOS App Management", () => {
         // they read as the machine doing things to itself.
         const h = harness({ permission: ["blocked", "granted"] });
         await toDetection(h);
-        await h.flow.send({ type: "set-language", code: "tr" });
+        await setLanguage(h.flow, "tr");
 
         const before = h.ports.now();
         await h.flow.send({ type: "next" });
@@ -801,7 +898,7 @@ describe("macOS App Management", () => {
         await toDetection(h);
 
         const before = h.ports.now();
-        await h.flow.send({ type: "set-language", code: "tr" });
+        await setLanguage(h.flow, "tr");
         const elapsed = h.ports.now() - before;
 
         expect(elapsed).toBeLessThan(2_500);
@@ -811,7 +908,7 @@ describe("macOS App Management", () => {
     it("does not die when the grant never arrives — it offers retry", async () => {
         const h = harness({ permission: ["blocked"] });
         await toDetection(h);
-        await h.flow.send({ type: "set-language", code: "tr" });
+        await setLanguage(h.flow, "tr");
         const state = await h.flow.send({ type: "next" });
 
         expect(state.step).toBe("permission-blocked");
@@ -826,7 +923,7 @@ describe("macOS App Management", () => {
         const h = harness();
         h.ports.probePermission = () => (++calls > 12 ? "granted" : "blocked");
         await toDetection(h);
-        await h.flow.send({ type: "set-language", code: "tr" });
+        await setLanguage(h.flow, "tr");
         const blocked = await h.flow.send({ type: "next" });
         expect(blocked.step).toBe("permission-blocked");
 
@@ -840,7 +937,7 @@ describe("macOS App Management", () => {
     it("can re-open System Settings without leaving the waiting screen", async () => {
         const h = harness({ permission: ["blocked"] });
         await toDetection(h);
-        await h.flow.send({ type: "set-language", code: "tr" });
+        await setLanguage(h.flow, "tr");
         await h.flow.send({ type: "next" });
         const state = await h.flow.send({ type: "open-permission-settings" });
         expect(state.step).toBe("permission-blocked");
@@ -853,7 +950,7 @@ describe("macOS App Management", () => {
             patch: { ok: false, error: fail("PERMISSION_DENIED", "Not allowed to replace app.asar.") }
         });
         await toDetection(h);
-        const failed = await h.flow.send({ type: "set-language", code: "tr" });
+        const failed = await setLanguage(h.flow, "tr");
         expect(failed.step).toBe("patch-failed");
         expect(failed.error?.code).toBe("PERMISSION_DENIED");
 
@@ -872,7 +969,7 @@ describe("patch failures", () => {
             patch: { ok: false, error: fail("VERIFICATION_FAILED", "Discord's app.asar did not match after writing it.") }
         });
         await toDetection(h);
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
         expect(state.step).toBe("patch-failed");
         expect(state.error?.code).toBe("VERIFICATION_FAILED");
         expect(state.detail).toContain("put back exactly as it was");
@@ -881,7 +978,7 @@ describe("patch failures", () => {
     it("does not claim a rollback for a failure that never wrote anything", async () => {
         const h = harness({ patch: { ok: false, error: fail("READ_ONLY_VOLUME", "Cannot write: the volume is read-only.") } });
         await toDetection(h);
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
         expect(state.error?.code).toBe("READ_ONLY_VOLUME");
         expect(state.detail).not.toContain("put back exactly as it was");
     });
@@ -891,7 +988,7 @@ describe("patch failures", () => {
         for (const code of codes) {
             const h = harness({ patch: { ok: false, error: fail(code, `failure: ${code}`) } });
             await toDetection(h);
-            const state = await h.flow.send({ type: "set-language", code: "tr" });
+            const state = await setLanguage(h.flow, "tr");
             expect(state.step).toBe("patch-failed");
             expect(state.error?.code).toBe(code);
         }
@@ -905,7 +1002,7 @@ describe("patch failures", () => {
                 : { ok: true, value: patchReport() })
         });
         await toDetection(h);
-        const failed = await h.flow.send({ type: "set-language", code: "tr" });
+        const failed = await setLanguage(h.flow, "tr");
         expect(failed.step).toBe("patch-failed");
         const state = await h.flow.send({ type: "retry" });
         expect(state.step).toBe("done");
@@ -914,7 +1011,7 @@ describe("patch failures", () => {
     it("never reaches done on a failed patch", async () => {
         const h = harness({ patch: { ok: false, error: fail("IO_ERROR", "nope") } });
         await toDetection(h);
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
         expect(state.step).not.toBe("done");
         expect(isConfirmedSuccess(state)).toBe(false);
         expect(h.launched).toBe(0);
@@ -929,14 +1026,14 @@ describe("verification", () => {
     it("confirms only when a translation actually rendered", async () => {
         const h = harness({ verify: verification({ status: "translating-approx", confirmed: true, loaded: true, tier: "approx" }) });
         await toDetection(h);
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
         expect(isConfirmedSuccess(state)).toBe(true);
     });
 
     it("does NOT claim success when the mod never reported in", async () => {
         const h = harness({ verify: verification({ status: "not-loaded", summary: "…never reported in from Discord…" }) });
         await toDetection(h);
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
         expect(state.step).toBe("done");
         expect(isConfirmedSuccess(state)).toBe(false);
         expect(state.verification?.status).toBe("not-loaded");
@@ -945,14 +1042,14 @@ describe("verification", () => {
     it("distinguishes 'nothing to translate yet' from 'loaded and erroring'", async () => {
         const idle = harness({ verify: verification({ status: "loaded-idle", loaded: true }) });
         await toDetection(idle);
-        const idleState = await idle.flow.send({ type: "set-language", code: "tr" });
+        const idleState = await setLanguage(idle.flow, "tr");
         expect(idleState.verification?.status).toBe("loaded-idle");
         expect(idleState.verification?.loaded).toBe(true);
         expect(isConfirmedSuccess(idleState)).toBe(false);
 
         const erroring = harness({ verify: verification({ status: "loaded-erroring", loaded: true, errorCode: "engine-error" }) });
         await toDetection(erroring);
-        const erroringState = await erroring.flow.send({ type: "set-language", code: "tr" });
+        const erroringState = await setLanguage(erroring.flow, "tr");
         expect(erroringState.verification?.status).toBe("loaded-erroring");
         expect(erroringState.verification?.errorCode).toBe("engine-error");
         expect(isConfirmedSuccess(erroringState)).toBe(false);
@@ -961,7 +1058,7 @@ describe("verification", () => {
     it("does not confirm somebody else's copy of the plugin", async () => {
         const h = harness({ verify: verification({ status: "foreign-beacon", identity: "mismatch" }) });
         await toDetection(h);
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
         expect(isConfirmedSuccess(state)).toBe(false);
         expect(state.verification?.identity).toBe("mismatch");
     });
@@ -969,21 +1066,21 @@ describe("verification", () => {
     it("does not confirm a beacon that names no build at all", async () => {
         const h = harness({ verify: verification({ status: "unidentified-beacon", identity: "absent" }) });
         await toDetection(h);
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
         expect(isConfirmedSuccess(state)).toBe(false);
     });
 
     it("does not confirm a stale beacon from a previous install", async () => {
         const h = harness({ verify: verification({ status: "stale-beacon", stale: true }) });
         await toDetection(h);
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
         expect(isConfirmedSuccess(state)).toBe(false);
     });
 
     it("does not confirm a mod that translates but renders nothing", async () => {
         const h = harness({ verify: verification({ status: "translating-not-rendering", loaded: true }) });
         await toDetection(h);
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
         expect(isConfirmedSuccess(state)).toBe(false);
     });
 
@@ -991,7 +1088,7 @@ describe("verification", () => {
         const summary = "Subline is installed, but it never reported in from Discord.";
         const h = harness({ verify: verification({ status: "not-loaded", summary }) });
         await toDetection(h);
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
         expect(state.detail).toBe(summary);
     });
 
@@ -999,7 +1096,7 @@ describe("verification", () => {
         for (const confirmed of [true, false]) {
             const h = harness({ verify: verification({ confirmed, loaded: true }) });
             await toDetection(h);
-            const state = await h.flow.send({ type: "set-language", code: "tr" });
+            const state = await setLanguage(h.flow, "tr");
             expect(state.step).toBe("done");
             expect(isConfirmedSuccess(state)).toBe(confirmed);
         }
@@ -1010,7 +1107,7 @@ describe("Discord failing to launch", () => {
     it("is its own state, and still lets verification proceed", async () => {
         const h = harness({ launch: { ok: false, error: fail("IO_ERROR", "Could not start Discord.") } });
         await toDetection(h);
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
         expect(state.step).toBe("launch-failed");
         expect(state.detail).toContain("Subline is installed");
         expect(state.actions).toContain("skip-launch");
@@ -1022,7 +1119,7 @@ describe("Discord failing to launch", () => {
     it("does not confirm success merely because the patch succeeded", async () => {
         const h = harness({ launch: { ok: false, error: fail("IO_ERROR", "Could not start Discord.") } });
         await toDetection(h);
-        const state = await h.flow.send({ type: "set-language", code: "tr" });
+        const state = await setLanguage(h.flow, "tr");
         expect(isConfirmedSuccess(state)).toBe(false);
     });
 });
@@ -1035,7 +1132,7 @@ describe("the machine", () => {
     it("ignores an action the current state did not offer", async () => {
         const h = harness();
         const before = h.flow.state;
-        const after = await h.flow.send({ type: "set-language", code: "tr" });
+        const after = await setLanguage(h.flow, "tr");
         expect(after.step).toBe(before.step);
         expect(h.logged.some(entry => entry.event === "flow.action.rejected")).toBe(true);
     });
@@ -1053,7 +1150,7 @@ describe("the machine", () => {
         const seen: string[] = [];
         h.flow.onChange = next => seen.push(next.step);
         await toDetection(h);
-        await h.flow.send({ type: "set-language", code: "tr" });
+        await setLanguage(h.flow, "tr");
         expect(seen).toContain("detecting");
         expect(seen).toContain("choose-language");
         expect(seen).toContain("patching");
@@ -1064,7 +1161,7 @@ describe("the machine", () => {
     it("logs every state and never logs anything resembling message text", async () => {
         const h = harness();
         await toDetection(h);
-        await h.flow.send({ type: "set-language", code: "tr" });
+        await setLanguage(h.flow, "tr");
         const events = h.logged.map(entry => entry.event);
         expect(events).toContain("flow.state");
         expect(events).toContain("patch.ok");
@@ -1081,7 +1178,7 @@ describe("the machine", () => {
         const seen: FlowState[] = [];
         h.flow.onChange = next => seen.push({ ...next });
         await toDetection(h);
-        await h.flow.send({ type: "set-language", code: "tr" });
+        await setLanguage(h.flow, "tr");
         expect(seen.some(s => s.step === "patching" && s.busy)).toBe(true);
         expect(seen.some(s => s.step === "verifying" && s.busy)).toBe(true);
         expect(seen.at(-1)?.busy).toBe(false);

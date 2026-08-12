@@ -55,6 +55,7 @@ const STEP_TITLES: Partial<Record<FlowState["step"], string>> = {
     "discord-running": "Discord is running",
     "quit-blocked": "Discord is still running",
     "choose-language": "Your reading language",
+    "choose-key": "Better translations",
     "permission-explain": "macOS needs your permission",
     "permission-waiting": "Waiting for permission",
     "permission-blocked": "Permission not granted",
@@ -82,6 +83,10 @@ const ACTION_LABELS: Record<FlowActionType, string> = {
     "force-quit-discord": "Close Discord anyway",
     recheck: "Check again",
     "set-language": "Continue",
+    "set-key": "Save key and continue",
+    // Named for what it costs. "Continue" here would let somebody give up the
+    // better tier without noticing there was one.
+    "skip-key": "Skip — use Google only",
     "open-permission-settings": "Open System Settings",
     retry: "Try again",
     // Named for what it costs, not for what it skips. "Continue" here would let
@@ -93,9 +98,10 @@ const ACTION_LABELS: Record<FlowActionType, string> = {
 };
 
 /** Which action gets the filled button. One per screen, never two. */
-const PRIMARY: FlowActionType[] = ["next", "set-language", "proceed-over-mod", "quit-discord", "force-quit-discord", "retry", "finish", "open-permission-settings"];
+const PRIMARY: FlowActionType[] = ["next", "set-language", "set-key", "proceed-over-mod", "quit-discord", "force-quit-discord", "retry", "finish", "open-permission-settings"];
 
 let chosenLanguage: string | null = null;
+let typedKey = "";
 
 /**
  * The heading, with one override.
@@ -178,6 +184,48 @@ function renderExtra(state: FlowState): void {
         select.onchange = () => { chosenLanguage = select.value; };
         field.append(label, select);
         extra.append(field);
+    }
+
+    if (state.step === "choose-key") {
+        typedKey = "";
+        const field = document.createElement("div");
+        field.className = "fld";
+
+        const label = document.createElement("label");
+        label.className = "lbl";
+        label.textContent = "API key";
+
+        const input = document.createElement("input");
+        input.className = "sel";
+        input.type = "text";
+        input.placeholder = "gsk_…";
+        // Not type="password": this is pasted once, and a masked field makes a
+        // mis-paste impossible to spot — which is exactly the failure that had
+        // a valid key reported as rejected.
+        input.autocomplete = "off";
+        input.spellcheck = false;
+        input.oninput = () => { typedKey = input.value; };
+        input.onkeydown = event => {
+            if (event.key === "Enter" && typedKey.trim() !== "") void onAction("set-key");
+        };
+
+        const hint = document.createElement("p");
+        hint.className = "note";
+        if (state.keySignupUrl !== undefined) {
+            const link = document.createElement("a");
+            link.href = "#";
+            link.textContent = "Get a free key";
+            link.onclick = event => {
+                event.preventDefault();
+                void api.openUrl(state.keySignupUrl as string);
+            };
+            hint.append(link, document.createTextNode(" — it takes a minute, and costs nothing."));
+        }
+
+        field.append(label, input, hint);
+        extra.append(field);
+        // Focus so a paste works without hunting for the field.
+        setTimeout(() => input.focus(), 0);
     }
 
     if (state.step === "discord-running" && state.processes) {
@@ -315,6 +363,10 @@ async function onAction(action: FlowActionType): Promise<void> {
     }
     if (action === "set-language") {
         await act({ type: "set-language", code: chosenLanguage ?? "en" });
+        return;
+    }
+    if (action === "set-key") {
+        await act({ type: "set-key", key: typedKey });
         return;
     }
     if (action === "finish") {

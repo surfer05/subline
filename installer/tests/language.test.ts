@@ -13,6 +13,7 @@ import {
     PLUGIN_SETTINGS_KEY,
     readDiscordLocale,
     readTargetLanguage,
+    setApiKey,
     setTargetLanguage,
     SUPPORTED_LANGUAGE_CODES,
     TARGET_LANG_KEY,
@@ -306,5 +307,65 @@ describe("readTargetLanguage", () => {
         const corrupt = join(dir, "corrupt.json");
         writeFileSync(corrupt, "nope", "utf8");
         expect(readTargetLanguage(corrupt)).toBeNull();
+    });
+});
+
+describe("setApiKey", () => {
+    it("stores the key and selects the engine that uses it", () => {
+        const path = join(dir, "settings.json");
+        const result = setApiKey(path, "gsk_abcdefghijklmnop");
+        expect(result.ok).toBe(true);
+
+        const written = JSON.parse(readFileSync(path, "utf8"));
+        const plugin = written.plugins[PLUGIN_SETTINGS_KEY];
+        expect(plugin.groqApiKey).toBe("gsk_abcdefghijklmnop");
+        // A key with no engine selected changes nothing: the plugin would go on
+        // using Google and the user would have handed over a key for no result.
+        expect(plugin.engine).toBe("groq");
+        expect(plugin.enabled).toBe(true);
+    });
+
+    it("trims a pasted key", () => {
+        // A key arriving with a trailing space is rejected by the provider with
+        // a 401, which the plugin then reports as a rejected key — sending
+        // somebody to replace a credential that was correct.
+        const path = join(dir, "settings.json");
+        setApiKey(path, "  gsk_padded  \n");
+        const written = JSON.parse(readFileSync(path, "utf8"));
+        expect(written.plugins[PLUGIN_SETTINGS_KEY].groqApiKey).toBe("gsk_padded");
+    });
+
+    it("refuses an empty key rather than storing one", () => {
+        const path = join(dir, "settings.json");
+        const result = setApiKey(path, "   ");
+        expect(result.ok).toBe(false);
+        expect(existsSync(path)).toBe(false);
+    });
+
+    it("never returns the key, only its length", () => {
+        const result = setApiKey(join(dir, "settings.json"), "gsk_secret");
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(JSON.stringify(result.value)).not.toContain("gsk_secret");
+        expect(result.value.keyLength).toBe("gsk_secret".length);
+    });
+
+    it("keeps every other plugin's settings", () => {
+        // The file is Vencord's, not ours. Overwriting it would silently lose
+        // whatever else the user has configured.
+        const path = join(dir, "settings.json");
+        writeFileSync(path, JSON.stringify({ plugins: { SomethingElse: { enabled: true, size: 3 } } }), "utf8");
+        setApiKey(path, "gsk_x");
+
+        const written = JSON.parse(readFileSync(path, "utf8"));
+        expect(written.plugins.SomethingElse).toEqual({ enabled: true, size: 3 });
+    });
+
+    it("refuses a settings file it cannot parse rather than replacing it", () => {
+        const path = join(dir, "settings.json");
+        writeFileSync(path, "{ not json", "utf8");
+        const result = setApiKey(path, "gsk_x");
+        expect(result.ok).toBe(false);
+        expect(readFileSync(path, "utf8")).toBe("{ not json");
     });
 });

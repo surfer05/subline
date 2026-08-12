@@ -88,6 +88,20 @@ function ports(overrides: { processesStdout?: string } = {}) {
 
 const RUNTIME_MOD_DIR = () => join(home, "Library", "Application Support", "Subline", "mod");
 
+
+/**
+ * Choose a language and move past the optional key step.
+ *
+ * The key step sits between the language and the patch, so almost every test
+ * that used to go straight from `set-language` to patching now has one more
+ * state to cross. Routed through here rather than repeated inline, so adding
+ * another optional step later is one edit and not forty.
+ */
+async function setLanguage(flow: { send: (a: any) => Promise<any> }, code = "tr"): Promise<any> {
+    const next = await flow.send({ type: "set-language", code });
+    return next.step === "choose-key" ? flow.send({ type: "skip-key" }) : next;
+}
+
 describe("the real ports, end to end", () => {
     it("finds, patches and verifies a temp-directory Discord", async () => {
         const flowPorts = ports();
@@ -102,7 +116,7 @@ describe("the real ports, end to end", () => {
         const language = await flow.send({ type: "next" });
         expect(language.step).toBe("choose-language");
 
-        const done = await flow.send({ type: "set-language", code: "tr" });
+        const done = await setLanguage(flow, "tr");
         expect(done.step).toBe("done");
         expect(isConfirmedSuccess(done)).toBe(false);
         expect(done.verification?.status).toBe("not-loaded");
@@ -115,7 +129,7 @@ describe("the real ports, end to end", () => {
         const flow = new InstallFlow(flowPorts);
         await flow.send({ type: "next" });
         await flow.send({ type: "next" });
-        await flow.send({ type: "set-language", code: "tr" });
+        await setLanguage(flow, "tr");
 
         const stub = readStub(discord.install.asarPath);
         expect(stub.ok).toBe(true);
@@ -134,7 +148,7 @@ describe("the real ports, end to end", () => {
         const flow = new InstallFlow(flowPorts);
         await flow.send({ type: "next" });
         await flow.send({ type: "next" });
-        await flow.send({ type: "set-language", code: "tr" });
+        await setLanguage(flow, "tr");
 
         const marker = readMarker(discord.install.resourcesPath);
         expect(marker.ok).toBe(true);
@@ -150,7 +164,7 @@ describe("the real ports, end to end", () => {
         const flow = new InstallFlow(flowPorts);
         await flow.send({ type: "next" });
         await flow.send({ type: "next" });
-        await flow.send({ type: "set-language", code: "tr" });
+        await setLanguage(flow, "tr");
 
         expect(readFileSync(discord.install.backupPath)).toEqual(discord.originalAsar);
     });
@@ -162,7 +176,7 @@ describe("the real ports, end to end", () => {
         const flow = new InstallFlow(flowPorts);
         await flow.send({ type: "next" });
         await flow.send({ type: "next" });
-        await flow.send({ type: "set-language", code: "pt-BR" });
+        await setLanguage(flow, "pt-BR");
 
         const settingsPath = join(home, "Library", "Application Support", "Vencord", "settings", "settings.json");
         const written = JSON.parse(readFileSync(settingsPath, "utf8"));
