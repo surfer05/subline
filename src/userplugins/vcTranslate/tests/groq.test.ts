@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildPrompt, parseGroqResponse, translateWithGroq } from "../engines/groq";
+import { DEFAULT_GROQ_MODEL, effectiveGroqModel, RETIRED_GROQ_MODELS } from "../types";
+import { buildPrompt, looksLikeReasoningModel, parseGroqResponse, translateWithGroq } from "../engines/groq";
 import type { BatchRequest } from "../types";
 import { REAL_GEMINI_FENCED_TEXT, REAL_GEMINI_TRANSLATIONS } from "./fixtures/realGeminiText";
 
@@ -299,7 +300,7 @@ describe("translateWithGroq — the request", () => {
         expect(sent.messages[0].content).toContain("\"skip\"");
     });
 
-    it("defaults to llama-3.3-70b-versatile", async () => {
+    it("defaults to the current live model", async () => {
         // A LITERAL, not the DEFAULT_GROQ_MODEL constant: asserting against the
         // constant would pass for any value it was ever changed to, which is
         // exactly how a default with no free-tier allowance could be
@@ -308,7 +309,7 @@ describe("translateWithGroq — the request", () => {
             apiResponse(ok({ id: "10", lang: "ja", text: "ok", skip: false }))
         );
         await translateWithGroq(req, "gsk-test", fetchImpl as any);
-        expect(JSON.parse(fetchImpl.mock.calls[0][1].body).model).toBe("llama-3.3-70b-versatile");
+        expect(JSON.parse(fetchImpl.mock.calls[0][1].body).model).toBe(DEFAULT_GROQ_MODEL);
     });
 
     it("sends the model it was given, so a settings change reaches the wire", async () => {
@@ -331,7 +332,7 @@ describe("translateWithGroq — the request", () => {
             );
             await translateWithGroq(req, "gsk-test", fetchImpl as any, blank);
             expect(JSON.parse(fetchImpl.mock.calls[0][1].body).model)
-                .toBe("llama-3.3-70b-versatile");
+                .toBe(DEFAULT_GROQ_MODEL);
         }
     });
 
@@ -521,5 +522,98 @@ describe("translateWithGroq — failures", () => {
 
         expect(caught).toBeInstanceOf(Error);
         expect((caught as Error).message).not.toContain(key);
+    });
+});
+
+describe("a retired model does not strand an existing install", () => {
+    it("falls back to the current default when the stored model is dead", () => {
+        // The model is a persisted SETTING, so a new default reaches nobody who
+        // already installed: their settings.json still names the dead model and
+        // every request fails. Groq decommissioned Llama 3.3 70B on 2026-08-16.
+        expect(effectiveGroqModel("llama-3.3-70b-versatile")).toBe(DEFAULT_GROQ_MODEL);
+        for (const retired of RETIRED_GROQ_MODELS) {
+            expect(effectiveGroqModel(retired)).toBe(DEFAULT_GROQ_MODEL);
+        }
+    });
+
+    it("respects any live model the user chose", () => {
+        expect(effectiveGroqModel("llama-3.1-8b-instant")).toBe("llama-3.1-8b-instant");
+        expect(effectiveGroqModel("  qwen/qwen3.6-27b  ")).toBe("qwen/qwen3.6-27b");
+    });
+
+    it("falls back on a blank value, which would be a 400 on every request", () => {
+        expect(effectiveGroqModel("")).toBe(DEFAULT_GROQ_MODEL);
+        expect(effectiveGroqModel("   ")).toBe(DEFAULT_GROQ_MODEL);
+        expect(effectiveGroqModel(undefined)).toBe(DEFAULT_GROQ_MODEL);
+    });
+
+    it("does not ship a default that is itself retired", () => {
+        // The one mistake this whole mechanism cannot survive.
+        expect(RETIRED_GROQ_MODELS).not.toContain(DEFAULT_GROQ_MODEL);
+    });
+});
+
+describe("reasoning models", () => {
+    it("recognises the families that emit their working", () => {
+        expect(looksLikeReasoningModel("openai/gpt-oss-120b")).toBe(true);
+        expect(looksLikeReasoningModel("qwen/qwen3.6-27b")).toBe(true);
+        expect(looksLikeReasoningModel("llama-3.1-8b-instant")).toBe(false);
+    });
+
+    it("asks a reasoning model to keep its thinking out of the reply", async () => {
+        // Measured, not assumed: gpt-oss-120b answered with an empty `content`
+        // and finish_reason "length", having spent the budget on hidden
+        // reasoning. That is not the JSON this engine parses.
+        const bodies: any[] = [];
+        const fetchImpl = (async (_url: string, init: any) => {
+            bodies.push(JSON.parse(init.body));
+            return apiResponse(ok({ id: "10", lang: "ja", text: "not tonight" }));
+        }) as unknown as typeof fetch;
+
+        await translateWithGroq(req, "gsk_x", fetchImpl, "openai/gpt-oss-120b");
+        expect(bodies[0].reasoning_effort).toBe("low");
+        expect(bodies[0].reasoning_format).toBe("hidden");
+    });
+
+    it("sends no such parameter to a model that would reject it", async () => {
+        const bodies: any[] = [];
+        const fetchImpl = (async (_url: string, init: any) => {
+            bodies.push(JSON.parse(init.body));
+            return apiResponse(ok({ id: "10", lang: "ja", text: "not tonight" }));
+        }) as unknown as typeof fetch;
+
+        await translateWithGroq(req, "gsk_x", fetchImpl, "llama-3.1-8b-instant");
+        expect(bodies[0].reasoning_effort).toBeUndefined();
+        expect(bodies[0].reasoning_format).toBeUndefined();
+    });
+
+    it("retries without them when the provider says they are unsupported", async () => {
+        // The model is user-editable, so the family test above is only ever a
+        // first guess. A wrong guess must cost one retry, not every request.
+        const bodies: any[] = [];
+        let call = 0;
+        const fetchImpl = (async (_url: string, init: any) => {
+            bodies.push(JSON.parse(init.body));
+            call += 1;
+            if (call === 1) {
+                const body = JSON.stringify({
+                    error: { message: "`reasoning_effort` is not supported with this model" }
+                });
+                return {
+                    ok: false,
+                    status: 400,
+                    headers: { get: () => null },
+                    clone: () => ({ text: async () => body }),
+                    text: async () => body,
+                    json: async () => JSON.parse(body)
+                };
+            }
+            return apiResponse(ok({ id: "10", lang: "ja", text: "not tonight" }));
+        }) as unknown as typeof fetch;
+
+        await translateWithGroq(req, "gsk_x", fetchImpl, "qwen/some-future-non-reasoning");
+        expect(bodies).toHaveLength(2);
+        expect(bodies[0].reasoning_effort).toBe("low");
+        expect(bodies[1].reasoning_effort).toBeUndefined();
     });
 });

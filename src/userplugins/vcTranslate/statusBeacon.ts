@@ -220,8 +220,8 @@ export function recordRendered(): void {
  * right now", not "what has ever gone wrong"; spec §7's rotating human-readable
  * log is where a history belongs.
  */
-export function recordError(code: BeaconErrorCode): void {
-    lastError = { code, at: nowIso() };
+export function recordError(code: BeaconErrorCode, status?: number): void {
+    lastError = { code, at: nowIso(), ...(status === undefined ? {} : { status }) };
     scheduleWrite();
 }
 

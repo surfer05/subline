@@ -947,6 +947,12 @@ function hasQualityVerdict(key: string): boolean {
  * someone reading the diagnostics — a wrong key, an exhausted quota, and a
  * native half that never answered all need different advice.
  */
+/** The HTTP status an engine's error text names, when it names one. */
+function beaconErrorStatus(res: { error: string } | null): number | undefined {
+    const match = res === null ? null : /\bHTTP (\d{3})\b/.exec(res.error);
+    return match === null ? undefined : Number(match[1]);
+}
+
 function beaconErrorCode(res: { error: string } | null): BeaconErrorCode {
     if (res === null) return "ipc-failed";
     if (/\bHTTP 429\b/.test(res.error)) return "rate-limited";
@@ -1139,7 +1145,7 @@ async function runTier(
             // "loaded, but erroring" instead of the indistinguishable "loaded,
             // nothing to translate yet".
             const errorCode = beaconErrorCode(res);
-            recordError(errorCode);
+            recordError(errorCode, beaconErrorStatus(res));
             // Manual-⚡-only — see ForcedHint's own doc. Reuses the same
             // closed set of categories the beacon just recorded, so this can
             // never leak the engine's own (potentially remote-text-bearing)

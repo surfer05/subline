@@ -17,7 +17,7 @@ import { toggleChannel } from "../channels";
 import { cooldownUntil, setCooldown } from "../cooldownStore";
 import settings from "../settings";
 import { clearStore, getTranslation, makeKey, setTranslation } from "../store";
-import { FAST_DEBOUNCE_MS, QUALITY_DEBOUNCE_MS } from "../types";
+import { DEFAULT_GROQ_MODEL, FAST_DEBOUNCE_MS, QUALITY_DEBOUNCE_MS } from "../types";
 import type { NativeResponse } from "../native";
 import { __resetSettings } from "./stubs/api-settings";
 import * as DataStore from "./stubs/api-datastore";
@@ -3508,7 +3508,7 @@ describe("the Groq engine, end to end through the renderer", () => {
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
         expect(native.translateBatch.mock.calls.find(c => c[0] === "groq")![3])
-            .toBe("llama-3.3-70b-versatile");
+            .toBe(DEFAULT_GROQ_MODEL);
 
         settings.store.groqModel = "llama-3.1-8b-instant";
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });

@@ -1,6 +1,6 @@
 import { HttpError } from "../httpError";
 import { rateLimitFromHeaders, retryAfterFromHeader, type ProviderRateLimit } from "../rateHint";
-import { DEFAULT_GROQ_MODEL, type BatchRequest, type Result } from "../types";
+import { effectiveGroqModel, type BatchRequest, type Result } from "../types";
 import { buildPrompt, extractRows, mapRows, parseJsonText, SCHEMA } from "./llmShared";
 
 const ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
@@ -66,6 +66,31 @@ export interface GroqOutcome {
  * and a second, stricter parser here is how the two engines would come to
  * disagree about what a valid response is.
  */
+/**
+ * Keep a reasoning model's thinking out of the reply.
+ *
+ * Groq's recommended replacements for the decommissioned Llama 3.3 are both
+ * reasoning models. Left alone they emit their working — gpt-oss into a
+ * separate `reasoning` field that consumes the budget before any answer
+ * appears, qwen as a `<think>` block inside the content, which is not the JSON
+ * this engine parses. "low" rather than "off" because the reasoning is what
+ * makes these models better at the colloquial readings we want; it just has no
+ * business in the output.
+ */
+const REASONING_CONTROLS = { reasoning_effort: "low", reasoning_format: "hidden" } as const;
+
+/**
+ * Whether to send the controls above at all.
+ *
+ * A prefix test, not a list of model ids: the list would be stale the moment a
+ * provider ships a new one, and this is only ever the FIRST guess — a wrong
+ * answer costs one retry, never a failed translation. See the 400 handling in
+ * `translateWithGroq`.
+ */
+export function looksLikeReasoningModel(model: string): boolean {
+    return /^(openai\/gpt-oss|qwen\/)/i.test(model.trim());
+}
+
 export function parseGroqResponse(body: unknown, req: BatchRequest, debug = false): Result[] {
     if (body === null || typeof body !== "object") {
         throw new Error(`groq: response is not an object (got ${typeof body})`);
@@ -148,24 +173,44 @@ export async function translateWithGroq(
     model?: string,
     debug = false
 ): Promise<GroqOutcome> {
-    const chosenModel = typeof model === "string" && model.trim() !== ""
-        ? model.trim()
-        : DEFAULT_GROQ_MODEL;
+    // Handles blank AND retired values — see effectiveGroqModel. A user still
+    // on the decommissioned default would otherwise get a 400 on every request.
+    const chosenModel = effectiveGroqModel(model);
 
-    const res = await fetchImpl(ENDPOINT, {
+    const headers = {
+        "content-type": "application/json",
+        // A Bearer token, unlike Gemini's `x-goog-api-key` and Claude's
+        // `x-api-key` — the one thing about this transport that is neither
+        // sibling's.
+        authorization: `Bearer ${apiKey}`
+    };
+
+    const send = (withReasoningControls: boolean): Promise<Response> => fetchImpl(ENDPOINT, {
         method: "POST",
-        headers: {
-            "content-type": "application/json",
-            // A Bearer token, unlike Gemini's `x-goog-api-key` and Claude's
-            // `x-api-key` — the one thing about this transport that is neither
-            // sibling's.
-            authorization: `Bearer ${apiKey}`
-        },
+        headers,
         body: JSON.stringify({
             model: chosenModel,
-            messages: [{ role: "user", content: groqPrompt(req) }]
+            messages: [{ role: "user", content: groqPrompt(req) }],
+            ...(withReasoningControls ? REASONING_CONTROLS : {})
         })
     });
+
+    let res = await send(looksLikeReasoningModel(chosenModel));
+
+    // A reasoning model that is not told to keep quiet answers with an empty
+    // `content` and its whole budget spent in a `reasoning` field — measured,
+    // not guessed: gpt-oss-120b returned "" with finish_reason "length". And a
+    // NON-reasoning model 400s outright on those same parameters. Since the
+    // model is a user-editable setting, neither can be assumed, so a refusal
+    // that names one of them is retried once without them. That keeps an
+    // unrecognised model a user pastes working, instead of failing on every
+    // request in a way that reads like throttling.
+    if (res.status === 400) {
+        const text = await res.clone().text().catch(() => "");
+        if (/reasoning_(effort|format)/i.test(text)) {
+            res = await send(false);
+        }
+    }
 
     if (!res.ok) {
         // Deliberately does not include the request body or key.

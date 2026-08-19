@@ -52,7 +52,43 @@ export const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
  * side (engines/groq.ts) already import, so the setting's default and the
  * request's fallback are the same string by construction.
  */
-export const DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile";
+export const DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b";
+
+/**
+ * Models this provider has retired, and which no request can any longer reach.
+ *
+ * WHY A LIST AND NOT JUST A NEW DEFAULT. The model is a persisted SETTING, so a
+ * new default reaches nobody who has already installed: their settings.json
+ * still names the dead model, every request 404s or 400s, and the plugin falls
+ * back to Google with no explanation the user could act on. Changing the
+ * default alone would have fixed this for new installs only — which is the
+ * smaller half of the problem.
+ *
+ * Groq announced Llama 3.3 70B Versatile's decommission for 2026-08-16.
+ *
+ * Read by `effectiveGroqModel`: a stored value on this list is treated as
+ * absent, so the current default is used instead and the user's own choice of
+ * any LIVE model is still respected.
+ */
+export const RETIRED_GROQ_MODELS: readonly string[] = [
+    "llama-3.3-70b-versatile"
+];
+
+/**
+ * The model a request should actually use.
+ *
+ * Blank falls back for the reason the old comment gave — sending `"model": ""`
+ * is a 400 on every request. A RETIRED model falls back for a newer reason:
+ * it is a value the user never chose so much as inherited from a default that
+ * has since died, and leaving them on it means a plugin that silently stopped
+ * doing the one thing they installed it for.
+ */
+export function effectiveGroqModel(stored?: string): string {
+    const trimmed = typeof stored === "string" ? stored.trim() : "";
+    if (trimmed === "") return DEFAULT_GROQ_MODEL;
+    if (RETIRED_GROQ_MODELS.includes(trimmed)) return DEFAULT_GROQ_MODEL;
+    return trimmed;
+}
 
 export interface PendingMessage {
     id: string;

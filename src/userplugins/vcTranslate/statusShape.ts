@@ -135,6 +135,17 @@ export type BeaconErrorCode = (typeof BEACON_ERROR_CODES)[number];
 export interface BeaconError {
     code: BeaconErrorCode;
     at: string;
+    /**
+     * The HTTP status, when the failure had one.
+     *
+     * A NUMBER, deliberately — the provider's error prose is remote text and
+     * this file's whole rule is that a beacon cannot carry a conversation. But
+     * "engine-error" alone sent us round a loop: the request worked from curl
+     * and failed in the plugin, and the code said only that it was not 401, 403
+     * or 429. A status separates a 400 we are sending wrongly from a 500 at the
+     * other end, which are opposite problems.
+     */
+    status?: number;
 }
 
 export interface StatusBeacon {
@@ -272,7 +283,19 @@ export function sanitizeBeacon(value: unknown): StatusBeacon | null {
 
     const lastError: BeaconError | null =
         rawError !== null && isErrorCode(rawError.code) && isBeaconTimestamp(rawError.at)
-            ? { code: rawError.code, at: rawError.at }
+            ? {
+                code: rawError.code,
+                at: rawError.at,
+                // A plausible HTTP status and nothing else. Bounded so a
+                // hostile or buggy value cannot smuggle anything through the
+                // one field on this object that is not a closed vocabulary.
+                ...(typeof rawError.status === "number"
+                    && Number.isInteger(rawError.status)
+                    && rawError.status >= 100
+                    && rawError.status <= 599
+                    ? { status: rawError.status }
+                    : {})
+            }
             : null;
 
     return {

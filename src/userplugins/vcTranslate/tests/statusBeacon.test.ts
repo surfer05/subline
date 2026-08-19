@@ -372,3 +372,38 @@ describe("a broken beacon never breaks translation", () => {
         ]);
     });
 });
+
+describe("an error's HTTP status", () => {
+    function onDisk(): StatusBeacon | null {
+        return sanitizeBeacon(lastWritten());
+    }
+
+    it("is recorded alongside the code", async () => {
+        // "engine-error" alone sent us round a loop: the same request worked
+        // from curl and failed in the plugin, and the code said only that it
+        // was not 401, 403 or 429. A 400 we are sending wrongly and a 500 at
+        // the other end are opposite problems.
+        recordPluginLoaded();
+        recordError("engine-error", 400);
+        await passThrottle();
+        expect(onDisk()!.lastError).toMatchObject({ code: "engine-error", status: 400 });
+    });
+
+    it("is omitted when the failure had no status", async () => {
+        recordPluginLoaded();
+        recordError("ipc-failed");
+        await passThrottle();
+        expect(onDisk()!.lastError!.status).toBeUndefined();
+    });
+
+    it("refuses anything that is not a plausible status", async () => {
+        // The one field on this object that is not a closed vocabulary, so it
+        // is bounded rather than trusted.
+        recordPluginLoaded();
+        for (const bad of [99, 600, 1.5]) {
+            recordError("engine-error", bad);
+            await passThrottle();
+            expect(onDisk()!.lastError!.status).toBeUndefined();
+        }
+    });
+});
