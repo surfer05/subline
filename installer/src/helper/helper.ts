@@ -467,7 +467,14 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
         discordRunning: target => run.ports.discordRunning(target),
         mtimeOf: path => run.ports.mtimeOf(path),
         readDiscordVersion: target => run.ports.readDiscordVersion(target)
-    }, run.options.settle ?? {});
+    }, {
+        // WINDOWS ONLY. It refuses to rename a file a running process holds
+        // open, so the patch genuinely cannot be written while Discord is up.
+        // macOS allows it, and waiting there meant self-repair never ran at
+        // all for anyone who actually uses Discord — see requireDiscordClosed.
+        requireDiscordClosed: run.ports.platform === "win32",
+        ...(run.options.settle ?? {})
+    });
 
     if (!settled.settled) {
         run.deferred.push(install.rootPath);

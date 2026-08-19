@@ -80,6 +80,25 @@ export interface SettleOptions {
     pollMs?: number;
     /** Total budget for this run. Exceeding it defers to the next run, silently. */
     maxWaitMs?: number;
+    /**
+     * Whether a RUNNING Discord has to be waited out.
+     *
+     * Defaults to true, which is correct on Windows and was wrong everywhere
+     * else. Windows refuses to rename a file a running process holds open, so
+     * there the patch genuinely cannot be written while Discord is up. macOS
+     * has no such rule: the rename succeeds, the running Discord keeps the
+     * archive it already opened, and the patch takes effect at its next launch.
+     *
+     * Waiting anyway looked cautious and was in fact fatal. Self-repair exists
+     * for the user whose Discord updated underneath them — somebody who USES
+     * Discord, and therefore has it open. Every hourly run on a real Mac
+     * deferred, for days, and the product silently stopped translating with a
+     * helper installed, registered and running perfectly.
+     *
+     * The UPDATER is still waited out either way. That was always the real
+     * hazard: racing a half-written install, not touching a live one.
+     */
+    requireDiscordClosed?: boolean;
 }
 
 /**
@@ -154,13 +173,15 @@ export async function awaitDiscordSettled(
     const maxAttempts = Math.floor(maxWaitMs / Math.max(1, pollMs)) + 1;
     let attempts = 0;
 
+    const requireClosed = options.requireDiscordClosed ?? true;
+
     let lastReason: string;
     let lastStatus: SettleStatus;
     let lastQuietFor: number | null = null;
 
     do {
         attempts += 1;
-        if (await ports.discordRunning(install)) {
+        if (requireClosed && await ports.discordRunning(install)) {
             lastStatus = "discord-running";
             lastReason = "Discord is running, so it may be updating itself and its app.asar is in use";
             lastQuietFor = null;
@@ -188,7 +209,7 @@ export async function awaitDiscordSettled(
                     lastStatus = "files-changing";
                     lastReason = "a file under Resources changed while we were watching it";
                     lastQuietFor = second.newestMtime === null ? null : ports.now() - second.newestMtime;
-                } else if (await ports.discordRunning(install)) {
+                } else if (requireClosed && await ports.discordRunning(install)) {
                     // Discord can start during the confirmation delay — for
                     // instance because the user opened it, or because the
                     // updater relaunched it.
@@ -203,7 +224,9 @@ export async function awaitDiscordSettled(
                         quietForMs: second.newestMtime === null ? null : ports.now() - second.newestMtime,
                         waitedMs: waited(),
                         attempts,
-                        reason: "Discord is closed and nothing under Resources has changed across two observations"
+                        reason: requireClosed
+                            ? "Discord is closed and nothing under Resources has changed across two observations"
+                            : "nothing under Resources has changed across two observations"
                     };
                 }
             }

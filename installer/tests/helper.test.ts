@@ -73,6 +73,14 @@ interface Harness {
     /** Set to make the process table say Discord is open. */
     discordOpen: boolean;
     /**
+     * Which OS the helper believes it is on.
+     *
+     * Load-bearing since the settle rule diverged: Windows must wait for a
+     * closed Discord because it cannot rename an open file; macOS must not,
+     * because waiting there means never repairing at all.
+     */
+    platform: NodeJS.Platform;
+    /**
      * When Resources was last written, as an ABSOLUTE instant. Absolute rather
      * than "n ms ago" on purpose: the settle check compares two samples taken a
      * moment apart, and a relative mtime would move between them and look like
@@ -119,6 +127,7 @@ function makeHarness(): Harness {
         download: err("NETWORK_ERROR", "no download configured in this test"),
         nextBundle: null,
         unpacked: [],
+        platform: "darwin",
         clock: START
     };
 
@@ -132,7 +141,7 @@ function makeHarness(): Harness {
     };
 
     const ports: HelperPorts = {
-        platform: "darwin",
+        get platform() { return harness.platform ?? "darwin"; },
         productVersion: PRODUCT_VERSION,
         log,
         now: () => harness.clock ?? START,
@@ -365,7 +374,33 @@ describe("trigger A — Discord updated and wiped the injection", () => {
 });
 
 describe("not racing Discord's own updater", () => {
-    it("defers while Discord is running rather than patching underneath it", async () => {
+    it("repairs a running Discord on macOS, where the rename is allowed", async () => {
+        // CHANGED, and this is the whole point of the change. Waiting for
+        // Discord to close looked cautious and was fatal: self-repair exists
+        // for somebody whose Discord updated underneath them, which is somebody
+        // who USES Discord and therefore has it open. Every hourly run on a
+        // real Mac deferred for days while the product silently did nothing,
+        // with the helper installed, registered and running perfectly.
+        //
+        // The rename succeeds on macOS; the running Discord keeps the archive
+        // it already opened and picks the patch up at its next launch.
+        patchForReal(harness);
+        await harness.run();
+        simulateDiscordUpdate(harness.fixture.install, "0.0.407");
+        harness.discordOpen = true;
+
+        const report = await harness.run();
+
+        expect(report.repatched).toEqual([harness.fixture.install.rootPath]);
+        expect(report.deferred).toEqual([]);
+        const stub = readStub(harness.fixture.install.asarPath);
+        expect(stub.ok && stub.value).not.toBeNull();
+    });
+
+    it("still defers on Windows, where the rename would fail", async () => {
+        // Windows refuses to rename a file a running process holds open, so
+        // there the wait is not caution, it is the only thing that works.
+        harness.platform = "win32";
         patchForReal(harness);
         await harness.run();
         simulateDiscordUpdate(harness.fixture.install, "0.0.407");
@@ -396,6 +431,9 @@ describe("not racing Discord's own updater", () => {
     });
 
     it("repairs it on the NEXT run, once the updater has finished", async () => {
+        // Windows: the first run cannot touch a running Discord at all, so the
+        // repair has to survive until a run that finds it closed.
+        harness.platform = "win32";
         patchForReal(harness);
         await harness.run();
         simulateDiscordUpdate(harness.fixture.install, "0.0.407");
