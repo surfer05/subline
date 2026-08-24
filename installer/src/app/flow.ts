@@ -408,7 +408,11 @@ export class InstallFlow {
             return this.set(state({
                 step: "cancelled",
                 detail: "Nothing was changed. Discord is exactly as it was.",
-                actions: []
+                // A way to close, like every other terminal state. It offered
+                // NOTHING — the only exit was the window's own title bar, which
+                // on a screen that exists to reassure reads as being stuck.
+                // Found by the property test that walks every reachable state.
+                actions: ["finish"]
             }));
         }
 
@@ -734,7 +738,7 @@ export class InstallFlow {
      * have closed politely. `escalate: false` is how the caller says "this WAS
      * the forced attempt", so a failure there does not loop.
      */
-    private async quit(force = false, escalate = true): Promise<FlowState> {
+    private async quit(force = false): Promise<FlowState> {
         const install = this.chosenInstall;
         if (install === null) return this.detect();
 
@@ -751,6 +755,10 @@ export class InstallFlow {
             requestQuit: () => this.ports.requestQuit(install.branch),
             forceQuit: () => this.ports.forceQuit(install.branch),
             force,
+            // One press. The button said "Quit Discord for me", so closing it is
+            // what the user already agreed to — see quitDiscord, which owns the
+            // escalation now rather than each caller re-deciding it.
+            escalate: !force,
             sleep: ms => this.ports.sleep(ms),
             clock: () => this.ports.now(),
             ...(this.ports.quitGracePeriodMs === undefined ? {} : { gracePeriodMs: this.ports.quitGracePeriodMs })
@@ -758,9 +766,6 @@ export class InstallFlow {
         this.ports.log.info("discord.quit", { outcome: report.outcome, clear: report.clear, forced: report.forced });
 
         if (report.clear) return this.languageStep();
-
-        // Asking was not enough, so take the step the button already promised.
-        if (!force && escalate) return this.quit(true, false);
 
         // Only reached when the forced close ALSO failed, which means something
         // other than a cooperative Discord is holding those files. Offering the

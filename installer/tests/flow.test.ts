@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { AppManagementStatus } from "../src/app/appManagement.js";
+import { ACTION_LABELS, IS_PRIMARY } from "../src/app/actions.js";
 import { InstallFlow, isConfirmedSuccess } from "../src/app/flow.js";
 import type { FlowPorts, FlowState, FlowStep, HelperInstallOutcome } from "../src/app/flow.js";
 import type { InstalledModBundle } from "../src/app/modInstall.js";
@@ -1142,7 +1143,10 @@ describe("the machine", () => {
         await toDetection(h);
         const state = await h.flow.send({ type: "cancel" });
         expect(state.step).toBe("cancelled");
-        expect(state.actions).toEqual([]);
+        // CHANGED: was toEqual([]). A terminal screen with no action at all
+        // left the window's title bar as the only exit, which on a screen whose
+        // job is reassurance reads as being stuck.
+        expect(state.actions).toEqual(["finish"]);
     });
 
     it("notifies a subscriber on every transition", async () => {
@@ -1182,5 +1186,71 @@ describe("the machine", () => {
         expect(seen.some(s => s.step === "patching" && s.busy)).toBe(true);
         expect(seen.some(s => s.step === "verifying" && s.busy)).toBe(true);
         expect(seen.at(-1)?.busy).toBe(false);
+    });
+});
+
+describe("every screen the flow can reach", () => {
+    /**
+     * Drives the flow into as many states as the scripted ports allow and
+     * checks a property of each one, rather than of a table in isolation.
+     */
+    async function statesReached(): Promise<FlowState[]> {
+        const seen: FlowState[] = [];
+        const record = (h: Harness) => { for (const s of h.steps) void s; };
+
+        const runs: Array<() => Promise<void>> = [
+            async () => { const h = harness(); seen.push(await h.flow.start()); },
+            async () => { const h = harness(); seen.push(await toDetection(h)); },
+            async () => { const h = harness({ installs: { ok: false, error: fail("DISCORD_NOT_FOUND") } });
+                          seen.push(await toDetection(h)); },
+            async () => { const h = harness({ inspect: { ok: true, value: installState("patched-by-other", "betterdiscord") } });
+                          seen.push(await toDetection(h)); },
+            async () => { const h = harness({ inspect: { ok: true, value: installState("patched-by-other", "vencord") } });
+                          seen.push(await toDetection(h)); },
+            async () => { const h = harness({ processes: [[DISCORD_PROCESS]] });
+                          seen.push(await toDetection(h));
+                          seen.push(await h.flow.send({ type: "quit-discord" })); },
+            async () => { const h = harness(); await toDetection(h);
+                          seen.push(await h.flow.send({ type: "set-language", code: "tr" })); },
+            async () => { const h = harness({ permission: ["blocked"] }); await toDetection(h);
+                          seen.push(await setLanguage(h.flow, "tr")); },
+            async () => { const h = harness({ patch: { ok: false, error: fail("IO_ERROR") } });
+                          await toDetection(h); seen.push(await setLanguage(h.flow, "tr")); },
+            async () => { const h = harness({ installHelper: [{ ok: false, error: fail("HELPER_REGISTRATION_FAILED") }] });
+                          await toDetection(h); seen.push(await setLanguage(h.flow, "tr")); },
+            async () => { const h = harness({ launch: { ok: false, error: fail("IO_ERROR") } });
+                          await toDetection(h); seen.push(await setLanguage(h.flow, "tr")); },
+            async () => { const h = harness(); await toDetection(h);
+                          seen.push(await setLanguage(h.flow, "tr")); },
+            async () => { const h = harness(); seen.push(await h.flow.send({ type: "cancel" })); }
+        ];
+        for (const run of runs) await run();
+        void record;
+        return seen;
+    }
+
+    it("offers at most one filled button", async () => {
+        // The rule the renderer only stated in a comment. Two primaries on one
+        // screen means two recommended actions, which is none.
+        for (const state of await statesReached()) {
+            const primaries = state.actions.filter(action => IS_PRIMARY[action]);
+            expect(primaries.length, `${state.step}: ${primaries.join(", ")}`).toBeLessThanOrEqual(1);
+        }
+    });
+
+    it("gives every offered action a label", async () => {
+        for (const state of await statesReached()) {
+            for (const action of state.actions) {
+                expect(ACTION_LABELS[action], `${state.step}/${action}`).toBeTruthy();
+            }
+        }
+    });
+
+    it("always leaves a way out", async () => {
+        // No screen may be a dead end: every one offers at least one action, and
+        // the terminal ones offer the way to close.
+        for (const state of await statesReached()) {
+            expect(state.actions.length, state.step).toBeGreaterThan(0);
+        }
     });
 });

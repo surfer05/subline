@@ -442,7 +442,7 @@ const MUTATIONS = [
     {
         name: "settle: never asks whether Discord is running",
         file: "src/helper/settle.ts",
-        find: "if (await ports.discordRunning(install)) {",
+        find: "if (requireClosed && await ports.discordRunning(install)) {",
         with: "if (false) {",
         expect: "refuses to act while Discord is running"
     },
@@ -477,7 +477,7 @@ const MUTATIONS = [
     {
         name: "settle: Discord starting during the confirmation is ignored",
         file: "src/helper/settle.ts",
-        find: "} else if (await ports.discordRunning(install)) {",
+        find: "} else if (requireClosed && await ports.discordRunning(install)) {",
         with: "} else if (false) {",
         expect: "does NOT settle when Discord starts during the confirmation delay"
     },
@@ -652,8 +652,8 @@ const MUTATIONS = [
     {
         name: "launchAgent: the plist is deleted even when the agent could not be stopped",
         file: "src/helper/launchAgent.ts",
-        find: "        if (!booted.ok) {\n            return err<boolean>(",
-        with: "        if (false) {\n            return err<boolean>(",
+        find: "        if (!booted.ok) {\n            return rewrap<boolean>(",
+        with: "        if (false) {\n            return rewrap<boolean>(",
         expect: "KEEPS the plist when unregistering fails"
     },
     {

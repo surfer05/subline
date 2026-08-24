@@ -12,6 +12,7 @@
  * to.
  */
 
+import { ACTION_LABELS, IS_PRIMARY } from "../app/actions.js";
 import type { FlowAction, FlowActionType, FlowState } from "../app/flow.js";
 import type { LanguageOption } from "../app/language.js";
 import type { UninstallReport } from "../app/uninstall.js";
@@ -40,8 +41,15 @@ const extra = document.getElementById("extra") as HTMLDivElement;
 const errorBox = document.getElementById("error") as HTMLDivElement;
 const actionBar = document.getElementById("actions") as HTMLDivElement;
 
-/** Human labels. A step with no entry falls back to its own id, which is fine for a log-shaped state. */
-const STEP_TITLES: Partial<Record<FlowState["step"], string>> = {
+/**
+ * Human labels — a FULL Record, so adding a FlowStep fails to compile here.
+ *
+ * It used to be Partial, with `?? state.step` as the fallback, which meant a
+ * new state shipped with its own kebab-case id as the heading and nothing
+ * anywhere said so. ACTION_LABELS below was already a full Record and did catch
+ * a new action; the asymmetry was not a decision.
+ */
+const STEP_TITLES: Record<FlowState["step"], string> = {
     welcome: "Welcome",
     tiers: "Two levels of translation",
     detecting: "Looking for Discord",
@@ -70,35 +78,9 @@ const STEP_TITLES: Partial<Record<FlowState["step"], string>> = {
     cancelled: "Cancelled"
 };
 
-const ACTION_LABELS: Record<FlowActionType, string> = {
-    next: "Continue",
-    cancel: "Cancel",
-    "pick-path": "Choose Discord…",
-    "choose-install": "Choose",
-    "proceed-over-mod": "Replace it and continue",
-    "quit-discord": "Quit Discord for me",
-    // Says what it does. "Try again" here would hide that this one does not ask
-    // Discord first — the user is consenting to the close, which is the whole
-    // reason a forced quit is allowed to exist at all.
-    "force-quit-discord": "Close Discord anyway",
-    recheck: "Check again",
-    "set-language": "Continue",
-    "set-key": "Save key and continue",
-    // Named for what it costs. "Continue" here would let somebody give up the
-    // better tier without noticing there was one.
-    "skip-key": "Skip — use Google only",
-    "open-permission-settings": "Open System Settings",
-    retry: "Try again",
-    // Named for what it costs, not for what it skips. "Continue" here would let
-    // someone give up the thing that keeps their install alive without ever
-    // learning they had.
-    "skip-helper": "Continue without background updates",
-    "skip-launch": "I'll open Discord myself",
-    finish: "Done"
-};
 
-/** Which action gets the filled button. One per screen, never two. */
-const PRIMARY: FlowActionType[] = ["next", "set-language", "set-key", "proceed-over-mod", "quit-discord", "force-quit-discord", "retry", "finish", "open-permission-settings"];
+
+
 
 let chosenLanguage: string | null = null;
 let typedKey = "";
@@ -114,15 +96,18 @@ let typedKey = "";
  * `asar-inaccessible`.
  */
 function headingFor(state: FlowState): string {
-    const s = state as FlowState & { installState?: { kind?: string; reason?: string | null } };
+    // No cast. `installState` is already InstallState, whose `reason` is
+    // BrokenReason — so renaming that literal breaks this comparison at compile
+    // time instead of silently sending someone to a destructive "repair" for a
+    // file that was never broken, which is the bug this heading exists to fix.
     if (
         state.step === "broken-install"
-        && s.installState?.kind === "broken"
-        && s.installState.reason === "asar-inaccessible"
+        && state.installState?.kind === "broken"
+        && state.installState.reason === "asar-inaccessible"
     ) {
         return "Subline couldn't read Discord";
     }
-    return STEP_TITLES[state.step] ?? state.step;
+    return STEP_TITLES[state.step];
 }
 
 function render(state: FlowState): void {
@@ -347,33 +332,53 @@ function renderActions(state: FlowState): void {
         if (action === "choose-install") continue;
         const button = document.createElement("button");
         button.textContent = ACTION_LABELS[action];
-        button.className = PRIMARY.includes(action) ? "btn btn-primary" : "btn btn-secondary";
+        button.className = IS_PRIMARY[action] ? "btn btn-primary" : "btn btn-secondary";
         button.disabled = state.busy;
         button.onclick = () => void onAction(action);
         actionBar.append(button);
     }
 }
 
+/**
+ * A switch, not a chain of ifs with a cast at the end.
+ *
+ * The cast that used to close this function (`{ type: action } as FlowAction`)
+ * was the only thing standing between two unions. An action that grew a payload
+ * would still compile here and ship `{ type }` with the payload missing —
+ * `flow.send` accepts it, since its gate checks only `action.type`, and the
+ * handler then reads `undefined`. A bug with no error anywhere.
+ *
+ * In the default branch `action` is narrowed to the cases not handled above,
+ * and `{ type: action }` has to be assignable to FlowAction on its own merits.
+ * Give any of those a payload and this line stops compiling.
+ */
 async function onAction(action: FlowActionType): Promise<void> {
-    if (action === "pick-path") {
-        const path = await api.pickDiscord();
-        if (path === null) return;
-        await act({ type: "pick-path", path });
-        return;
+    switch (action) {
+        case "pick-path": {
+            const path = await api.pickDiscord();
+            if (path === null) return;
+            await act({ type: "pick-path", path });
+            return;
+        }
+        case "set-language":
+            await act({ type: "set-language", code: chosenLanguage ?? "en" });
+            return;
+        case "set-key":
+            await act({ type: "set-key", key: typedKey });
+            return;
+        case "finish":
+            window.close();
+            return;
+        case "choose-install":
+            // Never arrives here. It carries a rootPath and is dispatched from
+            // the list `renderExtra` draws, which is also why `renderActions`
+            // skips it. Two places have to agree about that, and until this
+            // switch existed neither the type nor a test said so — the cast at
+            // the end of this function was quietly accepting it.
+            return;
+        default:
+            await act({ type: action });
     }
-    if (action === "set-language") {
-        await act({ type: "set-language", code: chosenLanguage ?? "en" });
-        return;
-    }
-    if (action === "set-key") {
-        await act({ type: "set-key", key: typedKey });
-        return;
-    }
-    if (action === "finish") {
-        window.close();
-        return;
-    }
-    await act({ type: action } as FlowAction);
 }
 
 async function act(action: FlowAction): Promise<void> {

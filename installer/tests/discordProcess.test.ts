@@ -250,3 +250,77 @@ describe("quitDiscord", () => {
         expect(report.summary).not.toMatch(/dock/i);
     });
 });
+
+describe("escalation", () => {
+    /**
+     * The policy this module was originally built to REFUSE.
+     *
+     * It was kept out on the grounds that a pure module should hold no safety
+     * policy — and both callers then implemented it themselves, with
+     * near-identical comment blocks and different details. One looped over every
+     * located branch and passed no injected clock, so it blocked on the real
+     * fifteen-second grace. An invariant enforced in two places is enforced in
+     * none, which is why it lives here now.
+     *
+     * Built by hand rather than through `harness`: these cases need Discord to
+     * survive the polite request and die to the forced one, which a clamping
+     * list of process tables cannot express.
+     */
+    function stubborn(script: { diesPolitely: boolean }) {
+        const counts = { asked: 0, forced: 0 };
+        let alive = true;
+        let t = 0;
+        const options: QuitDiscordOptions = {
+            branch: "stable",
+            platform: "darwin",
+            listProcesses: async () => (alive ? [DISCORD] : []),
+            requestQuit: async () => { counts.asked += 1; if (script.diesPolitely) alive = false; },
+            forceQuit: async () => { counts.forced += 1; alive = false; },
+            clock: () => t,
+            sleep: async (ms: number) => { t += ms; },
+            gracePeriodMs: 5_000,
+            pollIntervalMs: 1_000
+        };
+        return { options, counts };
+    }
+
+    it("forces only after asking has failed", async () => {
+        const { options, counts } = stubborn({ diesPolitely: false });
+        const report = await quitDiscord({ ...options, escalate: true });
+
+        expect(report.outcome).toBe("quit");
+        expect(report.forced).toBe(true);
+        // Asked first, exactly once. Nothing is force-closed that would have
+        // closed politely.
+        expect(counts.asked).toBe(1);
+        expect(counts.forced).toBe(1);
+    });
+
+    it("never forces when asking worked", async () => {
+        const { options, counts } = stubborn({ diesPolitely: true });
+        const report = await quitDiscord({ ...options, escalate: true });
+
+        expect(report.outcome).toBe("quit");
+        expect(report.forced).toBe(false);
+        expect(counts.forced).toBe(0);
+    });
+
+    it("does nothing extra without the caller's consent", async () => {
+        // `escalate` is never defaulted to true: a caller that has not been
+        // given consent must not get an escalation by forgetting a flag.
+        const { options, counts } = stubborn({ diesPolitely: false });
+        const report = await quitDiscord(options);
+
+        expect(report.outcome).toBe("still-running");
+        expect(counts.forced).toBe(0);
+    });
+
+    it("does not ask again when the caller already said force", async () => {
+        const { options, counts } = stubborn({ diesPolitely: false });
+        const report = await quitDiscord({ ...options, force: true, escalate: true });
+
+        expect(report.forced).toBe(true);
+        expect(counts.asked).toBe(0);
+        expect(counts.forced).toBe(1);
+    });
+});

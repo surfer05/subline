@@ -10,14 +10,24 @@
  * as choosing Quit from the menu), wait, and if it will not go, SAY SO and let
  * the user quit it themselves.
  *
- * A forced quit exists, but ONLY behind an explicit click. The rule above says
- * never force-kill *silently*, and on Windows a strictly-polite escalation is a
- * dead end: `taskkill` without `/F` posts WM_CLOSE, Discord answers it by
+ * A forced quit exists, but ONLY behind an explicit request. The rule above
+ * says never force-kill *silently*, and on Windows a strictly-polite escalation
+ * is a dead end: `taskkill` without `/F` posts WM_CLOSE, Discord answers it by
  * minimising to the tray rather than exiting, and its windowless Electron
  * children ignore it outright. The user is then told "Discord is still running"
- * about a Discord they can see is closed, with no way forward. So `force: true`
- * is offered as a separate, named action the user chooses — never a fallback
- * this function takes on its own initiative.
+ * about a Discord they can see is closed, with no way forward.
+ *
+ * `escalate: true` says the CALLER has already been given consent — the button
+ * that reached here said "Quit Discord" — so asking politely and then forcing
+ * is one press rather than two. It is still an escalation: nothing is
+ * force-closed that would have closed politely.
+ *
+ * THIS POLICY LIVES HERE, not in the callers. It was originally kept out on the
+ * grounds that a pure module should hold no safety policy, and both adapters
+ * then implemented it themselves, with near-identical comment blocks and
+ * different details — one looped over every located branch and passed no
+ * injected clock, so it blocked on the real fifteen-second grace. An invariant
+ * enforced in two places is enforced in none.
  *
  * Everything here is pure given its ports. Enumerating processes and sending
  * the quit request are injected, so the escalation logic is testable without a
@@ -128,6 +138,14 @@ export interface QuitDiscordOptions {
     forceQuit?: () => Promise<void>;
     /** Set by the user's explicit choice. Never defaulted to true anywhere. */
     force?: boolean;
+    /**
+     * Ask first, then force if asking did not work — in one call.
+     *
+     * For callers whose button already promised to close Discord. Never
+     * defaulted to true: a caller that has not been given consent must not get
+     * an escalation by forgetting a flag.
+     */
+    escalate?: boolean;
     /** How long to wait for it to go away after asking. */
     gracePeriodMs?: number;
     pollIntervalMs?: number;
@@ -183,6 +201,13 @@ function stillRunningSummary(platform: NodeJS.Platform, forced: boolean): string
 }
 
 export async function quitDiscord(options: QuitDiscordOptions): Promise<QuitReport> {
+    const report = await attemptQuit(options);
+    // Asking was not enough, and the caller told us it had consent to go further.
+    if (report.clear || report.forced || options.escalate !== true) return report;
+    return attemptQuit({ ...options, force: true });
+}
+
+async function attemptQuit(options: QuitDiscordOptions): Promise<QuitReport> {
     const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
     const clock = options.clock ?? Date.now;
     const grace = options.gracePeriodMs ?? DEFAULT_QUIT_GRACE_MS;
