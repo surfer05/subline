@@ -450,7 +450,7 @@ const DEFAULT_COOLDOWN_MS = 60_000;
  * window spent a request rediscovering the limit and greeted the user with a
  * rate-limit toast before showing them anything.
  */
-function isCoolingDown(engine: LlmEngineId): boolean {
+function isCoolingDown(engine: EngineId): boolean {
     return Date.now() < cooldownUntil(engine);
 }
 
@@ -1026,6 +1026,17 @@ function beaconErrorCode(res: { error: string } | null): BeaconErrorCode {
  * engine on a 429, a 401/403 still falls the session back to Google, and the
  * `finally` still releases this tier's in-flight ids however the flush ended.
  */
+/**
+ * Resolve every id in a batch that never produced a per-message answer.
+ *
+ * Fast tier only, and `deferred` always: nothing here is a statement about any
+ * individual message. See the block comment on the marker write in runTier.
+ */
+function deferBatch(isQuality: boolean, req: BatchRequest): void {
+    if (isQuality) return;
+    for (const m of req.messages) writeResult(makeKey(m.id, req.targetLang), { deferred: true });
+}
+
 async function runTier(
     engine: EngineId, req: BatchRequest, myGeneration: number,
     // Manual-⚡-only: set by forceQualityTranslate so it can learn WHY this
@@ -1083,7 +1094,11 @@ async function runTier(
         // Cooling down after a 429: do not spend a request to be told so
         // again. Nothing is marked and nothing is diverted — the fast tier's
         // Google line for these same messages is already on screen.
-        if (isQuality && isLlmEngine(engine) && isCoolingDown(engine)) {
+        // The fast tier is included now. Google's free endpoint rate-limits
+        // by IP and answers 429 with an HTML block page; retrying into that is
+        // how a transient block becomes a sustained one — and unlike the LLMs,
+        // Google has no rate gate to fall back on.
+        if (isCoolingDown(engine)) {
             if (debug) {
                 logger.debug(
                     `[flush] ${engine}: blocked — cooling down for another `
@@ -1091,6 +1106,11 @@ async function runTier(
                 );
             }
             report?.({ kind: "cooldown" });
+            // A fast-tier batch skipped here never went out, so no id in it
+            // has an answer. Leave them readable as "delayed" rather than
+            // blank — and resolved, so catch-up sees work already accounted
+            // for instead of re-requesting into the same closed door.
+            deferBatch(isQuality, req);
             return;
         }
 
@@ -1191,6 +1211,14 @@ async function runTier(
                     enterCooldown(
                         engine, res.retryAfterMs, res.quotaLimitPerMinute, res.quotaModel
                     );
+                } else if (!isLlmEngine(engine) && /\b429\b/.test(res.error)) {
+                    // Google, parked through the plain store rather than
+                    // enterCooldown: that function retunes the rate gate and
+                    // announces a quota, and Google is behind neither — it is
+                    // per-message with its own concurrency cap, and its free
+                    // endpoint states no quota to retune towards. All that is
+                    // wanted here is "stop asking for a while".
+                    setCooldown(engine, Date.now() + (res.retryAfterMs ?? DEFAULT_COOLDOWN_MS));
                 }
                 // Retrying either of these every batch would be pure noise, so
                 // both fall back to Google for the rest of the session — but
@@ -1218,7 +1246,7 @@ async function runTier(
             // forever.
             if (!isQuality) {
                 for (const m of req.messages) {
-                    writeResult(makeKey(m.id, req.targetLang), { failed: true });
+                    writeResult(makeKey(m.id, req.targetLang), { deferred: true });
                 }
             }
             return;

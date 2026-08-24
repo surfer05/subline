@@ -244,14 +244,17 @@ describe("the plugin reports what it actually did", () => {
         expect(lastBeacon()?.counts.approx ?? 0).toBe(0);
     });
 
-    it("does not count a failure marker as a translation", async () => {
+    it("does not count a marker as a translation", async () => {
         await start();
         respondWith({ ok: false, error: "google: HTTP 500" });
 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", TEXT) });
         await settle();
 
-        expect(getTranslation(makeKey("1", "en"))).toEqual({ failed: true });
+        // `deferred`, not `failed`: a 500 is the endpoint refusing the whole
+        // batch, which says nothing about this message. Either way it is a
+        // marker, and the counts — the whole point of this test — stay at zero.
+        expect(getTranslation(makeKey("1", "en"))).toEqual({ deferred: true });
         expect(lastBeacon()!.counts).toEqual({ approx: 0, upgraded: 0 });
     });
 

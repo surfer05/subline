@@ -186,41 +186,113 @@ describe("skip results are written as a resolved marker", () => {
 // catch-up must keep treating them as retryable rather than finished.
 describe("markers — who writes them, and which ones catch-up picks back up", () => {
     it("marks a batch from the fast tier's own verdict, never from the quality tier's", async () => {
-        // WAS: "marks a batch deferred (not failed) only when the Google
-        // fallback fails too". Same question — what does the reader end up
-        // with when the LLM refuses? — against the mechanism that answers it
-        // now. `deferred` used to be produced by the quality tier's in-flush
-        // Google retry failing as well; that retry is gone (the fast tier
-        // already sent these messages to Google before the LLM was asked), so
-        // the quality tier writes NOTHING when it cannot answer and whatever
-        // the reader sees is the fast tier's verdict alone.
+        // WAS: a blanket 429 that rate-limited Gemini AND Google at once, then
+        // asserted `failed`. That setup could not actually answer the question
+        // in the title: with BOTH tiers refusing, a marker written by either
+        // one looks identical in the store, so the assertion passed no matter
+        // which tier wrote it. It also asserted the wrong marker — a refused
+        // endpoint is now `deferred` (see the next test).
+        //
+        // The question is worth keeping, so it is asked properly: the LLM
+        // refuses and GOOGLE SUCCEEDS. Now the two tiers write distinguishable
+        // things, and "the quality tier writes nothing when it cannot answer"
+        // is a claim the store can actually be checked against.
         settings.store.engine = "gemini";
         settings.store.geminiApiKey = "AIza-test";
-        // Blanket 429: Gemini is rate limited AND Google fails too, so there
-        // is genuinely nothing to be had from anywhere. That is a real
-        // attempt that came back broken — `failed` — and it must come from
-        // the fast tier. No `deferred`, from either tier.
-        native.translateBatch.mockImplementation(async () =>
-            ({ ok: false, error: "gemini: HTTP 429", retryAfterMs: 30_000 }));
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "google"
+                ? { ok: true, results: [{ id: "1", lang: "es", text: "hello", skip: false }] }
+                : { ok: false, error: "gemini: HTTP 429", retryAfterMs: 30_000 });
 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
 
-        expect(getTranslation(makeKey("1", "en"))).toEqual({ failed: true });
-        expect(getTranslation(makeKey("1", "en"))).not.toHaveProperty("deferred");
+        // The Google line stands, untouched. A rate-limited quality tier costs
+        // the reader the upgrade and nothing else — no marker of either kind
+        // is allowed to take a readable subtitle away from them.
+        expect(getTranslation(makeKey("1", "en"))).toMatchObject({ text: "hello", via: "google" });
 
-        // A second message arrives while still inside the 30s cooldown window.
-        // The LLM must not be touched again — but the message must still be
-        // ATTEMPTED, because the fast tier does not share the LLM's cooldown.
+        // A second message arrives inside the 30s cooldown window. The LLM must
+        // not be touched again — but the message must still be ATTEMPTED,
+        // because the fast tier does not share the LLM's cooldown. (It has one
+        // of its own now, which is why Google answers OK here: a 429 from
+        // Google would park Google, and that is the NEXT test's subject.)
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "google"
+                ? { ok: true, results: [{ id: "2", lang: "es", text: "how are you", skip: false }] }
+                : { ok: false, error: "gemini: HTTP 429", retryAfterMs: 30_000 });
         const before = native.translateBatch.mock.calls.length;
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
         await settle();
 
-        expect(getTranslation(makeKey("2", "en"))).toEqual({ failed: true });
+        expect(getTranslation(makeKey("2", "en"))).toMatchObject({ text: "how are you" });
         const laterCalls = native.translateBatch.mock.calls.slice(before).map(c => c[0]);
         expect(laterCalls.length).toBeGreaterThan(0);
         expect(laterCalls).not.toContain("gemini");
         expect(laterCalls.every(e => e === "google")).toBe(true);
+    });
+
+    // THE BUG THIS PINS, observed live on 2026-08-24: every message showed
+    // "⚠ translation failed" for ~20s, then the LLM landed and replaced it.
+    //
+    // Google's free endpoint (translate_a/single) rate-limits by IP, and when
+    // it does it answers 429 with an HTML "Sorry..." page — verified with curl
+    // from the affected machine. That is a statement about the ENDPOINT, made
+    // once, about the whole batch. It says nothing whatsoever about any
+    // individual message. Writing `failed` per id turned "the endpoint is
+    // refusing us and the quality tier is still coming" into "we tried your
+    // message and it is broken" — and persisted that to disk.
+    //
+    // `deferred` is the state that already meant exactly this, and its own
+    // renderer already says so: "a message awaiting a retry is not a broken
+    // one". It was retired when the QUALITY tier stopped marking rate limits.
+    // Nobody accounted for the FAST tier being rate-limited too.
+    it("defers, not fails, when the fast tier's endpoint refuses the whole batch", async () => {
+        // Fast tier only, so nothing else can write to these keys.
+        settings.store.engine = "google";
+        native.translateBatch.mockImplementation(async () =>
+            ({ ok: false, error: "google: HTTP 429", retryAfterMs: 30_000 }));
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(getTranslation(makeKey("1", "en"))).toEqual({ deferred: true });
+
+        // And it stops hammering the endpoint that just blocked it. Google is
+        // not rate-gated (it is per-message, not batched), so the cooldown is
+        // the ONLY thing standing between a 429 and a tight retry loop — which
+        // is how a transient IP block becomes a sustained one.
+        const before = native.translateBatch.mock.calls.length;
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+
+        expect(native.translateBatch.mock.calls.length).toBe(before);
+        // Still resolved, though — a message the reader can see is "delayed",
+        // not one sitting blank while catch-up quietly re-requests it forever.
+        expect(getTranslation(makeKey("2", "en"))).toEqual({ deferred: true });
+    });
+
+    it("still fails a message the engine itself rejected, one id at a time", async () => {
+        // The counterpart, and the reason this is not just "never write
+        // failed". A per-message verdict from a batch that ARRIVED is real
+        // information about that message — google.ts's MessageError, raised
+        // for a garbled body or an empty translation — and it must survive as
+        // `failed` while its batch-mates keep their translations.
+        settings.store.engine = "google";
+        respondWith({
+            ok: true,
+            results: [
+                { id: "1", failed: true },
+                { id: "2", lang: "es", text: "how are you", skip: false }
+            ]
+        } as NativeResponse);
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+
+        expect(getTranslation(makeKey("1", "en"))).toEqual({ failed: true });
+        expect(getTranslation(makeKey("2", "en"))).toMatchObject({ text: "how are you" });
     });
 
     it("retries a deferred message on the next channel open, exactly like a failed one", async () => {
