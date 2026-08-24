@@ -27,7 +27,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { join } from "node:path";
 
 import type { Result } from "../patcher/result.js";
-import { err, fsError, ok } from "../patcher/result.js";
+import { err, fsError, ok, rewrap } from "../patcher/result.js";
 
 /** Reverse-DNS, matching the app id in `package.json`'s electron-builder block. */
 export const HELPER_LABEL = "com.subline.helper";
@@ -210,7 +210,11 @@ export async function installLaunchAgent(options: InstallLaunchAgentOptions): Pr
         } catch {
             // Reporting the registration failure matters more than the tidy-up.
         }
-        return err<LaunchAgentReport>("HELPER_REGISTRATION_FAILED", bootstrapped.error.message, { path: plistPath });
+        // Carries launchctl's stderr, which is the only thing that says WHY.
+        return rewrap<LaunchAgentReport>(bootstrapped.error, {
+            code: "HELPER_REGISTRATION_FAILED",
+            path: plistPath
+        });
     }
 
     // Registration is CONFIRMED, not assumed — the same standard the patcher
@@ -246,11 +250,11 @@ export async function removeLaunchAgent(options: {
     if (wasLoaded) {
         const booted = await launchctl.bootout(label, uid);
         if (!booted.ok) {
-            return err<boolean>(
-                "HELPER_REGISTRATION_FAILED",
-                `The Subline background helper could not be unregistered (${booted.error.message}), so its file was left in place rather than leaving a running agent with no configuration.`,
-                { path: plistPath }
-            );
+            return rewrap<boolean>(booted.error, {
+                code: "HELPER_REGISTRATION_FAILED",
+                message: `The Subline background helper could not be unregistered (${booted.error.message}), so its file was left in place rather than leaving a running agent with no configuration.`,
+                path: plistPath
+            });
         }
     }
 

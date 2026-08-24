@@ -55,7 +55,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -252,6 +252,67 @@ Built at ${new Date().toISOString()} by installer/scripts/buildMod.mjs.
 `;
 }
 
+
+/**
+ * Delete every Vencord plugin Subline does not use, before the build runs.
+ *
+ * WHY. Vencord ships 167 plugins. A Subline user installed a translator, and
+ * was getting all of them — a settings screen listing dozens of features they
+ * never asked for, each one a way to change their Discord and a support burden
+ * that lands on us. Someone who wants Vencord should install Vencord.
+ *
+ * WHAT IS KEPT. `_api` provides the extension points the plugin registers
+ * against (chat buttons, the message popover, message accessories, user
+ * settings); `_core` provides the settings UI itself. Whole directories rather
+ * than individual files, because the members of each are interdependent and a
+ * per-file list would be a per-file guess.
+ *
+ * THE GUARD IS THE POINT. Vencord moves under us — this build is pinned to one
+ * commit, and the day that pin is bumped a directory we rely on may have been
+ * renamed or absorbed. Then the prune would silently remove nothing, or the
+ * build would lose a feature quietly. So a KEPT entry that is not there is a
+ * hard failure naming it, and the answer to "what does bumping Vencord cost"
+ * is: run this, fix what it names.
+ */
+const KEPT_PLUGIN_DIRS = ["_api", "_core", "clientTheme"];
+
+function prunePlugins() {
+    const pluginsDir = join(VENCORD_DIR, "src", "plugins");
+    if (!existsSync(pluginsDir)) fail(`Vencord's checkout has no src/plugins — the layout has changed.`);
+
+    const present = readdirSync(pluginsDir);
+    const missing = KEPT_PLUGIN_DIRS.filter(name => !present.includes(name));
+    if (missing.length > 0) {
+        fail(
+            `Vencord no longer has src/plugins/${missing.join(", src/plugins/")}. `
+            + "The pinned commit moved something Subline depends on: check what replaced it, "
+            + "update KEPT_PLUGIN_DIRS, and rebuild."
+        );
+    }
+
+    let removed = 0;
+    for (const name of present) {
+        if (KEPT_PLUGIN_DIRS.includes(name)) continue;
+        // index.ts sits alongside the plugin directories and is what imports
+        // them; Vencord globs the folder, so removing the folders is enough and
+        // removing the index would break the build outright.
+        if (name === "index.ts" || name === "index.tsx") continue;
+        rmSync(join(pluginsDir, name), { recursive: true, force: true });
+        removed += 1;
+    }
+
+    // Asserted on the END STATE, not on how many files this run deleted. The
+    // checkout is reused between builds, so a second build legitimately has
+    // nothing left to remove — an earlier version of this guard failed the
+    // build for succeeding twice.
+    const left = readdirSync(pluginsDir).filter(name => !name.startsWith("index."));
+    const unexpected = left.filter(name => !KEPT_PLUGIN_DIRS.includes(name));
+    if (unexpected.length > 0) {
+        fail(`src/plugins still contains ${unexpected.join(", ")} after pruning.`);
+    }
+    return `${left.join(", ")} (removed ${removed} this run)`;
+}
+
 function main() {
     const pin = readPin();
 
@@ -273,6 +334,9 @@ function main() {
 
     log("3/6  Copying the plugin into src/userplugins/vcTranslate");
     log(`     ${installPlugin()} files`);
+
+    log(`3b/6 Removing the plugins we do not ship`);
+    log(`     kept ${prunePlugins()}, removed the rest`);
 
     log("4/6  Installing Vencord's dependencies and building");
     pnpm(["install", "--frozen-lockfile"]);

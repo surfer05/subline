@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { beforeEach, afterEach, describe, expect, it } from "vitest";
 
 import { buildAsar } from "../src/patcher/asar.js";
 import { markerPathFor, readMarker } from "../src/patcher/marker.js";
 import { patchInstall, unpatchInstall } from "../src/patcher/patch.js";
-import { fsError } from "../src/patcher/result.js";
+import { err, fsError, rewrap } from "../src/patcher/result.js";
+import type { PatcherError } from "../src/patcher/result.js";
 import type { PatchOptions } from "../src/patcher/patch.js";
 import { inspectInstall } from "../src/patcher/state.js";
 import { buildStubAsar, readStub, STUB_PACKAGE_JSON, stubIndexSource } from "../src/patcher/stub.js";
@@ -719,5 +721,80 @@ describe("fsError", () => {
             .toBe("PERMISSION_DENIED");
         expect((fsError(thrown("EROFS"), "/a", "x") as { error: { code: string } }).error.code)
             .toBe("READ_ONLY_VOLUME");
+    });
+});
+
+describe("rewrap", () => {
+    const inner = (): PatcherError => {
+        const result = fsError<never>(
+            Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" }),
+            "/inner/path",
+            "do the thing"
+        );
+        if (result.ok) throw new Error("unreachable");
+        return result.error;
+    };
+
+    it("carries the cause across a module seam", () => {
+        // The whole reason it exists. installLaunchAgent dropped launchctl's
+        // stderr one line above the adapter that captured it, so a failed
+        // registration reached the log and the screen as `cause: null`.
+        const out = rewrap<true>(inner(), { code: "HELPER_REGISTRATION_FAILED" });
+        expect(out.ok).toBe(false);
+        if (out.ok) return;
+        expect(out.error.code).toBe("HELPER_REGISTRATION_FAILED");
+        expect(out.error.cause).toContain("EACCES");
+    });
+
+    it("prefers the outer path but keeps the inner one when none is given", () => {
+        const withOuter = rewrap<true>(inner(), { code: "IO_ERROR", path: "/outer/path" });
+        const withoutOuter = rewrap<true>(inner(), { code: "IO_ERROR" });
+        expect(!withOuter.ok && withOuter.error.path).toBe("/outer/path");
+        expect(!withoutOuter.ok && withoutOuter.error.path).toBe("/inner/path");
+    });
+
+    it("keeps the inner message unless the caller has a better one", () => {
+        const kept = rewrap<true>(inner(), { code: "IO_ERROR" });
+        const replaced = rewrap<true>(inner(), { code: "IO_ERROR", message: "Could not set up the helper." });
+        expect(!kept.ok && kept.error.message).toContain("Not allowed to do the thing");
+        expect(!replaced.ok && replaced.error.message).toBe("Could not set up the helper.");
+    });
+
+    it("does not invent a cause when the inner error had none", () => {
+        const bare = err<true>("IO_ERROR", "no cause here");
+        if (bare.ok) throw new Error("unreachable");
+        const out = rewrap<true>(bare.error, { code: "VERIFICATION_FAILED" });
+        expect(!out.ok && out.error.cause).toBeUndefined();
+    });
+});
+
+describe("no module re-wraps an error by hand", () => {
+    it("every re-report goes through rewrap", () => {
+        // A source-level guard, like tests/realFs.test.ts. The convention was
+        // "read the inner error, remember to spread cause across" — two modules
+        // did it, three did not, and the ones that did not shipped a failure
+        // path with no diagnostic detail at all. Nothing about the resulting
+        // error looks wrong; it is simply empty where it matters.
+        const SRC = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
+        const offenders: string[] = [];
+
+        const walk = (dir: string): void => {
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+                const full = join(dir, entry.name);
+                if (entry.isDirectory()) walk(full);
+                else if (entry.name.endsWith(".ts")) {
+                    for (const line of readFileSync(full, "utf8").split("\n")) {
+                        // `err(...)` built from another Result's error is the shape
+                        // that loses the cause. `rewrap` is how that is spelled now.
+                        if (/\berr[<(]/.test(line) && /\.error\.(message|code)\b/.test(line)) {
+                            offenders.push(`${entry.name}: ${line.trim().slice(0, 80)}`);
+                        }
+                    }
+                }
+            }
+        };
+        walk(SRC);
+
+        expect(offenders).toEqual([]);
     });
 });

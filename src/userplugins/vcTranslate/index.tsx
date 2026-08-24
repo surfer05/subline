@@ -410,6 +410,15 @@ function modelFor(engine: EngineId): string {
 function effectiveEngine(): EngineId {
     const configured = settings.store.engine as EngineId;
     if (!isLlmEngine(configured)) return configured;
+    // An expired block lifts itself here rather than needing a settings change
+    // or a restart, which is the difference between a transient network fault
+    // and a wrong credential.
+    if (sessionFallback && fallbackExpiresAt !== null && Date.now() >= fallbackExpiresAt) {
+        sessionFallback = false;
+        fallbackExpiresAt = null;
+        fallbackPinnedFor = null;
+        rebuildBatcher();
+    }
     if (sessionFallback || apiKeyFor(configured).trim() === "") return "google";
     return configured;
 }
@@ -783,14 +792,35 @@ function releaseFallbackIfCredentialChanged(): void {
     if (credentialFingerprint() === fallbackPinnedFor) return;
     sessionFallback = false;
     fallbackPinnedFor = null;
+    fallbackExpiresAt = null;
 }
 
 type FallbackKind = "key" | "blocked";
+
+/**
+ * How long a NETWORK block pins the quality tier before it is retried.
+ *
+ * A rejected key is a fact about the credential: it will still be wrong in an
+ * hour, so retrying it every batch is pure noise and the pin lasts the session.
+ * A 403 is a fact about the connection — a VPN, an ISB, a region — and those
+ * come back. Pinning until restart meant a block on one day left the tier off
+ * for as long as Discord stayed open: a real session ran three days past a
+ * network hiccup that had cleared within the hour, showing "✦ blocked" the
+ * whole time while Groq was reachable.
+ *
+ * Long enough that a persistent block is not retried every batch, short enough
+ * that nobody has to restart Discord to recover from a transient one.
+ */
+const BLOCKED_RETRY_AFTER_MS = 15 * 60_000;
+
+/** When a `blocked` pin stops applying. Null when the pin is not time-based. */
+let fallbackExpiresAt: number | null = null;
 
 function fallBackToGoogle(reason: string, kind: FallbackKind = "key") {
     if (sessionFallback) return;   // only announce once
     sessionFallback = true;
     fallbackKind = kind;
+    fallbackExpiresAt = kind === "blocked" ? Date.now() + BLOCKED_RETRY_AFTER_MS : null;
     fallbackPinnedFor = credentialFingerprint();
     Toasts.show({
         id: Toasts.genId(),
@@ -2657,6 +2687,7 @@ export default definePlugin({
         // Claude instead of staying pinned to Google.
         sessionFallback = false;
         fallbackPinnedFor = null;
+        fallbackExpiresAt = null;
         // Session-scoped by design: a new session may have a different engine,
         // model or target language, and answers from the old one should not
         // silently survive into it.

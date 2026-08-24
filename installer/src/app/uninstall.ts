@@ -31,7 +31,8 @@
  * that leaves something behind.
  */
 
-import { rmSync } from "node:fs";
+import { readdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 // realFs for everything that touches an ".asar" path: Electron treats those as
 // virtual archives rather than files, so restoring _app.asar over app.asar
 // fails inside the packaged app. `rmSync` stays on node:fs — it only ever
@@ -51,6 +52,15 @@ export interface UninstallPorts {
     modBundleDir: string | null;
     /** Subline's per-user directory — the beacon and anything else we own. */
     productDir: string | null;
+    /**
+     * The diagnostics log directory, when it sits INSIDE `productDir`.
+     *
+     * Passed in rather than derived, for the same reason every other path here
+     * is: this module does no I/O and knows no layout. `null` means the log
+     * lives somewhere else entirely — macOS keeps it under ~/Library/Logs — in
+     * which case there is nothing here to preserve.
+     */
+    logDir: string | null;
     /** Vencord's settings.json, so our plugin's key can be removed from it. */
     vencordSettingsPath: string | null;
     log: {
@@ -316,7 +326,29 @@ export function uninstall(ports: UninstallPorts, options: UninstallOptions): Uni
             });
         } else if (ports.productDir !== null && existsSync(ports.productDir)) {
             try {
-                rmSync(ports.productDir, { recursive: true, force: true });
+                // EVERYTHING EXCEPT THE LOG BEING WRITTEN RIGHT NOW.
+                //
+                // On Windows the diagnostics log lives INSIDE this folder
+                // (%LOCALAPPDATA%\Subline\logs), so removing it wholesale
+                // deleted the record of the very run doing the removing. The
+                // folder reappeared empty on the next append, and "Copy
+                // diagnostics" then returned only the lines written after the
+                // deletion — with the uninstall's own account of itself gone.
+                //
+                // Same shape as the bug that stopped Discord starting: a
+                // containment relationship that no interface stated, found by
+                // deleting a parent.
+                if (ports.logDir === null) {
+                    // Nothing of ours lives inside it that outlives this run —
+                    // macOS keeps the log under ~/Library/Logs — so the folder
+                    // goes too.
+                    rmSync(ports.productDir, { recursive: true, force: true });
+                } else {
+                    for (const entry of readdirSync(ports.productDir)) {
+                        if (join(ports.productDir, entry) === ports.logDir) continue;
+                        rmSync(join(ports.productDir, entry), { recursive: true, force: true });
+                    }
+                }
                 productDataRemoved = true;
             } catch (cause) {
                 const failure = fsError<boolean>(cause, ports.productDir, "remove Subline's data folder");

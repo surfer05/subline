@@ -444,21 +444,43 @@ export function uninstallPaths(
     platform: NodeJS.Platform = process.platform,
     env: NodeJS.ProcessEnv = process.env,
     home: string = homedir()
-): { modBundleDir: string | null; productDir: string | null; vencordSettingsPath: string | null } {
+): {
+    modBundleDir: string | null;
+    productDir: string | null;
+    logDir: string | null;
+    vencordSettingsPath: string | null;
+} {
+    const productDir = productDirFor(platform, env, home);
+    const logDir = logDirFor(platform, env, home);
     return {
         modBundleDir: modBundleDirFor(platform, env, home),
-        productDir: productDirFor(platform, env, home),
+        productDir,
+        // Only when it is actually INSIDE the product directory. On macOS the
+        // log lives under ~/Library/Logs and the removal never goes near it, so
+        // naming it here would be a preservation rule with nothing to preserve.
+        logDir: productDir !== null && logDir.startsWith(productDir) ? logDir : null,
         vencordSettingsPath: vencordSettingsPathFor(platform, env, home)
     };
 }
 
 /** Where the rotating diagnostics log lives (spec §4/§5 paths). */
+export const LOG_DIR_NAME = "logs";
+
 export function logDirFor(
     platform: NodeJS.Platform = process.platform,
     env: NodeJS.ProcessEnv = process.env,
     home: string = homedir()
 ): string {
+    // macOS keeps logs where the OS expects them, OUTSIDE the product folder.
     if (platform === "darwin") return join(home, "Library", "Logs", "Subline");
-    if (platform === "win32" && env.LOCALAPPDATA) return join(env.LOCALAPPDATA, "Subline", "logs");
-    return join(home, ".subline", "logs");
+
+    // Everywhere else the logs live INSIDE the product folder, and that is a
+    // relationship the uninstaller has to know about — see uninstall.ts, which
+    // removes the product folder and must not take the log of the run it is
+    // currently reporting with it. Derived from productDirFor rather than
+    // rebuilt from a literal "Subline": the literal is how the two drifted into
+    // an overlap nobody had stated.
+    const product = productDirFor(platform, env, home);
+    if (product !== null) return join(product, LOG_DIR_NAME);
+    return join(home, ".subline", LOG_DIR_NAME);
 }

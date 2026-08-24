@@ -34,7 +34,7 @@ import type { DiscordInstall } from "./locate.js";
 import { markerPathFor, MARKER_FORMAT, readMarker, removeMarker, writeMarker } from "./marker.js";
 import type { PatchMarker } from "./marker.js";
 import type { Result } from "./result.js";
-import { err, fsError, ok } from "./result.js";
+import { err, fsError, ok, rewrap } from "./result.js";
 import { hasUnpackedAppDir, inspectInstall } from "./state.js";
 import type { InstallState, InstallStateKind, KnownMod } from "./state.js";
 import { buildStubAsar, readIsOriginalAsar, readStub, STUB_PACKAGE_JSON, stubIndexSource } from "./stub.js";
@@ -322,7 +322,9 @@ export function verifyPatch(install: DiscordInstall, expected: PatchIdentity, ex
 
     const stub = readStub(install.asarPath);
     if (!stub.ok) {
-        return err<true>("VERIFICATION_FAILED", `The patched app.asar is unreadable (${stub.error.message})`, {
+        return rewrap<true>(stub.error, {
+            code: "VERIFICATION_FAILED",
+            message: `The patched app.asar is unreadable (${stub.error.message})`,
             path: install.asarPath
         });
     }
@@ -358,7 +360,9 @@ export function verifyPatch(install: DiscordInstall, expected: PatchIdentity, ex
 
     const marker = readMarker(install.resourcesPath);
     if (!marker.ok) {
-        return err<true>("VERIFICATION_FAILED", `The patch marker is unreadable (${marker.error.message})`, {
+        return rewrap<true>(marker.error, {
+            code: "VERIFICATION_FAILED",
+            message: `The patch marker is unreadable (${marker.error.message})`,
             path: markerPathFor(install.resourcesPath)
         });
     }

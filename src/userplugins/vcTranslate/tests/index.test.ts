@@ -2813,6 +2813,40 @@ describe("the quota indicator (chat-bar ✦)", () => {
         expect(text(render())).toBe("✦ key rejected");
     });
 
+    it("retries by itself after a network block, without a restart", async () => {
+        // A rejected key is a fact about the credential and will still be wrong
+        // in an hour. A 403 is a fact about the connection, and those come
+        // back. Pinning both until restart left a real session showing
+        // "✦ blocked" for three days after a hiccup that cleared within the
+        // hour, because Discord had simply stayed open.
+        useGemini();
+        native.translateBatch.mockResolvedValue({ ok: false, error: "HTTP 403 Access denied" });
+        stubMessages.set(CHANNEL, [discordMessage("1", "hola")]);
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        expect(text(render())).toBe("✦ blocked");
+
+        // The block lifts on its own once the retry window has passed.
+        vi.setSystemTime(new Date(Date.now() + 16 * 60_000));
+        await settle();
+        expect(text(render())).toBe("✦");
+    });
+
+    it("does NOT expire a rejected key the same way", async () => {
+        // Retrying a wrong key every batch is noise, and the remedy is the
+        // user's to apply — so this one stays pinned until they change it.
+        useGemini();
+        native.translateBatch.mockResolvedValue({ ok: false, error: "HTTP 401 unauthorized" });
+        stubMessages.set(CHANNEL, [discordMessage("1", "hola")]);
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        expect(text(render())).toBe("✦ key rejected");
+
+        vi.setSystemTime(new Date(Date.now() + 60 * 60_000));
+        await settle();
+        expect(text(render())).toBe("✦ key rejected");
+    });
+
     it("goes back to reporting the quota once a different key is entered", async () => {
         // The pin means "this credential is bad", not "this session is bad".
         // Vencord persists a settings field on every keystroke, so a batch

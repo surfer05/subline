@@ -80,6 +80,7 @@ function ports(overrides: Partial<UninstallPorts> = {}): UninstallPorts {
         unpatch: install => unpatchOk(install),
         modBundleDir: modDir,
         productDir,
+        logDir: null,
         vencordSettingsPath: settingsPath,
         log: {
             info: event => logged.push(`info:${event}`),
@@ -501,5 +502,39 @@ describe("whatever happens, Discord can still start", () => {
             expect(existsSync(productDir)).toBe(true);
             expect(report.clean).toBe(false);
         }
+    });
+});
+
+describe("the diagnostics log survives its own uninstall", () => {
+    it("keeps the log directory when it sits inside the product folder", () => {
+        // WINDOWS. logDirFor puts the log at %LOCALAPPDATA%\Subline\logs, which
+        // is INSIDE productDir, and step 3 removed productDir wholesale — so an
+        // uninstall deleted the record of the very run doing the removing. The
+        // folder then reappeared empty on the next append, and Copy diagnostics
+        // returned only the lines written after the deletion.
+        const logDir = join(productDir, "logs");
+        mkdirSync(logDir, { recursive: true });
+        writeFileSync(join(logDir, "subline.log"), "the run being reported\n", "utf8");
+
+        const report = uninstall(
+            ports({ logDir }),
+            { installs: [INSTALL], helper: HELPER_GONE, keepSettings: false }
+        );
+
+        expect(report.productDataRemoved).toBe(true);
+        expect(existsSync(join(logDir, "subline.log"))).toBe(true);
+        // Everything else of ours still went.
+        expect(existsSync(join(productDir, "status.json"))).toBe(false);
+    });
+
+    it("removes the whole product folder when the log lives elsewhere", () => {
+        // macOS: ~/Library/Logs is outside, so there is nothing to preserve and
+        // leaving an empty folder behind would just be litter.
+        const report = uninstall(
+            ports({ logDir: null }),
+            { installs: [INSTALL], helper: HELPER_GONE, keepSettings: false }
+        );
+        expect(report.productDataRemoved).toBe(true);
+        expect(existsSync(productDir)).toBe(false);
     });
 });

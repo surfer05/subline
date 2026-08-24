@@ -25,7 +25,7 @@ import { dirname, join } from "node:path";
 import { inspectModBundle, removeModBundle } from "../bundle/bundle.js";
 import type { ModBundle } from "../bundle/bundle.js";
 import type { Result } from "../patcher/result.js";
-import { err, fsError, ok } from "../patcher/result.js";
+import { rewrap, err, fsError, ok } from "../patcher/result.js";
 
 /**
  * Fault-injection seam, mirroring `PatchOptions.hooks.afterWrite`.
@@ -126,10 +126,7 @@ export function installModBundle(options: InstallModBundleOptions): Result<Insta
         const removed = removeModBundle(destDir);
         if (!removed.ok) {
             rmSync(staging, { recursive: true, force: true });
-            return err<InstalledModBundle>(removed.error.code, removed.error.message, {
-                path: destDir,
-                cause: removed.error.cause
-            });
+            return rewrap<InstalledModBundle>(removed.error, { code: removed.error.code, path: destDir });
         }
     }
 

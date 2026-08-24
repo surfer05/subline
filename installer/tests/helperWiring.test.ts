@@ -283,6 +283,7 @@ describe("uninstall consumes what removeHelperFor produces", () => {
             }),
             modBundleDir: null,
             productDir: null,
+            logDir: null,
             vencordSettingsPath: null,
             log
         };

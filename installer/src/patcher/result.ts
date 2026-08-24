@@ -116,6 +116,41 @@ export function err<T>(
     return { ok: false, error };
 }
 
+/**
+ * Re-report a lower module's failure under this module's own code, KEEPING
+ * everything that made it diagnosable.
+ *
+ * WHY THIS EXISTS AS AN OPERATION. `err()` takes `cause` in an optional bag,
+ * so re-wrapping was a convention every module had to remember: read the inner
+ * error, spread `cause` across if present, spread `path` across if present.
+ * Two modules did it. Three did not. `installLaunchAgent` dropped launchctl's
+ * stderr one line above the adapter that had captured it, so a failed helper
+ * registration reached the diagnostics log — and the screen — as
+ * `cause: null`, and `errorFields` faithfully recorded a cause that had been
+ * destroyed two modules earlier.
+ *
+ * With this, carrying the cause is what the short spelling does, and dropping
+ * it is what takes extra effort. That is the right way round: nobody has ever
+ * deliberately wanted less diagnostic detail on a failure path.
+ *
+ * `path` from the outer call wins when given — the outer module usually knows
+ * a more useful path (the plist it was writing) than the inner one (the binary
+ * it invoked) — but the inner path is kept when the outer names none.
+ */
+export function rewrap<T>(
+    error: PatcherError,
+    outer: { code: PatcherErrorCode; message?: string; path?: string }
+): Result<T> {
+    const wrapped: PatcherError = {
+        code: outer.code,
+        message: outer.message ?? error.message
+    };
+    const path = outer.path ?? error.path;
+    if (path !== undefined) wrapped.path = path;
+    if (error.cause !== undefined) wrapped.cause = error.cause;
+    return { ok: false, error: wrapped };
+}
+
 function describeCause(cause: unknown): string {
     if (!(cause instanceof Error)) return String(cause);
     // A rejected child process carries what the command actually SAID on

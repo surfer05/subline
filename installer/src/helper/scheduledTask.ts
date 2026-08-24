@@ -26,7 +26,7 @@ import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { Result } from "../patcher/result.js";
-import { err, fsError, ok } from "../patcher/result.js";
+import { err, fsError, ok, rewrap } from "../patcher/result.js";
 import { DEFAULT_INTERVAL_SECONDS, HELPER_FLAG } from "./launchAgent.js";
 
 /**
@@ -253,9 +253,9 @@ export async function installScheduledTask(
         // reached a user as "Windows refused to register the Subline helper
         // task" and nothing else — schtasks had said exactly why on stderr, and
         // this line threw it away one level above the port that captured it.
-        return err<ScheduledTaskReport>("HELPER_REGISTRATION_FAILED", created.error.message, {
-            path: spec.name,
-            ...(created.error.cause === undefined ? {} : { cause: created.error.cause })
+        return rewrap<ScheduledTaskReport>(created.error, {
+            code: "HELPER_REGISTRATION_FAILED",
+            path: spec.name
         });
     }
 
