@@ -22,7 +22,7 @@ import {
 } from "./statusBeacon";
 import type { BeaconErrorCode } from "./statusShape";
 import {
-    getTranslation, invalidateMessage, loadPersistedTranslations, makeKey,
+    clearStore, getTranslation, invalidateMessage, loadPersistedTranslations, makeKey,
     setTranslation, subscribe, type StoredTranslation
 } from "./store";
 import {
@@ -2692,6 +2692,25 @@ export default definePlugin({
         // model or target language, and answers from the old one should not
         // silently survive into it.
         qualityPhrases.clear();
+        // THE TWO CALLBACK LISTS. Both hold functions belonging to subtitle
+        // components from the session being torn down. Nothing removed them:
+        // stop() unsubscribed Flux and disposed the batchers, then left these
+        // pointing at the previous session's screen elements — and fired them
+        // twice on the way out, through the very set it was not clearing.
+        //
+        // Neither is persisted and neither has any reason to cross a session
+        // boundary. They survived because "clear every global by hand" is a
+        // convention, and a convention applied nineteen times out of twenty-one
+        // looks exactly like one applied twenty-one times.
+        forcedInFlightListeners.clear();
+        // clearStore() has existed and worked the whole time, and the plugin
+        // never called it — only the test harness did, which is why the tests
+        // were better isolated than the shipped code. It drops the in-memory
+        // cache too, which costs nothing: start() reloads it from disk via
+        // loadPersistedTranslations(), and clearStore deliberately leaves disk
+        // alone.
+        clearStore();
+
         // Only the in-memory mirror. The persisted mark deliberately SURVIVES:
         // an exhausted quota is a fact about the API key, not about this
         // plugin session, so restarting Discord (or toggling the plugin off
