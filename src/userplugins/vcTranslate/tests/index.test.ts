@@ -232,6 +232,41 @@ describe("markers — who writes them, and which ones catch-up picks back up", (
         expect(laterCalls.every(e => e === "google")).toBe(true);
     });
 
+    // The fast tier has NO debounce window. Google is per-message under the
+    // hood (engines/google.ts sends one HTTP request per message, concurrency
+    // 4), so holding messages back never reduced what Google receives by a
+    // single request — the old 700ms window was pure added stare time on
+    // every ≈ line. A zero timer still coalesces synchronous bursts: catch-up
+    // enqueues its whole backlog in one loop, and the timer fires after it.
+    it("flushes the fast tier on the next tick, not after a window", async () => {
+        settings.store.engine = "google";
+        respondWith({ ok: true, results: [{ id: "1", lang: "es", text: "hello", skip: false }] });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await vi.advanceTimersByTimeAsync(1);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        expect(native.translateBatch.mock.calls.map(c => c[0])).toContain("google");
+    });
+
+    it("coalesces a synchronous burst into one fast batch despite the zero window", async () => {
+        // The property the 700ms window was actually FOR — kept, without the
+        // wait. Three messages enqueued in the same tick (as catch-up does)
+        // must produce one google call, not three.
+        settings.store.engine = "google";
+        respondWith({ ok: true, results: [] });
+
+        for (const [id, text] of [["1", "hola"], ["2", "que tal"], ["3", "adios"]] as const) {
+            FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage(id, text) });
+        }
+        await vi.advanceTimersByTimeAsync(1);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        const googleCalls = native.translateBatch.mock.calls.filter(c => c[0] === "google");
+        expect(googleCalls.length).toBe(1);
+        expect(JSON.parse(googleCalls[0][2]).messages.map((m: any) => m.id)).toEqual(["1", "2", "3"]);
+    });
+
     // THE GAP THIS PINS, felt live on 2026-08-26: with Google's endpoint
     // blocking this IP, every message showed "translation delayed" for the
     // full 20-second quality window before the LLM answered. The reader can
@@ -1387,13 +1422,14 @@ describe("a settings change mid-debounce does not drop the message", () => {
         // mid-debounce by a settings change: no entry, no marker, no retry.
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
 
-        // Still inside the fast tier's 700ms window — nothing has flushed.
-        await vi.advanceTimersByTimeAsync(200);
-        for (let i = 0; i < 20; i++) await Promise.resolve();
+        // The fast window is 0ms now, so "mid-debounce" is one tick wide: the
+        // timer is armed but cannot have fired while this test stays
+        // synchronous. Queued, not flushed — timers untouched.
         expect(native.translateBatch).not.toHaveBeenCalled();
 
         // Any setting with an onChange rebuilds both batchers and drains
-        // whatever is still pending — targetLang here, arbitrarily.
+        // whatever is still pending — targetLang here, arbitrarily. Still in
+        // the same tick, so the drain genuinely orphans the queued message.
         settings.store.targetLang = "de";
 
         await settle();
@@ -1418,8 +1454,7 @@ describe("a settings change mid-debounce does not drop the message", () => {
         // and the stale copy goes out under the OLD targetLang. Both are
         // asserted, because "was it sent at all?" cannot see either.
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
-        await vi.advanceTimersByTimeAsync(200);
-        for (let i = 0; i < 20; i++) await Promise.resolve();
+        // Same one-tick-wide trap as the previous test: armed, not fired.
         expect(native.translateBatch).not.toHaveBeenCalled();
 
         settings.store.targetLang = "de";

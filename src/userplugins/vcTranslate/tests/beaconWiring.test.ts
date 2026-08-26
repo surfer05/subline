@@ -227,16 +227,25 @@ describe("the plugin reports what it actually did", () => {
         // also the real race: the two tiers write the same key from different
         // latencies.
         await start();
+        // The Google answer is HELD until this test releases it, so the LLM
+        // line lands while the request is genuinely in flight — the exact
+        // race the comment above describes, not the mid-debounce
+        // approximation of it the old 700ms window allowed.
+        let release: (() => void) | undefined;
         native.translateBatch.mockImplementation(
-            async (_e: string, _k: string, payload: string) => googleAnswers(payload)
+            (_e: string, _k: string, payload: string) =>
+                new Promise(resolve => { release = () => resolve(googleAnswers(payload)); })
         );
 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", TEXT) });
-        // Inside the fast tier's 700ms debounce: queued, not yet answered.
-        await vi.advanceTimersByTimeAsync(100);
+        await vi.advanceTimersByTimeAsync(1);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        expect(release).toBeDefined();
+
         setTranslation(makeKey("1", "en"), { lang: "es", text: "already better", via: "gemini" });
         native.reportStatus.mockClear();
 
+        release!();
         await settle();
 
         // The Google result came back and was refused over the Gemini line.

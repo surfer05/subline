@@ -197,11 +197,29 @@ export function isSameText(a: string, b: string): boolean {
 }
 
 /**
- * The fast tier: Google, on a short window. Free and unmetered, so the only
- * thing being traded off is how many tiny HTTP calls we make — hence a small
- * batch and a short wait. This is what the reader actually sees first.
+ * The fast tier: Google, with NO debounce window. This is what the reader
+ * actually sees first, so every millisecond here is stare time.
+ *
+ * WHY ZERO. The old 700ms window existed "to make fewer tiny HTTP calls" —
+ * a premise that was never true: engines/google.ts sends ONE request PER
+ * MESSAGE whatever the batch size (its own concurrency cap does the rate
+ * shaping), so holding messages back reduced what Google receives by exactly
+ * nothing. The window bought no requests and cost 700ms on every ≈ line —
+ * more than half the observed end-to-end latency.
+ *
+ * What the window WAS doing usefully — coalescing catch-up's backlog into one
+ * flush — a zero timer still does: catch-up enqueues synchronously in a loop
+ * and setTimeout(0) fires after it, so the whole backlog lands in one batch
+ * (pinned by "coalesces a synchronous burst" in index.test.ts). Messages
+ * arriving over the network seconds apart flush separately, which is the same
+ * number of Google requests either way.
+ *
+ * Also the quality tier's window while Google is cooling down (see
+ * rebuildBatcher): in that state the LLM is the reader's only translator and
+ * the same argument applies — the rate gate, not a window, is what protects
+ * the quota.
  */
-export const FAST_DEBOUNCE_MS = 700;
+export const FAST_DEBOUNCE_MS = 0;
 export const FAST_MAX_BATCH = 10;
 
 /**
