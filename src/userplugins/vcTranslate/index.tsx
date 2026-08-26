@@ -1462,7 +1462,24 @@ function rebuildBatcher() {
     // exactly as before this change.
     qualityBatcher = isLlmEngine(quality)
         ? createBatcher({
-            debounceMs: QUALITY_DEBOUNCE_MS,
+            // 20s while the fast tier is healthy; the fast tier's own window
+            // while it is cooling down. The 20s window's stated justification
+            // is "the reader does not wait on this: the fast tier has already
+            // put a subtitle on screen" (types.ts). While Google is parked on
+            // a 429 that premise is false — the LLM is the reader's ONLY
+            // translator, and holding its batch for 20s puts a felt, 20-second
+            // hole in a live conversation. Felt on 2026-08-26, with Google's
+            // endpoint IP-blocking this machine for days.
+            //
+            // The 429 storms the long window exists to prevent stay prevented
+            // by the rate gate: every quality flush still goes through
+            // acquireSlot, so a busy channel on the short window is throttled
+            // to the same requests-per-minute, just in smaller batches. That
+            // trades context quality and quota headroom for latency — the
+            // right trade in the one state where latency is all the reader
+            // has. Asked at arm time, so each burst picks its window from the
+            // fast tier's health at that moment.
+            debounceMs: () => isCoolingDown("google") ? FAST_DEBOUNCE_MS : QUALITY_DEBOUNCE_MS,
             maxBatch: QUALITY_MAX_BATCH,
             contextSize: 8,
             // Same table, same reason. `quality` is narrowed to an LLM engine

@@ -232,6 +232,46 @@ describe("markers — who writes them, and which ones catch-up picks back up", (
         expect(laterCalls.every(e => e === "google")).toBe(true);
     });
 
+    // THE GAP THIS PINS, felt live on 2026-08-26: with Google's endpoint
+    // blocking this IP, every message showed "translation delayed" for the
+    // full 20-second quality window before the LLM answered. The reader can
+    // feel a 20s hole in a conversation. QUALITY_DEBOUNCE_MS's own rationale
+    // is "the reader does not wait on this: the fast tier has already put a
+    // subtitle on screen" — and while the fast tier is cooling down, that
+    // premise is false, so the window it justifies must not apply.
+    it("flushes the quality tier on the fast window while Google is cooling down", async () => {
+        settings.store.engine = "groq";
+        settings.store.groqApiKey = "gsk-test";
+        setCooldown("google", Date.now() + 60_000);
+        respondWith({ ok: true, results: [{ id: "1", lang: "es", text: "hello", skip: false }] });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        // One second — enough for the FAST window (700ms), a twentieth of the
+        // quality one. The subtitle must already be the LLM's.
+        await vi.advanceTimersByTimeAsync(1_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        expect(native.translateBatch.mock.calls.map(c => c[0])).toContain("groq");
+        expect(getTranslation(makeKey("1", "en"))).toMatchObject({ text: "hello", via: "groq" });
+    });
+
+    it("keeps the 20s quality window while the fast tier is healthy", async () => {
+        // The counterpart, so the fix cannot quietly become "always flush
+        // fast" — that schedule sat exactly ON the measured rate-limit ceiling
+        // and is where the 429 storms came from (see QUALITY_DEBOUNCE_MS).
+        settings.store.engine = "groq";
+        settings.store.groqApiKey = "gsk-test";
+        respondWith({ ok: true, results: [{ id: "1", lang: "es", text: "hello", skip: false }] });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await vi.advanceTimersByTimeAsync(1_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        const engines = native.translateBatch.mock.calls.map(c => c[0]);
+        expect(engines).toContain("google");
+        expect(engines).not.toContain("groq");
+    });
+
     // THE BUG THIS PINS, observed live on 2026-08-24: every message showed
     // "⚠ translation failed" for ~20s, then the LLM landed and replaced it.
     //

@@ -1,7 +1,15 @@
 import type { BatchRequest, PendingMessage } from "./types";
 
 export interface BatcherOptions {
-    debounceMs: number;
+    /**
+     * How long the window from a burst's first message is. A function is
+     * consulted each time a timer is ARMED — not per message, and never for a
+     * window already running — so a caller can pick the window from live state
+     * (the quality tier shortens its 20s to the fast 700ms while Google is
+     * cooling down, because its long window is justified by "the reader is
+     * already looking at a Google line", which is false exactly then).
+     */
+    debounceMs: number | (() => number);
     maxBatch: number;
     contextSize: number;
     supportsContext: boolean;
@@ -103,7 +111,8 @@ export function createBatcher(opts: BatcherOptions): Batcher {
             // fixed window guarantees a flush within debounceMs of the first
             // queued message. Do not "fix" this into a sliding debounce.
             if (s.timer === null) {
-                s.timer = setTimeout(() => flushChannel(msg.channelId), opts.debounceMs);
+                const wait = typeof opts.debounceMs === "function" ? opts.debounceMs() : opts.debounceMs;
+                s.timer = setTimeout(() => flushChannel(msg.channelId), wait);
             }
         },
 
