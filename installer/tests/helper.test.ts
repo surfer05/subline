@@ -448,6 +448,76 @@ describe("not racing Discord's own updater", () => {
     });
 });
 
+describe("after a repair that a running Discord cannot see", () => {
+    // THE FAILURE THIS CLOSES, observed 2026-08-28. Discord updated to 0.0.409
+    // at 07:29 and the helper re-patched at 07:30 — correctly, in one attempt,
+    // with a log line saying so. The user spent the morning believing Subline
+    // was broken.
+    //
+    // It was not broken. app.asar is read by Discord's MAIN process at startup,
+    // so a Discord already running when the repair lands can never pick it up —
+    // not on Cmd+R, which reloads only the renderer. The files were right and
+    // the running process was stale, and NOTHING said so. Every silent update
+    // therefore looks exactly like a silent failure, which is why updating felt
+    // dangerous even though self-repair worked every time.
+    //
+    // The remaining gap is genuinely the user's to close: the helper repairs
+    // Discord, it does not restart it. That is precisely what alerts.ts is for.
+    it("asks for a restart when it repaired a Discord that was open", async () => {
+        patchForReal(harness);
+        await harness.run();
+
+        simulateDiscordUpdate(harness.fixture.install, "0.0.409");
+        harness.discordOpen = true;
+        harness.advance(60 * 60_000);
+        const report = await harness.run();
+
+        expect(report.repatched).toEqual([harness.fixture.install.rootPath]);
+        const restart = harness.notifications!.find(a => a.code === "restart-required");
+        expect(restart, "a repair under a running Discord must be announced").toBeDefined();
+        expect(restart!.message).toContain("quit and reopen Discord");
+        // Scalars only, never text — same rule as the log (spec §7).
+        expect(restart!.detail).toMatchObject({ discord: "0.0.409" });
+    });
+
+    it("stays silent when it repaired a Discord that was closed", async () => {
+        // Nothing to tell anyone: the next launch reads the new app.asar on its
+        // own. Notifying here would be the "crying wolf" alerts.ts exists to
+        // avoid — and an update notice the user cannot act on is worse than
+        // none, because it teaches them to dismiss the one that matters.
+        patchForReal(harness);
+        await harness.run();
+
+        simulateDiscordUpdate(harness.fixture.install, "0.0.409");
+        harness.discordOpen = false;
+        harness.advance(60 * 60_000);
+        const report = await harness.run();
+
+        expect(report.repatched).toEqual([harness.fixture.install.rootPath]);
+        expect(harness.notifications!.map(a => a.code)).not.toContain("restart-required");
+    });
+
+    it("clears the request once Discord is no longer running it", async () => {
+        // The condition ends the moment that stale process does — whatever the
+        // user actually did. An alert that outlives its condition is the same
+        // false alarm as one that should never have fired.
+        patchForReal(harness);
+        await harness.run();
+
+        simulateDiscordUpdate(harness.fixture.install, "0.0.409");
+        harness.discordOpen = true;
+        harness.advance(60 * 60_000);
+        await harness.run();
+        expect(harness.notifications!.some(a => a.code === "restart-required")).toBe(true);
+
+        harness.discordOpen = false;
+        harness.advance(60 * 60_000);
+        const after = await harness.run();
+
+        expect(after.decisions.some(d => d.outcome === "restart-required:resolved")).toBe(true);
+    });
+});
+
 describe("when re-patching fails", () => {
     it("leaves Discord usable, says the rollback happened, and tells the user", async () => {
         patchForReal(harness);

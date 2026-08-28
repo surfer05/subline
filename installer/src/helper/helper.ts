@@ -456,6 +456,18 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
             discord: entry.version,
             versionChanged
         });
+
+        // The patch is in place and nothing needs writing, so any outstanding
+        // "quit and reopen Discord" is answered the moment the stale process is
+        // gone — whatever the user actually did, and without asking them to
+        // confirm it. Still running means still stale: leave it standing, and
+        // raiseAlert's own throttle keeps it from being repeated at them hourly.
+        //
+        // Deliberately NOT conditioned on the beacon reporting our build. The
+        // beacon only speaks once a channel is open and a message arrives, so a
+        // reader who restarts Discord and then reads nothing for an hour would
+        // keep being told to restart a Discord they already restarted.
+        if (!await run.ports.discordRunning(install)) run.clear("restart-required");
         return;
     }
 
@@ -502,6 +514,23 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
         run.clear("repatch-failed");
         run.clear("rollback-failed");
         run.clear("backup-missing");
+
+        // A repair a running Discord cannot see is not finished from the
+        // reader's side. Only when we actually WROTE something (an
+        // already-patched install changed nothing to miss) and only while that
+        // stale process is still up: if Discord is closed, its next launch
+        // reads the new app.asar on its own and there is nothing to say.
+        // Saying it anyway is how an alert channel gets trained into noise.
+        if (!patched.value.alreadyPatched && await run.ports.discordRunning(install)) {
+            await run.alert(
+                "restart-required",
+                "Discord updated and Subline has been restored — quit and reopen Discord to start translating again.",
+                {
+                    discord: patched.value.discordVersion ?? null,
+                    buildId: patched.value.pluginBuildId ?? null
+                }
+            );
+        }
         return;
     }
 

@@ -56,7 +56,23 @@ export type AlertCode =
     /** Update checks keep failing, or a download will not verify. */
     | "update-failed"
     /** The mod loads, translates, and renders nothing — and there is no new build. */
-    | "mod-stale";
+    | "mod-stale"
+    /**
+     * Repaired, but under a Discord that was already running and therefore
+     * cannot see it. The one alert here that does NOT mean something is wrong.
+     *
+     * It earns its place all the same, because the module's subject is "a
+     * condition the helper cannot resolve on its own", and this is one: the
+     * helper repairs Discord, it does not restart it. Discord reads app.asar
+     * in its MAIN process at startup, so a running instance keeps the old
+     * entry point until it is quit — Cmd+R reloads only the renderer and will
+     * never pick the repair up.
+     *
+     * Without this, every silent update looks exactly like a silent failure.
+     * Observed 2026-08-28: repaired correctly at 07:30, one attempt, logged —
+     * and the user spent the morning believing it was broken.
+     */
+    | "restart-required";
 
 export interface Alert {
     code: AlertCode;
