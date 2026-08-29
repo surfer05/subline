@@ -6,6 +6,21 @@ const ENDPOINT = "https://translate.googleapis.com/translate_a/single";
 const CONCURRENCY = 4;
 
 /**
+ * How long to wait before re-sending a message the endpoint just throttled.
+ *
+ * MEASURED, 2026-08-29. Ten messages at CONCURRENCY 4 against the live
+ * endpoint returned nine 200s and one 429 — and the two requests issued
+ * immediately AFTER the refusal both succeeded. This endpoint throttles
+ * individual requests under burst; it does not shut the caller out. So one
+ * short retry converts the common case into no loss at all, and the delay only
+ * has to outlast the burst that caused it rather than any stated quota (there
+ * is none to read — the refusal is an HTML block page).
+ */
+const RETRY_DELAY_MS = 400;
+
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+/**
  * A failure that concerns exactly ONE message — a garbled body, an empty
  * translation. It degrades that message to `{ failed: true }` and leaves the
  * rest of the batch intact.
@@ -19,7 +34,9 @@ class MessageError extends Error {}
 async function translateOne(
     msg: { id: string; text: string; sourceLang?: string },
     targetLang: string,
-    fetchImpl: typeof fetch
+    fetchImpl: typeof fetch,
+    retryDelayMs: number = RETRY_DELAY_MS,
+    isRetry: boolean = false
 ): Promise<Result> {
     // `auto` unless the caller resolved a language for us. Pinning is what
     // rescues short replies: "ne" under `sl=auto` comes back as Hausa "it is",
@@ -31,7 +48,17 @@ async function translateOne(
         `&dt=t&q=${encodeURIComponent(msg.text)}`;
 
     const res = await fetchImpl(url);
-    if (!res.ok) throw new HttpError(`google: HTTP ${res.status}`, res.status, retryAfterFromHeader(res));
+    if (!res.ok) {
+        // One retry for a throttle, because this endpoint refuses REQUESTS
+        // rather than callers (see RETRY_DELAY_MS). Only 429, and only once:
+        // a 4xx that is not a throttle repeats identically, and retrying into
+        // a genuine block is how a burst sustains itself.
+        if (res.status === 429 && !isRetry) {
+            await sleep(retryDelayMs);
+            return translateOne(msg, targetLang, fetchImpl, retryDelayMs, true);
+        }
+        throw new HttpError(`google: HTTP ${res.status}`, res.status, retryAfterFromHeader(res));
+    }
 
     const body = await res.json();
     // Expected: [[["translated","original",...], ...], null, "<detected lang>"]
@@ -67,30 +94,56 @@ async function translateOne(
     return { id: msg.id, lang: detected, text, skip: false, conf };
 }
 
+export interface GoogleOptions {
+    /** Only the tests set this, to keep the retry from costing real time. */
+    retryDelayMs?: number;
+}
+
 export async function translateWithGoogle(
     req: BatchRequest,
-    fetchImpl: typeof fetch = fetch
+    fetchImpl: typeof fetch = fetch,
+    options: GoogleOptions = {}
 ): Promise<Result[]> {
+    const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS;
     const results: Result[] = [];
+    // Kept so a request that was refused OUTRIGHT — every message, no
+    // exceptions — can still be rethrown. That is the shape of a real block,
+    // and runTier needs to see it to park the engine.
+    let transportError: unknown;
+
     for (let i = 0; i < req.messages.length; i += CONCURRENCY) {
         const slice = req.messages.slice(i, i + CONCURRENCY);
-        // allSettled, not all: one bad message must not discard the nine good
-        // translations alongside it (and make native.ts retry all ten).
         const settled = await Promise.allSettled(
-            slice.map(m => translateOne(m, req.targetLang, fetchImpl))
+            slice.map(m => translateOne(m, req.targetLang, fetchImpl, retryDelayMs))
         );
         for (let j = 0; j < settled.length; j++) {
             const outcome = settled[j];
             if (outcome.status === "fulfilled") {
                 results.push(outcome.value);
             } else if (outcome.reason instanceof MessageError) {
-                results.push({ id: slice[j].id, failed: true });
+                results.push({ id: slice[j]!.id, failed: true });
             } else {
-                // Whole-request failure (non-OK HTTP status): rethrow so
-                // native.ts can retry or classify it.
-                throw outcome.reason;
+                // A TRANSPORT failure for ONE message. It used to be rethrown
+                // here, on the reasoning that a non-OK status "means the
+                // endpoint is refusing us" — true of a batch endpoint, false of
+                // this one. Google is per-message, and it throttles per message:
+                // a single 429 among nine 200s was discarding nine finished
+                // translations and reporting the whole batch as refused.
+                //
+                // So it is recorded as this message's own failure, and the rest
+                // of the batch stands. The reader loses at most the one message
+                // Google would not take — which the quality tier is already on
+                // its way to translating anyway.
+                transportError = outcome.reason;
+                results.push({ id: slice[j]!.id, failed: true });
             }
         }
+    }
+
+    // Nothing came back at all: not a throttle, a refusal. Rethrow so runTier
+    // classifies it, marks the batch deferred and cools the engine down.
+    if (transportError !== undefined && !results.some(r => !("failed" in r))) {
+        throw transportError;
     }
     return results;
 }

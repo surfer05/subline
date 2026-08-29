@@ -43,9 +43,60 @@ describe("translateWithGoogle", () => {
         expect(fetchImpl).toHaveBeenCalledTimes(3);
     });
 
-    it("throws when the endpoint returns a non-OK status", async () => {
+    it("throws only when the endpoint refused EVERY message", async () => {
+        // Unchanged for a total refusal — that is a real block, and runTier
+        // needs it to park Google. What changed is what "refused" has to mean:
+        // all of them, not any of them. See the next test.
         const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 429, json: async () => ({}) });
         await expect(translateWithGoogle(req(["hola"]), fetchImpl as any)).rejects.toThrow();
+    });
+
+    // THE REGRESSION THIS CLOSES, measured 2026-08-29. Google's free endpoint
+    // throttles INDIVIDUAL requests under burst, not the IP: a real run of ten
+    // messages at concurrency 4 came back 9x200 and 1x429, and the two requests
+    // AFTER the refused one succeeded immediately.
+    //
+    // The old code threw on that single 429, discarding nine finished
+    // translations with it. runTier then wrote "delayed" over all ten and — once
+    // Google gained a cooldown — parked the whole fast tier for a minute, during
+    // which every new message deferred too. A partial, self-healing throttle had
+    // been turned into a sustained outage, and the LLM became the reader's only
+    // translator, which is exactly the latency they were complaining about.
+    it("keeps the translations it got when only some requests were throttled", async () => {
+        // Keyed on the message text, not call order: the slice runs
+        // concurrently, so call order is not deterministic. "c" is refused
+        // every time, including its retry; the rest always succeed.
+        const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+            if (url.includes("q=c")) return { ok: false, status: 429, json: async () => ({}) };
+            return okResponse("hi", "es");
+        });
+
+        const results = await translateWithGoogle(
+            req(["a", "b", "c", "d"]), fetchImpl as any, { retryDelayMs: 0 }
+        );
+
+        // Three real translations survive; the throttled one is reported as its
+        // own failure rather than taking the batch down.
+        expect(results.filter(r => "text" in r)).toHaveLength(3);
+        expect(results.find(r => "failed" in r)).toBeDefined();
+        expect(results).toHaveLength(4);
+    });
+
+    it("retries a throttled message once before giving up on it", async () => {
+        // The measured behaviour: requests immediately after a refused one
+        // succeed. One cheap retry converts the common case into no loss at
+        // all — nine-plus-one instead of nine-and-a-gap.
+        let n = 0;
+        const fetchImpl = vi.fn().mockImplementation(async () => {
+            n++;
+            if (n === 1) return { ok: false, status: 429, json: async () => ({}) };
+            return okResponse("hi", "es");
+        });
+
+        const results = await translateWithGoogle(req(["a"]), fetchImpl as any, { retryDelayMs: 0 });
+
+        expect(results).toEqual([{ id: "0", lang: "es", text: "hi", skip: false }]);
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
     });
 
     it("attaches a Retry-After header as retryAfterMs on the thrown error", async () => {
@@ -148,15 +199,25 @@ describe("translateWithGoogle", () => {
         ]);
     });
 
-    it("still throws on a non-OK status even when other messages succeeded", async () => {
-        // A transport failure is NOT per-message: it must propagate so
-        // native.ts can retry or classify the whole request.
+    it("does NOT throw a non-OK status away with the messages that succeeded", async () => {
+        // WAS: "still throws ... even when other messages succeeded", on the
+        // reasoning that "a transport failure is NOT per-message". That is true
+        // of a batch endpoint and false of this one — Google is one request per
+        // message, and it refuses individual requests under burst. Throwing
+        // discarded every translation that had already come back.
+        //
+        // 503 rather than 429 on purpose: no retry applies, so this pins the
+        // partial-failure rule itself rather than the retry that usually hides
+        // it.
         const fetchImpl = vi.fn()
             .mockResolvedValueOnce(okResponse("one", "es"))
             .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) });
 
-        await expect(translateWithGoogle(req(["uno", "dos"]), fetchImpl as any))
-            .rejects.toThrow(/503/);
+        const results = await translateWithGoogle(req(["uno", "dos"]), fetchImpl as any);
+
+        expect(results).toHaveLength(2);
+        expect(results[0]).toEqual({ id: "0", lang: "es", text: "one", skip: false });
+        expect(results[1]).toEqual({ id: "1", failed: true });
     });
 
     it("caps concurrency at 4 and returns results in request order", async () => {
