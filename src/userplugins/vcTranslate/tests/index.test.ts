@@ -232,6 +232,53 @@ describe("markers — who writes them, and which ones catch-up picks back up", (
         expect(laterCalls.every(e => e === "google")).toBe(true);
     });
 
+    // THE 19-SECOND RACE, measured live on 2026-08-29 (the reader timed it).
+    //
+    // The quality window is chosen when the timer is ARMED. A message is
+    // enqueued to both tiers in the same tick, so the quality batcher asks
+    // "is Google cooling down?" BEFORE Google has had any chance to fail —
+    // the answer is no, the window is 20s, and one second later the fast
+    // tier comes back empty-handed and parks the engine. The reader is now
+    // blind, and the armed window keeps its deadline: the LLM answer lands
+    // 19 seconds after the blindness began. Arm-time logic can never see a
+    // failure that happens after arming — only an EVENT at the moment of
+    // failure can.
+    it("flushes the quality tier the moment the fast tier comes back empty-handed", async () => {
+        settings.store.engine = "groq";
+        settings.store.groqApiKey = "gsk-test";
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "google"
+                ? { ok: false, error: "google: HTTP 429" }
+                : { ok: true, results: [{ id: "1", lang: "es", text: "very well", skip: false }] });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "muy bien") });
+        // Two seconds — a tenth of the quality window. Long enough for the
+        // fast flush to fail and the reactive quality flush to answer.
+        await vi.advanceTimersByTimeAsync(2_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        expect(native.translateBatch.mock.calls.map(c => c[0])).toContain("groq");
+        expect(getTranslation(makeKey("1", "en"))).toMatchObject({ text: "very well", via: "groq" });
+    });
+
+    it("does not flush the quality tier early when the fast tier delivered", async () => {
+        // The counterpart: a healthy Google line on screen is exactly the
+        // state the 20s window is FOR. An early flush there re-creates the
+        // request rate the window exists to prevent.
+        settings.store.engine = "groq";
+        settings.store.groqApiKey = "gsk-test";
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "google"
+                ? { ok: true, results: [{ id: "1", lang: "es", text: "very well", skip: false }] }
+                : { ok: true, results: [{ id: "1", lang: "es", text: "very well indeed", skip: false }] });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "muy bien") });
+        await vi.advanceTimersByTimeAsync(2_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+
+        expect(native.translateBatch.mock.calls.map(c => c[0])).not.toContain("groq");
+    });
+
     // The fast tier has NO debounce window. Google is per-message under the
     // hood (engines/google.ts sends one HTTP request per message, concurrency
     // 4), so holding messages back never reduced what Google receives by a

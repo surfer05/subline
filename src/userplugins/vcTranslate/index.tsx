@@ -1248,6 +1248,18 @@ async function runTier(
                 for (const m of req.messages) {
                     writeResult(makeKey(m.id, req.targetLang), { deferred: true });
                 }
+                // THE 19-SECOND RACE. These messages were enqueued to BOTH
+                // tiers in one tick, so the quality timer was armed BEFORE this
+                // failure existed — it asked "is Google cooling down?" and was
+                // truthfully told no, picked the 20s window, and an armed
+                // window keeps its deadline. Arm-time logic cannot see a
+                // failure that happens after arming; only the failure itself
+                // can, and this is the moment it is known. Flush now: the
+                // reader has just gone blind, and the LLM is everything they
+                // have. (Measured before this existed: the ✦ line landed 19
+                // seconds after the ⏳ marker. The rate gate still meters the
+                // flush this triggers, exactly as it meters any other.)
+                qualityBatcher?.flushNow();
             }
             return;
         }
