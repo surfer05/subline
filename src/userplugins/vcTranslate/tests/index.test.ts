@@ -1134,11 +1134,17 @@ describe("the subtitle accessory", () => {
         expect(text(render(discordMessage("1", "hola")))).toContain("⚠");
     });
 
-    it("renders a deferred message as pending, not as failed", () => {
+    it("renders a deferred message as in-progress, not as failed", () => {
+        // By the time this marker is on screen, the quality flush is already
+        // in flight (runTier fires it in the same breath). "translating…" is
+        // what is actually happening; "delayed — retrying" described a
+        // two-second wait as a failure, and on a Google-throttled network it
+        // sat under every single message.
         setTranslation(key("1"), { deferred: true });
         const rendered = text(render(discordMessage("1", "hola")));
-        expect(rendered).toContain("retrying");
+        expect(rendered).toContain("translating");
         expect(rendered).not.toContain("⚠");
+        expect(rendered).not.toContain("failed");
     });
 
     /** The first node in the rendered tree carrying a `title` prop. */

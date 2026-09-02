@@ -2246,19 +2246,27 @@ function TranslationAccessory({ message }: { message: Message; }) {
         );
     }
 
-    // A deferred message was never given a fair attempt. NOTHING WRITES THIS
-    // ANY MORE: with a fast tier, a rate-limited quality tier leaves the
-    // Google line in place rather than marking anything (see runTier), so the
-    // only way one reaches the store today is a persisted cache written by an
-    // earlier version. The branch stays because those entries are still read
-    // back on the next launch and must not fall through to "⚠ translation
-    // failed" — a message awaiting a retry is not a broken one. Same muted
-    // token as the failure marker (this is still a "nothing to show yet"
-    // line), different wording and glyph.
+    // A deferred message: the fast tier could not deliver, and the quality
+    // flush is ALREADY in flight — runTier fires it in the same breath that
+    // writes this marker (the reactive flushNow), and a message arriving
+    // during an established cooldown flushes on the fast window. Either way,
+    // by the time a reader sees this line, an engine is working on the
+    // message.
+    //
+    // The copy used to say "translation delayed — retrying", which describes
+    // a two-second wait as a failure. On a network where Google's endpoint
+    // throttles the shared IP (observed: Airtel CGNAT, both address
+    // families, blocked for curl with the plugin idle), EVERY message wore
+    // that line for the seconds before its ✦ — a permanent air of breakage
+    // over a pipeline that was working exactly as designed. Say what is
+    // actually happening; the tooltip keeps the detail.
     if ("deferred" in entry) {
         return (
-            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-                ⏳ translation delayed — retrying
+            <div
+                style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}
+                title="The quick translator (Google) didn't answer, so the quality engine is translating this message instead."
+            >
+                ⏳ translating…
                 {forcing && " · ⚡ translating…"}
                 {!forcing && hint && (
                     <span title={forcedHintDisplay(hint).title}> · {forcedHintDisplay(hint).text}</span>
