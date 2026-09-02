@@ -97,3 +97,16 @@ html, body {
 
 /* Footer actions never wrap mid-label into two-line buttons. */
 .btn { white-space: nowrap; }
+
+/* The error card's chevron: hide the browser's default disclosure marker
+   (both syntaxes, or Chrome shows its own triangle NEXT to ours) and let
+   ours rotate when the card opens, so it reads as a control, not a stray
+   glyph. */
+.err > summary::-webkit-details-marker { display: none; }
+.err > summary::marker { content: ""; }
+.err .chev { color: var(--muted); transition: transform 0.15s ease; }
+.err[open] .chev { transform: rotate(90deg); }
+
+/* Footer safety: if a locale or label ever outgrows the window, wrap
+   instead of pushing the last button off the edge. */
+.foot-r { flex-wrap: wrap; justify-content: flex-end; }

@@ -1329,7 +1329,13 @@ async function runTier(
                 logger.debug(`[response] ${engine} ${r.id}: ${outcome}`);
             }
             if ("failed" in r) {
-                if (!isQuality) writeResult(key, { failed: true });
+                // Transport says "the moment was bad"; a verdict says "this
+                // message is bad". Only the verdict may wear ⚠ — a wall of
+                // "translation failed" under ordinary Spanish messages during
+                // an IP throttle (observed 2026-09-03) was transport wearing
+                // the verdict's clothes. Deferred is retried by catch-up and
+                // reads as waiting, which is what it is.
+                if (!isQuality) writeResult(key, "transport" in r && r.transport ? { deferred: true } : { failed: true });
                 continue;
             }
             if (r.skip) {

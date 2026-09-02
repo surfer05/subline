@@ -472,6 +472,18 @@ function runUninstall(
     mayRetry: boolean
 ): Promise<void> {
     lastKeepSettings = keepSettings;
+    // The wait is real: quitting Discord, waiting for its files to settle,
+    // restoring the original app.asar. Ten to twenty seconds of a frozen
+    // screen reads as a hang, so say what is happening for all of them.
+    stepName.textContent = "Removing Subline";
+    detail.textContent = closeDiscord === null
+        ? "Putting Discord's original files back…"
+        : "Closing Discord first. Its window disappears, then a few quiet seconds while Discord's original files are put back…";
+    extra.replaceChildren();
+    errorBox.replaceChildren();
+    const wait = document.createElement("span");
+    wait.className = "spin";
+    extra.append(wait);
     return api
         .uninstall(closeDiscord === null ? { keepSettings } : { keepSettings, closeDiscord })
         .then(report => showUninstall(report, mayRetry));

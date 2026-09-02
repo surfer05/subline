@@ -149,6 +149,8 @@ export async function translateWithGoogle(
             if (outcome.status === "fulfilled") {
                 results.push(outcome.value);
             } else if (outcome.reason instanceof MessageError) {
+                // A verdict about THIS message: garbled body, empty
+                // translation. Retrying repeats it; "failed" is honest.
                 results.push({ id: slice[j]!.id, failed: true });
             } else {
                 // A TRANSPORT failure for ONE message. It used to be rethrown
@@ -163,7 +165,7 @@ export async function translateWithGoogle(
                 // Google would not take — which the quality tier is already on
                 // its way to translating anyway.
                 transportError = outcome.reason;
-                results.push({ id: slice[j]!.id, failed: true });
+                results.push({ id: slice[j]!.id, failed: true, transport: true });
             }
         }
     }

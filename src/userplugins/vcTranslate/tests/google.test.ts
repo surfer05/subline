@@ -75,10 +75,12 @@ describe("translateWithGoogle", () => {
             req(["a", "b", "c", "d"]), fetchImpl as any, { retryDelayMs: 0 }
         );
 
-        // Three real translations survive; the throttled one is reported as its
-        // own failure rather than taking the batch down.
+        // Three real translations survive; the throttled one is reported as a
+        // TRANSPORT failure, so the plugin renders it as waiting, not broken.
         expect(results.filter(r => "text" in r)).toHaveLength(3);
-        expect(results.find(r => "failed" in r)).toBeDefined();
+        const throttled = results.find(r => "failed" in r) as any;
+        expect(throttled).toBeDefined();
+        expect(throttled.transport).toBe(true);
         expect(results).toHaveLength(4);
     });
 
@@ -217,7 +219,7 @@ describe("translateWithGoogle", () => {
 
         expect(results).toHaveLength(2);
         expect(results[0]).toEqual({ id: "0", lang: "es", text: "one", skip: false });
-        expect(results[1]).toEqual({ id: "1", failed: true });
+        expect(results[1]).toEqual({ id: "1", failed: true, transport: true });
     });
 
     it("caps concurrency at 4 and returns results in request order", async () => {

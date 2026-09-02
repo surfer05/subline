@@ -204,6 +204,12 @@ const config = {
 
     win: {
         /**
+         * Not a signer. This repairs the uninstaller CRC that electron-builder
+         * breaks when building the Windows target on macOS. See the file for
+         * the mechanism; tests/packaging.test.ts pins that it stays wired.
+         */
+        sign: "./packaging/fixNsisCrc.cjs",
+        /**
          * UNSIGNED, deliberately — spec §1 and §10: an EV certificate needs a
          * registered business and ~$500/yr, which is not justifiable pre-revenue.
          * `docs/RELEASING.md` has what users will see, and the ONE result that

@@ -163,7 +163,12 @@ export type Result =
     // pinned the language, because then nothing was detected to be unsure of.
     | { id: string; lang: string; text: string; skip: false; conf?: number }
     | { id: string; skip: true }
-    | { id: string; failed: true };
+    // `transport` marks a failure that never REACHED a verdict: a 429 that
+    // survived the retry, a 5xx, a network drop, for THIS message while its
+    // batch-mates went through. It is a fact about the moment, not the
+    // message, and runTier renders it as "waiting" rather than "failed" —
+    // the same transport-vs-verdict split the batch level already has.
+    | { id: string; failed: true; transport?: true };
 
 /**
  * What each engine can do, and — via `hasOwnProperty` in store.ts's

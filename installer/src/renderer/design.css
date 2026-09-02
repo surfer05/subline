@@ -198,6 +198,7 @@ h1{font-family:var(--font-serif);font-size:28px;line-height:1.15;letter-spacing:
 .spin{width:14px;height:14px;border-radius:50%;border:2px solid var(--line-strong);
   border-top-color:var(--accent);animation:spin .8s linear infinite;display:inline-block;vertical-align:-3px}
 @keyframes spin{to{transform:rotate(360deg)}
+}
 .sel{position:relative;display:inline-block}
 .sel select{appearance:none;font-family:inherit;font-size:13.5px;color:var(--fg);background:var(--panel);
   border:1px solid var(--line-strong);border-radius:var(--radius-sm);padding:10px 38px 10px 13px;min-width:280px}
@@ -225,6 +226,7 @@ body{background:var(--bg);color:var(--fg);font-family:var(--font-sans);-webkit-f
 .stage.plain{background:none;border:0;padding:0}
 @media (max-width:760px){.spec{grid-template-columns:1fr;gap:16px}
 .sheet{padding:40px 22px 70px}
+}
 .btn-primary:hover{filter:brightness(1.12)}
 .btn-secondary{background:var(--bg);border-color:var(--line-strong)}
 .btn-secondary:hover{border-color:var(--muted)}

@@ -829,3 +829,72 @@ describe("notarization", () => {
         expect(isNotarizationRequested({})).toBe(false);
     });
 });
+
+describe("the NSIS CRC repair hook", () => {
+    // On macOS electron-builder cannot execute the 32-bit NSIS stub that
+    // writes the uninstaller with a correct checksum; it byte-slices instead
+    // (UninstallerReader), and the result failed Windows' integrity check on
+    // three consecutive real installs. packaging/fixNsisCrc.cjs recomputes the
+    // checksum in the signing hook, which runs on the uninstaller right before
+    // it is embedded. These pin the wiring and the algorithm.
+    it("is wired as the win signing hook", async () => {
+        const config = (await import("../electron-builder.js")).default;
+        expect(config.win.sign).toBe("./packaging/fixNsisCrc.cjs");
+    });
+
+    it("repairs a mismatched checksum and leaves a correct one alone", async () => {
+        const { default: fix } = await import("../packaging/fixNsisCrc.cjs");
+        const zlib = await import("node:zlib");
+        const dir = mkdtempSync(join(tmpdir(), "subline-crc-"));
+        try {
+            // A minimal NSIS-shaped file: 600 bytes, signature present, CRC
+            // stored in the last 4 bytes over [512, len-4).
+            const bytes = Buffer.alloc(600, 7);
+            Buffer.from("EFBEADDE4E756C6C736F6674496E7374", "hex").copy(bytes, 520);
+            const right = zlib.crc32(bytes.subarray(512, 596)) >>> 0;
+            bytes.writeUInt32LE((right ^ 0xdeadbeef) >>> 0, 596); // wrong on purpose
+
+            const path = join(dir, "broken.exe");
+            writeFileSync(path, bytes);
+            await fix({ path });
+            expect(readFileSync(path).readUInt32LE(596)).toBe(right);
+
+            // Already-correct file: byte-identical after the hook.
+            const okPath = join(dir, "ok.exe");
+            bytes.writeUInt32LE(right, 596);
+            writeFileSync(okPath, bytes);
+            const before = readFileSync(okPath);
+            await fix({ path: okPath });
+            expect(readFileSync(okPath).equals(before)).toBe(true);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("the stylesheet parses to the end", () => {
+    // Two hand-lost braces (a keyframes block at line 200, a media query at
+    // line 227) silently swallowed every rule after them, which is why the
+    // setup screens shipped unstyled through an entire design pass: the CSS
+    // was present, and the browser never saw it. Brace balance is not full
+    // CSS validity, but it is exactly the failure class that happened.
+    it("design.css braces balance", () => {
+        const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "renderer", "design.css"), "utf8");
+        let depth = 0;
+        for (const ch of css) {
+            if (ch === "{") depth++;
+            if (ch === "}") depth--;
+        }
+        expect(depth).toBe(0);
+    });
+
+    it("app.css braces balance", () => {
+        const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "renderer", "app.css"), "utf8");
+        let depth = 0;
+        for (const ch of css) {
+            if (ch === "{") depth++;
+            if (ch === "}") depth--;
+        }
+        expect(depth).toBe(0);
+    });
+});
