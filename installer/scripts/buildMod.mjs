@@ -407,7 +407,12 @@ function brandSettings() {
         + entriesStart + `
             buildEntry({
                 key: "subline_main",
-                title: "Subline",
+                // "Settings", not "Subline": the sidebar already says Subline
+                // in the section header directly above this entry, and
+                // "Subline / Subline" reading twice in a row was called out in
+                // the Windows run. The pane keeps the product name in its own
+                // panelTitle and footer.
+                title: "Settings",
                 panelTitle: "Subline",
                 Component: SublineTab,
                 Icon: MainSettingsIcon

@@ -1134,17 +1134,26 @@ describe("the subtitle accessory", () => {
         expect(text(render(discordMessage("1", "hola")))).toContain("⚠");
     });
 
-    it("renders a deferred message as in-progress, not as failed", () => {
-        // By the time this marker is on screen, the quality flush is already
-        // in flight (runTier fires it in the same breath). "translating…" is
-        // what is actually happening; "delayed — retrying" described a
-        // two-second wait as a failure, and on a Google-throttled network it
-        // sat under every single message.
+    it("renders a deferred message by what is actually happening, per engine", () => {
+        // Two truths. With an LLM configured, the reactive flush has already
+        // fired when this marker renders, so "translating" is literal. With
+        // Google only, NOTHING is in flight; the message waits for the
+        // cooldown and the next retry, and claiming "translating" there
+        // described a wait as work, on screen for minutes on a throttled
+        // keyless install. Neither variant may read as failure.
         setTranslation(key("1"), { deferred: true });
-        const rendered = text(render(discordMessage("1", "hola")));
-        expect(rendered).toContain("translating");
-        expect(rendered).not.toContain("⚠");
-        expect(rendered).not.toContain("failed");
+
+        // Default engine is google (the keyless install).
+        const waiting = text(render(discordMessage("1", "hola")));
+        expect(waiting).toContain("waiting for the translator");
+        expect(waiting).not.toContain("⚠");
+        expect(waiting).not.toContain("failed");
+
+        settings.store.engine = "groq";
+        settings.store.groqApiKey = "gsk-test";
+        const translating = text(render(discordMessage("1", "hola")));
+        expect(translating).toContain("translating");
+        expect(translating).not.toContain("⚠");
     });
 
     /** The first node in the rendered tree carrying a `title` prop. */

@@ -725,10 +725,10 @@ function announceCooldownOnce(
     const { label } = LLM_ENGINES[engine];
 
     const message = typeof quotaModel === "string" && quotaModel !== ""
-        ? `VcTranslate: ${label} model "${quotaModel}" is over quota (429) — this model may `
+        ? `VcTranslate: ${label} model "${quotaModel}" is over quota (429). This model may `
         + "have no free-tier availability on your key. Change the model in VcTranslate "
         + "settings to try another. Translations are using Google (≈) meanwhile."
-        : `VcTranslate: ${label} is rate limited — translations are using Google `
+        : `VcTranslate: ${label} is rate limited. Translations are using Google `
         + `(≈) for about ${formatDuration(cooldownMs)}.`;
 
     Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message });
@@ -2111,8 +2111,8 @@ function forcedHintDisplay(hint: ForcedHint): { text: string; title: string } {
         case "cooldown":
             return {
                 text: "⚡ cooling down",
-                title: "VcTranslate: this engine is cooling down after a rate limit — "
-                    + "the request was never sent. Try ⚡ again in a moment."
+                title: "VcTranslate: this engine is cooling down after a rate limit. "
+                    + "The request was never sent. Try ⚡ again in a moment."
             };
         case "gate":
             return {
@@ -2261,12 +2261,22 @@ function TranslationAccessory({ message }: { message: Message; }) {
     // over a pipeline that was working exactly as designed. Say what is
     // actually happening; the tooltip keeps the detail.
     if ("deferred" in entry) {
+        // Two different truths, depending on configuration. With an LLM
+        // engine, the reactive flush has ALREADY fired by the time this marker
+        // renders, so "translating" is literally what is happening. With
+        // Google only, nothing is in flight: the message waits for Google's
+        // cooldown to lift and the next retry. Claiming "translating" there
+        // described a wait as work, and it sat on screen for minutes on a
+        // throttled network with no key configured.
+        const llmComing = isLlmEngine(effectiveEngine());
         return (
             <div
                 style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}
-                title="The quick translator (Google) didn't answer, so the quality engine is translating this message instead."
+                title={llmComing
+                    ? "The quick translator (Google) didn't answer, so the quality engine is translating this message instead."
+                    : "Google's free translator is busy right now. Subline retries on its own; adding a free AI key in settings covers these gaps instantly."}
             >
-                ⏳ translating…
+                {llmComing ? "⏳ translating…" : "⏳ waiting for the translator…"}
                 {forcing && " · ⚡ translating…"}
                 {!forcing && hint && (
                     <span title={forcedHintDisplay(hint).title}> · {forcedHintDisplay(hint).text}</span>

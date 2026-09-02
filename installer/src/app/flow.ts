@@ -421,8 +421,8 @@ export class InstallFlow {
                 return this.set(state({
                     step: "tiers",
                     detail: "≈ is Google Translate: instant, free, no account. ✦ is an AI model that reads the "
-                        + "conversation around a message, so slang and replies come out right. It needs a free key, "
-                        + "which the next step can set up for you, or skip it and add one later.",
+                        + "conversation around a message, so slang and replies come out right. It needs a free key. "
+                        + "Subline asks about that during setup, and skipping is fine; a key can be added any time.",
                     actions: ["next", "cancel"]
                 }));
 
@@ -744,7 +744,9 @@ export class InstallFlow {
 
         this.set(state({
             step: "discord-running",
-            detail: force ? "Closing Discord…" : "Asking Discord to quit…",
+            detail: force
+                ? "Closing Discord. Its window disappears first, then Subline waits a few quiet seconds to be sure it has fully stopped…"
+                : "Asking Discord to close. Its window disappears first, then Subline waits a few quiet seconds to be sure it has fully stopped…",
             busy: true,
             actions: []
         }));
@@ -1134,7 +1136,9 @@ export class InstallFlow {
     private async verify(): Promise<FlowState> {
         this.set(state({
             step: "verifying",
-            detail: "Checking that translation is actually working. This waits for a message in another language to appear.",
+            detail: "Subline confirms itself the moment a message in another language arrives. There is no need to go "
+                + "looking for one: if none shows up while we watch, Subline keeps checking in the background and "
+                + "everything still works.",
             busy: true,
             actions: []
         }));

@@ -230,7 +230,13 @@ const config = {
         oneClick: false,
         perMachine: false,
         allowElevation: false,
-        allowToChangeInstallationDirectory: true,
+        /**
+         * No "Choose Install Location" page. A friend installing a translator
+         * has no opinion about %LOCALAPPDATA% paths, and every extra wizard
+         * page is a place to hesitate. Power users can still use /D= on the
+         * command line, which NSIS honours regardless.
+         */
+        allowToChangeInstallationDirectory: false,
         deleteAppDataOnUninstall: false,
         /**
          * Replaces the default "app is running" check — see the file for what

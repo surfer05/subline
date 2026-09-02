@@ -151,8 +151,13 @@ function renderExtra(state: FlowState): void {
         const label = document.createElement("label");
         label.className = "lbl";
         label.textContent = "Translate messages into";
+        // design.css styles ".sel" as a WRAPPER around a select (it draws the
+        // chevron on the wrapper's ::after). Putting the class on the control
+        // itself left a naked OS widget, which is what made the setup screens
+        // read as unfinished.
+        const wrap = document.createElement("div");
+        wrap.className = "sel";
         const select = document.createElement("select");
-        select.className = "sel";
         for (const option of state.languages as LanguageOption[]) {
             const node = document.createElement("option");
             node.value = option.code;
@@ -167,7 +172,8 @@ function renderExtra(state: FlowState): void {
             select.append(node);
         }
         select.onchange = () => { chosenLanguage = select.value; };
-        field.append(label, select);
+        wrap.append(select);
+        field.append(label, wrap);
         extra.append(field);
     }
 
@@ -181,7 +187,7 @@ function renderExtra(state: FlowState): void {
         label.textContent = "API key";
 
         const input = document.createElement("input");
-        input.className = "sel";
+        input.className = "txt";
         input.type = "text";
         input.placeholder = "gsk_…";
         // Not type="password": this is pasted once, and a masked field makes a
@@ -296,6 +302,20 @@ function renderError(error: { code: string; message?: string; path?: string; cau
  * greyscale. Nothing here decides which one is shown; that is
  * `verification.confirmed`, and only `verifyOnce` sets it.
  */
+/** What each verification status means, in words a person can act on. */
+const STATUS_SENTENCES: Record<string, string> = {
+    "not-loaded": "Discord has not reported Subline as loaded yet.",
+    "stale-beacon": "Waiting for Discord to start with the new files.",
+    "unreadable-beacon": "Subline's status report could not be read.",
+    "foreign-beacon": "A different Subline build reported in, not this one.",
+    "unidentified-beacon": "The status report does not say which build wrote it.",
+    "loaded-idle": "Loaded and ready. Nothing has needed translating yet.",
+    "loaded-erroring": "Loaded, but its translation requests are failing right now, often a busy network. It retries by itself.",
+    "translating-not-rendering": "Translating, but nothing has appeared on screen yet.",
+    "translating-approx": "Working. Fast translations are on screen.",
+    "translating-upgraded": "Working, including the improved translations."
+};
+
 function verdictBlock(spec: {
     tone: "ok" | "warn";
     glyph: string;
@@ -318,7 +338,9 @@ function verdictBlock(spec: {
     body.textContent = spec.body;
     const status = document.createElement("p");
     status.className = "note";
-    status.textContent = `Status: ${spec.status}`;
+    // A sentence, not an internal enum. "loaded-erroring" on an end-user
+    // screen was the product owner's example of dev-speak leaking through.
+    status.textContent = STATUS_SENTENCES[spec.status] ?? `Status: ${spec.status}`;
     copy.append(heading, body, status);
 
     block.append(mark, copy);

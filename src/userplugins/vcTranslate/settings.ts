@@ -32,12 +32,12 @@ export const settings = definePluginSettings({
         // message and is what puts the ≈ line on screen in about a second,
         // whatever is picked here. This setting only chooses what re-translates
         // that line with conversation context afterwards (✦).
-        description: "Quality engine — Google always translates first (≈); this re-translates it with context (✦)",
+        description: "Quality engine. Google always translates first (≈); this re-translates it with context (✦)",
         options: [
-            { label: "Google only (free, no key — no ✦ upgrade)", value: "google", default: true },
+            { label: "Google only (free, no key, no ✦ upgrade)", value: "google", default: true },
             { label: "Claude Haiku (needs API key, best quality)", value: "claude" },
             { label: "Gemini Flash (needs free API key, context-aware)", value: "gemini" },
-            { label: "Groq (needs free API key, 30 requests/min — most headroom)", value: "groq" }
+            { label: "Groq (needs free API key, 30 requests/min, most headroom)", value: "groq" }
         ],
         // engine is captured by value when the batcher is built, so a change
         // here must rebuild it (see settingsBridge.ts / index.tsx).
@@ -72,7 +72,7 @@ export const settings = definePluginSettings({
         description:
             `Gemini model (default ${DEFAULT_GEMINI_MODEL}). If ✦ upgrades stop appearing and you ` +
             "keep seeing a rate-limit toast, this model may no longer be available on your key's " +
-            `free tier — try another (e.g. ${DEFAULT_GEMINI_MODEL}). Blank uses the default.`,
+            `free tier; try another (e.g. ${DEFAULT_GEMINI_MODEL}). Blank uses the default.`,
         default: DEFAULT_GEMINI_MODEL,
         placeholder: DEFAULT_GEMINI_MODEL,
         // Same immediacy requirement as the keys above: switching model to
@@ -96,8 +96,8 @@ export const settings = definePluginSettings({
         // to every request forever, which is the same status code as ordinary
         // throttling, and without a settings field the only cure is a rebuild.
         description:
-            `Groq model (default ${DEFAULT_GROQ_MODEL}). If ✦ upgrades stop appearing — especially `
-            + "if they never appear at all — this model may no longer be available on your key's "
+            `Groq model (default ${DEFAULT_GROQ_MODEL}). If ✦ upgrades stop appearing, especially `
+            + "if they never appear at all, this model may no longer be available on your key's "
             + "free tier. Try another from console.groq.com's model list; the change applies to "
             + "the next batch, with no restart. Blank uses the default.",
         default: DEFAULT_GROQ_MODEL,
@@ -150,7 +150,7 @@ export const settings = definePluginSettings({
             "Discord console (which tier a message went to or which rule " +
             "skipped it, rate-gate/cooldown blocks, what each engine returned, " +
             "and store writes). Message text is included in these logs. " +
-            "Nothing leaves your machine — this only affects what is printed " +
+            "Nothing leaves your machine; this only affects what is printed " +
             "to the console. Off by default.",
         default: false
     }
