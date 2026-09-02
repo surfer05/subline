@@ -1,10 +1,10 @@
-# Subline — try it out
+# Subline: try it out
 
 Subline translates incoming Discord messages and shows them as subtitles
-under each message. Fast line first (≈, Google), then a better one
-replaces it (✦, AI with conversation context).
+under each message. A fast line appears first (≈, Google), then a better
+one replaces it (✦, AI with conversation context).
 
-## Install — Mac
+## Install on Mac
 
 1. Open **Subline-0.1.0-arm64.dmg** (Apple Silicon) or **-x64** (Intel),
    drag Subline to Applications.
@@ -14,15 +14,15 @@ replaces it (✦, AI with conversation context).
 3. Click **Install**. It closes Discord, patches it, and starts it again.
    Done when it says so.
 
-## Install — Windows
+## Install on Windows
 
-1. Run **Subline-Setup-0.1.0.exe**.
+1. Extract the zip, then run **Subline-Setup-0.1.0.exe**.
 2. SmartScreen will warn (unsigned): **More info → Run anyway**.
-3. Click **Install**. Same flow — it handles Discord itself.
+3. Click **Install**. Same flow: it handles Discord itself.
 
 ## After installing
 
-- Messages in other languages get a subtitle within ~a second.
+- Messages in other languages get a subtitle within about a second.
 - **Better translations (optional, free):** grab a key at
   console.groq.com → API Keys, then in Discord: Settings → **Subline** →
   paste it under Groq API Key. Slang, replies and mixed-language messages
@@ -35,8 +35,8 @@ replaces it (✦, AI with conversation context).
 - **When Discord updates**, Subline repairs itself within the hour and
   tells you if Discord needs a restart. Nothing to do.
 - Your API key and all settings stay on your machine. Message text goes
-  only to the translator (Google / your chosen AI), never anywhere else.
-  Nothing is logged.
+  only to the translator (Google or your chosen AI), never anywhere
+  else. Nothing is logged.
 - **Uninstall:** run Subline again → Uninstall. Discord goes back to
   exactly as it was.
 
@@ -47,4 +47,4 @@ Tell me what you saw and send me this file:
 - Mac: `~/Library/Logs/Subline/subline.log`
 - Windows: `%LOCALAPPDATA%\Subline\logs\subline.log`
 
-It contains version numbers and error codes — no message text, ever.
+It contains version numbers and error codes. No message text, ever.

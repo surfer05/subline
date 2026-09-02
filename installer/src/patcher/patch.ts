@@ -168,7 +168,7 @@ function guardPatchable(state: InstallState, options: PatchOptions): Result<Patc
         if (hasUnpackedAppDir(state.install.resourcesPath)) {
             return err<PatchReport>(
                 "FOREIGN_MOD_PRESENT",
-                `${state.modName ?? "Another client mod"} loads from an unpacked resources/app folder, which Discord uses in preference to app.asar. Uninstall it first — patching over it would appear to work and do nothing.`,
+                `${state.modName ?? "Another client mod"} loads from an unpacked resources/app folder, which Discord uses in preference to app.asar. Uninstall it first: patching over it would appear to work and do nothing.`,
                 { path: state.install.resourcesPath }
             );
         }
@@ -402,7 +402,7 @@ function rollback(install: DiscordInstall, undo: Undo, tempPath: string): Result
     } catch (cause) {
         return err<true>(
             "ROLLBACK_FAILED",
-            `Patching failed and Discord could not be restored automatically. Its original app.asar is at ${install.backupPath} — move it back to ${install.asarPath}, or reinstall Discord.`,
+            `Patching failed and Discord could not be restored automatically. Its original app.asar is at ${install.backupPath}. Move it back to ${install.asarPath}, or reinstall Discord.`,
             { path: install.asarPath, cause }
         );
     }
@@ -465,7 +465,7 @@ export function unpatchInstall(install: DiscordInstall, options: UnpatchOptions 
             if (!options.removeForeignMod) {
                 return err<UnpatchReport>(
                     "FOREIGN_MOD_PRESENT",
-                    `Subline is not installed here — ${state.modName ?? "another client mod"} is. Remove it with its own uninstaller.`,
+                    `Subline is not installed here. ${state.modName ?? "another client mod"} is. Remove it with its own uninstaller.`,
                     { path: install.rootPath }
                 );
             }
@@ -526,7 +526,7 @@ function restoreOriginal(install: DiscordInstall, state: InstallState): Result<U
     if (!existsSync(install.backupPath)) {
         return err<UnpatchReport>(
             "BACKUP_MISSING",
-            `Discord's original app.asar backup (${install.backupPath}) is missing, so Subline cannot restore it. Use Discord's own repair or reinstall it — do not delete anything by hand.`,
+            `Discord's original app.asar backup (${install.backupPath}) is missing, so Subline cannot restore it. Use Discord's own repair or reinstall it, and do not delete anything by hand.`,
             { path: install.backupPath }
         );
     }

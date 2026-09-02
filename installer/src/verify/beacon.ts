@@ -252,7 +252,7 @@ export function readBeaconAt(path: string): Result<Beacon | null> {
         // from breaking, and "half a file" must never crash an installer.
         return err<Beacon | null>(
             "BEACON_MALFORMED",
-            "The status file could not be read as JSON — it may have been caught mid-write.",
+            "The status file could not be read as JSON. It may have been caught mid-write.",
             { path, cause }
         );
     }

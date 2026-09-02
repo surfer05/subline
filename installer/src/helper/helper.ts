@@ -407,7 +407,7 @@ function decideRepatch(run: Run, entry: ManagedInstall, bundle: ModBundle): { re
         case "unpatched":
             return {
                 reason: "injection-wiped",
-                detail: "Discord no longer carries Subline's loader — an update replaced app.asar"
+                detail: "Discord no longer carries Subline's loader: an update replaced app.asar"
             };
         case "broken":
             return {
@@ -524,7 +524,7 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
         if (!patched.value.alreadyPatched && await run.ports.discordRunning(install)) {
             await run.alert(
                 "restart-required",
-                "Discord updated and Subline has been restored — quit and reopen Discord to start translating again.",
+                "Discord updated and Subline has been restored. Quit and reopen Discord to start translating again.",
                 {
                     discord: patched.value.discordVersion ?? null,
                     buildId: patched.value.pluginBuildId ?? null
@@ -612,7 +612,7 @@ async function handlePatchFailure(
     if (IMMEDIATE_PATCH_ALERTS.includes(error.code) || failures >= REPATCH_FAILURES_BEFORE_ALERT) {
         await run.alert(
             "repatch-failed",
-            "Discord updated and Subline could not put its translation back. Discord itself is fine — "
+            "Discord updated and Subline could not put its translation back. Discord itself is fine. "
             + "open Subline to finish.",
             { code: error.code, failures, path: install.rootPath }
         );

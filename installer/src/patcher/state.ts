@@ -193,7 +193,7 @@ export function inspectInstall(install: DiscordInstall): Result<InstallState> {
                 inaccessible ? "asar-inaccessible" : "asar-unreadable",
                 inaccessible
                     ? "Subline could not open Discord's app.asar. Discord itself is "
-                      + "probably fine — this is normally a permissions problem. "
+                      + "probably fine. This is normally a permissions problem. "
                       + `(${stubResult.error.message})`
                     : `Discord's app.asar could not be read as an archive (${stubResult.error.message})`
             )

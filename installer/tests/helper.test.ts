@@ -475,7 +475,7 @@ describe("after a repair that a running Discord cannot see", () => {
         expect(report.repatched).toEqual([harness.fixture.install.rootPath]);
         const restart = harness.notifications!.find(a => a.code === "restart-required");
         expect(restart, "a repair under a running Discord must be announced").toBeDefined();
-        expect(restart!.message).toContain("quit and reopen Discord");
+        expect(restart!.message).toContain("Quit and reopen Discord");
         // Scalars only, never text — same rule as the log (spec §7).
         expect(restart!.detail).toMatchObject({ discord: "0.0.409" });
     });

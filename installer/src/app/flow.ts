@@ -422,7 +422,7 @@ export class InstallFlow {
                     step: "tiers",
                     detail: "≈ is Google Translate: instant, free, no account. ✦ is an AI model that reads the "
                         + "conversation around a message, so slang and replies come out right. It needs a free key, "
-                        + "which the next step can set up for you — or skip it and add one later.",
+                        + "which the next step can set up for you, or skip it and add one later.",
                     actions: ["next", "cancel"]
                 }));
 
@@ -658,7 +658,7 @@ export class InstallFlow {
                 step: "mod-conflict",
                 detail:
                     `${installState.modName ?? "Another client mod"} is already installed in this Discord. `
-                    + "If you continue, Subline replaces it — any plugins and themes you set up there will stop loading. "
+                    + "If you continue, Subline replaces it, and any plugins and themes you set up there will stop loading. "
                     + "Discord's original files stay backed up either way.",
                 install,
                 installState,
@@ -691,7 +691,7 @@ export class InstallFlow {
         return this.set(state({
             step: "already-installed",
             detail:
-                "Subline is installed and Discord is set up to use it. There is nothing left to do — open Discord "
+                "Subline is installed and Discord is set up to use it. There is nothing left to do. Open Discord "
                 + "and messages in other languages will have a translation underneath them. Updates are handled in "
                 + "the background.",
             install,
@@ -819,7 +819,7 @@ export class InstallFlow {
     private keyStep(error: PatcherError | null = null): FlowState {
         return this.set(state({
             step: "choose-key",
-            detail: "Paste a free key to turn on the better translations, or skip — Subline still translates "
+            detail: "Paste a free key to turn on the better translations, or skip. Subline still translates "
                 + "everything with Google either way, and you can add a key later.",
             keySignupUrl: KEY_SIGNUP_URL,
             error,
@@ -896,9 +896,9 @@ export class InstallFlow {
             // again for no reason.
             detail:
                 "macOS needs your permission before Subline can change Discord. Continue, and Subline will open the "
-                + "right settings page — switch Subline on under App Management.\n\n"
+                + "right settings page. Switch Subline on under App Management.\n\n"
                 + "macOS will then say Subline cannot \"update or delete other applications\" until it is quit. That is "
-                + "Apple's wording for this permission, not something Subline asks for — the only app it ever changes "
+                + "Apple's wording for this permission, not something Subline asks for. The only app it ever changes "
                 + "is Discord. You can choose Later: the install finishes without restarting anything. Discord will "
                 + "reopen by itself when it is done.",
             permissionStatus: status,
@@ -914,7 +914,7 @@ export class InstallFlow {
 
         this.set(state({
             step: "permission-waiting",
-            detail: "Waiting for permission. Turn Subline on under Privacy & Security › App Management — this screen will move on by itself.",
+            detail: "Waiting for permission. Turn Subline on under Privacy & Security › App Management. This screen will move on by itself.",
             busy: true,
             permissionSettingsUrl: this.ports.permissionSettingsUrl,
             actions: ["open-permission-settings", "cancel"]
@@ -939,7 +939,7 @@ export class InstallFlow {
         return this.set(state({
             step: "permission-blocked",
             detail:
-                `${report.summary} Without it, Subline cannot add translation to Discord — everything else you have `
+                `${report.summary} Without it, Subline cannot add translation to Discord. Everything else you have `
                 + "chosen is saved, so you can grant it and try again at any time.",
             permission: report,
             permissionStatus: report.status,
@@ -1045,7 +1045,7 @@ export class InstallFlow {
                 step: "helper-failed",
                 detail:
                     `${result.error.message} Translation itself is installed and will work. What is missing is the `
-                    + "background check that puts Subline back after Discord updates itself — without it, translation "
+                    + "background check that puts Subline back after Discord updates itself. Without it, translation "
                     + "will stop working at some point and you would need to run Subline again to restore it.",
                 error: result.error,
                 install: this.chosenInstall ?? undefined,
@@ -1069,7 +1069,7 @@ export class InstallFlow {
         // hand, on a Discord that is already fine.
         const rolledBack = error.code === "VERIFICATION_FAILED";
         const detail = rolledBack
-            ? `${error.message} Discord has been put back exactly as it was, so nothing is broken — please report this.`
+            ? `${error.message} Discord has been put back exactly as it was, so nothing is broken. Please report this.`
             : error.message;
         return this.set(state({
             step: "patch-failed",
@@ -1105,7 +1105,7 @@ export class InstallFlow {
         if (this.permissionPrompted) {
             this.set(state({
                 step: "launching",
-                detail: "Finishing up — macOS may still be showing you a prompt. Discord opens in a moment.",
+                detail: "Finishing up. macOS may still be showing you a prompt. Discord opens in a moment.",
                 busy: true,
                 actions: []
             }));
@@ -1121,7 +1121,7 @@ export class InstallFlow {
             return this.set(state({
                 step: "launch-failed",
                 detail:
-                    `${launched.error.message} Subline is installed — open Discord yourself and Subline will check whether `
+                    `${launched.error.message} Subline is installed. Open Discord yourself and Subline will check whether `
                     + "translation is working.",
                 error: launched.error,
                 install,

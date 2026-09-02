@@ -246,7 +246,7 @@ export function uninstall(ports: UninstallPorts, options: UninstallOptions): Uni
             problems: [error],
             clean: false,
             summary:
-                "Quit Discord first — on Windows, check the system tray near the clock. Its files cannot be "
+                "Quit Discord first. On Windows, check the system tray near the clock. Its files cannot be "
                 + "put back while it is using them. Nothing has been changed, so Discord keeps working exactly "
                 + "as it does now."
         };
@@ -391,7 +391,7 @@ function summarize(input: {
     modBundleKeptForSafety: boolean;
 }): string {
     if (input.restores.length === 0) {
-        return "There was nothing to remove — Subline is not installed in any Discord we can find.";
+        return "There was nothing to remove. Subline is not installed in any Discord we can find.";
     }
 
     if (!input.discordRestored) {
@@ -399,7 +399,7 @@ function summarize(input: {
         // at Discord's own repair rather than leaving a broken client behind.
         const missingBackup = input.problems.some(problem => problem.code === "BACKUP_MISSING");
         if (missingBackup) {
-            return "Subline could not put Discord's original files back, because the backup copy is gone — "
+            return "Subline could not put Discord's original files back, because the backup copy is gone. "
                 + "something other than Subline removed it. Discord will keep working as it is, but to return it "
                 + "to normal you will need to reinstall Discord from discord.com. Subline's own files have been "
                 + "left in place so Discord keeps starting until you do.";

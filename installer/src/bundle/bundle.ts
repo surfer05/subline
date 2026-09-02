@@ -83,7 +83,7 @@ export function removeModBundle(bundleDir: string): Result<boolean> {
     if (!existsSync(manifestPathFor(bundleDir))) {
         return err<boolean>(
             "MOD_BUNDLE_INVALID",
-            `${bundleDir} has no ${MOD_MANIFEST_FILENAME}, so Subline will not delete it — it is not a mod bundle we installed.`,
+            `${bundleDir} has no ${MOD_MANIFEST_FILENAME}, so Subline will not delete it. It is not a mod bundle we installed.`,
             { path: bundleDir }
         );
     }

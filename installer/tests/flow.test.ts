@@ -916,7 +916,7 @@ describe("macOS App Management", () => {
         expect(state.error?.code).toBe("PERMISSION_DENIED");
         expect(state.actions).toContain("retry");
         expect(state.actions).toContain("open-permission-settings");
-        expect(state.detail).toContain("everything else you have chosen is saved");
+        expect(state.detail).toContain("Everything else you have chosen is saved");
     });
 
     it("retries from where it left off, without redoing the language step", async () => {

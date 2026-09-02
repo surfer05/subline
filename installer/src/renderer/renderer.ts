@@ -204,7 +204,7 @@ function renderExtra(state: FlowState): void {
                 event.preventDefault();
                 void api.openUrl(state.keySignupUrl as string);
             };
-            hint.append(link, document.createTextNode(" — it takes a minute, and costs nothing."));
+            hint.append(link, document.createTextNode(". It takes a minute, and costs nothing."));
         }
 
         field.append(label, input, hint);
@@ -231,7 +231,7 @@ function renderExtra(state: FlowState): void {
             glyph: confirmed ? "✓" : "?",
             heading: confirmed ? "Confirmed working" : "Installed, not yet confirmed",
             body: confirmed
-                ? "We watched a translation render in Discord just now. Not an assumption — an observation."
+                ? "We watched a translation render in Discord just now. Not an assumption, an observation."
                 : "Every file was written correctly. No message in another language arrived while we watched.",
             status: state.verification.status
         }));

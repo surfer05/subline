@@ -158,7 +158,7 @@ function describeCause(cause: unknown): string {
     // the whole diagnostic value — "schtasks refused" is not actionable,
     // "ERROR: Cannot create a file when that file already exists" is.
     const stderr = (cause as { stderr?: unknown }).stderr;
-    const detail = typeof stderr === "string" && stderr.trim() !== "" ? ` — ${stderr.trim()}` : "";
+    const detail = typeof stderr === "string" && stderr.trim() !== "" ? `: ${stderr.trim()}` : "";
     return `${cause.name}: ${cause.message}${detail}`;
 }
 
@@ -193,8 +193,8 @@ export function fsError<T>(cause: unknown, path: string, what: string): Result<T
         case "EBUSY":
             return err<T>(
                 "FILE_IN_USE",
-                `Cannot ${what}: another program still has Discord's files open. Close Discord completely — `
-                + "including any Discord icon in the system tray, near the clock — then try again.",
+                `Cannot ${what}: another program still has Discord's files open. Close Discord completely, `
+                + "including any Discord icon in the system tray near the clock, then try again.",
                 { path, cause }
             );
         default:

@@ -256,7 +256,7 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
             pending: withinWaitingPeriod,
             beacon,
             summary: withinWaitingPeriod
-                ? "Waiting for Discord to start — the status file is still the previous installation's."
+                ? "Waiting for Discord to start. The status file is still the previous installation's."
                 : "Subline is installed, but the only status we can find predates this installation, "
                   + "so we cannot confirm it is working. Quit Discord completely and reopen it."
         });
@@ -277,7 +277,7 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
             pending: withinWaitingPeriod,
             beacon,
             summary: withinWaitingPeriod
-                ? "Waiting for Discord to load Subline — the status file is currently another copy of the "
+                ? "Waiting for Discord to load Subline. The status file is currently another copy of the "
                   + "plugin's."
                 : "Discord is running a different copy of this plugin, not the one Subline installed, so we "
                   + "cannot confirm this installation is working. Remove any existing Vencord or vcTranslate "
@@ -292,7 +292,7 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
             pending: withinWaitingPeriod,
             beacon,
             summary: withinWaitingPeriod
-                ? "Waiting for Discord to load Subline — the status file does not say which build wrote it."
+                ? "Waiting for Discord to load Subline. The status file does not say which build wrote it."
                 : "Something reported in from Discord, but it did not identify itself as the build Subline "
                   + "installed, so we cannot confirm this installation is working."
         });
@@ -331,7 +331,7 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
                 summary: errorCode === null
                     ? "Working: translations are appearing in Discord (≈ Google)."
                     : "Working: translations are appearing in Discord (≈ Google). The ✦ quality "
-                      + "upgrade is not arriving — check the engine settings in Discord."
+                      + "upgrade is not arriving. Check the engine settings in Discord."
             });
     }
 
@@ -351,7 +351,7 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
             // wait would only delay the one thing that helps.
             summary:
                 "Subline is running and translating, but nothing is reaching the screen. Discord has "
-                + "probably changed and Subline needs an update — this cannot be fixed by reinstalling."
+                + "probably changed and Subline needs an update. This cannot be fixed by reinstalling."
         });
     }
 

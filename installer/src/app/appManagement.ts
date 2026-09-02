@@ -148,7 +148,7 @@ function describe(status: AppManagementStatus, advice: PermissionAdvice, timedOu
         return "Subline could not tell whether macOS will allow it to update Discord. Try again, or pick Discord's location by hand.";
     }
     if (advice === "relaunch") {
-        return "macOS is still blocking Subline from updating Discord. If you have already turned Subline on under Privacy & Security › App Management, quit Subline and open it again — macOS sometimes only applies the change to a fresh launch.";
+        return "macOS is still blocking Subline from updating Discord. If you have already turned Subline on under Privacy & Security › App Management, quit Subline and open it again. macOS sometimes only applies the change to a fresh launch.";
     }
     return timedOut
         ? "macOS is blocking Subline from updating Discord. Open System Settings › Privacy & Security › App Management, turn Subline on, then try again."

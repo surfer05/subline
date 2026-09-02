@@ -30,7 +30,7 @@ export const ACTION_LABELS: Record<FlowActionType, string> = {
     "set-key": "Save key and continue",
     // Named for what it costs. "Continue" here would let somebody give up the
     // better tier without noticing there was one.
-    "skip-key": "Skip — use Google only",
+    "skip-key": "Skip and use Google only",
     "open-permission-settings": "Open System Settings",
     retry: "Try again",
     // Named for what it costs, not for what it skips. "Continue" here would let

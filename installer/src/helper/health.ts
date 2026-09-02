@@ -176,8 +176,8 @@ export function observeHealth(options: ObserveHealthOptions): HealthObservation 
         observations,
         sustainedMs,
         reason: qualifies
-            ? `translations are being produced and none is reaching the screen — seen ${observations} times over ${Math.round(sustainedMs / 3_600_000)}h, which re-patching cannot fix`
-            : `translations are being produced and none is reaching the screen — seen ${observations} time(s) over ${Math.round(sustainedMs / 60_000)}m, not yet enough to call it broken`
+            ? `translations are being produced and none is reaching the screen: seen ${observations} times over ${Math.round(sustainedMs / 3_600_000)}h, which re-patching cannot fix`
+            : `translations are being produced and none is reaching the screen: seen ${observations} time(s) over ${Math.round(sustainedMs / 60_000)}m, not yet enough to call it broken`
     };
 }
 
@@ -186,7 +186,7 @@ function reasonFor(status: HealthStatus, from: VerificationStatus): string {
         case "healthy":
             return "a translated subtitle has been painted since the patch";
         case "quiet":
-            return "the mod is loaded and has had nothing to translate — a normal, healthy state";
+            return "the mod is loaded and has had nothing to translate: a normal, healthy state";
         case "erroring":
             return "the mod is loaded but the translation engine is reporting errors, which a new build would not fix";
         default:
