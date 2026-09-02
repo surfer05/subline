@@ -126,6 +126,35 @@ const ENGLISH_WORDS = new Set([
  * and is not English; at 2/12 = 0.17 the ratio rejects it.
  */
 const MIN_TOKENS = 3;
+
+/**
+ * Words safe to classify a SHORT message (fewer than MIN_TOKENS) on.
+ *
+ * A separate list from ENGLISH_WORDS, with a strictly harder admission rule,
+ * because the two rules lean on their evidence differently. ENGLISH_WORDS
+ * feeds a ratio over three-plus tokens, where one ambiguous entry is diluted
+ * by the rest of the message; here EVERY token must match and there may be
+ * only one, so a single entry that is also a word in a veto language
+ * misclassifies whole messages by itself. "was" (German what), "die" (German
+ * the), "is"/"in" (Dutch), "si" (Spanish yes) all sit safely in the ratio
+ * rule's world and would each be a bug in this one. Nothing on this list may
+ * be a word — function OR content — in any language the veto lists cover.
+ *
+ * WHY THE RULE EXISTS AT ALL: MIN_TOKENS made the gate abstain on one- and
+ * two-word messages, and short messages are where chat lives. Measured on
+ * 2026-09-02, a channel of "good luck!", "break", "helloo hellooo" wore
+ * "⚠ translation failed" because every one of them cost a request the
+ * throttled endpoints refused — for messages that never needed translating.
+ */
+const SHORT_MESSAGE_WORDS = new Set([
+    "hello", "hi", "hey", "heya", "yo", "sup", "welcome", "bye", "goodbye",
+    "good", "luck", "morning", "night", "evening", "afternoon",
+    "thanks", "thank", "please", "sorry", "congrats", "congratulations",
+    "guys", "yall", "everyone", "folks", "friends",
+    "break", "nice", "cool", "great", "awesome", "amazing", "perfect",
+    "love", "happy", "birthday", "wow", "damn", "same", "true", "right",
+    "ready", "done", "wait", "stop", "help", "letsgo"
+]);
 const MIN_ENGLISH_HITS = 2;
 const MIN_ENGLISH_RATIO = 0.25;
 
@@ -193,6 +222,16 @@ function tokenize(text: string): string[] {
  * false positive here still requires an entry that was independently vetted
  * against the veto languages when it was added.
  */
+/** "helloo" -> "hello", "luckk" -> "luck": the final letter-run cut to one. */
+function trimFinalRun(token: string): string {
+    return token.replace(/(\p{L})\1+$/u, "$1");
+}
+
+/** "goodd" -> "good": the final letter-run cut to two, for genuine doubles. */
+function trimFinalRunToPair(token: string): string {
+    return token.replace(/(\p{L})\1+$/u, "$1$1");
+}
+
 function matchesWord(token: string, set: Set<string>): boolean {
     return set.has(token) || set.has(collapseElongation(token)) || set.has(collapseElongationToPair(token));
 }
@@ -221,9 +260,28 @@ export function isConfidentlyTargetLanguage(text: string, targetLang: string): b
     if (FOREIGN_CHARS.test(stripped)) return false;
 
     const tokens = tokenize(text);
-    if (tokens.length < MIN_TOKENS) return false;
+    if (tokens.length === 0) return false;
 
     if (tokens.some(t => matchesWord(t, FOREIGN_WORDS))) return false;
+
+    // Short messages: every token must be unambiguously English — a list with
+    // a harder admission rule than the ratio evidence below, because there is
+    // no surrounding message to dilute a wrong entry. All the vetoes above
+    // have already run.
+    //
+    // The extra two forms handle elongation-by-ONE ("luckk", "helloo"), which
+    // both shared collapses are blind to — they fire only on runs of 3+,
+    // because collapsing every 2-run would corrupt genuine doubles ("good" →
+    // "god"). Chat elongation is overwhelmingly final-letter, so trimming just
+    // the FINAL run is safe where a global collapse is not: "helloo" → "hello"
+    // leaves the genuine "ll" alone.
+    if (tokens.length < MIN_TOKENS) {
+        return tokens.every(t =>
+            matchesWord(t, SHORT_MESSAGE_WORDS)
+            || SHORT_MESSAGE_WORDS.has(trimFinalRun(t))
+            || SHORT_MESSAGE_WORDS.has(trimFinalRunToPair(t))
+        );
+    }
 
     let hits = 0;
     for (const t of tokens) if (matchesWord(t, ENGLISH_WORDS)) hits++;

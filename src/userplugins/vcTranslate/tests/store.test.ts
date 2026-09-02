@@ -319,4 +319,37 @@ describe("store", () => {
         setTranslation(makeKey("2", "en"), { lang: "ja", text: "y", via: "claude" });
         expect(fn).toHaveBeenCalledTimes(1);
     });
+
+    // A failure is a fact about a MOMENT — the throttled minute, the parked
+    // engine — not about the message. Persisting one turns "Google was busy on
+    // Tuesday" into a warning the reader sees every session until catch-up
+    // happens to heal it. Real translations and skips persist; markers do not.
+    describe("markers are session-scoped", () => {
+        it("does not persist failed or deferred markers", async () => {
+            setTranslation("m1 en", { failed: true });
+            setTranslation("m2 en", { deferred: true });
+            setTranslation("m3 en", { lang: "es", text: "hi", via: "google" });
+            await new Promise(r => setTimeout(r, 0)); // let the write chain drain
+
+            const written = await DataStore.get(PERSIST_KEY) as [string, unknown][];
+            const keys = written.map(([k]) => k);
+            expect(keys).toContain("m3 en");
+            expect(keys).not.toContain("m1 en");
+            expect(keys).not.toContain("m2 en");
+        });
+
+        it("drops markers persisted by earlier builds on load", async () => {
+            await DataStore.set(PERSIST_KEY, [
+                ["old1 en", { failed: true }],
+                ["old2 en", { deferred: true }],
+                ["old3 en", { lang: "es", text: "kept", via: "google" }]
+            ]);
+            clearStore();
+            await loadPersistedTranslations();
+
+            expect(getTranslation("old3 en")).toMatchObject({ text: "kept" });
+            expect(getTranslation("old1 en")).toBeUndefined();
+            expect(getTranslation("old2 en")).toBeUndefined();
+        });
+    });
 });

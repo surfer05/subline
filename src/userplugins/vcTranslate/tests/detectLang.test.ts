@@ -159,4 +159,38 @@ describe("isConfidentlyTargetLanguage — elongated words inside a sentence", ()
         // "ceeeee" case above.
         expect(en("waiii bine multumesc")).toBe(false);
     });
+
+    // THE SCREENSHOT OF 2026-09-02: "Good luckk🍀", "helloo hellooo", "break",
+    // "good luck!", "welcome and gl" — a wall of English small talk wearing
+    // "⚠ translation failed", because every one of them is under MIN_TOKENS
+    // and the gate refuses to classify short messages at all. Short messages
+    // are where chat LIVES; a gate that abstains on them abstains on most of
+    // the traffic. They get their own rule: every token must be on a list of
+    // words vetted to be English-only — no entry that is also a function word
+    // in any veto language, which is what makes 1-2 token confidence safe.
+    describe("short messages of unambiguous English", () => {
+        it.each([
+            "Good luckk🍀",
+            "good luck!",
+            "helloo hellooo",
+            "break",
+            "welcome",
+            "hi yall",
+            "good morning",
+            "thanks guys"
+        ])("skips %j locally", text => {
+            expect(isConfidentlyTargetLanguage(text, "en")).toBe(true);
+        });
+
+        it.each([
+            ["was", "German 'what'"],
+            ["die", "German 'the'"],
+            ["si", "Spanish/Italian 'yes'"],
+            ["Glucks🍀", "German Glücks minus the umlaut"],
+            ["hi yall gll", "gll is not a word anyone vetted"],
+            ["gut", "German 'good'"]
+        ])("still sends %j (%s)", text => {
+            expect(isConfidentlyTargetLanguage(text, "en")).toBe(false);
+        });
+    });
 });

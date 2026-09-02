@@ -417,6 +417,45 @@ describe("markers — who writes them, and which ones catch-up picks back up", (
         expect(getTranslation(makeKey("2", "en"))).toMatchObject({ text: "how are you" });
     });
 
+    // THE WALL OF WARNINGS, 2026-09-02. A channel of English small talk —
+    // "good luck!", "break", "helloo hellooo" — wearing "⚠ translation failed"
+    // permanently. Chain: throttled Google fails messages one by one; the
+    // quality batch that would have cleaned every marker (an LLM skip replaces
+    // a failed marker) gets a 429; the ledger charges for that refused batch;
+    // and no engine is ever allowed to look at those messages again. This is
+    // the ledger's documented trade-off ("the readable ≈ line is still there")
+    // in the one world it never priced: no readable line exists.
+    it("cleans a failed marker once the quality tier recovers", async () => {
+        settings.store.engine = "groq";
+        settings.store.groqApiKey = "gsk-test";
+
+        // Round 1: Google fails the message; groq's batch is rate-limited.
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "google"
+                ? { ok: true, results: [{ id: "1", failed: true }] }
+                : { ok: false, error: "groq: HTTP 429", retryAfterMs: 1_000 });
+        // NOT "good luck!" — the short-message English gate now resolves that
+        // locally, which is the point of the gate but would make this test
+        // vacuous. German reaches the engines.
+        stubMessages.set(CHANNEL, [discordMessage("1", "viel glück!")]);
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        expect(getTranslation(makeKey("1", "en"))).toEqual({ failed: true });
+
+        // Round 2: past the cooldown, the channel is opened again and groq is
+        // healthy — it judges the message already-English. The marker must be
+        // replaced by that verdict, not blocked by a ledger charged for a
+        // batch the provider refused.
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "google"
+                ? { ok: true, results: [{ id: "1", failed: true }] }
+                : { ok: true, results: [{ id: "1", skip: true }] });
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+
+        expect(getTranslation(makeKey("1", "en"))).toEqual({ skipped: true, via: "groq" });
+    });
+
     it("retries a deferred message on the next channel open, exactly like a failed one", async () => {
         setTranslation(makeKey("1", "en"), { deferred: true });
         stubMessages.set(CHANNEL, [discordMessage("1", "hola")]);

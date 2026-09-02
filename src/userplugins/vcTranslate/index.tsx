@@ -1196,6 +1196,31 @@ async function runTier(
             // nothing to translate yet".
             const errorCode = beaconErrorCode(res);
             recordError(errorCode, beaconErrorStatus(res));
+
+            // REFUND THE LEDGER. It was charged above, at send time, and the
+            // provider has now refused the whole batch — nothing was judged,
+            // so nothing was bought. The ledger's own trade-off ("a message
+            // whose one attempt failed never gets its ✦ — the readable ≈ line
+            // is still there") was priced for a healthy fast tier; when BOTH
+            // tiers are down, the un-refunded ledger turns a throttled minute
+            // into a permanent ⚠ for every message in the batch, because the
+            // groq skip that would clean the marker is never allowed to run
+            // again. Per-message verdicts below still charge — a model that
+            // OMITTED a message from its answer has judged it, and re-buying
+            // that forever is the loop the ledger exists to stop.
+            if (isQuality) {
+                for (const m of req.messages) {
+                    const k = makeKey(m.id, req.targetLang);
+                    // Only while the reader is BLIND. With a readable line on
+                    // screen (Google delivered), the original trade-off stands
+                    // in full: retrying an already-readable message on every
+                    // channel open is the quota loop the ledger was built to
+                    // stop. The refund is for the case the trade-off never
+                    // priced — marker on screen, nothing readable, and the one
+                    // engine that could fix it barred from trying again.
+                    if (!isRealTranslation(getTranslation(k))) qualityAttempted.delete(k);
+                }
+            }
             // Manual-⚡-only — see ForcedHint's own doc. Reuses the same
             // closed set of categories the beacon just recorded, so this can
             // never leak the engine's own (potentially remote-text-bearing)

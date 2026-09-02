@@ -209,6 +209,10 @@ export async function loadPersistedTranslations(): Promise<void> {
         const [key, value] = row as [unknown, unknown];
         if (typeof key !== "string" || key === "") continue;
         if (!isStoredTranslation(value)) continue;
+        // Markers written by earlier builds (setTranslation no longer persists
+        // them): a failure is a session fact, and one read back from disk is a
+        // warning about a moment nobody remembers.
+        if ("failed" in value || "deferred" in value) continue;
         valid.push([key, value]);
     }
 
@@ -269,11 +273,22 @@ export function setTranslation(key: string, value: StoredTranslation): void {
     cache.set(key, value);
     trim(cache, MAX_ENTRIES);
 
-    // Same recency-refresh + eviction as the LRU above, on its own cap.
-    persisted.delete(key);
-    persisted.set(key, value);
-    trim(persisted, MAX_PERSISTED);
-    schedulePersist();
+    // Markers stay in this session. A failed or deferred entry is a fact
+    // about a MOMENT — the throttled minute, the parked engine — not about
+    // the message, and persisting one turns "Google was busy on Tuesday"
+    // into a warning shown every session until something happens to heal it.
+    // Removing any older persisted value for the key matters as much as not
+    // adding one: a marker must also STOP a stale disk entry from
+    // resurrecting over what the reader last saw.
+    if ("failed" in value || "deferred" in value) {
+        if (persisted.delete(key)) schedulePersist();
+    } else {
+        // Same recency-refresh + eviction as the LRU above, on its own cap.
+        persisted.delete(key);
+        persisted.set(key, value);
+        trim(persisted, MAX_PERSISTED);
+        schedulePersist();
+    }
 
     for (const fn of listeners) fn();
 }
