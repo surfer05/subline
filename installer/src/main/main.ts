@@ -33,7 +33,7 @@ import {
 } from "../helper/index.js";
 import { productDirFor } from "../bundle/layout.js";
 import { findDiscordProcesses, quitDiscord } from "../app/discordProcess.js";
-import { locateDiscordInstalls } from "../patcher/locate.js";
+import { locateDiscordInstalls, uninstallTargets } from "../patcher/locate.js";
 import { unpatchInstall } from "../patcher/patch.js";
 import { usingOriginalFs } from "../patcher/realFs.js";
 import {
@@ -332,8 +332,15 @@ ipcMain.handle("uninstall:run", async (
     // assemble it wrongly.
     const helper = await removeHelperFor(helperWiring(), process.platform, app.getPath("home"));
 
-    const located = locateDiscordInstalls({ platform: process.platform });
-    const installs = located.ok ? located.value : [];
+    // uninstallTargets, not locateDiscordInstalls: the latter deliberately
+    // returns only the NEWEST Windows app dir (right for installing), but a
+    // helper patches whichever dir is newest at the time, so after a Discord
+    // update TWO siblings can carry the patch. Restoring only the newest left
+    // a shim behind whose require died once the mod bundle was deleted —
+    // observed bricking a real machine on 2026-09-02. Uninstall's question is
+    // "where did we ever leave a mark?", and this is the function that
+    // answers it.
+    const installs = uninstallTargets({ platform: process.platform });
 
     // Restoring Discord renames _app.asar back over app.asar, and Windows
     // refuses to rename a file a running process holds open. Looked up here

@@ -273,3 +273,75 @@ function canonicalKey(path: string): string {
         return path;
     }
 }
+
+/**
+ * Every Discord app directory that carries evidence of our patch — the marker,
+ * or the `_app.asar` backup (the backup alone counts: it is the very thing a
+ * restore needs, so its presence makes the directory ours to clean up).
+ *
+ * THE QUESTION THIS ANSWERS IS NOT locateDiscordInstalls'. That one asks
+ * "which Discord is live?" and on Windows deliberately returns only the newest
+ * `app-1.0.xxxx`, because installing into a leftover has no visible effect.
+ * Uninstall asks "where did we ever leave a mark?" — and a helper patches
+ * whichever directory is newest AT THE TIME, so after an update two siblings
+ * can both be patched. Restoring only the newest leaves a shim in the other
+ * whose `require` dies the moment the mod bundle is deleted — which is not
+ * hypothetical: it bricked a real machine on 2026-09-02, "Cannot find module
+ * …patcher.js", and the repair was hand-written PowerShell. Uninstall must
+ * sweep them all.
+ */
+export function locatePatchedResidue(options: LocateOptions = {}): DiscordInstall[] {
+    const platform = options.platform ?? process.platform;
+    const roots = options.searchRoots ?? defaultSearchRoots(platform);
+    const branches = options.branches ?? DEFAULT_BRANCHES;
+
+    const carriesOurMark = (install: DiscordInstall): boolean =>
+        existsSync(install.backupPath) || existsSync(join(install.resourcesPath, "subline-patch.json"));
+
+    const found: DiscordInstall[] = [];
+    const seen = new Set<string>();
+    const add = (install: DiscordInstall) => {
+        if (seen.has(install.rootPath)) return;
+        seen.add(install.rootPath);
+        found.push(install);
+    };
+
+    for (const definition of BRANCHES) {
+        if (!branches.includes(definition.branch)) continue;
+        for (const root of roots) {
+            if (platform === "darwin" || platform === "linux") {
+                const candidate = join(root, definition.macAppName);
+                if (!isDirectory(candidate, options.onIgnoredError)) continue;
+                const install = makeInstall(definition.branch, candidate, platform, false);
+                if (carriesOurMark(install)) add(install);
+            } else if (platform === "win32") {
+                const branchDir = join(root, definition.windowsDirName);
+                if (!isDirectory(branchDir, options.onIgnoredError)) continue;
+                // EVERY app dir, no break — the whole point. findWindowsAppDirs
+                // already sorts newest-first, which is also the order a restore
+                // should run in (the live one back first).
+                for (const appDir of findWindowsAppDirs(branchDir, options.onIgnoredError)) {
+                    const install = makeInstall(definition.branch, appDir, platform, false);
+                    if (carriesOurMark(install)) add(install);
+                }
+            }
+        }
+    }
+    return found;
+}
+
+/**
+ * What uninstall should operate on: the live install (even when unpatched —
+ * marker removal and verification still concern it) plus every patched
+ * leftover, deduplicated. This exists as a function so the wiring in main.ts
+ * is a call, not logic — logic in main.ts is logic no test executes.
+ */
+export function uninstallTargets(options: LocateOptions = {}): DiscordInstall[] {
+    const live = locateDiscordInstalls(options);
+    const targets = [...(live.ok ? live.value : [])];
+    const seen = new Set(targets.map(i => i.rootPath));
+    for (const residue of locatePatchedResidue(options)) {
+        if (!seen.has(residue.rootPath)) targets.push(residue);
+    }
+    return targets;
+}
