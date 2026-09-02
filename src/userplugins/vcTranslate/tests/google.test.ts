@@ -342,3 +342,48 @@ describe("source language and detection confidence", () => {
         expect((result as any).conf).toBeUndefined();
     });
 });
+    // 2026-09-02, one house, one Airtel connection, the throttle active: the
+    // BROWSER got 200 from this endpoint while the plugin got 429 — same IP,
+    // same minute, caught by the beacon (updatedAt == lastError.at). The
+    // plugin was sending fetchImpl(url) with no headers at all, more naked
+    // than curl. The free endpoint throttles by (IP, request shape); a bare
+    // request is the first thing it sheds. So every request now carries what
+    // a real browser would send. Not a trick — the browser's own shape.
+    describe("request shape", () => {
+        it("sends browser-shaped headers on every request", async () => {
+            const seen: any[] = [];
+            const fetchImpl = vi.fn().mockImplementation(async (_url: string, init?: any) => {
+                seen.push(init?.headers);
+                return okResponse("hello", "es");
+            });
+
+            await translateWithGoogle(req(["hola"]), fetchImpl as any);
+
+            expect(seen).toHaveLength(1);
+            expect(seen[0]).toMatchObject({
+                "User-Agent": expect.stringContaining("Mozilla/5.0"),
+                "Accept-Language": expect.stringContaining("en"),
+                "Referer": "https://translate.google.com/"
+            });
+        });
+
+        it("keeps the headers on the 429 retry", async () => {
+            // The retry exists because the request AFTER a refusal usually
+            // succeeds — but only if it is the same kind of request. A retry
+            // that dropped the headers would be a worse request than the one
+            // that was just refused.
+            const seen: any[] = [];
+            const fetchImpl = vi.fn().mockImplementation(async (_url: string, init?: any) => {
+                seen.push(init?.headers);
+                return seen.length === 1
+                    ? { ok: false, status: 429, json: async () => ({}) }
+                    : okResponse("hello", "es");
+            });
+
+            await translateWithGoogle(req(["hola"]), fetchImpl as any, { retryDelayMs: 0 });
+
+            expect(seen).toHaveLength(2);
+            expect(seen[1]).toMatchObject({ "User-Agent": expect.stringContaining("Mozilla/5.0") });
+        });
+    });
+

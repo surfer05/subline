@@ -21,6 +21,34 @@ const RETRY_DELAY_MS = 400;
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 /**
+ * Headers that make the request look like a browser rather than a bare fetch.
+ *
+ * WHY THIS MATTERS, evidenced 2026-09-02. The free translate_a endpoint
+ * throttles by (IP, request shape) — not IP alone. On one Airtel connection,
+ * with the block active, a browser hitting the endpoint got 200 while the
+ * plugin got 429, at the same second, from the same house. The status beacon
+ * caught it: updatedAt == lastError.at, status 429, while the browser answered
+ * cleanly. The difference was the request: the plugin sent `fetchImpl(url)`
+ * with no headers at all, which is MORE naked than curl (curl at least sends a
+ * User-Agent). A bare request is the first thing a rate limiter sheds.
+ *
+ * So we stop looking like a script. A real Chrome User-Agent, an
+ * Accept-Language, and the Referer/Origin a browser translate widget would
+ * carry. None of it is a trick — it is what any browser sends, and it is the
+ * difference between surviving a throttling window and being dropped in it.
+ * It cannot make things worse: the previous request sent strictly less.
+ */
+const BROWSER_HEADERS: Record<string, string> = {
+    "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        + "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://translate.google.com/",
+    "Origin": "https://translate.google.com"
+};
+
+/**
  * A failure that concerns exactly ONE message — a garbled body, an empty
  * translation. It degrades that message to `{ failed: true }` and leaves the
  * rest of the batch intact.
@@ -47,7 +75,7 @@ async function translateOne(
         `&tl=${encodeURIComponent(targetLang)}` +
         `&dt=t&q=${encodeURIComponent(msg.text)}`;
 
-    const res = await fetchImpl(url);
+    const res = await fetchImpl(url, { headers: BROWSER_HEADERS });
     if (!res.ok) {
         // One retry for a throttle, because this endpoint refuses REQUESTS
         // rather than callers (see RETRY_DELAY_MS). Only 429, and only once:
