@@ -33,7 +33,7 @@ import {
 } from "../helper/index.js";
 import { productDirFor } from "../bundle/layout.js";
 import { findDiscordProcesses, quitDiscord } from "../app/discordProcess.js";
-import { locateDiscordInstalls, uninstallTargets } from "../patcher/locate.js";
+import { uninstallTargets } from "../patcher/locate.js";
 import { unpatchInstall } from "../patcher/patch.js";
 import { usingOriginalFs } from "../patcher/realFs.js";
 import {
