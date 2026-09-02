@@ -69,7 +69,7 @@ const config = {
      * launchd can never start, and it would be silent forever.
      */
     productName: "Subline",
-    copyright: "Copyright © 2026 the Subline contributors. GPL-3.0-or-later.",
+    copyright: "Copyright (c) 2026 the Subline contributors. GPL-3.0-or-later.",
 
     directories: {
         output: "release",
