@@ -844,7 +844,7 @@ describe("the NSIS CRC repair hook", () => {
     // it is embedded. These pin the wiring and the algorithm.
     it("is wired as the win signing hook", async () => {
         const config = (await import("../electron-builder.js")).default;
-        expect(config.win.sign).toBe("./packaging/fixNsisCrc.cjs");
+        expect(config.win?.sign).toBe("./packaging/fixNsisCrc.cjs");
     });
 
     it("repairs a mismatched checksum and leaves a correct one alone", async () => {
