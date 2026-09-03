@@ -496,6 +496,45 @@ describe("a Discord we already patched", () => {
         expect(h.patchCalls).toHaveLength(0);
     });
 
+    // OBSERVED 2026-09-03: a NEW installer run over an existing install landed
+    // on "already set up" while Discord kept running the previous plugin
+    // build - with the fixes the new installer existed to deliver. "Updates
+    // are handled in the background" is false until the release feed ships;
+    // today the installer is the only updater there is. A different build id
+    // is an update, not a no-op.
+    it("updates when the installed build differs from the shipped one", async () => {
+        const marker = { pluginBuildId: "0000000000000000" } as unknown as InstallState["marker"];
+        const st = { ...installState("patched-by-us", "subline"), marker };
+        const h = harness({ inspect: { ok: true, value: st } });
+
+        // Record every transition, so the skip assertions below are REAL -
+        // an assertion over a list nothing populates proves nothing.
+        const seen: string[] = [];
+        h.flow.onChange = st => seen.push(st.step);
+
+        const first = await h.flow.start();
+        // Not "already-installed": the flow proceeds. Discord is closed in
+        // this harness, so it heads for the patch pipeline directly - and the
+        // language and key steps must NOT appear: their answers are the
+        // user's saved settings and asking twice is how an update gets
+        // abandoned halfway.
+        expect(first.step).not.toBe("already-installed");
+        expect(seen).not.toContain("already-installed");
+        expect(seen).not.toContain("choose-language");
+        expect(seen).not.toContain("choose-key");
+        expect(h.patchCalls.length).toBeGreaterThan(0);
+    });
+
+    it("still says already-set-up when the installed build IS the shipped build", async () => {
+        const marker = { pluginBuildId: BUILD_ID } as unknown as InstallState["marker"];
+        const st = { ...installState("patched-by-us", "subline"), marker };
+        const h = harness({ inspect: { ok: true, value: st } });
+
+        const first = await h.flow.start();
+        expect(first.step).toBe("already-installed");
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
     it("still shows Welcome when there is nothing installed yet", async () => {
         // The narrowness matters: only an install that is already OURS skips
         // the explanation. Everyone else is genuinely at the start.

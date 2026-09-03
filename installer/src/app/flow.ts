@@ -687,7 +687,25 @@ export class InstallFlow {
      * a write to somebody else's application in exchange for nothing, and the
      * helper already repairs the one case that needs it.
      */
-    private alreadyInstalled(install: DiscordInstall, installState: InstallState): FlowState {
+    private alreadyInstalled(install: DiscordInstall, installState: InstallState): FlowState | Promise<FlowState> {
+        // AN OLDER BUILD IS NOT "ALREADY SET UP". Observed 2026-09-03: a new
+        // installer run over an existing install landed on "nothing left to
+        // do" while Discord kept running the previous plugin build - with the
+        // fixes the new installer existed to deliver. The old reasoning was
+        // "the helper handles updates in the background", which is false
+        // until the release feed ships (RELEASE_FEED_ENABLED=false): today
+        // THIS installer is the only updater there is. Same id: done.
+        // Different id: continue as an update - straight to the quit gate,
+        // skipping the language and key steps, whose answers are the user's
+        // saved settings and must not be asked twice.
+        const installedId = installState.marker?.pluginBuildId ?? null;
+        const shipped = this.ports.inspectShippedBundle();
+        if (shipped.ok && installedId !== null && shipped.value.buildId !== installedId) {
+            this.ports.log.info("flow.update-detected", { from: installedId, to: shipped.value.buildId });
+            this.updating = true;
+            return this.checkRunning();
+        }
+
         return this.set(state({
             step: "already-installed",
             detail:
@@ -721,7 +739,7 @@ export class InstallFlow {
             }));
         }
 
-        return this.languageStep();
+        return this.updating ? this.permissionStep() : this.languageStep();
     }
 
     /**
@@ -767,7 +785,7 @@ export class InstallFlow {
         });
         this.ports.log.info("discord.quit", { outcome: report.outcome, clear: report.clear, forced: report.forced });
 
-        if (report.clear) return this.languageStep();
+        if (report.clear) return this.updating ? this.permissionStep() : this.languageStep();
 
         // Only reached when the forced close ALSO failed, which means something
         // other than a cooperative Discord is holding those files. Offering the
@@ -1136,6 +1154,13 @@ export class InstallFlow {
 
     /** Set when the user pasted a key during install; decides verify's advice. */
     private keyConfigured = false;
+
+    /**
+     * This run is an update over an existing install. Language and key steps
+     * are skipped (their answers are the user's saved settings), and verify's
+     * advice treats the engine configuration as the user's standing choice.
+     */
+    private updating = false;
 
     private async verify(): Promise<FlowState> {
         this.set(state({
