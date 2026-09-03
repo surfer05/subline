@@ -8,9 +8,14 @@ const req = (texts: string[]): BatchRequest => ({
     targetLang: "en"
 });
 
-const okResponse = (translated: string, detected: string) => ({
+// translate-pa's flat JSON, the shape the engine now parses.
+const okResponse = (translated: string, detected: string, conf: number | null = null) => ({
     ok: true,
-    json: async () => [[[translated, "orig", null, null, 10]], null, detected]
+    json: async () => ({
+        translation: translated,
+        sourceLanguage: detected,
+        detectedLanguages: conf === null ? {} : { srclangs: [detected], srclangsConfidences: [conf] }
+    })
 });
 
 describe("translateWithGoogle", () => {
@@ -26,11 +31,8 @@ describe("translateWithGoogle", () => {
         expect(result).toEqual({ id: "0", skip: true });
     });
 
-    it("joins multi-segment translations", async () => {
-        const fetchImpl = vi.fn().mockResolvedValue({
-            ok: true,
-            json: async () => [[["one ", "a"], ["two", "b"]], null, "de"]
-        });
+    it("returns the translation string verbatim", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue(okResponse("one two", "de"));
         const [result] = await translateWithGoogle(req(["eins zwei"]), fetchImpl as any);
         expect(result).toEqual({ id: "0", lang: "de", text: "one two", skip: false });
     });
@@ -67,7 +69,7 @@ describe("translateWithGoogle", () => {
         // concurrently, so call order is not deterministic. "c" is refused
         // every time, including its retry; the rest always succeed.
         const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
-            if (url.includes("q=c")) return { ok: false, status: 429, json: async () => ({}) };
+            if (url.includes("query.text=c")) return { ok: false, status: 429, json: async () => ({}) };
             return okResponse("hi", "es");
         });
 
@@ -176,26 +178,25 @@ describe("translateWithGoogle", () => {
         const fetchImpl = vi.fn().mockResolvedValue(okResponse("hi", "es"));
         await translateWithGoogle(req(["a&b c?"]), fetchImpl as any);
         const url = fetchImpl.mock.calls[0][0] as string;
-        expect(url).toContain(encodeURIComponent("a&b c?"));
+        // URLSearchParams is the encoder now: space -> "+", & -> "%26".
+        expect(url).toContain("query.text=" + new URLSearchParams({ x: "a&b c?" }).toString().slice(2));
     });
 
-    it("marks a message failed when the detected-language field is not a string", async () => {
-        // Segments are valid but body[2] is a number. Without the shape guard
-        // this returns a Result with lang=123, i.e. bogus data rendered as a
-        // real translation.
+    it("marks a message failed when translation is not a string", async () => {
+        // translate-pa returned an object without a string `translation`.
+        // Without the shape guard this renders bogus data as a real line.
         const fetchImpl = vi.fn().mockResolvedValue({
             ok: true,
-            json: async () => [[["hola", "orig"]], null, 123]
+            json: async () => ({ translation: 123, sourceLanguage: "es" })
         });
         await expect(translateWithGoogle(req(["x"]), fetchImpl as any))
             .resolves.toEqual([{ id: "0", failed: true }]);
     });
 
-    it("marks a message failed when the segments array is missing", async () => {
-        // body[0] is null rather than an array of segments.
+    it("marks a message failed when translation is missing entirely", async () => {
         const fetchImpl = vi.fn().mockResolvedValue({
             ok: true,
-            json: async () => [null, null, "es"]
+            json: async () => ({ sourceLanguage: "es" })
         });
         await expect(translateWithGoogle(req(["x"]), fetchImpl as any))
             .resolves.toEqual([{ id: "0", failed: true }]);
@@ -301,75 +302,60 @@ describe("translateWithGoogle", () => {
 describe("translateWithGoogle — pass-through detection", () => {
     it("skips when the translation is identical to the source", async () => {
         // Google misdetects English slang and echoes it back verbatim.
-        const fetchImpl = vi.fn().mockResolvedValue({
-            ok: true,
-            json: async () => [[["hbu", "hbu", null, null, 10]], null, "fy"]
-        });
+        const fetchImpl = vi.fn().mockResolvedValue(okResponse("hbu", "fy"));
         const [result] = await translateWithGoogle(req(["hbu"]), fetchImpl as any);
         expect(result).toEqual({ id: "0", skip: true });
     });
 
     it("ignores case and spacing when comparing", async () => {
-        const fetchImpl = vi.fn().mockResolvedValue({
-            ok: true,
-            json: async () => [[["  U2   <2 ", "u2 <2"]], null, "zh-CN"]
-        });
+        const fetchImpl = vi.fn().mockResolvedValue(okResponse("  U2   <2 ", "zh-CN"));
         const [result] = await translateWithGoogle(req(["u2 <2"]), fetchImpl as any);
         expect(result).toEqual({ id: "0", skip: true });
     });
 
     it("still returns a real translation when the text actually changed", async () => {
-        const fetchImpl = vi.fn().mockResolvedValue({
-            ok: true,
-            json: async () => [[["let's go", "vamos"]], null, "es"]
-        });
+        const fetchImpl = vi.fn().mockResolvedValue(okResponse("let's go", "es"));
         const [result] = await translateWithGoogle(req(["vamos"]), fetchImpl as any);
         expect(result).toEqual({ id: "0", lang: "es", text: "let's go", skip: false });
     });
 });
 
 describe("source language and detection confidence", () => {
-    /** A real response carries the confidence at index 6. */
-    const withConfidence = (translated: string, detected: string, conf: number | null) => ({
-        ok: true,
-        json: async () => [[[translated, "orig", null, null, 3]], null, detected,
-            null, null, null, conf]
-    });
-
     const urlOf = (fetchImpl: any) => String(fetchImpl.mock.calls[0][0]);
 
     it("auto-detects when no source language was resolved", async () => {
-        const fetchImpl = vi.fn().mockResolvedValue(withConfidence("no", "de", 1));
+        const fetchImpl = vi.fn().mockResolvedValue(okResponse("no", "de", 1));
         await translateWithGoogle(req(["ne"]), fetchImpl as any);
-        expect(urlOf(fetchImpl)).toContain("sl=auto");
+        expect(urlOf(fetchImpl)).toContain("query.sourceLanguage=auto");
     });
 
-    it("pins sl to the resolved source language instead of auto-detecting", async () => {
-        // THE fix. Live, "ne" under sl=auto returns Hausa "it is"; under sl=de
-        // it returns "no". Same request, opposite meaning — so which `sl` goes
-        // on the wire is the whole behaviour worth asserting.
-        const fetchImpl = vi.fn().mockResolvedValue(withConfidence("no", "de", null));
+    it("pins the source language instead of auto-detecting", async () => {
+        // THE fix. Live, "ne" under auto returns Hausa "it is"; under de it
+        // returns "no". Same request, opposite meaning — so which source
+        // language goes on the wire is the whole behaviour worth asserting.
+        const fetchImpl = vi.fn().mockResolvedValue(okResponse("no", "de", null));
         const r: BatchRequest = {
             messages: [{ id: "0", author: "a", text: "ne", sourceLang: "de" }],
             context: [],
             targetLang: "en"
         };
         await translateWithGoogle(r, fetchImpl as any);
-        expect(urlOf(fetchImpl)).toContain("sl=de");
-        expect(urlOf(fetchImpl)).not.toContain("sl=auto");
+        expect(urlOf(fetchImpl)).toContain("query.sourceLanguage=de");
+        expect(urlOf(fetchImpl)).not.toContain("query.sourceLanguage=auto");
     });
 
     it("passes the detection confidence through so the renderer can flag a guess", async () => {
         // 0.217 is the number the live endpoint actually returned for "ne".
-        const fetchImpl = vi.fn().mockResolvedValue(withConfidence("it is", "ha", 0.21705426));
+        const fetchImpl = vi.fn().mockResolvedValue(okResponse("it is", "ha", 0.21705426));
         const [result] = await translateWithGoogle(req(["ne"]), fetchImpl as any);
         expect(result).toMatchObject({ lang: "ha", text: "it is", conf: 0.21705426 });
     });
 
     it("reports no confidence when the response carries none", async () => {
-        // A pinned request gets null here — nothing was detected, so there is
-        // nothing to be unsure about, and the renderer must not show a "?".
-        const fetchImpl = vi.fn().mockResolvedValue(withConfidence("no", "de", null));
+        // translate-pa omits detectedLanguages when it detected nothing (a
+        // pinned request), so there is nothing to be unsure about and the
+        // renderer must not show a "?".
+        const fetchImpl = vi.fn().mockResolvedValue(okResponse("no", "de", null));
         const [result] = await translateWithGoogle(req(["ne"]), fetchImpl as any);
         expect((result as any).conf).toBeUndefined();
     });

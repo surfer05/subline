@@ -2,7 +2,17 @@ import { HttpError } from "../httpError";
 import { retryAfterFromHeader } from "../rateHint";
 import { isSameText, type BatchRequest, type Result } from "../types";
 
-const ENDPOINT = "https://translate.googleapis.com/translate_a/single";
+// translate-pa, not translate_a/single. MEASURED 2026-09-03 on TWO throttled
+// networks (an Airtel connection and a friend's, a different country, first
+// install): translate_a/single 429'd bursts wholesale while THIS endpoint
+// answered 200 to every request in the same burst from the same machine. The
+// difference is the key: translate_a is the unofficial keyless scrape Google
+// rate-limits aggressively; translate-pa is the keyed path the browser widget
+// uses, and it returns clean structured JSON instead of the positional array.
+// The key below is Google's own public gtx widget key, exactly as Vencord's
+// Translate plugin has shipped it to a large userbase for years.
+const ENDPOINT = "https://translate-pa.googleapis.com/v1/translate";
+const GTX_KEY = "AIzaSyDLEeFI5OtFBwYBIoK_jj5m32rZK5CkCXA";
 const CONCURRENCY = 4;
 
 /**
@@ -80,10 +90,14 @@ async function translateOne(
     // rescues short replies: "ne" under `sl=auto` comes back as Hausa "it is",
     // and under `sl=de` as "no" — opposite answers to the same question.
     const sourceLang = msg.sourceLang ?? "auto";
-    const url =
-        `${ENDPOINT}?client=gtx&sl=${encodeURIComponent(sourceLang)}` +
-        `&tl=${encodeURIComponent(targetLang)}` +
-        `&dt=t&q=${encodeURIComponent(msg.text)}`;
+    const url = ENDPOINT + "?" + new URLSearchParams({
+        "params.client": "gtx",
+        "dataTypes": "TRANSLATION",
+        "key": GTX_KEY,
+        "query.sourceLanguage": sourceLang,
+        "query.targetLanguage": targetLang,
+        "query.text": msg.text
+    }).toString();
 
     const res = await fetchImpl(url, { headers: BROWSER_HEADERS });
     if (!res.ok) {
@@ -98,27 +112,28 @@ async function translateOne(
         throw new HttpError(`google: HTTP ${res.status}`, res.status, retryAfterFromHeader(res));
     }
 
-    const body = await res.json();
-    // Expected: [[["translated","original",...], ...], null, "<detected lang>"]
-    if (!Array.isArray(body) || !Array.isArray(body[0]) || typeof body[2] !== "string") {
+    // translate-pa's shape: { translation, sourceLanguage, detectedLanguages:
+    // { srclangs: [...], srclangsConfidences: [...] } }. A flat object, not the
+    // positional array translate_a returned.
+    const body = await res.json() as {
+        translation?: unknown;
+        sourceLanguage?: unknown;
+        detectedLanguages?: { srclangs?: unknown; srclangsConfidences?: unknown };
+    };
+    if (typeof body.translation !== "string") {
         throw new MessageError("google: unexpected response shape");
     }
 
-    const detected = body[2] as string;
+    const detected = typeof body.sourceLanguage === "string" ? body.sourceLanguage : sourceLang;
 
-    // Index 6 carries the detection confidence — a number under `sl=auto`,
-    // and absent/null when we pinned the language (nothing was detected).
-    // Reading it costs nothing and is the only signal that separates a
-    // trustworthy translation from a guess; the endpoint has been telling us
-    // all along and we were discarding it.
-    const conf = typeof body[6] === "number" ? body[6] : undefined;
+    // Detection confidence, when the endpoint reports one. Same job as before:
+    // the only signal separating a trustworthy translation from a guess, so a
+    // low-confidence line can be marked for the reader.
+    const confidences = body.detectedLanguages?.srclangsConfidences;
+    const conf = Array.isArray(confidences) && typeof confidences[0] === "number" ? confidences[0] : undefined;
     if (detected === targetLang) return { id: msg.id, skip: true };
 
-    const text = (body[0] as unknown[])
-        .map(seg => (Array.isArray(seg) && typeof seg[0] === "string" ? seg[0] : ""))
-        .join("")
-        .trim();
-
+    const text = body.translation.trim();
     if (text.length === 0) throw new MessageError("google: empty translation");
 
     // The engine handed back exactly what we sent, so there is nothing to
