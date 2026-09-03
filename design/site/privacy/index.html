@@ -41,10 +41,16 @@ table.pv td b{color:var(--fg);font-weight:600}
 .plain h3{margin:0 0 6px;font-family:var(--font-serif);font-size:17px;font-weight:400}
 .plain p{margin:0;font-size:13.5px;color:var(--muted)}
 ul.off{list-style:none;padding:0;margin:26px 0 0;max-width:64ch}
-ul.off li{display:grid;grid-template-columns:20px 1fr;gap:12px;padding:11px 0;border-top:1px solid var(--line);font-size:14px}
+ul.off li{display:grid;grid-template-columns:20px minmax(0,1fr);gap:12px;padding:11px 0;border-top:1px solid var(--line);font-size:14px}
 ul.off li:first-child{border-top:0}
 ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);padding-top:3px}
-@media (max-width:640px){table.pv td:first-child{white-space:normal}}
+@media (max-width:600px){
+  table.pv,table.pv tbody,table.pv tr,table.pv td{display:block;width:auto}
+  table.pv thead{display:none}
+  table.pv tr{border-bottom:1px solid var(--line);padding:12px 0}
+  table.pv td{border:0;padding:2px 0;white-space:normal}
+  table.pv td:first-child{font-size:15px;margin-bottom:4px}
+}
 </style>
 </head>
 <body>

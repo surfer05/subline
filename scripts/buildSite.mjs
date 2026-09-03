@@ -37,7 +37,7 @@ function styleOf(html) {
     return match ? match[1].trim() : "";
 }
 
-/** Everything inside <body>, minus the wrapper the previews use for standalone framing. */
+/** Everything inside <body>. buildSite wraps each section in .wrap itself (the previews don't). */
 function bodyOf(html) {
     const match = /<body>([\s\S]*?)<\/body>/.exec(html);
     if (!match) throw new Error("no <body>");
@@ -136,7 +136,7 @@ ${mergeStyles(parts.map(p => p.style))}
 </head>
 <body>
 
-${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}">\n${p.body}\n</section>`).join("\n\n")}
+${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}">\n<div class="wrap">\n${p.body}\n</div>\n</section>`).join("\n\n")}
 
 <script>
 (function () {
