@@ -144,14 +144,20 @@ export async function translateWithGoogle(
 ): Promise<Result[]> {
     const base = req.patientRetries === true ? PATIENT_RETRY_DELAYS_MS : [RETRY_DELAY_MS];
     const retryDelays = options.retryDelayMs === undefined ? base : base.map(() => options.retryDelayMs!);
+    // Half the burst profile when Google is the only translator. A 20-message
+    // catch-up at concurrency 4 is a burst, and a throttling endpoint sheds
+    // bursts wholesale - observed: channel-switching re-ran catch-up and every
+    // message re-deferred, while single messages in live traffic got through.
+    // Slower catch-up is translations; fast catch-up was a repeated no-op.
+    const concurrency = req.patientRetries === true ? 2 : CONCURRENCY;
     const results: Result[] = [];
     // Kept so a request that was refused OUTRIGHT — every message, no
     // exceptions — can still be rethrown. That is the shape of a real block,
     // and runTier needs to see it to park the engine.
     let transportError: unknown;
 
-    for (let i = 0; i < req.messages.length; i += CONCURRENCY) {
-        const slice = req.messages.slice(i, i + CONCURRENCY);
+    for (let i = 0; i < req.messages.length; i += concurrency) {
+        const slice = req.messages.slice(i, i + concurrency);
         const settled = await Promise.allSettled(
             slice.map(m => translateOne(m, req.targetLang, fetchImpl, retryDelays))
         );

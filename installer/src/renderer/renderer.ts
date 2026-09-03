@@ -452,6 +452,14 @@ const CLOSING_DISCORD_WOULD_HELP = ["DISCORD_RUNNING", "FILE_IN_USE"];
 function showUninstall(report: UninstallReport, mayRetry: boolean): void {
     detail.textContent = report.summary;
     stepName.textContent = report.clean ? "Removed" : "Not fully removed";
+    // A clean removal retires the footer Uninstall button. Leaving it live
+    // offered "Uninstall" on the very screen saying everything was removed -
+    // and pressing it re-ran the entire quit-Discord cycle against a Discord
+    // with nothing of ours in it. Observed, twice, by the product owner.
+    if (report.clean) {
+        const footerUninstall = document.getElementById("uninstall") as HTMLButtonElement | null;
+        if (footerUninstall !== null) footerUninstall.disabled = true;
+    }
     extra.replaceChildren();
     actionBar.replaceChildren();
 
