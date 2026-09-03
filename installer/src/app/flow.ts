@@ -843,7 +843,14 @@ export class InstallFlow {
                 + "everything with Google either way, and you can add a key later.",
             keySignupUrl: KEY_SIGNUP_URL,
             error,
-            actions: ["set-key", "skip-key", "cancel"]
+            // NO CANCEL ON THIS SCREEN. A real friend, on the first field
+            // install, pressed Cancel here twice meaning "no key for me" and
+            // aborted the whole install both times - the log shows the
+            // identical mistake ten minutes apart. On a screen whose subject
+            // is an optional extra, Cancel reads as "decline the extra", and
+            // the decline path this screen actually offers is "Use Google
+            // only". Someone who truly wants out can close the window.
+            actions: ["set-key", "skip-key"]
         }));
     }
 

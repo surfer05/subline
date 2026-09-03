@@ -812,7 +812,10 @@ describe("the optional key step", () => {
         const h = harness();
         const state = await toKeyStep(h);
         expect(state.step).toBe("choose-key");
-        expect(state.actions).toEqual(["set-key", "skip-key", "cancel"]);
+        // Cancel is deliberately absent: a real friend pressed it here twice
+        // meaning "no key", aborting the install both times (field log,
+        // 2026-09-03). The decline path is "Use Google only".
+        expect(state.actions).toEqual(["set-key", "skip-key"]);
         // Nothing has been written to Discord yet.
         expect(h.patchCalls).toHaveLength(0);
     });
