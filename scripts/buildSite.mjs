@@ -56,7 +56,7 @@ function mergeStyles(styles) {
     const seen = new Set();
     const out = [];
     for (const sheet of styles) {
-        for (const rule of sheet.split(/(?<=\})/)) {
+        for (const rule of topLevelRules(sheet)) {
             const trimmed = rule.trim();
             if (trimmed === "") continue;
             const key = trimmed.replace(/\s+/g, " ");
@@ -66,6 +66,43 @@ function mergeStyles(styles) {
         }
     }
     return out.join("\n");
+}
+
+/**
+ * Split a stylesheet into TOP-LEVEL rules, respecting brace depth.
+ *
+ * The obvious `split(/(?<=\})/)` (split after every `}`) is wrong for any
+ * nested at-rule: it cuts `@media (...) { .x {} }` in half at the inner
+ * brace, and the dedup below then drops or reorders the orphaned outer `}`,
+ * leaving the sheet permanently unbalanced. That is the source of every
+ * "unstyled screen" and "boxes with no padding" this project has hit - the
+ * installer's design.css carried two lost braces this way, hand-patched in
+ * the output; this fixes it in the generator so both outputs are correct.
+ *
+ * A top-level rule is everything from one depth-0 position to the next: emit a
+ * chunk each time the brace depth returns to zero.
+ */
+function topLevelRules(sheet) {
+    const rules = [];
+    let depth = 0;
+    let start = 0;
+    for (let i = 0; i < sheet.length; i++) {
+        const ch = sheet[i];
+        if (ch === "{") depth++;
+        else if (ch === "}") {
+            depth--;
+            if (depth === 0) {
+                rules.push(sheet.slice(start, i + 1));
+                start = i + 1;
+            }
+        }
+    }
+    // Trailing content with no closing brace (a comment, or a syntax error we
+    // would rather surface than swallow) rides along as its own chunk.
+    if (start < sheet.length && sheet.slice(start).trim() !== "") {
+        rules.push(sheet.slice(start));
+    }
+    return rules;
 }
 
 const tokens = readFileSync(join(DESIGN, "tokens.css"), "utf8").trim();
