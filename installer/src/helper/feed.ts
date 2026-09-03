@@ -49,7 +49,7 @@ export const RELEASE_FEED_URL =
  * `false` until the first release exists. See the header — this is the switch,
  * and it is the only one.
  */
-export const RELEASE_FEED_ENABLED = false;
+export const RELEASE_FEED_ENABLED = true;
 
 /**
  * The URL the helper polls, or `null` for "do not check at all".

@@ -373,11 +373,16 @@ describe("release URLs", () => {
         expect(releaseTagFor("v0.1.0")).toBe("v0.1.0");
     });
 
-    it("keeps the feed off until there is something to fetch", () => {
-        expect(RELEASE_FEED_ENABLED).toBe(false);
-        expect(releaseManifestUrl()).toBeNull();
-        // And the switch really is the switch.
-        expect(releaseManifestUrl({ enabled: true })).toBe(RELEASE_FEED_URL);
+    it("has the feed on, now that the first release exists", () => {
+        // Flipped from false in the v0.1.0 release commit - the same commit that
+        // published the first GitHub release, so the URL it points at resolves
+        // rather than 404s (see feed.ts). Before that commit this asserted the
+        // flag was OFF; a 404 on every hourly check would have raised a false
+        // "cannot check for updates" for a feature that had not shipped.
+        expect(RELEASE_FEED_ENABLED).toBe(true);
+        expect(releaseManifestUrl()).toBe(RELEASE_FEED_URL);
+        // The switch is still only a switch: forced off, the URL is null.
+        expect(releaseManifestUrl({ enabled: false })).toBeNull();
     });
 
     it("offers no way to point the feed somewhere else", () => {
