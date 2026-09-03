@@ -37,3 +37,32 @@
   ; is the same failure under a different name.
   Sleep 1500
 !macroend
+
+; ---------------------------------------------------------------------------
+; customInstall: guarantee the Start Menu shortcut exists.
+;
+; WHY (root-caused 2026-09-03 from the electron-builder 25.1.8 template
+; source): the assisted installer creates shortcuts ONLY when $keepShortcuts
+; is "false" (include/installer.nsh:169-194; the "true" branch merely RENAMES
+; an existing .lnk). $keepShortcuts is "true" whenever the install registry
+; key (HKCU\Software\<APP_GUID> - NOT the Uninstall key) still says
+; KeepShortcuts="true" and $INSTDIR still holds the app exe. And with
+; allowToChangeInstallationDirectory:false, the only template guard that
+; forces recreation is compiled out (installUtil.nsh:88-92).
+;
+; So: delete the .lnk out-of-band while that registry value persists, and
+; EVERY future install completes successfully while silently creating no
+; shortcut - the app becomes invisible to the Start Menu and to Windows
+; Search, permanently. Observed on a real machine after a manual cleanup
+; deleted the .lnk and the Uninstall key but not the install key.
+;
+; customInstall runs after the template's addStartMenuLink
+; (installSection.nsh:81-83), with $newStartMenuLink and $appExe in scope.
+; If the template made the shortcut, this is a no-op; if anything ate it, it
+; comes back. SetLnkAUMI matches what the template sets on its own shortcuts.
+!macro customInstall
+  ${ifNot} ${FileExists} "$newStartMenuLink"
+    CreateShortCut "$newStartMenuLink" "$appExe"
+    WinShell::SetLnkAUMI "$newStartMenuLink" "${APP_ID}"
+  ${endIf}
+!macroend

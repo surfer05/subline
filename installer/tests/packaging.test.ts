@@ -847,25 +847,46 @@ describe("the NSIS CRC repair hook", () => {
         const zlib = await import("node:zlib");
         const dir = mkdtempSync(join(tmpdir(), "subline-crc-"));
         try {
-            // A minimal NSIS-shaped file: 600 bytes, signature present, CRC
-            // stored in the last 4 bytes over [512, len-4).
-            const bytes = Buffer.alloc(600, 7);
-            Buffer.from("EFBEADDE4E756C6C736F6674496E7374", "hex").copy(bytes, 520);
-            const right = zlib.crc32(bytes.subarray(512, 596)) >>> 0;
-            bytes.writeUInt32LE((right ^ 0xdeadbeef) >>> 0, 596); // wrong on purpose
+            // A minimal NSIS-shaped file matching everything the hardened hook
+            // validates: a PE header with an empty security directory, the NSIS
+            // signature at a 512-aligned firstheader, loafd covering the
+            // overlay, CRC at fhOffset+loafd-4.
+            const bytes = Buffer.alloc(1024, 7);
+            bytes.write("MZ", 0, "ascii");
+            bytes.writeUInt32LE(0x80, 0x3c);              // e_lfanew
+            bytes.write("PE\0\0", 0x80, "ascii");
+            bytes.writeUInt16LE(0x10b, 0x80 + 24);        // PE32 optional header
+            bytes.writeUInt32LE(0, 0x80 + 24 + 128);      // security dir RVA
+            bytes.writeUInt32LE(0, 0x80 + 24 + 132);      // security dir size
+            Buffer.from("EFBEADDE4E756C6C736F6674496E7374", "hex").copy(bytes, 516); // fhOffset = 512
+            bytes.writeUInt32LE(100, 512 + 20);           // length_of_header (arbitrary)
+            bytes.writeUInt32LE(512, 512 + 24);           // loafd at fh+24: overlay is 512 bytes -> CRC at 1020, ends at EOF
+            const right = zlib.crc32(bytes.subarray(512, 1020)) >>> 0;
+            bytes.writeUInt32LE((right ^ 0xdeadbeef) >>> 0, 1020); // wrong on purpose
 
             const path = join(dir, "broken.exe");
             writeFileSync(path, bytes);
             await fix({ path });
-            expect(readFileSync(path).readUInt32LE(596)).toBe(right);
+            expect(readFileSync(path).readUInt32LE(1020)).toBe(right);
 
             // Already-correct file: byte-identical after the hook.
             const okPath = join(dir, "ok.exe");
-            bytes.writeUInt32LE(right, 596);
+            bytes.writeUInt32LE(right, 1020);
             writeFileSync(okPath, bytes);
             const before = readFileSync(okPath);
             await fix({ path: okPath });
             expect(readFileSync(okPath).equals(before)).toBe(true);
+
+            // Signed exe (nonzero security directory): untouched even with a
+            // wrong CRC - never risk clobbering a signature.
+            const signedPath = join(dir, "signed.exe");
+            bytes.writeUInt32LE(0x9000, 0x80 + 24 + 128);
+            bytes.writeUInt32LE(0x100, 0x80 + 24 + 132);
+            bytes.writeUInt32LE((right ^ 0x1234) >>> 0, 1020);
+            writeFileSync(signedPath, bytes);
+            const beforeSigned = readFileSync(signedPath);
+            await fix({ path: signedPath });
+            expect(readFileSync(signedPath).equals(beforeSigned)).toBe(true);
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
@@ -896,5 +917,23 @@ describe("the stylesheet parses to the end", () => {
             if (ch === "}") depth--;
         }
         expect(depth).toBe(0);
+    });
+});
+
+describe("the shortcut-ensure macro", () => {
+    // Root-caused 2026-09-03: with allowToChangeInstallationDirectory:false,
+    // electron-builder's assisted installer NEVER recreates a Start Menu
+    // shortcut once HKCU\Software\<APP_GUID> says KeepShortcuts=true - the
+    // keep-path only renames an existing .lnk. Delete the .lnk out-of-band
+    // and every future install silently produces an app invisible to the
+    // Start Menu and Windows Search. customInstall runs after the template's
+    // addStartMenuLink with $newStartMenuLink in scope and recreates it when
+    // missing. This pins the macro's presence and its load-bearing parts.
+    it("is present in installer.nsh and recreates a missing link", () => {
+        const nsh = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "packaging", "installer.nsh"), "utf8");
+        expect(nsh).toContain("!macro customInstall");
+        expect(nsh).toContain('${ifNot} ${FileExists} "$newStartMenuLink"');
+        expect(nsh).toContain('CreateShortCut "$newStartMenuLink" "$appExe"');
+        expect(nsh).toContain("WinShell::SetLnkAUMI");
     });
 });

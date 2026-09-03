@@ -136,6 +136,7 @@ function renderExtra(state: FlowState): void {
         for (const install of state.installs) {
             const item = document.createElement("li");
             const button = document.createElement("button");
+            button.className = "row-pick";
             button.textContent = install.rootPath;
             button.onclick = () => void act({ type: "choose-install", rootPath: install.rootPath });
             item.append(button);
@@ -349,13 +350,25 @@ function verdictBlock(spec: {
 
 function renderActions(state: FlowState): void {
     actionBar.replaceChildren();
+    // One primary per screen, enforced HERE rather than hoped for: the visual
+    // sweep caught permission-blocked offering two teal buttons because two
+    // actions are each primary somewhere. The first primary in the array wins;
+    // any later one renders secondary. Order in the actions array is already
+    // meaningful (it is the on-screen order), so this adds no new convention.
+    let primarySeen = false;
     for (const action of state.actions) {
         // `choose-install` is rendered as the list above, not as a footer button.
         if (action === "choose-install") continue;
         const button = document.createElement("button");
         button.textContent = ACTION_LABELS[action];
-        button.className = IS_PRIMARY[action] ? "btn btn-primary" : "btn btn-secondary";
-        button.disabled = state.busy;
+        const primary = IS_PRIMARY[action] && !primarySeen;
+        if (primary) primarySeen = true;
+        button.className = primary ? "btn btn-primary" : "btn btn-secondary";
+        // busy no longer disables offered actions. The sweep caught
+        // permission-waiting inviting the user to open System Settings with
+        // the button rendered inert, and Cancel dead for a two-minute poll.
+        // A state that should offer nothing offers an empty actions array;
+        // one that offers an action means it.
         button.onclick = () => void onAction(action);
         actionBar.append(button);
     }
@@ -481,9 +494,11 @@ function runUninstall(
         : "Closing Discord first. Its window disappears, then a few quiet seconds while Discord's original files are put back…";
     extra.replaceChildren();
     errorBox.replaceChildren();
+    // Inline before the sentence, matching every flow busy screen - the sweep
+    // caught the bare spinner sitting alone in #extra like a stray dot.
     const wait = document.createElement("span");
     wait.className = "spin";
-    extra.append(wait);
+    detail.prepend(wait, document.createTextNode(" "));
     return api
         .uninstall(closeDiscord === null ? { keepSettings } : { keepSettings, closeDiscord })
         .then(report => showUninstall(report, mayRetry));
