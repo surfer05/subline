@@ -137,6 +137,24 @@ const inFlightQuality = new Set<string>();
 const forcedInFlight = new Set<string>();
 const forcedInFlightListeners = new Set<() => void>();
 
+/**
+ * Channels that currently hold deferred (⏳) messages from the fast tier.
+ *
+ * THE GAP THIS CLOSES, observed 2026-09-03: deferred messages were retried
+ * only by catch-up, which runs on channel open and scroll. A reader sitting
+ * IN the channel while Google throttled saw "waiting for the translator…"
+ * hold forever, because nothing ever retried — the wait was unbounded and
+ * the copy, while honest about the state, was a lie about the trajectory.
+ *
+ * The heal is event-driven, like the reactive quality flush: the first fast
+ * flush that SUCCEEDS in a marked channel proves Google is answering again
+ * and re-runs catch-up for that channel, which re-enqueues everything still
+ * deferred. Partial recoveries converge: each sweep translates some and
+ * re-defers the rest, and the next success sweeps again; a full failure
+ * writes no success, triggers no sweep, and the cooldown brakes the loop.
+ */
+const deferredChannels = new Set<string>();
+
 function notifyForcedInFlight(): void {
     for (const fn of forcedInFlightListeners) fn();
 }
@@ -1039,6 +1057,7 @@ function deferBatch(isQuality: boolean, req: BatchRequest): void {
 
 async function runTier(
     engine: EngineId, req: BatchRequest, myGeneration: number,
+    channelId?: string,
     // Manual-⚡-only: set by forceQualityTranslate so it can learn WHY this
     // flush produced nothing, in terms the reader can act on (see
     // ForcedHint's own doc). Both onFlush closures in rebuildBatcher leave
@@ -1273,6 +1292,7 @@ async function runTier(
                 for (const m of req.messages) {
                     writeResult(makeKey(m.id, req.targetLang), { deferred: true });
                 }
+                if (channelId !== undefined) deferredChannels.add(channelId);
                 // THE 19-SECOND RACE. These messages were enqueued to BOTH
                 // tiers in one tick, so the quality timer was armed BEFORE this
                 // failure existed — it asked "is Google cooling down?" and was
@@ -1335,7 +1355,11 @@ async function runTier(
                 // an IP throttle (observed 2026-09-03) was transport wearing
                 // the verdict's clothes. Deferred is retried by catch-up and
                 // reads as waiting, which is what it is.
-                if (!isQuality) writeResult(key, "transport" in r && r.transport ? { deferred: true } : { failed: true });
+                if (!isQuality) {
+                    const transport = "transport" in r && r.transport === true;
+                    writeResult(key, transport ? { deferred: true } : { failed: true });
+                    if (transport && channelId !== undefined) deferredChannels.add(channelId);
+                }
                 continue;
             }
             if (r.skip) {
@@ -1367,6 +1391,17 @@ async function runTier(
             // exactly what a later identical message will present.
             const sent = req.messages.find(m => m.id === r.id);
             if (sent !== undefined) rememberPhrase(sent.text, req.targetLang, value);
+        }
+
+        // THE RECOVERY SWEEP (see deferredChannels). Fast tier only, and only
+        // on evidence: at least one message in this flush got a real answer,
+        // so Google is talking to us again and the channel's ⏳ backlog is
+        // worth re-asking about. catchUp re-enqueues whatever is still
+        // deferred; a channel that is not focused is catch-up's own concern.
+        if (!isQuality && channelId !== undefined && deferredChannels.has(channelId)
+            && res.results.some(r => !("failed" in r))) {
+            deferredChannels.delete(channelId);
+            catchUp(channelId);
         }
     } finally {
         // Fires once this flush has fully settled, whichever way it went
@@ -1466,7 +1501,7 @@ async function forceQualityTranslate(message: Message): Promise<void> {
     // failure gets. Success needs no report of its own: the store write is
     // what the accessory's ✦/≈ line already reacts to.
     try {
-        await runTier(engine, req, batcherGeneration, outcome => setForcedHint(message.id, outcome));
+        await runTier(engine, req, batcherGeneration, undefined, outcome => setForcedHint(message.id, outcome));
     } finally {
         forcedInFlight.delete(message.id);
         notifyForcedInFlight();
@@ -1497,7 +1532,7 @@ function rebuildBatcher() {
         // drift apart. (Google is per-message; context is wasted on it.)
         supportsContext: ENGINE_CAPS.google.supportsContext,
         targetLang: settings.store.targetLang,
-        onFlush: req => runTier("google", req, myGeneration)
+        onFlush: (req, channelId) => runTier("google", req, myGeneration, channelId)
     });
 
     // Only when an LLM is actually configured AND usable. With engine=google
@@ -1531,7 +1566,7 @@ function rebuildBatcher() {
             // types.ts rather than a second place to remember.
             supportsContext: ENGINE_CAPS[quality].supportsContext,
             targetLang: settings.store.targetLang,
-            onFlush: req => runTier(quality, req, myGeneration)
+            onFlush: (req, channelId) => runTier(quality, req, myGeneration, channelId)
         })
         : null;
 
@@ -2809,6 +2844,7 @@ export default definePlugin({
         // convention, and a convention applied nineteen times out of twenty-one
         // looks exactly like one applied twenty-one times.
         forcedInFlightListeners.clear();
+        deferredChannels.clear();
         // clearStore() has existed and worked the whole time, and the plugin
         // never called it — only the test harness did, which is why the tests
         // were better isolated than the shipped code. It drops the in-memory

@@ -117,6 +117,15 @@ export interface VerifyOptions {
      */
     expectedBuildId: string;
     /**
+     * Whether a quality-tier key was configured during install. Decides what
+     * the ≈-only summary may complain about: "the ✦ upgrade is not arriving,
+     * check the engine settings" is diagnosis for a configured engine, and it
+     * was shown to a keyless install where nothing was wrong and nothing was
+     * configured. Wrong advice erodes exactly the trust a verifier exists to
+     * earn.
+     */
+    expectUpgrade?: boolean;
+    /**
      * When the patch was written, epoch ms. A beacon older than this cannot
      * describe the install we just made, whatever else it says.
      */
@@ -328,10 +337,18 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
                 tier: "approx",
                 errorCode,
                 beacon,
-                summary: errorCode === null
-                    ? "Working: translations are appearing in Discord (≈ Google)."
-                    : "Working: translations are appearing in Discord (≈ Google). The ✦ quality "
-                      + "upgrade is not arriving. Check the engine settings in Discord."
+                // Base fact plus only the riders that are TRUE for this
+                // install. A rate limit is reported as the network condition
+                // it is (the reader was watching messages say "waiting" while
+                // this screen said only "Working"); the missing-✦ diagnosis is
+                // reserved for installs that configured an engine.
+                summary: "Working: translations are appearing in Discord (≈ Google)."
+                    + (errorCode === "rate-limited"
+                        ? " Google is rate-limiting this network right now, so some messages show as waiting; they retry on their own."
+                        : "")
+                    + (options.expectUpgrade === true
+                        ? " The ✦ quality upgrade is not arriving. Check the engine settings in Discord."
+                        : " Add a free key in Discord's Subline settings whenever you want the smarter ✦ upgrades.")
             });
     }
 

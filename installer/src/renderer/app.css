@@ -110,3 +110,8 @@ html, body {
 /* Footer safety: if a locale or label ever outgrows the window, wrap
    instead of pushing the last button off the edge. */
 .foot-r { flex-wrap: wrap; justify-content: flex-end; }
+
+/* Grid items stretch to the column by default, which parked the select's
+   chevron at the far right of the window while the select stayed 300px
+   wide. The wrapper hugs its content instead. */
+.fld > .sel { justify-self: start; }

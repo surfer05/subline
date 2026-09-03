@@ -830,6 +830,7 @@ export class InstallFlow {
     }
 
     private async applyKey(key: string): Promise<FlowState> {
+        this.keyConfigured = true;
         const saved = this.ports.setApiKey(key);
         if (!saved.ok) {
             // The key itself is never logged — see setApiKey. A refusal here is
@@ -1133,6 +1134,9 @@ export class InstallFlow {
         return this.verify();
     }
 
+    /** Set when the user pasted a key during install; decides verify's advice. */
+    private keyConfigured = false;
+
     private async verify(): Promise<FlowState> {
         this.set(state({
             step: "verifying",
@@ -1151,6 +1155,7 @@ export class InstallFlow {
             // written by somebody else's copy of the plugin cannot confirm this
             // install. Never a guess, in either direction.
             expectedBuildId: patch.pluginBuildId,
+            expectUpgrade: this.keyConfigured,
             patchedAt: this.patchedAt,
             launchedAt: this.launchedAt,
             sleep: ms => this.ports.sleep(ms),

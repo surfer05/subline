@@ -417,6 +417,55 @@ describe("markers — who writes them, and which ones catch-up picks back up", (
         expect(getTranslation(makeKey("2", "en"))).toMatchObject({ text: "how are you" });
     });
 
+    // "WAITING FOR THE TRANSLATOR… never ends, never" — 2026-09-03, verbatim.
+    // Deferred messages were retried only by catch-up, which runs on channel
+    // open and scroll; a reader sitting IN the channel during a throttle
+    // watched the marker hold forever. The heal is event-driven: the first
+    // fast flush that SUCCEEDS in a marked channel proves Google is answering
+    // again and re-runs catch-up there, re-enqueuing the ⏳ backlog.
+    it("heals the deferred backlog once Google answers again", async () => {
+        settings.store.engine = "google";
+
+        // Round 1: Google refuses outright. The message defers.
+        native.translateBatch.mockImplementation(async () =>
+            ({ ok: false, error: "google: HTTP 429" }));
+        stubMessages.set(CHANNEL, [discordMessage("1", "viel glück!")]);
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "viel glück!") });
+        await settle();
+        expect(getTranslation(makeKey("1", "en"))).toEqual({ deferred: true });
+
+        // Past the cooldown, Google recovers. A NEW message arrives and
+        // succeeds — that success must sweep message 1 back through.
+        await vi.advanceTimersByTimeAsync(120_000);
+        native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => ({
+            ok: true,
+            results: JSON.parse(payload).messages.map((m: any) =>
+                ({ id: m.id, lang: "de", text: m.id === "1" ? "good luck!" : "hello", skip: false }))
+        }));
+        stubMessages.set(CHANNEL, [discordMessage("1", "viel glück!"), discordMessage("2", "hallo")]);
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "hallo") });
+        await settle();
+        await settle();
+
+        expect(getTranslation(makeKey("2", "en"))).toMatchObject({ text: "hello" });
+        expect(getTranslation(makeKey("1", "en"))).toMatchObject({ text: "good luck!" });
+    });
+
+    it("does not sweep while Google is still refusing", async () => {
+        // A failure round must not trigger the sweep — that would be the
+        // retry treadmill the cooldown exists to stop.
+        settings.store.engine = "google";
+        native.translateBatch.mockImplementation(async () =>
+            ({ ok: false, error: "google: HTTP 429" }));
+        stubMessages.set(CHANNEL, [discordMessage("1", "viel glück!")]);
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "viel glück!") });
+        await settle();
+        const calls = native.translateBatch.mock.calls.length;
+        await settle();
+        expect(native.translateBatch.mock.calls.length).toBe(calls);
+        expect(getTranslation(makeKey("1", "en"))).toEqual({ deferred: true });
+    });
+
     // THE WALL OF WARNINGS, 2026-09-02. A channel of English small talk —
     // "good luck!", "break", "helloo hellooo" — wearing "⚠ translation failed"
     // permanently. Chain: throttled Google fails messages one by one; the
