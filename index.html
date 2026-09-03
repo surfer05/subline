@@ -149,16 +149,18 @@ a:hover{color:var(--fg)}
 .cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-top:30px}
 .chat{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
   padding:16px 20px;margin-top:44px;max-width:600px}
-.m{display:grid;grid-template-columns:36px 1fr;gap:14px;padding:8px 0}
+.m{display:grid;grid-template-columns:36px minmax(0,1fr);gap:14px;padding:8px 0}
+.m>div{min-width:0}
+.tx{overflow-wrap:anywhere}
 .av{width:36px;height:36px;border-radius:50%;background:var(--line)}
 .nm{font-size:14px;font-weight:600}
 .tm{font-size:11px;font-weight:400;color:var(--muted);margin-left:7px}
 .tx{font-size:15px;line-height:1.42;margin-top:1px}
-.sl{margin-top:3px;font-size:13.5px;line-height:1.35;color:var(--muted);display:flex;gap:7px;
+.sl{margin-top:3px;font-size:13.5px;line-height:1.35;color:var(--muted);display:flex;gap:7px;flex-wrap:wrap;min-width:0;
   align-items:baseline;padding-left:9px;border-left:2px solid var(--line-strong)}
 .gl{font-family:var(--font-mono);font-size:11px;color:var(--accent);flex:none}
 .lc{font-family:var(--font-mono);font-size:11px;letter-spacing:.03em;flex:none;opacity:.85}
-.cap{font-size:12.5px;color:var(--muted);margin:12px 0 0;display:flex;gap:8px;align-items:baseline}
+.cap{font-size:12.5px;color:var(--muted);margin:12px 0 0}
 @media (max-width:640px){.hero h1{font-size:34px}}
 .dl{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:26px}
 @media (max-width:700px){.dl{grid-template-columns:1fr}}
@@ -203,16 +205,23 @@ table.pv td b{color:var(--fg);font-weight:600}
 .plain h3{margin:0 0 6px;font-family:var(--font-serif);font-size:17px;font-weight:400}
 .plain p{margin:0;font-size:13.5px;color:var(--muted)}
 ul.off{list-style:none;padding:0;margin:26px 0 0;max-width:64ch}
-ul.off li{display:grid;grid-template-columns:20px 1fr;gap:12px;padding:11px 0;border-top:1px solid var(--line);font-size:14px}
+ul.off li{display:grid;grid-template-columns:20px minmax(0,1fr);gap:12px;padding:11px 0;border-top:1px solid var(--line);font-size:14px}
 ul.off li:first-child{border-top:0}
 ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);padding-top:3px}
-@media (max-width:640px){table.pv td:first-child{white-space:normal}}
+@media (max-width:600px){
+  table.pv,table.pv tbody,table.pv tr,table.pv td{display:block;width:auto}
+  table.pv thead{display:none}
+  table.pv tr{border-bottom:1px solid var(--line);padding:12px 0}
+  table.pv td{border:0;padding:2px 0;white-space:normal}
+  table.pv td:first-child{font-size:15px;margin-bottom:4px}
+}
 </style>
 </head>
 <body>
 
 <!-- hero -->
 <section id="hero">
+<div class="wrap">
 <div class="hero">
 <span class="wm-sm">subline</span>
 <h1>Read what your friends are actually saying.</h1>
@@ -227,15 +236,17 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
     <div class="tx">bora marcar? tô livre depois das 8</div>
     <div class="sl"><span class="gl">○</span><span class="lc">pt</span><span>shall we make a plan? I'm free after 8</span></div></div></div>
   <div class="m"><div class="av"></div><div><div class="nm">yasmine<span class="tm">20:15</span></div>
-    <div class="tx">لما نبدأ نكتب، بنعمل خليط من العربي والفرنسي</div>
+    <div class="tx" dir="rtl">لما نبدأ نكتب، بنعمل خليط من العربي والفرنسي</div>
     <div class="sl"><span class="gl">●</span><span class="lc">ar</span><span>when we start writing, we end up mixing Arabic and French</span></div></div></div>
 </div>
 <p class="cap"><span class="gl" style="font-family:var(--font-mono);color:var(--accent)">○</span> Instant, from Google. <span class="gl" style="font-family:var(--font-mono);color:var(--accent);margin-left:10px">●</span> Sharper, from an AI — add a free key when you want it.</p>
 <p class="fine" style="margin-top:26px">An independent project. Not affiliated with Discord.</p>
+</div>
 </section>
 
 <!-- downloads -->
 <section id="downloads">
+<div class="wrap">
 <p class="kicker">Download</p>
 <h2 class="sec">Grab your platform</h2>
 <p class="lead">Two Mac builds, one per chip. Not sure which? The card tells you.</p>
@@ -251,10 +262,12 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 </div>
 <details class="which"><summary><span>Which Mac do I have?</span><span class="mono">▸</span></summary>
 <div class="in"> menu → <b>About This Mac</b>. <span class="mono">Chip: Apple M…</span> means Apple Silicon; <span class="mono">Processor: Intel…</span> means Intel.</div></details>
+</div>
 </section>
 
 <!-- security-warning -->
 <section id="security-warning">
+<div class="wrap">
 <p class="kicker">Installing</p>
 <h2 class="sec">About that warning</h2>
 <p class="lead">The builds aren't code-signed yet — I haven't paid for a certificate. So your computer warns you once. It means "unverified," not "unsafe." Here's the click-through.</p>
@@ -275,10 +288,12 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
   <li><div><h3>Click Install.</h3>
     <p>It closes Discord, patches it, reopens it. You're done.</p></div></li>
 </ol>
+</div>
 </section>
 
 <!-- privacy -->
 <section id="privacy">
+<div class="wrap">
 <p class="kicker">Privacy</p>
 <h2 class="sec">Where your messages go</h2>
 <p class="lead">Translating means sending text somewhere. Here's exactly where — I'd rather you pass on Subline knowing this than install it not knowing.</p>
@@ -295,6 +310,7 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
   <li><span class="t">off</span><div><b>Your own language never leaves.</b> Subline checks on your machine first and skips it.</div></li>
   <li><span class="t">you</span><div><b>Kill it per channel.</b> Nothing leaves a channel you've switched off.</div></li>
 </ul>
+</div>
 </section>
 
 <script>
