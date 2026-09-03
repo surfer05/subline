@@ -84,6 +84,36 @@ describe("translateWithGoogle", () => {
         expect(results).toHaveLength(4);
     });
 
+    it("retries a sole-translator message up to three extra times", async () => {
+        // patientRetries: Google is the reader's ONLY translator, so seconds
+        // spent retrying buy translations instead of delaying a quality flush
+        // that does not exist. Measured odds of ~1-in-7 per request make a
+        // single retry leave most messages waiting.
+        let n = 0;
+        const fetchImpl = vi.fn().mockImplementation(async () => {
+            n++;
+            if (n <= 3) return { ok: false, status: 429, json: async () => ({}) };
+            return okResponse("hi", "es");
+        });
+
+        const results = await translateWithGoogle(
+            { ...req(["hola"]), patientRetries: true }, fetchImpl as any, { retryDelayMs: 0 }
+        );
+
+        expect(results).toEqual([{ id: "0", lang: "es", text: "hi", skip: false }]);
+        expect(fetchImpl).toHaveBeenCalledTimes(4);
+    });
+
+    it("stays at one quick retry when a quality engine is behind it", async () => {
+        // Without patientRetries every extra Google retry delays the reactive
+        // quality flush - the thing that actually rescues the reader there.
+        const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 429, json: async () => ({}) });
+
+        await expect(translateWithGoogle(req(["hola"]), fetchImpl as any, { retryDelayMs: 0 }))
+            .rejects.toThrow();
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+    });
+
     it("retries a throttled message once before giving up on it", async () => {
         // The measured behaviour: requests immediately after a refused one
         // succeed. One cheap retry converts the common case into no loss at

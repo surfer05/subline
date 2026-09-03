@@ -104,6 +104,15 @@ export interface PendingMessage {
 }
 
 export interface BatchRequest {
+    /**
+     * True when Google is the reader's ONLY translator (no LLM configured).
+     * google.ts then retries a throttled request up to three times with
+     * growing delays instead of once: with nothing arriving behind the fast
+     * tier, patience buys translations. With an LLM configured it stays ONE
+     * quick retry, because every second spent retrying Google is a second the
+     * reactive quality flush is not being fired.
+     */
+    patientRetries?: boolean;
     messages: {
         id: string;
         author: string;
@@ -225,6 +234,23 @@ export function isSameText(a: string, b: string): boolean {
  * the quota.
  */
 export const FAST_DEBOUNCE_MS = 0;
+
+/**
+ * How long Google is parked after refusing a WHOLE batch.
+ *
+ * NOT DEFAULT_COOLDOWN_MS (60s). That number is for API-quota 429s, where
+ * retrying into the wall costs budget and cannot succeed until the window
+ * turns. translate_a is not a quota: it sheds individual requests while the
+ * next one sails through (measured 2026-09-02: nine 200s around one 429, and
+ * again 2026-09-03 at roughly one success in seven). With single-message
+ * batches, every lost message was a "whole batch" failure, so ONE dropped
+ * request parked the engine for a full minute during which every new message
+ * deferred untried. On a throttled network that turned "waiting" into a
+ * many-minutes cycle - measured by the product owner, twice, in growing
+ * anger. Ten seconds keeps a brake on the treadmill (at most ~6 probes a
+ * minute) without turning one shed request into a minute of blindness.
+ */
+export const GOOGLE_COOLDOWN_MS = 10_000;
 export const FAST_MAX_BATCH = 10;
 
 /**

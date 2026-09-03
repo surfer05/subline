@@ -15,6 +15,7 @@
  * directly would be a far more attractive thing to compromise than a translator.
  */
 
+import { existsSync } from "node:fs";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron";
 import { execFile } from "node:child_process";
 import { userInfo } from "node:os";
@@ -111,6 +112,32 @@ const RELEASE_MANIFEST_URL: string | null = releaseManifestUrl();
 
 const isHelperRun = process.argv.includes(HELPER_FLAG);
 
+/**
+ * The Start Menu shortcut, self-healed on every app launch.
+ *
+ * Observed 2026-09-03: after a full install cycle, Windows search could not
+ * surface the Subline app at all - only the setup zip. Whether the shortcut
+ * was eaten by a cleanup, never indexed, or lost to search ranking against
+ * Sublime Text, the durable answer is the same: an app that depends on one
+ * .lnk written once at install time has a single point of failure, and this
+ * removes it. Runs on every non-helper launch, writes only when missing, and
+ * a failure to write is logged rather than fatal - a missing shortcut is an
+ * inconvenience, not a broken install.
+ */
+function ensureStartMenuShortcut(): void {
+    if (process.platform !== "win32" || isHelperRun) return;
+    try {
+        const lnk = join(
+            app.getPath("appData"), "Microsoft", "Windows", "Start Menu", "Programs", "Subline.lnk"
+        );
+        if (existsSync(lnk)) return;
+        const wrote = shell.writeShortcutLink(lnk, "create", { target: process.execPath });
+        log.info("startmenu.shortcut", { restored: wrote });
+    } catch (cause) {
+        log.warn("startmenu.shortcut-failed", { cause: String(cause) });
+    }
+}
+
 if (isHelperRun) {
     // No window, no dock icon, no IPC. Run once, write the log, exit.
     app.dock?.hide();
@@ -206,6 +233,7 @@ function createWindow(): void {
 }
 
 if (!isHelperRun) app.whenReady().then(() => {
+    ensureStartMenuShortcut();
     log.writeHeader({
         productVersion: app.getVersion(),
         os: process.platform,

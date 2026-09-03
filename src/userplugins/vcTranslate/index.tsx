@@ -26,7 +26,7 @@ import {
     setTranslation, subscribe, type StoredTranslation
 } from "./store";
 import {
-    ENGINE_CAPS, FAST_DEBOUNCE_MS, FAST_MAX_BATCH, MIN_DETECT_CONFIDENCE,
+    ENGINE_CAPS, FAST_DEBOUNCE_MS, GOOGLE_COOLDOWN_MS, FAST_MAX_BATCH, MIN_DETECT_CONFIDENCE,
     QUALITY_DEBOUNCE_MS, QUALITY_MAX_BATCH, SHORT_TEXT_MAX,
     type BatchRequest, type EngineId, type PendingMessage
 } from "./types";
@@ -1256,13 +1256,16 @@ async function runTier(
                         engine, res.retryAfterMs, res.quotaLimitPerMinute, res.quotaModel
                     );
                 } else if (!isLlmEngine(engine) && /\b429\b/.test(res.error)) {
+                    // GOOGLE_COOLDOWN_MS, not the 60s default - see types.ts.
+                    // One shed request parking the engine for a minute is how
+                    // "waiting for the translator" measured in minutes.
                     // Google, parked through the plain store rather than
                     // enterCooldown: that function retunes the rate gate and
                     // announces a quota, and Google is behind neither — it is
                     // per-message with its own concurrency cap, and its free
                     // endpoint states no quota to retune towards. All that is
                     // wanted here is "stop asking for a while".
-                    setCooldown(engine, Date.now() + (res.retryAfterMs ?? DEFAULT_COOLDOWN_MS));
+                    setCooldown(engine, Date.now() + (res.retryAfterMs ?? GOOGLE_COOLDOWN_MS));
                 }
                 // Retrying either of these every batch would be pure noise, so
                 // both fall back to Google for the rest of the session — but
@@ -1532,7 +1535,8 @@ function rebuildBatcher() {
         // drift apart. (Google is per-message; context is wasted on it.)
         supportsContext: ENGINE_CAPS.google.supportsContext,
         targetLang: settings.store.targetLang,
-        onFlush: (req, channelId) => runTier("google", req, myGeneration, channelId)
+        onFlush: (req, channelId) =>
+            runTier("google", { ...req, patientRetries: !isLlmEngine(quality) }, myGeneration, channelId)
     });
 
     // Only when an LLM is actually configured AND usable. With engine=google

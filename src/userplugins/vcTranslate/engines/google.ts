@@ -18,6 +18,16 @@ const CONCURRENCY = 4;
  */
 const RETRY_DELAY_MS = 400;
 
+/**
+ * The patient ladder, used only when Google is the reader's sole translator
+ * (req.patientRetries). At roughly one-in-seven per-request odds on a
+ * throttled network, one retry leaves ~73% of messages waiting; four attempts
+ * lift a message's odds per flush to ~45%, and the recovery sweep re-runs the
+ * rest whenever any success lands. With an LLM configured the quick single
+ * retry stays: those seconds belong to the reactive quality flush instead.
+ */
+const PATIENT_RETRY_DELAYS_MS = [400, 1500, 4000];
+
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 /**
@@ -63,8 +73,8 @@ async function translateOne(
     msg: { id: string; text: string; sourceLang?: string },
     targetLang: string,
     fetchImpl: typeof fetch,
-    retryDelayMs: number = RETRY_DELAY_MS,
-    isRetry: boolean = false
+    retryDelays: readonly number[],
+    attempt: number = 0
 ): Promise<Result> {
     // `auto` unless the caller resolved a language for us. Pinning is what
     // rescues short replies: "ne" under `sl=auto` comes back as Hausa "it is",
@@ -81,9 +91,9 @@ async function translateOne(
         // rather than callers (see RETRY_DELAY_MS). Only 429, and only once:
         // a 4xx that is not a throttle repeats identically, and retrying into
         // a genuine block is how a burst sustains itself.
-        if (res.status === 429 && !isRetry) {
-            await sleep(retryDelayMs);
-            return translateOne(msg, targetLang, fetchImpl, retryDelayMs, true);
+        if (res.status === 429 && attempt < retryDelays.length) {
+            await sleep(retryDelays[attempt]!);
+            return translateOne(msg, targetLang, fetchImpl, retryDelays, attempt + 1);
         }
         throw new HttpError(`google: HTTP ${res.status}`, res.status, retryAfterFromHeader(res));
     }
@@ -123,7 +133,7 @@ async function translateOne(
 }
 
 export interface GoogleOptions {
-    /** Only the tests set this, to keep the retry from costing real time. */
+    /** Only the tests set this, to keep the retries from costing real time. */
     retryDelayMs?: number;
 }
 
@@ -132,7 +142,8 @@ export async function translateWithGoogle(
     fetchImpl: typeof fetch = fetch,
     options: GoogleOptions = {}
 ): Promise<Result[]> {
-    const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS;
+    const base = req.patientRetries === true ? PATIENT_RETRY_DELAYS_MS : [RETRY_DELAY_MS];
+    const retryDelays = options.retryDelayMs === undefined ? base : base.map(() => options.retryDelayMs!);
     const results: Result[] = [];
     // Kept so a request that was refused OUTRIGHT — every message, no
     // exceptions — can still be rethrown. That is the shape of a real block,
@@ -142,7 +153,7 @@ export async function translateWithGoogle(
     for (let i = 0; i < req.messages.length; i += CONCURRENCY) {
         const slice = req.messages.slice(i, i + CONCURRENCY);
         const settled = await Promise.allSettled(
-            slice.map(m => translateOne(m, req.targetLang, fetchImpl, retryDelayMs))
+            slice.map(m => translateOne(m, req.targetLang, fetchImpl, retryDelays))
         );
         for (let j = 0; j < settled.length; j++) {
             const outcome = settled[j];

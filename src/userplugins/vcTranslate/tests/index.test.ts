@@ -417,7 +417,30 @@ describe("markers — who writes them, and which ones catch-up picks back up", (
         expect(getTranslation(makeKey("2", "en"))).toMatchObject({ text: "how are you" });
     });
 
-    // "WAITING FOR THE TRANSLATOR… never ends, never" — 2026-09-03, verbatim.
+    it("re-probes Google after seconds, not a minute, when it is the only translator", async () => {
+        // The 60s DEFAULT_COOLDOWN_MS is for API quotas. translate_a sheds
+        // individual requests - one lost message parking the engine for a
+        // minute is how "waiting for the translator" measured in MINUTES on a
+        // throttled network: try, fail, sixty blind seconds, repeat.
+        settings.store.engine = "google";
+        native.translateBatch.mockImplementation(async () =>
+            ({ ok: false, error: "google: HTTP 429" }));
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "viel glück!") });
+        await settle();
+        const afterFirst = native.translateBatch.mock.calls.length;
+        expect(afterFirst).toBeGreaterThan(0);
+
+        // Fifteen seconds later - past GOOGLE_COOLDOWN_MS (10s), far inside
+        // the old 60s - a new message must produce a real attempt.
+        await vi.advanceTimersByTimeAsync(15_000);
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "guten tag!") });
+        await settle();
+
+        expect(native.translateBatch.mock.calls.length).toBeGreaterThan(afterFirst);
+    });
+
+        // "WAITING FOR THE TRANSLATOR… never ends, never" — 2026-09-03, verbatim.
     // Deferred messages were retried only by catch-up, which runs on channel
     // open and scroll; a reader sitting IN the channel during a throttle
     // watched the marker hold forever. The heal is event-driven: the first
