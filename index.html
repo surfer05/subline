@@ -144,9 +144,7 @@ a:hover{color:var(--fg)}
 .fine{font-size:12.5px;color:var(--muted)}
 .wm-sm{font-family:var(--font-serif);font-size:17px;font-weight:400;letter-spacing:-.01em;display:inline-block;
   padding-bottom:3px;border-bottom:1.5px solid var(--accent);line-height:1}
-@media (max-width:640px){.wrap{padding:44px 20px}
-h2.sec{font-size:25px}
-}
+@media (max-width:640px){.wrap{padding:44px 20px}h2.sec{font-size:25px}}
 .hero h1{font-family:var(--font-serif);font-size:50px;line-height:1.04;letter-spacing:-.02em;font-weight:400;margin:22px 0 0;max-width:17ch}
 .cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-top:30px}
 .chat{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
@@ -161,9 +159,9 @@ h2.sec{font-size:25px}
 .gl{font-family:var(--font-mono);font-size:11px;color:var(--accent);flex:none}
 .lc{font-family:var(--font-mono);font-size:11px;letter-spacing:.03em;flex:none;opacity:.85}
 .cap{font-size:12.5px;color:var(--muted);margin:12px 0 0;display:flex;gap:8px;align-items:baseline}
-@media (max-width:640px){.hero h1{font-size:34px}
+@media (max-width:640px){.hero h1{font-size:34px}}
 .dl{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:26px}
-@media (max-width:700px){.dl{grid-template-columns:1fr}
+@media (max-width:700px){.dl{grid-template-columns:1fr}}
 .card{padding:20px;display:flex;flex-direction:column;gap:4px}
 .card h3{margin:0;font-family:var(--font-serif);font-size:18px;font-weight:400}
 .card p{margin:0;font-size:13px;color:var(--muted)}
@@ -208,7 +206,7 @@ ul.off{list-style:none;padding:0;margin:26px 0 0;max-width:64ch}
 ul.off li{display:grid;grid-template-columns:20px 1fr;gap:12px;padding:11px 0;border-top:1px solid var(--line);font-size:14px}
 ul.off li:first-child{border-top:0}
 ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);padding-top:3px}
-@media (max-width:640px){table.pv td:first-child{white-space:normal}
+@media (max-width:640px){table.pv td:first-child{white-space:normal}}
 </style>
 </head>
 <body>
@@ -243,7 +241,7 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 <div class="wrap">
 <p class="kicker">Download</p>
 <h2 class="sec">Which one you need</h2>
-<p class="lead">We ask instead of guessing. No browser can tell an Apple Silicon Mac from an Intel one, and guessing wrong hands half of you a file that simply won't open.</p>
+<p class="lead">Pick your platform. The two Mac builds are for different chips; the cards below tell you which in five seconds.</p>
 <div class="dl">
   <div class="panel card"><h3>Mac · Apple Silicon</h3><p>M1, M2, M3, M4 — any Mac sold since late 2020.</p>
     <a data-dl="mac-arm" class="btn btn-primary" href="#">Download .dmg</a><span class="ver" data-state="pending" data-version>resolving latest version…</span></div>
@@ -256,7 +254,7 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 </div>
 <details class="which"><summary><span>Not sure which Mac you have?</span><span class="mono">▸</span></summary>
 <div class="in">Click the apple in the top-left corner of your screen, then <b>About This Mac</b>. If the line says <span class="mono">Chip: Apple M…</span>, take Apple Silicon. If it says <span class="mono">Processor: Intel…</span>, take Intel.</div></details>
-<p class="fine" style="margin-top:22px">Every download link points at the GitHub release page and works immediately — the version number fills itself in a moment later, and never blocks the button.</p></div>
+</div>
 </section>
 
 <!-- security-warning -->
@@ -264,7 +262,7 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 <div class="wrap">
 <p class="kicker">Installing</p>
 <h2 class="sec">Your computer will warn you. Here is exactly what it says, and why.</h2>
-<p class="lead">Subline is not code-signed. Signing means paying Apple or Microsoft a few hundred dollars a year for a certificate, and this project doesn't take money yet. The warnings below are what an unsigned app looks like. They are not a judgement about this app in particular — your computer has not examined it and is telling you so.</p>
+<p class="lead">Subline isn’t code-signed yet, so your computer shows a warning the first time. It means "we haven’t paid for a certificate," not "we found a problem." Here’s how to get past it.</p>
 <div class="tabs" role="tablist"><button class="tab" role="tab" aria-selected="true">macOS</button><button class="tab" role="tab" aria-selected="false">Windows</button></div>
 <ol class="steps">
   <li><div><h3>Open the downloaded file, then drag Subline to Applications.</h3>
