@@ -44,21 +44,21 @@ details.which summary::-webkit-details-marker{display:none}
 details.which .in{padding:0 16px 16px;font-size:13.5px;color:var(--muted);max-width:64ch}
 </style>
 </head>
-<body><div class="wrap">
+<body>
 <p class="kicker">Download</p>
-<h2 class="sec">Which one you need</h2>
-<p class="lead">Pick your platform. The two Mac builds are for different chips; the cards below tell you which in five seconds.</p>
+<h2 class="sec">Grab your platform</h2>
+<p class="lead">Two Mac builds, one per chip. Not sure which? The card tells you.</p>
 <div class="dl">
-  <div class="panel card"><h3>Mac · Apple Silicon</h3><p>M1, M2, M3, M4 — any Mac sold since late 2020.</p>
-    <a data-dl="mac-arm" class="btn btn-primary" href="#">Download .dmg</a><span class="ver" data-state="pending" data-version>resolving latest version…</span></div>
-  <div class="panel card"><h3>Mac · Intel</h3><p>Macs sold before late 2020.</p>
-    <a data-dl="mac-intel" class="btn btn-secondary" href="#">Download .dmg</a><span class="ver" data-state="pending" data-version>resolving latest version…</span></div>
+  <div class="panel card"><h3>Mac · Apple Silicon</h3><p>M1 to M4 — any Mac since late 2020.</p>
+    <a data-dl="mac-arm" class="btn btn-primary" href="#">Download .dmg</a><span class="ver" data-state="pending" data-version>latest…</span></div>
+  <div class="panel card"><h3>Mac · Intel</h3><p>Macs before late 2020.</p>
+    <a data-dl="mac-intel" class="btn btn-secondary" href="#">Download .dmg</a><span class="ver" data-state="pending" data-version>latest…</span></div>
   <div class="panel card"><h3>Windows</h3><p>Windows 10 and 11, 64-bit.</p>
-    <a data-dl="win" class="btn btn-secondary" href="#">Download .exe</a><span class="ver" data-state="pending" data-version>resolving latest version…</span></div>
-  <div class="panel card"><h3>Source</h3><p>Build it yourself, or read it before you run it.</p>
-    <a class="btn btn-secondary" href="https://github.com/surfer05/subline" rel="noopener">View on GitHub</a><span class="ver">GPL-3.0</span></div>
+    <a data-dl="win" class="btn btn-secondary" href="#">Download .exe</a><span class="ver" data-state="pending" data-version>latest…</span></div>
+  <div class="panel card"><h3>Source</h3><p>Read it, or build it yourself.</p>
+    <a class="btn btn-secondary" href="https://github.com/surfer05/subline" rel="noopener">GitHub</a><span class="ver">GPL-3.0</span></div>
 </div>
-<details class="which"><summary><span>Not sure which Mac you have?</span><span class="mono">▸</span></summary>
-<div class="in">Click the apple in the top-left corner of your screen, then <b>About This Mac</b>. If the line says <span class="mono">Chip: Apple M…</span>, take Apple Silicon. If it says <span class="mono">Processor: Intel…</span>, take Intel.</div></details>
-</div></body>
+<details class="which"><summary><span>Which Mac do I have?</span><span class="mono">▸</span></summary>
+<div class="in"> menu → <b>About This Mac</b>. <span class="mono">Chip: Apple M…</span> means Apple Silicon; <span class="mono">Processor: Intel…</span> means Intel.</div></details>
+</body>
 </html>

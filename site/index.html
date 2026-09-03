@@ -213,15 +213,14 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 
 <!-- hero -->
 <section id="hero">
-<div class="wrap">
 <div class="hero">
 <span class="wm-sm">subline</span>
 <h1>Read what your friends are actually saying.</h1>
-<p class="lead">Subline puts a translation underneath any Discord message written in a language you don't read. It runs inside the Discord you already have — same app, same account, same servers. Nothing to learn, nothing to switch to.</p>
+<p class="lead">It drops a translation under any Discord message in a language you don't read. Same Discord, same account — nothing new to open, nothing to sign up for.</p>
 <div class="cta">
   <a class="btn btn-primary" href="#downloads">Download for Mac</a>
   <a class="btn btn-secondary" href="#downloads">Windows</a>
-  <span class="fine">Free · open source · GPL-3.0</span>
+  <span class="fine">Free · open source</span>
 </div>
 <div class="chat" aria-label="Example of a translated conversation">
   <div class="m"><div class="av"></div><div><div class="nm">rafa<span class="tm">20:14</span></div>
@@ -231,78 +230,71 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
     <div class="tx">لما نبدأ نكتب، بنعمل خليط من العربي والفرنسي</div>
     <div class="sl"><span class="gl">●</span><span class="lc">ar</span><span>when we start writing, we end up mixing Arabic and French</span></div></div></div>
 </div>
-<p class="cap"><span class="gl" style="font-family:var(--font-mono);color:var(--accent)">○</span> Quick, within a second. <span class="gl" style="font-family:var(--font-mono);color:var(--accent);margin-left:10px">●</span> Careful, a few seconds later, if you add a free key.</p>
-<p class="fine" style="margin-top:26px">Subline is an independent project. It is not made by, endorsed by, or affiliated with Discord.</p>
-</div></div>
+<p class="cap"><span class="gl" style="font-family:var(--font-mono);color:var(--accent)">○</span> Instant, from Google. <span class="gl" style="font-family:var(--font-mono);color:var(--accent);margin-left:10px">●</span> Sharper, from an AI — add a free key when you want it.</p>
+<p class="fine" style="margin-top:26px">An independent project. Not affiliated with Discord.</p>
 </section>
 
 <!-- downloads -->
 <section id="downloads">
-<div class="wrap">
 <p class="kicker">Download</p>
-<h2 class="sec">Which one you need</h2>
-<p class="lead">Pick your platform. The two Mac builds are for different chips; the cards below tell you which in five seconds.</p>
+<h2 class="sec">Grab your platform</h2>
+<p class="lead">Two Mac builds, one per chip. Not sure which? The card tells you.</p>
 <div class="dl">
-  <div class="panel card"><h3>Mac · Apple Silicon</h3><p>M1, M2, M3, M4 — any Mac sold since late 2020.</p>
-    <a data-dl="mac-arm" class="btn btn-primary" href="#">Download .dmg</a><span class="ver" data-state="pending" data-version>resolving latest version…</span></div>
-  <div class="panel card"><h3>Mac · Intel</h3><p>Macs sold before late 2020.</p>
-    <a data-dl="mac-intel" class="btn btn-secondary" href="#">Download .dmg</a><span class="ver" data-state="pending" data-version>resolving latest version…</span></div>
+  <div class="panel card"><h3>Mac · Apple Silicon</h3><p>M1 to M4 — any Mac since late 2020.</p>
+    <a data-dl="mac-arm" class="btn btn-primary" href="#">Download .dmg</a><span class="ver" data-state="pending" data-version>latest…</span></div>
+  <div class="panel card"><h3>Mac · Intel</h3><p>Macs before late 2020.</p>
+    <a data-dl="mac-intel" class="btn btn-secondary" href="#">Download .dmg</a><span class="ver" data-state="pending" data-version>latest…</span></div>
   <div class="panel card"><h3>Windows</h3><p>Windows 10 and 11, 64-bit.</p>
-    <a data-dl="win" class="btn btn-secondary" href="#">Download .exe</a><span class="ver" data-state="pending" data-version>resolving latest version…</span></div>
-  <div class="panel card"><h3>Source</h3><p>Build it yourself, or read it before you run it.</p>
-    <a class="btn btn-secondary" href="https://github.com/surfer05/subline" rel="noopener">View on GitHub</a><span class="ver">GPL-3.0</span></div>
+    <a data-dl="win" class="btn btn-secondary" href="#">Download .exe</a><span class="ver" data-state="pending" data-version>latest…</span></div>
+  <div class="panel card"><h3>Source</h3><p>Read it, or build it yourself.</p>
+    <a class="btn btn-secondary" href="https://github.com/surfer05/subline" rel="noopener">GitHub</a><span class="ver">GPL-3.0</span></div>
 </div>
-<details class="which"><summary><span>Not sure which Mac you have?</span><span class="mono">▸</span></summary>
-<div class="in">Click the apple in the top-left corner of your screen, then <b>About This Mac</b>. If the line says <span class="mono">Chip: Apple M…</span>, take Apple Silicon. If it says <span class="mono">Processor: Intel…</span>, take Intel.</div></details>
-</div>
+<details class="which"><summary><span>Which Mac do I have?</span><span class="mono">▸</span></summary>
+<div class="in"> menu → <b>About This Mac</b>. <span class="mono">Chip: Apple M…</span> means Apple Silicon; <span class="mono">Processor: Intel…</span> means Intel.</div></details>
 </section>
 
 <!-- security-warning -->
 <section id="security-warning">
-<div class="wrap">
 <p class="kicker">Installing</p>
-<h2 class="sec">Your computer will warn you. Here is exactly what it says, and why.</h2>
-<p class="lead">Subline isn’t code-signed yet, so your computer shows a warning the first time. It means "we haven’t paid for a certificate," not "we found a problem." Here’s how to get past it.</p>
-<div class="tabs" role="tablist"><button class="tab" role="tab" aria-selected="true">macOS</button><button class="tab" role="tab" aria-selected="false">Windows</button></div>
-<ol class="steps">
-  <li><div><h3>Open the downloaded file, then drag Subline to Applications.</h3>
-    <p>Ordinary so far.</p></div></li>
-  <li><div><h3>Double-click Subline. macOS refuses and shows this.</h3>
-    <blockquote class="os"><span class="src">macOS says</span>"Subline" Not Opened — Apple could not verify "Subline" is free of malware that may harm your Mac or compromise your privacy.</blockquote>
-    <p>Read it precisely: <em>could not verify</em>, not <em>found malware</em>. macOS is saying it has no certificate to check against, because none was bought.</p></div></li>
-  <li><div><h3>Open System Settings › Privacy &amp; Security and scroll down.</h3>
-    <blockquote class="os"><span class="src">macOS says</span>"Subline" was blocked to protect your Mac. &nbsp;<b>Open Anyway</b></blockquote>
-    <p>Click <b>Open Anyway</b>, then confirm with your password or Touch ID. You only do this once, for this app.</p></div></li>
-  <li><div><h3>Subline asks for App Management permission.</h3>
-    <p>This is the real ask, and it is the one worth thinking about. It is the right to modify another installed app — Subline needs it to add its translation file inside Discord. You can withdraw it at any time in the same Settings pane, and Subline will simply stop updating itself.</p></div></li>
-  <li><div><h3>That's the last of it.</h3>
-    <p>Discord closes, reopens, and translations start appearing. Nothing further is ever asked.</p></div></li>
+<h2 class="sec">About that warning</h2>
+<p class="lead">The builds aren't code-signed yet — I haven't paid for a certificate. So your computer warns you once. It means "unverified," not "unsafe." Here's the click-through.</p>
+<div class="tabs" role="tablist"><button class="tab" role="tab" data-tab="macos" aria-selected="true">macOS</button><button class="tab" role="tab" data-tab="windows" aria-selected="false">Windows</button></div>
+<ol class="steps" data-panel="macos">
+  <li><div><h3>Drag Subline to Applications.</h3>
+    <p>From the .dmg you downloaded.</p></div></li>
+  <li><div><h3>Right-click Subline → Open.</h3>
+    <blockquote class="os"><span class="src">macOS says</span>Apple could not verify "Subline" is free of malware…</blockquote>
+    <p>Right-click, not double-click. That gives you an <b>Open</b> button the double-click doesn't.</p></div></li>
+  <li><div><h3>Still stuck? Settings → Privacy &amp; Security → Open Anyway.</h3>
+    <p>Confirm with your password. Once, for this app, done.</p></div></li>
 </ol>
-<div class="why"><h3>If you'd rather not take our word for it</h3>
-<p>The source is public and the whole change to Discord is one file. You can read it, build Subline yourself, and skip every warning above — a signed app you didn't read is not safer than an unsigned one you did.</p></div></div>
+<ol class="steps" data-panel="windows" hidden>
+  <li><div><h3>Run Subline-Setup.exe.</h3>
+    <blockquote class="os"><span class="src">Windows says</span>Windows protected your PC.</blockquote>
+    <p><b>More info</b> → <b>Run anyway</b>. That's the whole trick.</p></div></li>
+  <li><div><h3>Click Install.</h3>
+    <p>It closes Discord, patches it, reopens it. You're done.</p></div></li>
+</ol>
 </section>
 
 <!-- privacy -->
 <section id="privacy">
-<div class="wrap">
 <p class="kicker">Privacy</p>
 <h2 class="sec">Where your messages go</h2>
-<p class="lead">Translation cannot happen without sending the text somewhere. Here is every place it goes, in plain terms. We would rather you decide against Subline knowing this than install it without.</p>
+<p class="lead">Translating means sending text somewhere. Here's exactly where — I'd rather you pass on Subline knowing this than install it not knowing.</p>
 <table class="pv">
-<thead><tr><th>What</th><th>Goes where</th><th>Kept?</th></tr></thead>
+<thead><tr><th>What</th><th>Goes where</th><th>Stored?</th></tr></thead>
 <tbody>
-<tr><td>Message text</td><td>Google Translate for a <b>Quick</b> translation. Anthropic's API for a <b>Careful</b> one, if you've added a key.</td><td>Not by us. We store nothing and run no server.</td></tr>
-<tr><td>Who sent it</td><td>Nowhere. Names, avatars, server and channel names are never sent.</td><td>—</td></tr>
-<tr><td>Your API key</td><td>Stays on your computer, in Discord's own settings storage. Sent only to Anthropic, only by you.</td><td>On your machine.</td></tr>
-<tr><td>Usage data</td><td>None collected. No analytics, no crash reporting, no telemetry of any kind.</td><td>—</td></tr>
+<tr><td>Message text</td><td>Google for the instant line. The AI you pick (Groq, Gemini or Claude) for the sharper one, only if you add a key.</td><td>Not by me. No server, nothing saved.</td></tr>
+<tr><td>Who sent it</td><td>Nowhere. Names, avatars, servers — never sent.</td><td>—</td></tr>
+<tr><td>Your API key</td><td>Stays on your machine, in Discord's own settings. Goes only to your AI, only when you translate.</td><td>Your machine.</td></tr>
+<tr><td>Usage data</td><td>None. No analytics, no tracking, nothing.</td><td>—</td></tr>
 </tbody></table>
 <ul class="off">
-  <li><span class="t">off</span><div><b>Direct messages are not translated unless you turn them on.</b> Off by default, per conversation, and it stays off until you say otherwise.</div></li>
-  <li><span class="t">off</span><div><b>Messages already in your reading language are never sent anywhere.</b> Detection happens on your computer first.</div></li>
-  <li><span class="t">you</span><div><b>You can switch translation off per channel.</b> Nothing leaves your machine from a channel you've disabled.</div></li>
+  <li><span class="t">off</span><div><b>DMs stay private.</b> Never translated unless you turn one on, per conversation.</div></li>
+  <li><span class="t">off</span><div><b>Your own language never leaves.</b> Subline checks on your machine first and skips it.</div></li>
+  <li><span class="t">you</span><div><b>Kill it per channel.</b> Nothing leaves a channel you've switched off.</div></li>
 </ul>
-<div class="plain"><h3>The honest part</h3>
-<p>Google and Anthropic have their own terms, and once text reaches them it is governed by those, not by us. If a conversation is sensitive enough that a third party reading it would matter, turn Subline off for that channel — or don't install it. That is a real trade, and it is yours to make.</p></div></div>
 </section>
 
 <script>
@@ -359,6 +351,17 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
     .catch(function () {
       // Links already point at the releases page. Nothing to do.
     });
+
+  // Install tabs: swap the macOS / Windows step panels, and preselect the
+  // visitor's own OS so the right steps show without a click.
+  var tabs = [].slice.call(document.querySelectorAll("[data-tab]"));
+  var panels = [].slice.call(document.querySelectorAll("[data-panel]"));
+  function showTab(name) {
+    tabs.forEach(function (t) { t.setAttribute("aria-selected", String(t.getAttribute("data-tab") === name)); });
+    panels.forEach(function (pnl) { pnl.hidden = pnl.getAttribute("data-panel") !== name; });
+  }
+  tabs.forEach(function (t) { t.addEventListener("click", function () { showTab(t.getAttribute("data-tab")); }); });
+  if (/Win/i.test(navigator.platform || navigator.userAgent)) showTab("windows");
 })();
 </script>
 

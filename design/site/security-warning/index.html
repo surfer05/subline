@@ -52,25 +52,26 @@ blockquote.os .src{display:block;font-family:var(--font-mono);font-size:10.5px;l
 .why p{margin:0;font-size:13.5px;color:var(--muted)}
 </style>
 </head>
-<body><div class="wrap">
+<body>
 <p class="kicker">Installing</p>
-<h2 class="sec">Your computer will warn you. Here is exactly what it says, and why.</h2>
-<p class="lead">Subline isn’t code-signed yet, so your computer shows a warning the first time. It means "we haven’t paid for a certificate," not "we found a problem." Here’s how to get past it.</p>
-<div class="tabs" role="tablist"><button class="tab" role="tab" aria-selected="true">macOS</button><button class="tab" role="tab" aria-selected="false">Windows</button></div>
-<ol class="steps">
-  <li><div><h3>Open the downloaded file, then drag Subline to Applications.</h3>
-    <p>Ordinary so far.</p></div></li>
-  <li><div><h3>Double-click Subline. macOS refuses and shows this.</h3>
-    <blockquote class="os"><span class="src">macOS says</span>"Subline" Not Opened — Apple could not verify "Subline" is free of malware that may harm your Mac or compromise your privacy.</blockquote>
-    <p>Read it precisely: <em>could not verify</em>, not <em>found malware</em>. macOS is saying it has no certificate to check against, because none was bought.</p></div></li>
-  <li><div><h3>Open System Settings › Privacy &amp; Security and scroll down.</h3>
-    <blockquote class="os"><span class="src">macOS says</span>"Subline" was blocked to protect your Mac. &nbsp;<b>Open Anyway</b></blockquote>
-    <p>Click <b>Open Anyway</b>, then confirm with your password or Touch ID. You only do this once, for this app.</p></div></li>
-  <li><div><h3>Subline asks for App Management permission.</h3>
-    <p>This is the real ask, and it is the one worth thinking about. It is the right to modify another installed app — Subline needs it to add its translation file inside Discord. You can withdraw it at any time in the same Settings pane, and Subline will simply stop updating itself.</p></div></li>
-  <li><div><h3>That's the last of it.</h3>
-    <p>Discord closes, reopens, and translations start appearing. Nothing further is ever asked.</p></div></li>
+<h2 class="sec">About that warning</h2>
+<p class="lead">The builds aren't code-signed yet — I haven't paid for a certificate. So your computer warns you once. It means "unverified," not "unsafe." Here's the click-through.</p>
+<div class="tabs" role="tablist"><button class="tab" role="tab" data-tab="macos" aria-selected="true">macOS</button><button class="tab" role="tab" data-tab="windows" aria-selected="false">Windows</button></div>
+<ol class="steps" data-panel="macos">
+  <li><div><h3>Drag Subline to Applications.</h3>
+    <p>From the .dmg you downloaded.</p></div></li>
+  <li><div><h3>Right-click Subline → Open.</h3>
+    <blockquote class="os"><span class="src">macOS says</span>Apple could not verify "Subline" is free of malware…</blockquote>
+    <p>Right-click, not double-click. That gives you an <b>Open</b> button the double-click doesn't.</p></div></li>
+  <li><div><h3>Still stuck? Settings → Privacy &amp; Security → Open Anyway.</h3>
+    <p>Confirm with your password. Once, for this app, done.</p></div></li>
 </ol>
-<div class="why"><h3>If you'd rather not take our word for it</h3>
-<p>The source is public and the whole change to Discord is one file. You can read it, build Subline yourself, and skip every warning above — a signed app you didn't read is not safer than an unsigned one you did.</p></div></div></body>
+<ol class="steps" data-panel="windows" hidden>
+  <li><div><h3>Run Subline-Setup.exe.</h3>
+    <blockquote class="os"><span class="src">Windows says</span>Windows protected your PC.</blockquote>
+    <p><b>More info</b> → <b>Run anyway</b>. That's the whole trick.</p></div></li>
+  <li><div><h3>Click Install.</h3>
+    <p>It closes Discord, patches it, reopens it. You're done.</p></div></li>
+</ol>
+</body>
 </html>

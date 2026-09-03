@@ -192,6 +192,17 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}">\n${p.body}\n</sec
     .catch(function () {
       // Links already point at the releases page. Nothing to do.
     });
+
+  // Install tabs: swap the macOS / Windows step panels, and preselect the
+  // visitor's own OS so the right steps show without a click.
+  var tabs = [].slice.call(document.querySelectorAll("[data-tab]"));
+  var panels = [].slice.call(document.querySelectorAll("[data-panel]"));
+  function showTab(name) {
+    tabs.forEach(function (t) { t.setAttribute("aria-selected", String(t.getAttribute("data-tab") === name)); });
+    panels.forEach(function (pnl) { pnl.hidden = pnl.getAttribute("data-panel") !== name; });
+  }
+  tabs.forEach(function (t) { t.addEventListener("click", function () { showTab(t.getAttribute("data-tab")); }); });
+  if (/Win/i.test(navigator.platform || navigator.userAgent)) showTab("windows");
 })();
 </script>
 
