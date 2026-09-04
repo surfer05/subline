@@ -35,12 +35,22 @@ export const settings = definePluginSettings({
         description: "Quality engine. Google always translates first (≈); this re-translates it with context (✦)",
         options: [
             { label: "Google only (free, no key, no ✦ upgrade)", value: "google", default: true },
+            { label: "Subline (keyless AI, just paste your code)", value: "relay" },
             { label: "Claude Haiku (needs API key, best quality)", value: "claude" },
             { label: "Gemini Flash (needs free API key, context-aware)", value: "gemini" },
             { label: "Groq (needs free API key, 30 requests/min, most headroom)", value: "groq" }
         ],
         // engine is captured by value when the batcher is built, so a change
         // here must rebuild it (see settingsBridge.ts / index.tsx).
+        onChange: notifySettingsChanged
+    },
+    sublineCode: {
+        type: OptionType.STRING,
+        description: "Subline code — keyless AI translation, no API key needed. Paste the code from your purchase or invite (used only when the Subline engine is selected).",
+        default: "",
+        placeholder: "slp_...",
+        // Same immediacy requirement as the API keys — effectiveEngine() must
+        // see a pasted/cleared code right away, not on next reload.
         onChange: notifySettingsChanged
     },
     anthropicApiKey: {

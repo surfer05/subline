@@ -4,6 +4,7 @@ import { translateWithClaude, TRUNCATED_ERROR } from "./engines/claude";
 import { translateWithGemini } from "./engines/gemini";
 import { translateWithGoogle } from "./engines/google";
 import { translateWithGroq } from "./engines/groq";
+import { translateWithRelay } from "./engines/relay";
 import type { ProviderRateLimit } from "./rateHint";
 import { withRetry } from "./retry";
 import { writeStatusBeacon } from "./statusFile";
@@ -131,6 +132,7 @@ async function runEngine(
 ): Promise<EngineOutcome> {
     // The only engine that reports a rate limit of its own, so the only one
     // whose outcome is used as-is rather than wrapped.
+    if (engine === "relay") return { results: await translateWithRelay(req, apiKey, fetch) };
     if (engine === "groq") return translateWithGroq(req, apiKey, fetch, model, debug);
     if (engine === "claude") return { results: await translateWithClaude(req, apiKey, fetch, debug) };
     if (engine === "gemini") {

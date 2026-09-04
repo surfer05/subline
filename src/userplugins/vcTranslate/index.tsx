@@ -382,10 +382,15 @@ let batcherGeneration = 0;
 const LLM_ENGINES = {
     claude: { keySetting: "anthropicApiKey", label: "Anthropic" },
     gemini: { keySetting: "geminiApiKey", label: "Gemini" },
-    groq: { keySetting: "groqApiKey", label: "Groq" }
+    groq: { keySetting: "groqApiKey", label: "Groq" },
+    // The relay's "key" is the Subline code. Everything key-gated (isLlmEngine,
+    // apiKeyFor, effectiveEngine's fallback-to-Google when the code is blank,
+    // the cooldown/rate-gate machinery) then treats the relay exactly like a
+    // keyed engine, because it reads THIS table rather than a hand-written list.
+    relay: { keySetting: "sublineCode", label: "Subline" }
 } as const satisfies Record<
     string,
-    { keySetting: "anthropicApiKey" | "geminiApiKey" | "groqApiKey"; label: string }
+    { keySetting: "anthropicApiKey" | "geminiApiKey" | "groqApiKey" | "sublineCode"; label: string }
 >;
 
 type LlmEngineId = keyof typeof LLM_ENGINES;
@@ -2123,7 +2128,8 @@ const ENGINE_PROVENANCE: Record<EngineId, { glyph: string; label: string; }> = {
     // ✦ — context-aware: batched, with a rolling window of recent messages.
     claude: { glyph: "✦", label: "Claude" },
     gemini: { glyph: "✦", label: "Gemini" },
-    groq: { glyph: "✦", label: "Groq" }
+    groq: { glyph: "✦", label: "Groq" },
+    relay: { glyph: "✦", label: "Subline" }
 };
 
 /**

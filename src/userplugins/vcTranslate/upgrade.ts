@@ -17,6 +17,7 @@ import type { EngineId } from "./types";
  */
 export const ENGINE_RANK: Record<EngineId, number> = {
     google: 0,
+    relay: 1,
     claude: 1,
     gemini: 1,
     groq: 1

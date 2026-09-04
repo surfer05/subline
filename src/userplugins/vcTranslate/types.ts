@@ -1,4 +1,4 @@
-export type EngineId = "google" | "claude" | "gemini" | "groq";
+export type EngineId = "google" | "claude" | "gemini" | "groq" | "relay";
 
 /**
  * The Gemini model the quality tier asks for unless the user overrides it in
@@ -189,6 +189,10 @@ export type Result =
  * table would come to disagree with the batchers it describes.
  */
 export const ENGINE_CAPS: Record<EngineId, { supportsContext: boolean }> = {
+    // Subline relay: LLM-backed, so it wants conversation context like the
+    // keyed engines. Its key is a code and its endpoint is the relay, but from
+    // the batcher's point of view it is a context-aware quality engine.
+    relay: { supportsContext: true },
     google: { supportsContext: false },
     claude: { supportsContext: true },
     gemini: { supportsContext: true },
