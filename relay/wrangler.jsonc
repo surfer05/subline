@@ -1,0 +1,31 @@
+{
+  // Subline translation relay — Cloudflare Worker.
+  // Deploy: see README.md. Secrets (GROQ_KEY, ADMIN_TOKEN, MOR_WEBHOOK_SECRET)
+  // are set with `wrangler secret put`, NEVER in this file or git.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "subline-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "vars": {
+    "MODEL": "openai/gpt-oss-120b",
+    // Freeze the whole relay after this many messages, ever (~$45 on Groq).
+    "GLOBAL_BUDGET_MESSAGES": "1400000"
+  },
+  "kv_namespaces": [
+    // Create with `wrangler kv namespace create CODES`, paste the id here.
+    { "binding": "CODES", "id": "REPLACE_WITH_PROD_KV_ID" }
+  ],
+  "analytics_engine_datasets": [
+    { "binding": "METRICS", "dataset": "subline_relay" }
+  ],
+  "env": {
+    "staging": {
+      "name": "subline-relay-staging",
+      "vars": { "MODEL": "openai/gpt-oss-120b", "GLOBAL_BUDGET_MESSAGES": "5000" },
+      "kv_namespaces": [{ "binding": "CODES", "id": "REPLACE_WITH_STAGING_KV_ID" }],
+      "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "subline_relay_staging" }]
+    }
+  }
+}

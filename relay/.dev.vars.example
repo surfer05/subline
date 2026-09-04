@@ -1,0 +1,4 @@
+# Copy to .dev.vars (gitignored) for `wrangler dev`. Never commit real values.
+GROQ_KEY=gsk_your_paid_groq_key
+ADMIN_TOKEN=run_openssl_rand_hex_32
+# MOR_WEBHOOK_SECRET=set_when_payments_go_live
