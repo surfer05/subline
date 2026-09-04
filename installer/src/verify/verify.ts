@@ -353,10 +353,18 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
     }
 
     if (translated) {
-        // Loaded, translating, and nothing on screen. Spec §6: after a Discord
-        // frontend change the mod "loads and silently renders nothing", and no
-        // amount of re-patching fixes it — it needs a new build. This is the
-        // one state that looks healthy on every signal except this one.
+        // Loaded and translating, but no subtitle has PAINTED on screen yet.
+        // A single install-time sample CANNOT tell "hasn't rendered yet" (the
+        // reader has not opened a foreign chat, or a DM whose globe is off)
+        // from the genuine spec §6 failure (Discord's frontend changed and the
+        // mod silently renders nothing). Distinguishing them needs TIME — it is
+        // the helper's sustained health watch (health.ts, hours of
+        // observations) that escalates the real breakage, NEVER this one-shot
+        // check. So the install screen must not cry "Discord changed" on a
+        // working install: observed doing exactly that to a tester whose
+        // install was fine (it rendered the moment she opened the chat). It
+        // stays pending inside the window (a render may still land), then
+        // resolves to the honest benign message.
         return report({
             status: "translating-not-rendering",
             loaded: true,
@@ -364,11 +372,12 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
             tier,
             errorCode,
             beacon,
-            // Never `pending`: waiting does not fix it, so telling the user to
-            // wait would only delay the one thing that helps.
-            summary:
-                "Subline is running and translating, but nothing is reaching the screen. Discord has "
-                + "probably changed and Subline needs an update. This cannot be fixed by reinstalling."
+            pending: withinWaitingPeriod,
+            summary: withinWaitingPeriod
+                ? "Subline is installed and translating. Waiting to see a subtitle appear on screen…"
+                : "Subline is installed and translating. Open a chat with messages in another language "
+                  + "to see the subtitles, and if it is a DM, click the globe on a message to turn "
+                  + "translation on there. (We just did not catch one painting while we watched.)"
         });
     }
 

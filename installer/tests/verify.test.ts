@@ -107,18 +107,23 @@ describe("only a painted subtitle confirms an install", () => {
         expect(result.summary).toContain("✦");
     });
 
-    it("does NOT confirm on a translation that was produced but never painted", () => {
-        // Spec §6: after a Discord frontend change the mod "loads and silently
-        // renders nothing", and no amount of re-patching fixes it. Every other
-        // signal — patched, launched, loaded, translating — is healthy here.
+    it("does NOT confirm, and does NOT cry 'Discord changed', on translated-but-not-painted", () => {
+        // A single install-time sample cannot tell "hasn't painted YET" (the
+        // reader has not opened a foreign chat / a DM globe is off) from the
+        // genuine spec §6 breakage. It once told a tester whose install was
+        // fine that Discord had broken — it painted the instant she opened the
+        // chat. So the one-shot check stays pending in the window and, when it
+        // resolves, gives benign advice; the alarming verdict is the helper's
+        // sustained health watch alone (health.test.ts pins that).
         writeBeacon({ lastRenderedAt: null });
         const result = verify();
-        expect(result.status).toBe("translating-not-rendering");
+        expect(result.status).toBe("translating-not-rendering"); // helper still keys on this
         expect(result.confirmed).toBe(false);
         expect(result.loaded).toBe(true);
-        // Waiting cannot fix it, so it must not tell the user to wait.
-        expect(result.pending).toBe(false);
-        expect(result.summary).toContain("needs an update");
+        // Inside the wait window it may still paint — keep waiting, do not alarm.
+        expect(result.pending).toBe(true);
+        expect(result.summary).not.toContain("needs an update");
+        expect(result.summary).not.toContain("Discord has");
     });
 });
 
@@ -474,22 +479,29 @@ describe("awaitVerification", () => {
         expect(clock).toBeGreaterThanOrEqual(LAUNCHED_AT + DEFAULT_VERIFY_TIMEOUT_MS);
     });
 
-    it("stops immediately on a state waiting cannot improve", async () => {
-        // "Translating but rendering nothing" needs a new build, not patience.
-        // Polling it for 90 seconds would delay the only useful advice.
+    it("keeps waiting on translated-but-not-painted, in case it paints", async () => {
+        // WAS "stops immediately". A one-shot check cannot know a not-yet-painted
+        // subtitle from an un-paintable one, and a real install painted the
+        // moment the user opened the chat — so the installer waits out the
+        // window (a paint would confirm it) rather than declaring it broken.
         writeBeacon({ lastRenderedAt: null });
+        let clock = NOW;
         let polls = 0;
         const result = await awaitVerification({
             expectedBuildId: OUR_BUILD,
             patchedAt: PATCHED_AT,
             launchedAt: LAUNCHED_AT,
             beaconPath,
-            clock: () => NOW,
-            sleep: async () => { polls += 1; }
+            clock: () => clock,
+            // No render ever lands — it just runs out the window. `pending`
+            // (not a bare deadline) is what stops the loop, so the clock must
+            // advance or this would spin forever.
+            sleep: async ms => { clock += ms; polls += 1; }
         });
 
         expect(result.status).toBe("translating-not-rendering");
-        expect(polls).toBe(0);
+        expect(result.pending).toBe(false);
+        expect(polls).toBeGreaterThan(0);
     });
 
     it("keeps waiting through an idle-but-loaded state, in case a message arrives", async () => {
