@@ -5,10 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // only hook that fires before the import statements below.
 const native = vi.hoisted(() => {
     const translateBatch = vi.fn();
+    // start() opens an update watch that calls this on load; default it to "no
+    // update staged" so the watch stays silent unless a test says otherwise.
+    const readStagedBuildId = vi.fn().mockResolvedValue(null);
     (globalThis as any).VencordNative = {
-        pluginHelpers: { VcTranslate: { translateBatch } }
+        pluginHelpers: { VcTranslate: { translateBatch, readStagedBuildId } }
     };
-    return { translateBatch };
+    return { translateBatch, readStagedBuildId };
 });
 
 import plugin, { FORCE_QUALITY_POPOVER_ID, FORCED_HINT_TTL_MS } from "../index";

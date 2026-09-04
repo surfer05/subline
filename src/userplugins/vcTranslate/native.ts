@@ -7,6 +7,7 @@ import { translateWithGroq } from "./engines/groq";
 import { translateWithRelay } from "./engines/relay";
 import type { ProviderRateLimit } from "./rateHint";
 import { withRetry } from "./retry";
+import { readStagedBuildIdSync } from "./stagedBuild";
 import { writeStatusBeacon } from "./statusFile";
 import type { BatchRequest, EngineId, Result } from "./types";
 
@@ -248,4 +249,16 @@ export async function translateBatch(
  */
 export async function reportStatus(_: IpcMainInvokeEvent, json: string): Promise<boolean> {
     return writeStatusBeacon(json);
+}
+
+/**
+ * The build id of the mod bundle staged on disk (see stagedBuild.ts), or null.
+ *
+ * Same channel and same "never throws" contract as `reportStatus`: the
+ * renderer cannot read files, so it asks the main process. The renderer
+ * compares the answer against its compiled BUILD_ID to notice that the helper
+ * has installed a newer build than the one currently running (updateNotice.ts).
+ */
+export async function readStagedBuildId(_: IpcMainInvokeEvent): Promise<string | null> {
+    return readStagedBuildIdSync();
 }

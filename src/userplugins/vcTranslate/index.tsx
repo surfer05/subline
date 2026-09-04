@@ -1,7 +1,9 @@
 import type { ChatBarProps } from "@api/ChatButtons";
 import { addMessagePopoverButton, removeMessagePopoverButton } from "@api/MessagePopover";
+import { showNotice } from "@api/Notices";
 import { Logger } from "@utils/Logger";
 import definePlugin, { PluginNative } from "@utils/types";
+import { relaunch } from "@utils/native";
 import { ChannelStore, FluxDispatcher, LocaleStore, MessageStore, React, SelectedChannelStore, Toasts, UserStore } from "@webpack/common";
 import type { Message } from "@vencord/discord-types";
 
@@ -20,7 +22,7 @@ import { shouldSkip } from "./skip";
 import {
     recordError, recordPluginLoaded, recordRendered, recordTranslation, resetStatusBeacon
 } from "./statusBeacon";
-import type { BeaconErrorCode } from "./statusShape";
+import { BUILD_ID, type BeaconErrorCode } from "./statusShape";
 import {
     clearStore, getTranslation, invalidateMessage, loadPersistedTranslations, makeKey,
     setTranslation, subscribe, type StoredTranslation
@@ -31,6 +33,7 @@ import {
     type BatchRequest, type EngineId, type PendingMessage
 } from "./types";
 import { ENGINE_RANK, isRealTranslation, mayReplace } from "./upgrade";
+import { createUpdateWatch, UPDATE_CHECK_INTERVAL_MS, type UpdateWatch } from "./updateNotice";
 
 const Native = VencordNative.pluginHelpers.VcTranslate as PluginNative<typeof import("./native")>;
 const logger = new Logger("VcTranslate");
@@ -40,6 +43,8 @@ const logger = new Logger("VcTranslate");
 // exists so what they end up reading is right. Neither waits on the other.
 let fastBatcher: Batcher | null = null;
 let qualityBatcher: Batcher | null = null;
+// Watches for a Subline update staged on disk but not yet loaded (updateNotice.ts).
+let updateWatch: UpdateWatch | null = null;
 let sessionFallback = false;   // set when the configured LLM engine is unusable this session
 /**
  * Which engine+key `sessionFallback` was set against.
@@ -2721,6 +2726,24 @@ export default definePlugin({
         // install, and a failing one look like it forever.
         recordPluginLoaded();
 
+        // Watch for a Subline update the helper has staged on disk but that this
+        // running Discord has not loaded yet, and offer a one-click restart
+        // (updateNotice.ts). Independent of everything below and best-effort:
+        // an absent or unreadable manifest simply never prompts.
+        updateWatch = createUpdateWatch({
+            runningBuildId: BUILD_ID,
+            readStagedBuildId: () => Native.readStagedBuildId(),
+            onUpdateStaged: () => showNotice(
+                "Subline updated in the background. Restart Discord to load the new version.",
+                "Restart Discord",
+                relaunch
+            ),
+            intervalMs: UPDATE_CHECK_INTERVAL_MS,
+            setInterval: (fn, ms) => setInterval(fn, ms),
+            clearInterval: handle => clearInterval(handle as ReturnType<typeof setInterval>)
+        });
+        updateWatch.start();
+
         await loadEnabledChannels();
         // AWAITED, unlike the translation cache below: this decides whether the
         // very first batch of the session is even allowed to touch the LLM
@@ -2788,6 +2811,10 @@ export default definePlugin({
 
     stop() {
         removeMessagePopoverButton(FORCE_QUALITY_POPOVER_ID);
+        // Stop the update watch so a stopped plugin leaves no interval armed to
+        // fire into a torn-down module (same reasoning as the timers below).
+        updateWatch?.stop();
+        updateWatch = null;
         onSettingsChanged(null);
         FluxDispatcher.unsubscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onMessageUpdate);
