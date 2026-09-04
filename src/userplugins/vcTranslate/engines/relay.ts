@@ -41,5 +41,17 @@ export async function translateWithRelay(
             body && typeof body.retryAfterMs === "number" ? body.retryAfterMs : undefined
         );
     }
-    return body.results as Result[];
+    // Validate rather than blind-cast: the relay is our own server, but a
+    // corrupted or hostile response must not inject malformed entries into the
+    // store. Keep only rows that match the Result union; anything else is
+    // dropped, and native.ts treats a short/empty array as it treats any
+    // partial engine result.
+    if (!Array.isArray(body.results)) throw new HttpError("relay: malformed response", 502);
+    return (body.results as unknown[]).filter((r): r is Result => {
+        if (!r || typeof r !== "object" || typeof (r as any).id !== "string") return false;
+        const o = r as any;
+        if (o.failed === true) return true;
+        if (o.skip === true) return true;
+        return o.skip === false && typeof o.lang === "string" && typeof o.text === "string";
+    });
 }

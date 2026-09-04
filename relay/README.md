@@ -75,13 +75,25 @@ Groq ≈ $0.032 / 1,000 messages. Defaults: free code 500 msgs/day (≈ $0.016/d
 ceiling), paid 1,500/day. Global freeze at 1.4M messages ≈ $45. Change
 `GLOBAL_BUDGET_MESSAGES` in `wrangler.jsonc` and `dailyCap` per code.
 
-## Notes / upgrade path
+## Security model
 
-- KV metering is eventually consistent: concurrent requests on one code can
-  slightly undercount. Bounded and safe here because (a) a client sends ~2-3
-  req/min and (b) the global kill-switch is the real budget guard. For precise
-  per-code accounting on the paid tier, swap `codes.ts` for one Durable Object
-  per code — the router only calls `authCode`/`reserve`/`refund`.
+- **The money guard is atomic.** The global spend ceiling lives in a Durable
+  Object (`budget.ts`), not KV — KV has no atomic read-modify-write, so a
+  concurrent burst on one code would race the check and drain the key without
+  bound (caught in review). The DO serialises reserves, so total spend is a hard
+  stop at `GLOBAL_BUDGET_MESSAGES` no matter the concurrency. The migration in
+  `wrangler.jsonc` creates it on first deploy; SQLite-backed DOs run on the
+  Workers free plan.
+- **Per-code daily caps stay in KV** — soft fairness limits, bounded by the
+  atomic global guard, so a slight concurrent over-count costs pennies not
+  dollars.
+- **The relay owns the model and prompt, and every untrusted field is escaped**
+  (message text, author, context, AND targetLang) — a crafted request cannot
+  inject a prompt or turn the relay into a general Groq proxy. Payloads are
+  capped: 40 messages, 12 context entries, 4k chars/field, 32KB body, 40-char
+  target; `cost` folds prompt size in so a huge context cannot be billed as one.
+- **A Groq timeout is truly cancelled** (AbortController) and stays charged, so a
+  client cannot force slow batches to burn the key for free.
 - `translate.ts` mirrors the plugin's `engines/llmShared.ts` + `engines/groq.ts`.
   The drift-guard test fails if the prompt's load-bearing rules change; keep them
   in sync.

@@ -12,3 +12,22 @@ export function fakeKV(seed: Record<string, string> = {}) {
 export function codeRec(over: Partial<CodeRecord> = {}): string {
     return JSON.stringify({ status: "active", dailyCap: 500, plan: "free", ...over } satisfies CodeRecord);
 }
+
+import { applyBudget, type BudgetState } from "../src/budget";
+/** A fake Budget Durable Object namespace: one shared in-memory counter,
+ *  applying the real applyBudget arithmetic — so codes.ts's DO path is exercised. */
+export function fakeBudget() {
+    const state: BudgetState = { total: 0, frozen: false };
+    const stub = {
+        fetch: async (_url: string, init: any) => {
+            const { cost, freezeAt } = JSON.parse(init.body);
+            const r = applyBudget(state, cost, freezeAt);
+            if (r.allowed) { state.total = r.total; state.frozen = r.frozen; }
+            return { json: async () => r } as any;
+        }
+    };
+    return {
+        ns: { idFromName: () => "global", get: () => stub } as unknown as DurableObjectNamespace,
+        state
+    };
+}

@@ -32,14 +32,18 @@ const LINE_SEPS = new RegExp("[" + String.fromCharCode(0x2028) + String.fromChar
 const enc = (s: string): string => JSON.stringify((s ?? "").replace(LINE_SEPS, " "));
 
 export function buildPrompt(req: BatchRequest): string {
+    // The target language is untrusted input like everything else: enc() it so
+    // a crafted "targetLang" cannot inject instructions into the system prompt.
+    // Length/charset are ALSO capped upstream in validBatch (index.ts).
+    const tgt = enc(req.targetLang);
     const parts: string[] = [];
     parts.push(
-        `You are translating a live group chat between friends into ${req.targetLang}.`,
+        `You are translating a live group chat between friends into ${tgt}.`,
         "",
         "Rules:",
-        `- Translate each message into ${req.targetLang}.`,
-        `- If a message is already in ${req.targetLang}, set skip to true and text to "".`,
-        "- Write what a native speaker would actually say in " + req.targetLang + ", not a word-by-word rendering.",
+        `- Translate each message into ${tgt}.`,
+        `- If a message is already in ${tgt}, set skip to true and text to "".`,
+        "- Write what a native speaker would actually say in " + tgt + ", not a word-by-word rendering.",
         "- Everyday address terms are the most common mistake. A word that literally means "
         + "'children', 'sacrifice', 'my eyes', 'my soul' is usually just 'guys', 'mate', 'dude' "
         + "or an affectionate filler. Translate the intent.",
@@ -105,18 +109,19 @@ function parseRows(content: string, req: BatchRequest): Result[] {
 }
 
 const REASONING_CONTROLS = { reasoning_effort: "low", reasoning_format: "hidden" } as const;
-const REASONING_HINT = /gpt-oss|reasoning|o1|o3|deepseek-r/i;
+const REASONING_HINT = /gpt-oss|qwen|reasoning|o1|o3|deepseek-r/i;
 
 export interface TranslateError { status: number; retryAfterMs?: number }
 
 /** Call Groq with the relay's key and return one verdict per message. Throws a
  *  TranslateError on a non-OK status so the Worker can map it to the client's
  *  { ok:false } shape. Never logs or returns the request text. */
-export async function translate(req: BatchRequest, apiKey: string, model: string): Promise<Result[]> {
+export async function translate(req: BatchRequest, apiKey: string, model: string, signal?: AbortSignal): Promise<Result[]> {
     const prompt = buildPrompt(req);
     const send = (withReasoning: boolean) => fetch(GROQ_ENDPOINT, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+        signal,
         body: JSON.stringify({
             model,
             messages: [{ role: "user", content: prompt }],
@@ -138,5 +143,11 @@ export async function translate(req: BatchRequest, apiKey: string, model: string
     }
     const body = await res.json() as any;
     const content = body?.choices?.[0]?.message?.content;
-    return parseRows(typeof content === "string" ? content : "", req);
+    if (typeof content !== "string" || content.trim() === "") {
+        // Empty 200: a reasoning model that answered in the hidden field, or a
+        // malformed success. Not the user's fault, not their quota — treat it
+        // like an upstream failure so index.ts refunds and the client retries.
+        throw { status: 502 } as TranslateError;
+    }
+    return parseRows(content, req);
 }

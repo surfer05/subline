@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { authCode, reserve, refund, usage, mintCode, type Env } from "../src/codes";
-import { fakeKV, codeRec } from "./kv-mock";
+import { fakeKV, codeRec, fakeBudget } from "./kv-mock";
 
-const env = (kv: any): Env => ({ CODES: kv, GROQ_KEY: "x", ADMIN_TOKEN: "a", MODEL: "m" });
+const env = (kv: any, budget?: any): Env =>
+    ({ CODES: kv, GROQ_KEY: "x", ADMIN_TOKEN: "a", MODEL: "m", BUDGET: (budget ?? fakeBudget().ns) });
 const NOW = Date.UTC(2026, 8, 4, 12, 0, 0);
 
 describe("authCode", () => {
@@ -44,12 +45,22 @@ describe("reserve — cap, rate, kill-switch, reserve-before-spend", () => {
         for (let i = 0; i < 20; i++) expect(await reserve(env(kv), "c", r, 1, NOW)).toMatchObject({ ok: true });
         expect(await reserve(env(kv), "c", r, 1, NOW)).toMatchObject({ ok: false, reason: "rate_limited" });
     });
-    it("freezes the whole relay at the global budget and refuses further reserves", async () => {
-        const kv = fakeKV({ "budget:total": "1399999" });
-        const e = { ...env(kv), GLOBAL_BUDGET_MESSAGES: "1400000" };
-        expect(await reserve(e, "c", rec, 1, NOW)).toMatchObject({ ok: true }); // hits 1.4M, sets frozen
-        expect(kv._dump()["budget:frozen"]).toBe("1");
-        expect(await reserve(e, "c", rec, 1, NOW)).toMatchObject({ ok: false, reason: "capacity" });
+    it("freezes the whole relay at the global budget (atomic DO) and refuses further reserves", async () => {
+        const b = fakeBudget();
+        const bigCap = JSON.parse(codeRec({ dailyCap: 1_000_000 }));
+        const e = { ...env(fakeKV(), b.ns), GLOBAL_BUDGET_MESSAGES: "5" };
+        expect(await reserve(e, "c", bigCap, 4, NOW)).toMatchObject({ ok: true });
+        expect(await reserve(e, "c", bigCap, 4, NOW)).toMatchObject({ ok: true }); // total 8 >= 5 -> frozen
+        expect(b.state.frozen).toBe(true);
+        expect(await reserve(e, "c", bigCap, 1, NOW)).toMatchObject({ ok: false, reason: "capacity" });
+    });
+
+    it("the global guard is committed even though per-code stays soft KV", async () => {
+        const b = fakeBudget();
+        const rec2 = JSON.parse(codeRec({ dailyCap: 1000 }));
+        const e = { ...env(fakeKV(), b.ns), GLOBAL_BUDGET_MESSAGES: "1000000" };
+        await reserve(e, "c", rec2, 7, NOW);
+        expect(b.state.total).toBe(7);
     });
 });
 

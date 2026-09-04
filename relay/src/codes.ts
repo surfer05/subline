@@ -15,6 +15,8 @@
 
 export interface Env {
     CODES: KVNamespace;
+    /** The atomic global spend guard (see budget.ts) — the real $50 ceiling. */
+    BUDGET: DurableObjectNamespace;
     GROQ_KEY: string;
     ADMIN_TOKEN: string;
     MODEL: string;
@@ -80,37 +82,36 @@ export type ReserveOutcome =
  * never overspends, and the reserve is the safe direction for the budget.
  */
 export async function reserve(env: Env, code: string, rec: CodeRecord, cost: number, now: number): Promise<ReserveOutcome> {
-    // 1) Global kill-switch — the real $50 guard. Cumulative, never resets
-    //    (the beta budget is a one-time total, not monthly).
-    const freezeAt = Number(env.GLOBAL_BUDGET_MESSAGES) || DEFAULT_GLOBAL_FREEZE;
-    if (await env.CODES.get("budget:frozen")) {
-        return { ok: false, reason: "capacity", retryAfterMs: 3_600_000 };
-    }
-    const globalUsed = await readCount(env, "budget:total");
-    if (globalUsed >= freezeAt) {
-        await env.CODES.put("budget:frozen", "1");
-        return { ok: false, reason: "capacity", retryAfterMs: 3_600_000 };
-    }
-
-    // 2) Per-minute rate limit — one shared paid key must not be drained by a
-    //    runaway/scraping client. Lax KV counter; well above a real user's rate.
+    // 1) Per-minute rate limit (KV, soft): one shared paid key must not be
+    //    drained by a runaway/scraping client. Well above a real user's rate.
     const rpmKey = `rl:${code}:${Math.floor(now / 60_000)}`;
     const rpm = await readCount(env, rpmKey);
     const rpmLimit = rec.plan === "paid" ? 30 : 20;
     if (rpm >= rpmLimit) return { ok: false, reason: "rate_limited", retryAfterMs: 60_000 - (now % 60_000) };
 
-    // 3) Daily per-code cap.
+    // 2) Daily per-code cap (KV, soft fairness — bounded by the atomic global
+    //    guard below, so slight concurrent over-count costs pennies, not dollars).
     const dayKey = `use:${code}:${today(now)}`;
     const used = await readCount(env, dayKey);
     if (used + cost > rec.dailyCap) {
         return { ok: false, reason: "cap_exceeded", retryAfterMs: msUntilUtcMidnight(now), used, cap: rec.dailyCap };
     }
 
-    // 4) Commit the reservation. Counters self-purge (daily 2d, rpm 2min).
+    // 3) Global spend guard (ATOMIC — Durable Object). This is the real money
+    //    ceiling; committed FIRST so a race can never push total dollars past
+    //    the cap. If it freezes, nothing per-code is written.
+    const freezeAt = Number(env.GLOBAL_BUDGET_MESSAGES) || DEFAULT_GLOBAL_FREEZE;
+    const budget = env.BUDGET.get(env.BUDGET.idFromName("global"));
+    const bres = await budget.fetch("https://budget.internal/reserve", {
+        method: "POST",
+        body: JSON.stringify({ cost, freezeAt })
+    });
+    const decision = await bres.json() as { allowed: boolean };
+    if (!decision.allowed) return { ok: false, reason: "capacity", retryAfterMs: 3_600_000 };
+
+    // 4) Commit the per-code counters (soft). Self-purge (daily 2d, rpm 2min).
     await env.CODES.put(dayKey, String(used + cost), { expirationTtl: 172_800 });
     await env.CODES.put(rpmKey, String(rpm + 1), { expirationTtl: 120 });
-    await env.CODES.put("budget:total", String(globalUsed + cost));
-    if (globalUsed + cost >= freezeAt) await env.CODES.put("budget:frozen", "1");
 
     return { ok: true, used: used + cost, cap: rec.dailyCap };
 }
