@@ -33,12 +33,15 @@ export const settings = definePluginSettings({
         // whatever is picked here. This setting only chooses what re-translates
         // that line with conversation context afterwards (✦).
         description: "Quality engine. Google always translates first (≈); this re-translates it with context (✦)",
+        // ONLY Google (free) and the Subline code (relay). Bring-your-own-key
+        // engines are deliberately NOT offered: they would let anyone self-serve
+        // ✦ AI with a free provider key and never need a code, which defeats the
+        // whole model (free ≈ Google, or a code for ✦ AI). The claude/gemini/groq
+        // engine code still exists, unreachable, for the test suite; there is no
+        // way into it from a shipped build. See tests/settings.test.ts.
         options: [
-            { label: "Google only (free, no key, no ✦ upgrade)", value: "google", default: true },
-            { label: "Subline (keyless AI, just paste your code)", value: "relay" },
-            { label: "Claude Haiku (needs API key, best quality)", value: "claude" },
-            { label: "Gemini Flash (needs free API key, context-aware)", value: "gemini" },
-            { label: "Groq (needs free API key, 30 requests/min, most headroom)", value: "groq" }
+            { label: "Google only (free, no ✦ upgrade)", value: "google", default: true },
+            { label: "Subline (keyless AI, just paste your code)", value: "relay" }
         ],
         // engine is captured by value when the batcher is built, so a change
         // here must rebuild it (see settingsBridge.ts / index.tsx).
@@ -46,7 +49,7 @@ export const settings = definePluginSettings({
     },
     sublineCode: {
         type: OptionType.STRING,
-        description: "Subline code — keyless AI translation, no API key needed. Paste the code from your purchase or invite (used only when the Subline engine is selected).",
+        description: "Subline code — paste the code from your purchase or invite to turn on ✦ AI translation. Without one, Subline still translates everything with Google (≈).",
         default: "",
         placeholder: "slp_...",
         // Same immediacy requirement as the API keys — effectiveEngine() must
@@ -166,27 +169,22 @@ export const settings = definePluginSettings({
     }
 }, {
     anthropicApiKey: {
-        // The key field is meaningless unless Claude is the selected engine.
-        // `hidden` as a function of `this.store` is Vencord's own supported
-        // mechanism for conditional visibility (see IsDisabledOrHidden in
-        // src/utils/types.ts, and src/plugins/translate/settings.tsx for the
-        // same pattern applied to the DeepL/Kagi credentials).
-        hidden() { return this.store.engine !== "claude"; }
+        // Permanently hidden: bring-your-own-key is not an offered path (see the
+        // engine options above and tests/settings.test.ts). The field stays in
+        // the schema so the engine machinery and its tests keep compiling.
+        hidden: () => true
     },
     geminiApiKey: {
-        // Same mechanism, same reasoning, gated on the Gemini engine instead.
-        hidden() { return this.store.engine !== "gemini"; }
+        hidden: () => true
     },
     geminiModel: {
-        // Ditto: a model name is meaningless unless Gemini is what runs.
-        hidden() { return this.store.engine !== "gemini"; }
+        hidden: () => true
     },
     groqApiKey: {
-        // Same mechanism again, gated on the Groq engine.
-        hidden() { return this.store.engine !== "groq"; }
+        hidden: () => true
     },
     groqModel: {
-        hidden() { return this.store.engine !== "groq"; }
+        hidden: () => true
     }
 });
 

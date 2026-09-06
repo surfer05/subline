@@ -1549,29 +1549,19 @@ describe("missing Gemini API key — mirrors the Claude behaviour", () => {
 });
 
 describe("settings wiring", () => {
-    it("hides the Anthropic key field unless Claude is selected", () => {
-        const hidden = (settings as any).def.anthropicApiKey.hidden as (this: unknown) => boolean;
-        expect(typeof hidden).toBe("function");
-
-        settings.store.engine = "google";
-        expect(hidden.call(settings)).toBe(true);
-
-        settings.store.engine = "claude";
-        expect(hidden.call(settings)).toBe(false);
-    });
-
-    it("hides the Gemini key field unless Gemini is selected", () => {
-        const hidden = (settings as any).def.geminiApiKey.hidden as (this: unknown) => boolean;
-        expect(typeof hidden).toBe("function");
-
-        settings.store.engine = "google";
-        expect(hidden.call(settings)).toBe(true);
-
-        settings.store.engine = "claude";
-        expect(hidden.call(settings)).toBe(true);
-
-        settings.store.engine = "gemini";
-        expect(hidden.call(settings)).toBe(false);
+    it("keeps the API-key fields hidden (bring-your-own-key is not an offered path)", () => {
+        // Was two tests asserting the OLD conditional visibility. BYOK is now a
+        // deliberate non-feature (it undercut the code/paywall), so these fields
+        // are permanently hidden whatever the engine. tests/settings.test.ts is
+        // the full guard; this keeps the settings-wiring block honest too.
+        for (const field of ["anthropicApiKey", "geminiApiKey", "groqApiKey"]) {
+            const hidden = (settings as any).def[field].hidden as (this: unknown) => boolean;
+            expect(typeof hidden).toBe("function");
+            settings.store.engine = "claude";
+            expect(hidden.call(settings)).toBe(true);
+            settings.store.engine = "relay";
+            expect(hidden.call(settings)).toBe(true);
+        }
     });
 
     it("defaults the target language to Discord's locale, without the region subtag", () => {
