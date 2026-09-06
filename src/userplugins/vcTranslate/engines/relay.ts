@@ -13,7 +13,7 @@ import type { BatchRequest, Result } from "../types";
  * a translation endpoint that a config file could repoint is a way to exfiltrate
  * message text, and there must be nothing to repoint.
  */
-export const RELAY_URL = "https://subline-relay.REPLACE.workers.dev/v1/translate";
+export const RELAY_URL = "https://subline-relay.rahul05alok.workers.dev/v1/translate";
 
 export async function translateWithRelay(
     req: BatchRequest,
