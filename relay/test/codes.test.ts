@@ -23,6 +23,20 @@ describe("authCode", () => {
         const r = await authCode(env(kv), "g");
         expect(r).toMatchObject({ ok: true, record: { dailyCap: 500 } });
     });
+    it("expired locally even if no revoke webhook arrived (safety net)", async () => {
+        const kv = fakeKV({ "code:e": codeRec({ expiresAt: Date.now() - 1000 }) });
+        expect(await authCode(env(kv), "e")).toMatchObject({ ok: false, reason: "expired" });
+    });
+    it("a future expiresAt is still valid; absent expiresAt never expires", async () => {
+        const soon = fakeKV({ "code:f": codeRec({ expiresAt: Date.now() + 60_000 }) });
+        expect(await authCode(env(soon), "f")).toMatchObject({ ok: true });
+        const none = fakeKV({ "code:l": codeRec({ plan: "lifetime" }) }); // no expiresAt
+        expect(await authCode(env(none), "l")).toMatchObject({ ok: true });
+    });
+    it("a terminal record is denied even with a future expiry (refund/expire is permanent)", async () => {
+        const kv = fakeKV({ "code:t": codeRec({ terminal: true, expiresAt: Date.now() + 60_000 }) });
+        expect(await authCode(env(kv), "t")).toMatchObject({ ok: false, reason: "revoked" });
+    });
 });
 
 describe("reserve — cap, rate, kill-switch, reserve-before-spend", () => {

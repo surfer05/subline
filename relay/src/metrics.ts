@@ -8,7 +8,7 @@ import type { Env } from "./codes";
 
 export type Outcome =
     | "ok" | "cap_exceeded" | "rate_limited" | "capacity"
-    | "no_code" | "unknown_code" | "revoked"
+    | "no_code" | "unknown_code" | "revoked" | "expired"
     | "too_large" | "bad_payload" | "upstream_error" | "relay_key_fail" | "not_found";
 
 /** A non-reversible short fingerprint of the code, so per-code volume can be

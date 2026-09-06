@@ -17,7 +17,7 @@
  * system prompt, or reach the key — which is what makes a keyless relay safe to
  * expose. A valid code is not a general Groq proxy.
  */
-import { authCode, reserve, refund, usage, mintCode, type Env, type CodeRecord } from "./codes";
+import { authCode, reserve, refund, usage, mintCode, applyMorEvent, type Env, type CodeRecord } from "./codes";
 import { translate, type BatchRequest, type TranslateError } from "./translate";
 import { record, type Outcome } from "./metrics";
 export { Budget } from "./budget";
@@ -98,8 +98,14 @@ export default {
 
             const auth = await authCode(env, code);
             if (!auth.ok) {
-                const map = { no_code: 401, unknown_code: 401, revoked: 401 } as const;
-                return done(fail("invalid or missing code", map[auth.reason]), auth.reason, code, 0);
+                const map = { no_code: 401, unknown_code: 401, revoked: 401, expired: 401 } as const;
+                // A distinct, actionable reason so the client can tell "renew your
+                // subscription" (expired) apart from "this code is wrong" (unknown).
+                const msg =
+                    auth.reason === "expired" ? "code expired or subscription lapsed" :
+                    auth.reason === "revoked" ? "code revoked" :
+                    "invalid or missing code";
+                return done(fail(msg, map[auth.reason]), auth.reason, code, 0);
             }
 
             const body = await readBody(req);
@@ -196,47 +202,47 @@ export default {
         }
 
         // ---- POST /webhook/mor — Merchant-of-Record (Lemon Squeezy) ------
-        // Scaffold: verify HMAC signature, then issue/revoke a code on the
-        // purchase/refund/cancel events. Wired but inert until MOR_WEBHOOK_SECRET
-        // is set and payments go live.
+        // Verify the HMAC signature over the RAW body, then mirror the event's
+        // lifecycle into KV (see applyMorEvent). Inert until MOR_WEBHOOK_SECRET
+        // is set. This router does signature + transport only; all state logic
+        // and idempotency live in codes.ts so they are unit-testable.
         if (url.pathname === "/webhook/mor") {
             if (req.method !== "POST") return fail("method not allowed", 405);
+            // Secret unset ⇒ 503, never a silent 200: an unconfigured relay must
+            // not look like it accepted (and dropped) a real purchase event.
             if (!env.MOR_WEBHOOK_SECRET) return fail("webhooks not configured", 503);
+
+            // Read the RAW bytes and sign THOSE — the HMAC must cover the exact
+            // body LS signed; re-serialising parsed JSON would change bytes and
+            // never match. (Read before any JSON.parse.)
             const rawBuf = await req.arrayBuffer();
             if (rawBuf.byteLength > MAX_BODY_BYTES) return fail("payload too large", 413);
             const raw = new TextDecoder().decode(rawBuf);
+
             const sig = req.headers.get("x-signature") || "";
-            const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.MOR_WEBHOOK_SECRET),
+            if (!sig) return fail("bad signature", 401); // missing header ⇒ reject, never process
+            const hkey = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.MOR_WEBHOOK_SECRET),
                 { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-            const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(raw));
+            const mac = await crypto.subtle.sign("HMAC", hkey, new TextEncoder().encode(raw));
             const expected = [...new Uint8Array(mac)].map(b => b.toString(16).padStart(2, "0")).join("");
+            // timingSafeEqual hashes both sides to a fixed 32 bytes first, so a
+            // wrong-LENGTH signature compares safely and never throws.
             if (!(await timingSafeEqual(sig, expected))) return fail("bad signature", 401);
 
             let evt: any; try { evt = JSON.parse(raw); } catch { return fail("bad payload", 400); }
-            const name = evt?.meta?.event_name as string | undefined;
-            const orderRef = String(evt?.data?.id ?? evt?.meta?.custom_data?.order_id ?? "");
-            if (!orderRef) return json({ ok: true }); // nothing to key on
 
-            if (name === "order_created" || name === "subscription_created") {
-                const code = mintCode();
-                const rec: CodeRecord = { status: "active", dailyCap: 1500, plan: "paid", orderRef };
-                await env.CODES.put(`code:${code}`, JSON.stringify(rec));
-                await env.CODES.put(`order:${orderRef}`, code);
-                // The MoR emails the customer; the relay never sees the address.
-                return json({ ok: true, code });
+            // Mirror the event. On an unexpected failure return 500 so LS RETRIES
+            // (dropping a paid-lifecycle event silently would strand access);
+            // log only the event name — never the key, email, body, or signature.
+            try {
+                await applyMorEvent(env, evt, Date.now());
+            } catch {
+                console.warn("mor webhook: mirror failed", { event: evt?.meta?.event_name });
+                return fail("processing error", 500);
             }
-            if (name === "order_refunded" || name === "subscription_cancelled" || name === "subscription_expired") {
-                const code = await env.CODES.get(`order:${orderRef}`);
-                if (code) {
-                    const raw2 = await env.CODES.get(`code:${code}`);
-                    if (raw2) {
-                        const rec = JSON.parse(raw2) as CodeRecord;
-                        rec.status = "revoked";
-                        await env.CODES.put(`code:${code}`, JSON.stringify(rec));
-                    }
-                }
-                return json({ ok: true });
-            }
+            // Delivery/emailing the customer is the MoR's job; LS ignores the
+            // response body, so we return a BARE 2xx — never the code (echoing a
+            // freshly minted code in a 200 was a leak and served no purpose).
             return json({ ok: true });
         }
 

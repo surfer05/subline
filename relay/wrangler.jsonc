@@ -2,6 +2,9 @@
   // Subline translation relay — Cloudflare Worker.
   // Deploy: see README.md. Secrets (GROQ_KEY, ADMIN_TOKEN, MOR_WEBHOOK_SECRET)
   // are set with `wrangler secret put`, NEVER in this file or git.
+  //   MOR_WEBHOOK_SECRET is the Lemon Squeezy webhook SIGNING SECRET (the value
+  //   you set when creating the webhook in the LS dashboard). The relay signs
+  //   the raw request body with it (HMAC-SHA256) and compares to X-Signature.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "subline-relay",
   "main": "src/index.ts",
@@ -10,14 +13,29 @@
   "observability": { "enabled": true },
   "vars": {
     "MODEL": "openai/gpt-oss-120b",
-    // Freeze the whole relay after this many messages, ever (~$45 on Groq).
-    "GLOBAL_BUDGET_MESSAGES": "1400000"
+    // Freeze the whole relay after this many cost-units, ever. A unit is ~1
+    // message (cost = messages + ceil(promptChars/1000)). On gpt-oss-120b with
+    // reasoning_effort=low, ~$0.04-0.07 per 1,000 units, so 400,000 is a
+    // conservative ~$15-25 launch wall. Raise it deliberately after watching
+    // real Groq spend vs the cost-units in metrics (Analytics Engine).
+    "GLOBAL_BUDGET_MESSAGES": "400000",
+    // Lemon Squeezy variant_id → { plan, dailyCap }. The webhook maps each paid
+    // license key to a plan + fair-use cap by its meta.variant_id. FILL IN the
+    // real numeric variant ids after creating the products in LS (the keys below
+    // are PLACEHOLDERS). An UNMAPPED or misconfigured variant fails SAFE: the
+    // code is minted at the free default cap (500/day) and flagged in its note —
+    // never at an unbounded cap. plan ∈ free|paid|monthly|annual|lifetime.
+    "VARIANTS": {
+      "REPLACE_MONTHLY_VARIANT_ID": { "plan": "monthly", "dailyCap": 1500 },
+      "REPLACE_ANNUAL_VARIANT_ID": { "plan": "annual", "dailyCap": 1500 },
+      "REPLACE_LIFETIME_VARIANT_ID": { "plan": "lifetime", "dailyCap": 1500 }
+    }
   },
   "durable_objects": { "bindings": [{ "name": "BUDGET", "class_name": "Budget" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Budget"] }],
   "kv_namespaces": [
     // Create with `wrangler kv namespace create CODES`, paste the id here.
-    { "binding": "CODES", "id": "REPLACE_WITH_PROD_KV_ID" }
+    { "binding": "CODES", "id": "f83c4973ea574abd9000ad5735ccd52a" }
   ],
   "analytics_engine_datasets": [
     { "binding": "METRICS", "dataset": "subline_relay" }

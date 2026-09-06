@@ -1,13 +1,16 @@
 import type { CodeRecord } from "../src/codes";
-/** Minimal in-memory KVNamespace for tests. Ignores TTL (irrelevant to logic). */
+/** Minimal in-memory KVNamespace for tests. Records the put OPTIONS (e.g.
+ *  expirationTtl) so tests can assert a key was written to self-expire. */
 export function fakeKV(seed: Record<string, string> = {}) {
     const m = new Map<string, string>(Object.entries(seed));
+    const opts = new Map<string, any>();
     return {
         get: async (k: string) => (m.has(k) ? m.get(k)! : null),
-        put: async (k: string, v: string) => { m.set(k, v); },
-        delete: async (k: string) => { m.delete(k); },
+        put: async (k: string, v: string, o?: any) => { m.set(k, v); opts.set(k, o); },
+        delete: async (k: string) => { m.delete(k); opts.delete(k); },
         _dump: () => Object.fromEntries(m),
-    } as unknown as KVNamespace & { _dump: () => Record<string, string> };
+        _opts: (k: string) => opts.get(k),
+    } as unknown as KVNamespace & { _dump: () => Record<string, string>; _opts: (k: string) => any };
 }
 export function codeRec(over: Partial<CodeRecord> = {}): string {
     return JSON.stringify({ status: "active", dailyCap: 500, plan: "free", ...over } satisfies CodeRecord);
