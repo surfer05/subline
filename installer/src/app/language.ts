@@ -338,13 +338,16 @@ export function readTargetLanguage(settingsPath: string | null): string | null {
 /** Vencord settings keys the quality tier reads. */
 export const ENGINE_KEY = "engine";
 export const GROQ_API_KEY = "groqApiKey";
+/** The Subline code activates the keyless AI relay engine (see the plugin's settings.ts). */
+export const SUBLINE_CODE_KEY = "sublineCode";
+export const RELAY_ENGINE = "relay";
 
-export interface SetApiKeyReport {
+export interface SetSublineCodeReport {
     path: string;
     /** The settings file did not exist and was created. */
     created: boolean;
-    /** How long the stored key is. NEVER the key itself — see below. */
-    keyLength: number;
+    /** How long the stored code is. NEVER the code itself — see below. */
+    codeLength: number;
 }
 
 /**
@@ -409,45 +412,50 @@ function updatePluginSettings(
 }
 
 /**
- * Store the quality tier's API key, from the installer.
+ * Store the Subline code, from the installer, and select the keyless AI relay.
  *
- * WHY THE INSTALLER WRITES THIS AT ALL. The key otherwise has to be pasted into
+ * WHY THE INSTALLER WRITES THIS AT ALL. The code otherwise has to be pasted into
  * Vencord's plugin settings inside Discord — a screen listing dozens of plugins
  * a Subline user never installed, reached by a path nobody could guess. The
  * product owner, having built it: "the user won't know what to do, literally no
  * way to guess". A setup that ends with the better tier off and no findable way
- * to turn it on is a setup that did not finish.
+ * to turn it on is a setup that did not finish. So the one paste happens here,
+ * in the installer, before Discord ever launches — no second restart, no
+ * settings spelunking.
  *
- * The key is TRIMMED. A pasted key arriving with a trailing space is rejected
- * by the provider with a 401, which the plugin reports as a rejected key —
- * sending somebody to replace a credential that was correct.
+ * The code is TRIMMED. A code arriving with a trailing space or newline is
+ * rejected by the relay, which the plugin surfaces as a bad code — sending
+ * somebody to replace a code that was correct.
  *
- * `engine` is set alongside it, because a key with no engine selected changes
- * nothing: the plugin would go on using Google and the user would have handed
- * over a key for no visible result.
+ * `engine` is set to the relay alongside it, because a code with no engine
+ * selected changes nothing: the plugin would go on using Google (≈) and the
+ * user would have pasted a code for no visible result. An empty code is a valid
+ * choice (the user skipped) and is handled by the caller NOT calling this — the
+ * plugin then simply stays on the free ≈ tier.
  *
- * NOTHING HERE RETURNS OR LOGS THE KEY. The report carries its LENGTH, which is
- * enough to tell "pasted" from "pasted half of it" in a log that spec §7
- * forbids putting secrets in.
+ * NOTHING HERE RETURNS OR LOGS THE CODE. The report carries its LENGTH, enough
+ * to tell "pasted" from "pasted half of it" in a log that spec §7 forbids
+ * putting secrets in. (The code is lower-stakes than an API key, but it is
+ * still a credential and is treated as one.)
  */
-export function setApiKey(settingsPath: string | null, rawKey: string): Result<SetApiKeyReport> {
-    const key = rawKey.trim();
-    if (key === "") {
-        return err<SetApiKeyReport>("IO_ERROR", "No key was given, so nothing was saved.");
+export function setSublineCode(settingsPath: string | null, rawCode: string): Result<SetSublineCodeReport> {
+    const code = rawCode.trim();
+    if (code === "") {
+        return err<SetSublineCodeReport>("IO_ERROR", "No code was given, so nothing was saved.");
     }
     if (settingsPath === null) {
-        return err<SetApiKeyReport>(
+        return err<SetSublineCodeReport>(
             "IO_ERROR",
-            "Could not work out where Vencord keeps its settings on this platform, so the key was not saved."
+            "Could not work out where Vencord keeps its settings on this platform, so the code was not saved."
         );
     }
 
     const written = updatePluginSettings(
         settingsPath,
-        existing => ({ ...existing, enabled: true, [ENGINE_KEY]: "groq", [GROQ_API_KEY]: key }),
-        "save the key into Vencord's settings"
+        existing => ({ ...existing, enabled: true, [ENGINE_KEY]: RELAY_ENGINE, [SUBLINE_CODE_KEY]: code }),
+        "save the code into Vencord's settings"
     );
-    if (!written.ok) return written as Result<SetApiKeyReport>;
+    if (!written.ok) return written as Result<SetSublineCodeReport>;
 
-    return ok({ path: settingsPath, created: written.value.created, keyLength: key.length });
+    return ok({ path: settingsPath, created: written.value.created, codeLength: code.length });
 }

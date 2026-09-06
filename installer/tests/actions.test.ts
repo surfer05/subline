@@ -34,7 +34,7 @@ describe("the action vocabulary", () => {
         // did: it says what you end up WITH, not just that you declined. The
         // label shrank because three footer actions have to fit a 720px
         // window with the Cancel button intact, which they did not.
-        expect(ACTION_LABELS["skip-key"]).toMatch(/google only/i);
+        expect(ACTION_LABELS["skip-code"]).toMatch(/google only/i);
     });
 
     it("marks no more than one action per screen as primary", () => {
@@ -43,7 +43,7 @@ describe("the action vocabulary", () => {
         // but still useful property that the obvious pairs are not both filled.
         const bothPrimary = (a: FlowActionType, b: FlowActionType) => IS_PRIMARY[a] && IS_PRIMARY[b];
         expect(bothPrimary("quit-discord", "recheck")).toBe(false);
-        expect(bothPrimary("set-key", "skip-key")).toBe(false);
+        expect(bothPrimary("set-code", "skip-code")).toBe(false);
         expect(bothPrimary("retry", "cancel")).toBe(false);
         expect(bothPrimary("proceed-over-mod", "cancel")).toBe(false);
     });

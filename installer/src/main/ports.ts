@@ -24,7 +24,7 @@ import type { HelperRemoval } from "../app/uninstall.js";
 import {
     discordSettingsPathFor,
     readDiscordLocale,
-    setApiKey,
+    setSublineCode,
     setTargetLanguage,
     vencordSettingsPathFor
 } from "../app/language.js";
@@ -420,7 +420,7 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
         discordLocale: () => readDiscordLocale(discordSettingsPathFor(platform, env, home)),
         systemLocale,
         setLanguage: code => setTargetLanguage(vencordSettings, code),
-        setApiKey: key => setApiKey(vencordSettingsPathFor(platform, env, home), key),
+        setSublineCode: key => setSublineCode(vencordSettingsPathFor(platform, env, home), key),
 
         patch: (install, patchOptions) =>
             patchInstall(install, {

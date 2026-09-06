@@ -120,7 +120,7 @@ interface Script {
     verify?: VerificationReport;
     discordLocale?: string | null;
     setLanguage?: Result<{ path: string; code: string; previous: string | null; created: boolean }>;
-    setApiKey?: Result<{ path: string; created: boolean; keyLength: number }>;
+    setSublineCode?: Result<{ path: string; created: boolean; codeLength: number }>;
     platform?: NodeJS.Platform;
 }
 
@@ -131,7 +131,7 @@ interface Harness {
     settingsOpened: number;
     patchCalls: Array<{ modBundleDir: string; overwriteForeignMod: boolean }>;
     languageWrites: string[];
-    keyWrites: string[];
+    codeWrites: string[];
     verifyCalls: Array<{ expectedBuildId: string; patchedAt: number; launchedAt: number }>;
     helperInstalls: number;
     launched: number;
@@ -152,7 +152,7 @@ function harness(script: Script = {}): Harness {
         settingsOpened: 0,
         patchCalls: [],
         languageWrites: [],
-        keyWrites: [],
+        codeWrites: [],
         verifyCalls: [],
         helperInstalls: 0,
         launched: 0,
@@ -198,11 +198,11 @@ function harness(script: Script = {}): Harness {
 
         discordLocale: () => (script.discordLocale === undefined ? "tr" : script.discordLocale),
         systemLocale: () => "en-GB",
-        setApiKey: (key: string) => {
-            h.keyWrites.push(key);
-            return script.setApiKey ?? {
+        setSublineCode: (code: string) => {
+            h.codeWrites.push(code);
+            return script.setSublineCode ?? {
                 ok: true,
-                value: { path: "/settings.json", created: false, keyLength: key.trim().length }
+                value: { path: "/settings.json", created: false, codeLength: code.trim().length }
             };
         },
         setLanguage: (code: string) => {
@@ -277,7 +277,7 @@ async function toDetection(h: Harness): Promise<FlowState> {
  */
 async function setLanguage(flow: { send: (a: any) => Promise<any> }, code = "tr"): Promise<any> {
     const next = await flow.send({ type: "set-language", code });
-    return next.step === "choose-key" ? flow.send({ type: "skip-key" }) : next;
+    return next.step === "choose-code" ? flow.send({ type: "skip-code" }) : next;
 }
 
 describe("the happy path", () => {
@@ -521,7 +521,7 @@ describe("a Discord we already patched", () => {
         expect(first.step).not.toBe("already-installed");
         expect(seen).not.toContain("already-installed");
         expect(seen).not.toContain("choose-language");
-        expect(seen).not.toContain("choose-key");
+        expect(seen).not.toContain("choose-code");
         expect(h.patchCalls.length).toBeGreaterThan(0);
     });
 
@@ -796,79 +796,82 @@ describe("Discord running", () => {
  * §4 — App Management
  * ------------------------------------------------------------------------ */
 
-describe("the optional key step", () => {
+describe("the optional Subline-code step", () => {
     /**
      * The step exists because the alternative was Vencord's plugin settings
      * inside Discord — dozens of plugins a Subline user never installed, by a
      * path nobody could guess. A setup that ends with the better tier off and
      * no findable way to switch it on has not finished.
      */
-    async function toKeyStep(h: Harness) {
+    async function toCodeStep(h: Harness) {
         await toDetection(h);
         return h.flow.send({ type: "set-language", code: "tr" });
     }
 
     it("is offered after the language, before anything is patched", async () => {
         const h = harness();
-        const state = await toKeyStep(h);
-        expect(state.step).toBe("choose-key");
+        const state = await toCodeStep(h);
+        expect(state.step).toBe("choose-code");
         // Cancel is deliberately absent: a real friend pressed it here twice
         // meaning "no key", aborting the install both times (field log,
         // 2026-09-03). The decline path is "Use Google only".
-        expect(state.actions).toEqual(["set-key", "skip-key"]);
+        expect(state.actions).toEqual(["set-code", "skip-code"]);
         // Nothing has been written to Discord yet.
         expect(h.patchCalls).toHaveLength(0);
     });
 
-    it("tells the user where to get one", async () => {
+    it("explains what to paste and that skipping is fine", async () => {
         const h = harness();
-        const state = await toKeyStep(h);
-        // Without this the step is a text box with no way to fill it.
-        expect(state.keySignupUrl).toBeDefined();
+        const state = await toCodeStep(h);
+        // No signup link exists yet (codes come from an invite/purchase), so the
+        // step must at least say what goes here and that skipping still works —
+        // otherwise it is a text box with no way to fill it.
+        expect(state.detail).toMatch(/code/i);
+        expect(state.detail).toMatch(/skip/i);
     });
 
     it("saves the key and carries on", async () => {
         const h = harness();
-        await toKeyStep(h);
-        const state = await h.flow.send({ type: "set-key", key: "gsk_abcdefghijklmnop" });
+        await toCodeStep(h);
+        const state = await h.flow.send({ type: "set-code", code: "slp_abcdefghijklmnop" });
 
-        expect(h.keyWrites).toEqual(["gsk_abcdefghijklmnop"]);
+        expect(h.codeWrites).toEqual(["slp_abcdefghijklmnop"]);
         expect(state.step).toBe("done");
     });
 
     it("skipping is a normal answer, not a failure", async () => {
         const h = harness();
-        await toKeyStep(h);
-        const state = await h.flow.send({ type: "skip-key" });
+        await toCodeStep(h);
+        const state = await h.flow.send({ type: "skip-code" });
 
-        expect(h.keyWrites).toEqual([]);
+        expect(h.codeWrites).toEqual([]);
         expect(state.step).toBe("done");
         // Google still translates everything, so this is not an error state.
         expect(state.error).toBeNull();
     });
 
     it("stays on the step when the key cannot be saved", async () => {
-        const h = harness({ setApiKey: { ok: false, error: fail("IO_ERROR", "settings are read-only") } });
-        await toKeyStep(h);
-        const state = await h.flow.send({ type: "set-key", key: "gsk_x" });
+        const h = harness({ setSublineCode: { ok: false, error: fail("IO_ERROR", "settings are read-only") } });
+        await toCodeStep(h);
+        const state = await h.flow.send({ type: "set-code", code: "slp_x" });
 
-        expect(state.step).toBe("choose-key");
+        expect(state.step).toBe("choose-code");
         expect(state.error?.code).toBe("IO_ERROR");
         // Still skippable — a failure to store a key must not trap the install.
-        expect(state.actions).toContain("skip-key");
+        expect(state.actions).toContain("skip-code");
         expect(h.patchCalls).toHaveLength(0);
     });
 
     it("never puts the key in the log", async () => {
         const h = harness();
-        await toKeyStep(h);
-        await h.flow.send({ type: "set-key", key: "gsk_SUPERSECRETVALUE" });
+        await toCodeStep(h);
+        await h.flow.send({ type: "set-code", code: "slp_SUPERSECRETVALUE" });
 
         const logged = JSON.stringify(h.logged);
-        expect(logged).not.toContain("gsk_SUPERSECRETVALUE");
+        expect(logged).not.toContain("slp_SUPERSECRETVALUE");
         // The LENGTH is recorded, which is what distinguishes "pasted" from
         // "pasted half of it" without storing a secret.
-        expect(logged).toContain("keyLength");
+        expect(logged).toContain("codeLength");
     });
 });
 

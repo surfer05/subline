@@ -63,7 +63,7 @@ const STEP_TITLES: Record<FlowState["step"], string> = {
     "discord-running": "Discord is running",
     "quit-blocked": "Discord is still running",
     "choose-language": "Your reading language",
-    "choose-key": "Better translations",
+    "choose-code": "Your Subline code",
     "permission-explain": "macOS needs your permission",
     "permission-waiting": "Waiting for permission",
     "permission-blocked": "Permission not granted",
@@ -83,7 +83,7 @@ const STEP_TITLES: Record<FlowState["step"], string> = {
 
 
 let chosenLanguage: string | null = null;
-let typedKey = "";
+let typedCode = "";
 
 /**
  * The heading, with one override.
@@ -178,41 +178,33 @@ function renderExtra(state: FlowState): void {
         extra.append(field);
     }
 
-    if (state.step === "choose-key") {
-        typedKey = "";
+    if (state.step === "choose-code") {
+        typedCode = "";
         const field = document.createElement("div");
         field.className = "fld";
 
         const label = document.createElement("label");
         label.className = "lbl";
-        label.textContent = "API key";
+        label.textContent = "Subline code";
 
         const input = document.createElement("input");
         input.className = "txt";
         input.type = "text";
-        input.placeholder = "gsk_…";
+        input.placeholder = "slp_…";
         // Not type="password": this is pasted once, and a masked field makes a
         // mis-paste impossible to spot — which is exactly the failure that had
         // a valid key reported as rejected.
         input.autocomplete = "off";
         input.spellcheck = false;
-        input.oninput = () => { typedKey = input.value; };
+        input.oninput = () => { typedCode = input.value; };
         input.onkeydown = event => {
-            if (event.key === "Enter" && typedKey.trim() !== "") void onAction("set-key");
+            if (event.key === "Enter" && typedCode.trim() !== "") void onAction("set-code");
         };
 
         const hint = document.createElement("p");
         hint.className = "note";
-        if (state.keySignupUrl !== undefined) {
-            const link = document.createElement("a");
-            link.href = "#";
-            link.textContent = "Get a free key";
-            link.onclick = event => {
-                event.preventDefault();
-                void api.openUrl(state.keySignupUrl as string);
-            };
-            hint.append(link, document.createTextNode(". It takes a minute, and costs nothing."));
-        }
+        hint.textContent = "No code? Skip below. Subline still translates everything with Google (≈), "
+            + "and you can paste a code anytime from Subline's settings in Discord.";
 
         field.append(label, input, hint);
         extra.append(field);
@@ -398,8 +390,8 @@ async function onAction(action: FlowActionType): Promise<void> {
         case "set-language":
             await act({ type: "set-language", code: chosenLanguage ?? "en" });
             return;
-        case "set-key":
-            await act({ type: "set-key", key: typedKey });
+        case "set-code":
+            await act({ type: "set-code", code: typedCode });
             return;
         case "finish":
             window.close();

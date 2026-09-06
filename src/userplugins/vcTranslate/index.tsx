@@ -1,6 +1,7 @@
 import type { ChatBarProps } from "@api/ChatButtons";
 import { addMessagePopoverButton, removeMessagePopoverButton } from "@api/MessagePopover";
-import { showNotice } from "@api/Notices";
+import * as DataStore from "@api/DataStore";
+import { popNotice, showNotice } from "@api/Notices";
 import { Logger } from "@utils/Logger";
 import definePlugin, { PluginNative } from "@utils/types";
 import { relaunch } from "@utils/native";
@@ -34,6 +35,7 @@ import {
 } from "./types";
 import { ENGINE_RANK, isRealTranslation, mayReplace } from "./upgrade";
 import { createUpdateWatch, UPDATE_CHECK_INTERVAL_MS, type UpdateWatch } from "./updateNotice";
+import { maybeShowUpgradeNudge } from "./upgradeNotice";
 
 const Native = VencordNative.pluginHelpers.VcTranslate as PluginNative<typeof import("./native")>;
 const logger = new Logger("VcTranslate");
@@ -45,6 +47,8 @@ let fastBatcher: Batcher | null = null;
 let qualityBatcher: Batcher | null = null;
 // Watches for a Subline update staged on disk but not yet loaded (updateNotice.ts).
 let updateWatch: UpdateWatch | null = null;
+// Persisted flag so the free-tier upgrade nudge (upgradeNotice.ts) shows once, ever.
+const UPGRADE_NUDGE_SEEN_KEY = "vcTranslate:upgradeNudgeSeen";
 let sessionFallback = false;   // set when the configured LLM engine is unusable this session
 /**
  * Which engine+key `sessionFallback` was set against.
@@ -2743,6 +2747,20 @@ export default definePlugin({
             clearInterval: handle => clearInterval(handle as ReturnType<typeof setInterval>)
         });
         updateWatch.start();
+
+        // One-time, dismissible pointer for free-tier users to the ✦ AI upgrade
+        // (upgradeNotice.ts). Fire-and-forget: never blocks start, never throws.
+        void maybeShowUpgradeNudge({
+            onFreeTier: () => effectiveEngine() === "google",
+            hasNudged: async () => (await DataStore.get<boolean>(UPGRADE_NUDGE_SEEN_KEY)) === true,
+            markNudged: () => DataStore.set(UPGRADE_NUDGE_SEEN_KEY, true),
+            showNudge: () => showNotice(
+                "Subline is translating with free Google (≈). Paste your Subline code in Subline's "
+                + "settings for ✦ AI-quality translation.",
+                "Got it",
+                () => popNotice()
+            )
+        });
 
         await loadEnabledChannels();
         // AWAITED, unlike the translation cache below: this decides whether the

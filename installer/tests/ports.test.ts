@@ -99,7 +99,7 @@ const RUNTIME_MOD_DIR = () => join(home, "Library", "Application Support", "Subl
  */
 async function setLanguage(flow: { send: (a: any) => Promise<any> }, code = "tr"): Promise<any> {
     const next = await flow.send({ type: "set-language", code });
-    return next.step === "choose-key" ? flow.send({ type: "skip-key" }) : next;
+    return next.step === "choose-code" ? flow.send({ type: "skip-code" }) : next;
 }
 
 describe("the real ports, end to end", () => {

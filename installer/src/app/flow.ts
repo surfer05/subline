@@ -41,7 +41,7 @@ import { awaitAppManagement } from "./appManagement.js";
 import type { QuitReport, RunningProcess } from "./discordProcess.js";
 import { findDiscordProcesses, quitDiscord } from "./discordProcess.js";
 import { defaultLanguage, endonymOf, languageOptions } from "./language.js";
-import type { LanguageOption, SetApiKeyReport, SetTargetLanguageReport } from "./language.js";
+import type { LanguageOption, SetSublineCodeReport, SetTargetLanguageReport } from "./language.js";
 import type { ModBundle } from "../bundle/bundle.js";
 import type { DiscordBranch, DiscordInstall } from "../patcher/locate.js";
 import type { PatchReport } from "../patcher/patch.js";
@@ -59,8 +59,6 @@ import type { AwaitVerifyOptions, VerificationReport } from "../verify/verify.js
  */
 const SETTLE_BEFORE_LAUNCH_MS = 2_500;
 
-/** Where a free key comes from. Shown on the key step so nobody has to search. */
-export const KEY_SIGNUP_URL = "https://console.groq.com/keys";
 
 /**
  * Everything a `PatcherError` knows, as log fields.
@@ -122,7 +120,7 @@ export type FlowStep =
      * path nobody could guess. A setup that ends with the better tier off and
      * no findable way to switch it on has not finished.
      */
-    | "choose-key"
+    | "choose-code"
     /* §3 step 7 / §4. */
     | "permission-explain"
     | "permission-waiting"
@@ -151,8 +149,8 @@ export type FlowActionType =
     | "force-quit-discord"
     | "recheck"
     | "set-language"
-    | "set-key"
-    | "skip-key"
+    | "set-code"
+    | "skip-code"
     | "open-permission-settings"
     | "retry"
     | "skip-helper"
@@ -169,8 +167,8 @@ export type FlowAction =
     | { type: "force-quit-discord" }
     | { type: "recheck" }
     | { type: "set-language"; code: string }
-    | { type: "set-key"; key: string }
-    | { type: "skip-key" }
+    | { type: "set-code"; code: string }
+    | { type: "skip-code" }
     | { type: "open-permission-settings" }
     | { type: "retry" }
     | { type: "skip-helper" }
@@ -205,8 +203,6 @@ export interface FlowState {
     permissionStatus?: AppManagementStatus;
     /** Deep link to the exact System Settings pane (§4). */
     permissionSettingsUrl?: string;
-    /** Where to get a key, for the `choose-key` step. */
-    keySignupUrl?: string;
     bundle?: ModBundle;
     patch?: PatchReport;
     /** What happened to the background helper (§3 step 8b). */
@@ -271,7 +267,7 @@ export interface FlowPorts {
     systemLocale(): string | null;
     setLanguage(code: string): Result<SetTargetLanguageReport>;
     /** Writes the quality tier's key. Never returns the key itself. */
-    setApiKey(key: string): Result<SetApiKeyReport>;
+    setSublineCode(key: string): Result<SetSublineCodeReport>;
 
     patch(install: DiscordInstall, options: { modBundleDir: string; overwriteForeignMod: boolean }): Result<PatchReport>;
     /**
@@ -421,8 +417,8 @@ export class InstallFlow {
                 return this.set(state({
                     step: "tiers",
                     detail: "≈ is Google Translate: instant, free, no account. ✦ is an AI model that reads the "
-                        + "conversation around a message, so slang and replies come out right. It needs a free key. "
-                        + "Subline asks about that during setup, and skipping is fine; a key can be added any time.",
+                        + "conversation around a message, so slang and replies come out right. It needs your Subline "
+                        + "code, which Subline asks for next; skipping is fine, and a code can be added any time.",
                     actions: ["next", "cancel"]
                 }));
 
@@ -483,13 +479,13 @@ export class InstallFlow {
                 if (action.type !== "set-language") return this.current;
                 return this.applyLanguage(action.code);
 
-            case "choose-key":
-                if (action.type === "set-key") return this.applyKey(action.key);
-                if (action.type === "skip-key") {
-                    // Skipping is a real answer, not a failure. Google still
-                    // translates everything; the better tier simply stays off
-                    // until somebody adds a key.
-                    this.ports.log.info("key.skipped");
+            case "choose-code":
+                if (action.type === "set-code") return this.applyCode(action.code);
+                if (action.type === "skip-code") {
+                    // Skipping is a real answer, not a failure. Google (≈) still
+                    // translates everything; the ✦ AI tier simply stays off
+                    // until somebody adds a code.
+                    this.ports.log.info("code.skipped");
                     return this.permissionStep();
                 }
                 return this.current;
@@ -829,19 +825,19 @@ export class InstallFlow {
         }
         this.chosenLanguage = saved.value.code;
         this.ports.log.info("language.saved", { lang: saved.value.code, created: saved.value.created });
-        return this.keyStep();
+        return this.codeStep();
     }
 
     /* -------------------------------------------------------------------- *
-     * The quality tier's key — optional, offered once
+     * The Subline code — optional, offered once
      * -------------------------------------------------------------------- */
 
-    private keyStep(error: PatcherError | null = null): FlowState {
+    private codeStep(error: PatcherError | null = null): FlowState {
         return this.set(state({
-            step: "choose-key",
-            detail: "Paste a free key to turn on the better translations, or skip. Subline still translates "
-                + "everything with Google either way, and you can add a key later.",
-            keySignupUrl: KEY_SIGNUP_URL,
+            step: "choose-code",
+            detail: "Paste your Subline code to turn on ✦ AI translation, or skip. Subline still "
+                + "translates everything with Google (≈) either way, and you can add a code later. "
+                + "Codes start with slp_.",
             error,
             // NO CANCEL ON THIS SCREEN. A real friend, on the first field
             // install, pressed Cancel here twice meaning "no key for me" and
@@ -850,22 +846,22 @@ export class InstallFlow {
             // is an optional extra, Cancel reads as "decline the extra", and
             // the decline path this screen actually offers is "Use Google
             // only". Someone who truly wants out can close the window.
-            actions: ["set-key", "skip-key"]
+            actions: ["set-code", "skip-code"]
         }));
     }
 
-    private async applyKey(key: string): Promise<FlowState> {
-        this.keyConfigured = true;
-        const saved = this.ports.setApiKey(key);
+    private async applyCode(code: string): Promise<FlowState> {
+        this.codeConfigured = true;
+        const saved = this.ports.setSublineCode(code);
         if (!saved.ok) {
-            // The key itself is never logged — see setApiKey. A refusal here is
-            // almost always an empty paste or an unwritable settings file, and
+            // The code itself is never logged — see setSublineCode. A refusal here
+            // is almost always an empty paste or an unwritable settings file, and
             // both are things the user can act on from the message.
-            this.ports.log.error("key.save-failed", errorFields(saved.error));
-            return this.keyStep(saved.error);
+            this.ports.log.error("code.save-failed", errorFields(saved.error));
+            return this.codeStep(saved.error);
         }
-        // LENGTH, never the key. Enough to tell "pasted" from "pasted half".
-        this.ports.log.info("key.saved", { keyLength: saved.value.keyLength, created: saved.value.created });
+        // LENGTH, never the code. Enough to tell "pasted" from "pasted half".
+        this.ports.log.info("code.saved", { codeLength: saved.value.codeLength, created: saved.value.created });
         return this.permissionStep();
     }
 
@@ -1160,7 +1156,7 @@ export class InstallFlow {
     }
 
     /** Set when the user pasted a key during install; decides verify's advice. */
-    private keyConfigured = false;
+    private codeConfigured = false;
 
     /**
      * This run is an update over an existing install. Language and key steps
@@ -1187,7 +1183,7 @@ export class InstallFlow {
             // written by somebody else's copy of the plugin cannot confirm this
             // install. Never a guess, in either direction.
             expectedBuildId: patch.pluginBuildId,
-            expectUpgrade: this.keyConfigured,
+            expectUpgrade: this.codeConfigured,
             patchedAt: this.patchedAt,
             launchedAt: this.launchedAt,
             sleep: ms => this.ports.sleep(ms),

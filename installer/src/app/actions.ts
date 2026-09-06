@@ -27,10 +27,10 @@ export const ACTION_LABELS: Record<FlowActionType, string> = {
     "force-quit-discord": "Close Discord anyway",
     recheck: "Check again",
     "set-language": "Continue",
-    "set-key": "Save key",
+    "set-code": "Save code",
     // Named for what it costs. "Continue" here would let somebody give up the
-    // better tier without noticing there was one.
-    "skip-key": "Use Google only",
+    // ✦ AI tier without noticing there was one.
+    "skip-code": "Use free Google only",
     "open-permission-settings": "Open System Settings",
     retry: "Try again",
     // Named for what it costs, not for what it skips. "Continue" here would let
@@ -61,8 +61,8 @@ const IS_PRIMARY: Record<FlowActionType, boolean> = {
     "force-quit-discord": true,
     recheck: false,
     "set-language": true,
-    "set-key": true,
-    "skip-key": false,
+    "set-code": true,
+    "skip-code": false,
     "open-permission-settings": true,
     retry: true,
     "skip-helper": false,
