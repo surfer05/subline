@@ -55,6 +55,24 @@ async function timingSafeEqual(a: string, b: string): Promise<boolean> {
     return out === 0;
 }
 
+/** Base64-encode raw bytes (the Standard-Webhooks signature encoding). */
+function bytesToBase64(bytes: Uint8Array): string {
+    let s = "";
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s);
+}
+
+/** Decode a Standard-Webhooks signing secret to its raw HMAC key bytes: strip
+ *  the optional `whsec_` prefix, then base64-decode the remainder. Throws on a
+ *  malformed (non-base64) secret so the caller can 503 rather than 401. */
+function decodeSecret(secret: string): Uint8Array {
+    const b64 = secret.startsWith("whsec_") ? secret.slice(6) : secret;
+    const bin = atob(b64); // throws on invalid base64 ⇒ treated as misconfig upstream
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+}
+
 function validBatch(v: unknown): v is BatchRequest {
     if (!v || typeof v !== "object") return false;
     const b = v as any;
@@ -201,46 +219,84 @@ export default {
             return fail("bad request", 400);
         }
 
-        // ---- POST /webhook/mor — Merchant-of-Record (Lemon Squeezy) ------
-        // Verify the HMAC signature over the RAW body, then mirror the event's
-        // lifecycle into KV (see applyMorEvent). Inert until MOR_WEBHOOK_SECRET
-        // is set. This router does signature + transport only; all state logic
-        // and idempotency live in codes.ts so they are unit-testable.
+        // ---- POST /webhook/mor — Merchant-of-Record (Dodo Payments) ------
+        // Verify the Standard-Webhooks signature over the RAW body, then mirror
+        // the event's lifecycle into KV (see applyMorEvent). Inert until
+        // MOR_WEBHOOK_SECRET is set. This router does signature + transport only;
+        // all state logic and idempotency live in codes.ts so they are unit-testable.
         if (url.pathname === "/webhook/mor") {
             if (req.method !== "POST") return fail("method not allowed", 405);
             // Secret unset ⇒ 503, never a silent 200: an unconfigured relay must
             // not look like it accepted (and dropped) a real purchase event.
             if (!env.MOR_WEBHOOK_SECRET) return fail("webhooks not configured", 503);
 
-            // Read the RAW bytes and sign THOSE — the HMAC must cover the exact
-            // body LS signed; re-serialising parsed JSON would change bytes and
-            // never match. (Read before any JSON.parse.)
+            // Read the RAW bytes and sign THOSE — the HMAC covers the exact body
+            // Dodo signed; re-serialising parsed JSON would change bytes and never
+            // match. (Read BEFORE any JSON.parse.)
             const rawBuf = await req.arrayBuffer();
             if (rawBuf.byteLength > MAX_BODY_BYTES) return fail("payload too large", 413);
             const raw = new TextDecoder().decode(rawBuf);
 
-            const sig = req.headers.get("x-signature") || "";
-            if (!sig) return fail("bad signature", 401); // missing header ⇒ reject, never process
-            const hkey = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.MOR_WEBHOOK_SECRET),
-                { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-            const mac = await crypto.subtle.sign("HMAC", hkey, new TextEncoder().encode(raw));
-            const expected = [...new Uint8Array(mac)].map(b => b.toString(16).padStart(2, "0")).join("");
-            // timingSafeEqual hashes both sides to a fixed 32 bytes first, so a
-            // wrong-LENGTH signature compares safely and never throws.
-            if (!(await timingSafeEqual(sig, expected))) return fail("bad signature", 401);
+            // Standard Webhooks headers. ALL three are required — a missing one is
+            // an unsigned/forged request and is rejected, never processed.
+            const webhookId = req.headers.get("webhook-id") || "";
+            const webhookTs = req.headers.get("webhook-timestamp") || "";
+            const sigHeader = req.headers.get("webhook-signature") || "";
+            if (!webhookId || !webhookTs || !sigHeader) return fail("bad signature", 401);
+
+            // REPLAY WINDOW (the security review's ask): reject a timestamp more
+            // than 5 minutes from now in EITHER direction. A captured valid body
+            // can be resent, but only within this window; combined with the
+            // terminal/forward-only state machine, replays stay harmless. A
+            // non-numeric timestamp is malformed ⇒ reject (never NaN-compare true).
+            const tsSecs = Number(webhookTs);
+            if (!Number.isFinite(tsSecs) || Math.abs(Date.now() - tsSecs * 1000) > 5 * 60_000) {
+                return fail("bad signature", 401);
+            }
+
+            // The signing secret is `whsec_<base64>`: strip the prefix and
+            // base64-decode to the raw HMAC key (confirmed against the
+            // standardwebhooks JS lib that Dodo's SDK uses — it does exactly
+            // this). A malformed secret is a config error ⇒ 503, never a silent
+            // accept and never an unhandled throw.
+            let hkey: CryptoKey;
+            try {
+                hkey = await crypto.subtle.importKey("raw", decodeSecret(env.MOR_WEBHOOK_SECRET),
+                    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+            } catch {
+                return fail("webhooks misconfigured", 503);
+            }
+
+            // Signed content = `${webhook-id}.${webhook-timestamp}.${rawBody}`
+            // (use the timestamp header STRING exactly as received). HMAC-SHA256
+            // → base64 = the expected `v1` signature.
+            const mac = await crypto.subtle.sign("HMAC", hkey, new TextEncoder().encode(`${webhookId}.${webhookTs}.${raw}`));
+            const expected = bytesToBase64(new Uint8Array(mac));
+            // webhook-signature is a SPACE-DELIMITED list of `v1,<base64>` entries
+            // (key rotation / multi-sig). Accept if ANY entry matches. Compare via
+            // timingSafeEqual, which SHA-256s both sides to a fixed 32 bytes first
+            // — so a wrong-LENGTH or garbage signature compares safely and never
+            // throws, and the compare leaks neither length nor content via timing.
+            let good = false;
+            for (const entry of sigHeader.split(" ")) {
+                const comma = entry.indexOf(",");
+                if (comma < 0 || entry.slice(0, comma) !== "v1") continue; // only the v1 scheme
+                if (await timingSafeEqual(entry.slice(comma + 1), expected)) { good = true; break; }
+            }
+            if (!good) return fail("bad signature", 401);
 
             let evt: any; try { evt = JSON.parse(raw); } catch { return fail("bad payload", 400); }
 
-            // Mirror the event. On an unexpected failure return 500 so LS RETRIES
-            // (dropping a paid-lifecycle event silently would strand access);
-            // log only the event name — never the key, email, body, or signature.
+            // Mirror the event. On an unexpected failure return 500 so Dodo RETRIES
+            // (dropping a paid-lifecycle event silently would strand access); log
+            // only the event name — never the key, email, body, or signature.
             try {
                 await applyMorEvent(env, evt, Date.now());
             } catch {
-                console.warn("mor webhook: mirror failed", { event: evt?.meta?.event_name });
+                console.warn("mor webhook: mirror failed", { event: evt?.type });
                 return fail("processing error", 500);
             }
-            // Delivery/emailing the customer is the MoR's job; LS ignores the
+            // Delivery/emailing the customer is the MoR's job; Dodo ignores the
             // response body, so we return a BARE 2xx — never the code (echoing a
             // freshly minted code in a 200 was a leak and served no purpose).
             return json({ ok: true });

@@ -21,7 +21,7 @@ translation** to Subline clients presenting an opaque per-user **code**.
 | `POST /v1/translate` | `Bearer <code>` | translate a batch → `{ok,results,used,cap}` |
 | `GET /v1/status` | `Bearer <code>` | `{ok,plan,used,cap,resetsInMs}` for the settings pane |
 | `POST /admin/codes` | `Bearer <ADMIN_TOKEN>` | mint / revoke codes |
-| `POST /webhook/mor` | HMAC signature | issue/revoke on purchase/refund (inert until configured) |
+| `POST /webhook/mor` | Dodo Standard-Webhooks signature | issue/revoke on purchase/refund (inert until configured) |
 
 Responses use the plugin's exact `NativeResponse` shape, so the client `relay`
 engine needs no reshaping.

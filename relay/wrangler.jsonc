@@ -2,9 +2,11 @@
   // Subline translation relay — Cloudflare Worker.
   // Deploy: see README.md. Secrets (GROQ_KEY, ADMIN_TOKEN, MOR_WEBHOOK_SECRET)
   // are set with `wrangler secret put`, NEVER in this file or git.
-  //   MOR_WEBHOOK_SECRET is the Lemon Squeezy webhook SIGNING SECRET (the value
-  //   you set when creating the webhook in the LS dashboard). The relay signs
-  //   the raw request body with it (HMAC-SHA256) and compares to X-Signature.
+  //   MOR_WEBHOOK_SECRET is the Dodo Payments webhook SIGNING SECRET — the
+  //   `whsec_...` value from the endpoint's Overview tab in the Dodo dashboard.
+  //   Dodo follows the Standard Webhooks spec: the relay HMAC-SHA256s
+  //   `${webhook-id}.${webhook-timestamp}.${rawBody}` with the base64-decoded
+  //   secret and compares (base64) against the `webhook-signature` header.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "subline-relay",
   "main": "src/index.ts",
@@ -19,16 +21,19 @@
     // conservative ~$15-25 launch wall. Raise it deliberately after watching
     // real Groq spend vs the cost-units in metrics (Analytics Engine).
     "GLOBAL_BUDGET_MESSAGES": "400000",
-    // Lemon Squeezy variant_id → { plan, dailyCap }. The webhook maps each paid
-    // license key to a plan + fair-use cap by its meta.variant_id. FILL IN the
-    // real numeric variant ids after creating the products in LS (the keys below
-    // are PLACEHOLDERS). An UNMAPPED or misconfigured variant fails SAFE: the
-    // code is minted at the free default cap (500/day) and flagged in its note —
-    // never at an unbounded cap. plan ∈ free|paid|monthly|annual|lifetime.
+    // Dodo Payments product_id → { plan, dailyCap }. The webhook maps each paid
+    // license key to a plan + fair-use cap by its data.product_id. FILL IN the
+    // real Dodo product ids after creating the products in the Dodo dashboard
+    // (the keys below are PLACEHOLDERS). An UNMAPPED or misconfigured product
+    // fails SAFE: the code is minted at the free default cap (500/day) and
+    // flagged in its note — never at an unbounded cap. A `monthly`/`annual` plan
+    // is treated as a SUBSCRIPTION (gets a finite provisional expiry + renews via
+    // subscription.* events); `lifetime` is a one-time purchase (never expires).
+    // plan ∈ free|paid|monthly|annual|lifetime.
     "VARIANTS": {
-      "REPLACE_MONTHLY_VARIANT_ID": { "plan": "monthly", "dailyCap": 1500 },
-      "REPLACE_ANNUAL_VARIANT_ID": { "plan": "annual", "dailyCap": 1500 },
-      "REPLACE_LIFETIME_VARIANT_ID": { "plan": "lifetime", "dailyCap": 1500 }
+      "REPLACE_MONTHLY_PRODUCT_ID": { "plan": "monthly", "dailyCap": 1500 },
+      "REPLACE_ANNUAL_PRODUCT_ID": { "plan": "annual", "dailyCap": 1500 },
+      "REPLACE_LIFETIME_PRODUCT_ID": { "plan": "lifetime", "dailyCap": 1500 }
     }
   },
   "durable_objects": { "bindings": [{ "name": "BUDGET", "class_name": "Budget" }] },
