@@ -2755,10 +2755,15 @@ export default definePlugin({
             hasNudged: async () => (await DataStore.get<boolean>(UPGRADE_NUDGE_SEEN_KEY)) === true,
             markNudged: () => DataStore.set(UPGRADE_NUDGE_SEEN_KEY, true),
             showNudge: () => showNotice(
-                "Subline is translating with free Google (≈). Paste your Subline code in Subline's "
-                + "settings for ✦ AI-quality translation.",
-                "Got it",
-                () => popNotice()
+                "Subline is translating with free Google (≈). Unlock sharper ✦ AI translation, "
+                + "cheaper than Nitro.",
+                "See plans",
+                () => {
+                    // Opens the pricing page in the browser; buyers paste the code they get
+                    // back into Subline's settings (the sublineCode field) to switch on ✦.
+                    (globalThis as any).VencordNative?.native?.openExternal?.("https://surfer05.github.io/subline#pricing");
+                    popNotice();
+                }
             )
         });
 
