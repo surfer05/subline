@@ -27,7 +27,7 @@ const DESIGN = join(ROOT, "design");
 const OUT = join(ROOT, "site", "index.html");
 
 /** Order on the page. Not alphabetical — this is the argument the page makes. */
-const SECTIONS = ["hero", "downloads", "security-warning", "privacy"];
+const SECTIONS = ["hero", "pricing", "downloads", "security-warning", "privacy"];
 
 const REPO = "surfer05/subline";
 

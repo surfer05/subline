@@ -1,0 +1,80 @@
+<!-- @dsCard group="Site" title="Pricing" viewport="980x780" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subline — Pricing</title>
+<link rel="stylesheet" href="../../tokens.css">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-sans);-webkit-font-smoothing:antialiased;line-height:1.6}
+.wrap{max-width:880px;margin:0 auto;padding:60px 30px}
+h2.sec{font-family:var(--font-serif);font-size:32px;line-height:1.14;letter-spacing:-.015em;font-weight:400;margin:0;max-width:22ch}
+.kicker{font-family:var(--font-mono);font-size:10px;letter-spacing:.19em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+p.lead{font-size:16px;color:var(--muted);max-width:60ch;margin:16px 0 0;text-wrap:pretty}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius)}
+.btn{font-family:inherit;font-size:15px;font-weight:500;padding:12px 22px;border-radius:var(--radius);
+  border:1px solid transparent;background:none;color:var(--fg);cursor:pointer;text-decoration:none;display:inline-block}
+.btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.btn-primary{background:var(--accent);color:var(--accent-fg)}
+.btn-primary:hover{filter:brightness(1.12)}
+.btn-secondary{background:var(--panel);border-color:var(--line-strong)}
+.btn-secondary:hover{border-color:var(--muted)}
+a{color:var(--accent)}
+a:hover{color:var(--fg)}
+.mono{font-family:var(--font-mono);font-size:12.5px}
+.fine{font-size:12.5px;color:var(--muted)}
+.wm-sm{font-family:var(--font-serif);font-size:17px;font-weight:400;letter-spacing:-.01em;display:inline-block;
+  padding-bottom:3px;border-bottom:1.5px solid var(--accent);line-height:1}
+@media (max-width:640px){.wrap{padding:44px 20px}h2.sec{font-size:25px}}
+
+.gl{font-family:var(--font-mono);font-size:11px;color:var(--accent);flex:none}
+.card{padding:20px;display:flex;flex-direction:column;gap:4px}
+.card h3{margin:0;font-family:var(--font-serif);font-size:18px;font-weight:400}
+.card p{margin:0;font-size:13px;color:var(--muted)}
+.card .btn{margin-top:14px;align-self:flex-start;font-size:14px;padding:10px 18px}
+.anchor{font-family:var(--font-serif);font-size:19px;line-height:1.42;font-weight:400;margin:26px 0 0;max-width:44ch;
+  padding-left:14px;border-left:3px solid var(--accent)}
+.anchor b{font-weight:600}
+.plans{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:26px}
+@media (max-width:700px){.plans{grid-template-columns:1fr}}
+.plans .card{min-width:0;overflow-wrap:anywhere}
+.badge{align-self:flex-start;font-family:var(--font-mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--accent);background:var(--accent-weak);border:1px solid color-mix(in oklab,var(--accent) 40%,var(--line));
+  border-radius:999px;padding:3px 9px;margin-bottom:4px}
+.price{font-family:var(--font-serif);font-size:26px;font-weight:400;letter-spacing:-.01em;color:var(--fg);margin-top:2px}
+.price .per{font-family:var(--font-sans);font-size:13px;font-weight:400;color:var(--muted);margin-left:2px}
+</style>
+</head>
+<body>
+<p class="kicker">Upgrade</p>
+<h2 class="sec">Turn on the sharper translation</h2>
+<p class="lead">The free tier is instant Google translation — the <span class="gl">○</span> line under every message — and it stays free forever. The paid tier is an AI that reads the surrounding conversation, so slang, replies and tone come out right: the <span class="gl">●</span> line. You switch it on by pasting a code. No API key, no setup.</p>
+<p class="anchor"><b>Less than Discord Nitro Basic</b> — and it actually reads your friends' messages.</p>
+<!-- TODO go-live: swap test.checkout → checkout and to live product ids -->
+<div class="plans">
+  <div class="panel card">
+    <h3>Monthly</h3>
+    <div class="price">$1.99<span class="per">/mo</span></div>
+    <p>Try it, cancel anytime.</p>
+    <a class="btn btn-secondary" href="https://test.checkout.dodopayments.com/buy/pdt_0NnIsRwbVPPj5DiRqfTK4?quantity=1">Get Monthly</a>
+  </div>
+  <div class="panel card">
+    <span class="badge">Best value · ~$1/mo</span>
+    <h3>Annual</h3>
+    <div class="price">$9.99<span class="per">/yr</span></div>
+    <p>Twelve months up front.</p>
+    <a class="btn btn-primary" href="https://test.checkout.dodopayments.com/buy/pdt_0NnFPWmBGAvS6n0XioM7E?quantity=1">Get Annual</a>
+  </div>
+  <div class="panel card">
+    <h3>Lifetime</h3>
+    <div class="price">$19.99</div>
+    <p>One-time. Yours forever.</p>
+    <a class="btn btn-secondary" href="https://test.checkout.dodopayments.com/buy/pdt_0NnFNIFZempWa5YVSk4AE?quantity=1">Get Lifetime</a>
+  </div>
+</div>
+<p class="fine">Free <span class="gl">○</span> Google translation never expires — paying just unlocks the <span class="gl">●</span> AI. Prices in USD; tax added at checkout.</p>
+</body>
+</html>
