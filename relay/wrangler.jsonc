@@ -31,6 +31,7 @@
     // subscription.* events); `lifetime` is a one-time purchase (never expires).
     // plan ∈ free|paid|monthly|annual|lifetime.
     "VARIANTS": {
+      "pdt_0NnIsRwbVPPj5DiRqfTK4": { "plan": "monthly", "dailyCap": 2000 },
       "pdt_0NnFPWmBGAvS6n0XioM7E": { "plan": "annual", "dailyCap": 2000 },
       "pdt_0NnFNIFZempWa5YVSk4AE": { "plan": "lifetime", "dailyCap": 2000 }
     }
