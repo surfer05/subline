@@ -162,12 +162,23 @@ a:hover{color:var(--fg)}
 .lc{font-family:var(--font-mono);font-size:11px;letter-spacing:.03em;flex:none;opacity:.85}
 .cap{font-size:12.5px;color:var(--muted);margin:12px 0 0}
 @media (max-width:640px){.hero h1{font-size:34px}}
-.dl{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:26px}
-@media (max-width:700px){.dl{grid-template-columns:1fr}}
 .card{padding:20px;display:flex;flex-direction:column;gap:4px}
 .card h3{margin:0;font-family:var(--font-serif);font-size:18px;font-weight:400}
 .card p{margin:0;font-size:13px;color:var(--muted)}
 .card .btn{margin-top:14px;align-self:flex-start;font-size:14px;padding:10px 18px}
+.anchor{font-family:var(--font-serif);font-size:19px;line-height:1.42;font-weight:400;margin:26px 0 0;max-width:44ch;
+  padding-left:14px;border-left:3px solid var(--accent)}
+.anchor b{font-weight:600}
+.plans{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:26px}
+@media (max-width:700px){.plans{grid-template-columns:1fr}}
+.plans .card{min-width:0;overflow-wrap:anywhere}
+.badge{align-self:flex-start;font-family:var(--font-mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--accent);background:var(--accent-weak);border:1px solid color-mix(in oklab,var(--accent) 40%,var(--line));
+  border-radius:999px;padding:3px 9px;margin-bottom:4px}
+.price{font-family:var(--font-serif);font-size:26px;font-weight:400;letter-spacing:-.01em;color:var(--fg);margin-top:2px}
+.price .per{font-family:var(--font-sans);font-size:13px;font-weight:400;color:var(--muted);margin-left:2px}
+.dl{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:26px}
+@media (max-width:700px){.dl{grid-template-columns:1fr}}
 .ver{font-family:var(--font-mono);font-size:11px;color:var(--muted);margin-top:10px}
 .ver[data-state="pending"]{opacity:.6}
 details.which{margin-top:22px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel)}
@@ -239,8 +250,41 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
     <div class="tx" dir="rtl">لما نبدأ نكتب، بنعمل خليط من العربي والفرنسي</div>
     <div class="sl"><span class="gl">●</span><span class="lc">ar</span><span>when we start writing, we end up mixing Arabic and French</span></div></div></div>
 </div>
-<p class="cap"><span class="gl" style="font-family:var(--font-mono);color:var(--accent)">○</span> Instant, from Google. <span class="gl" style="font-family:var(--font-mono);color:var(--accent);margin-left:10px">●</span> Sharper, from an AI — add a free key when you want it.</p>
+<p class="cap"><span class="gl" style="font-family:var(--font-mono);color:var(--accent)">○</span> Instant, from Google. <span class="gl" style="font-family:var(--font-mono);color:var(--accent);margin-left:10px">●</span> Sharper, from an AI — a cheap upgrade when you want it.</p>
 <p class="fine" style="margin-top:26px">An independent project. Not affiliated with Discord.</p>
+</div>
+</section>
+
+<!-- pricing -->
+<section id="pricing">
+<div class="wrap">
+<p class="kicker">Upgrade</p>
+<h2 class="sec">Turn on the sharper translation</h2>
+<p class="lead">The free tier is instant Google translation — the <span class="gl">○</span> line under every message — and it stays free forever. The paid tier is an AI that reads the surrounding conversation, so slang, replies and tone come out right: the <span class="gl">●</span> line. You switch it on by pasting a code. No API key, no setup.</p>
+<p class="anchor"><b>Less than Discord Nitro Basic</b> — and it actually reads your friends' messages.</p>
+<!-- TODO go-live: swap test.checkout → checkout and to live product ids -->
+<div class="plans">
+  <div class="panel card">
+    <h3>Monthly</h3>
+    <div class="price">$1.99<span class="per">/mo</span></div>
+    <p>Try it, cancel anytime.</p>
+    <a class="btn btn-secondary" href="https://test.checkout.dodopayments.com/buy/pdt_0NnIsRwbVPPj5DiRqfTK4?quantity=1">Get Monthly</a>
+  </div>
+  <div class="panel card">
+    <span class="badge">Best value · ~$1/mo</span>
+    <h3>Annual</h3>
+    <div class="price">$9.99<span class="per">/yr</span></div>
+    <p>Twelve months up front.</p>
+    <a class="btn btn-primary" href="https://test.checkout.dodopayments.com/buy/pdt_0NnFPWmBGAvS6n0XioM7E?quantity=1">Get Annual</a>
+  </div>
+  <div class="panel card">
+    <h3>Lifetime</h3>
+    <div class="price">$19.99</div>
+    <p>One-time. Yours forever.</p>
+    <a class="btn btn-secondary" href="https://test.checkout.dodopayments.com/buy/pdt_0NnFNIFZempWa5YVSk4AE?quantity=1">Get Lifetime</a>
+  </div>
+</div>
+<p class="fine">Free <span class="gl">○</span> Google translation never expires — paying just unlocks the <span class="gl">●</span> AI. Prices in USD; tax added at checkout.</p>
 </div>
 </section>
 
@@ -300,9 +344,9 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 <table class="pv">
 <thead><tr><th>What</th><th>Goes where</th><th>Stored?</th></tr></thead>
 <tbody>
-<tr><td>Message text</td><td>Google for the instant line. The AI you pick (Groq, Gemini or Claude) for the sharper one, only if you add a key.</td><td>Not by me. No server, nothing saved.</td></tr>
+<tr><td>Message text</td><td><b>Google</b> for the instant ○ line. For the sharper ● line, <b>Subline's own relay</b>, which forwards it to Groq and returns the translation.</td><td>No. The relay keeps no logs of message text and stores nothing — it counts usage only.</td></tr>
 <tr><td>Who sent it</td><td>Nowhere. Names, avatars, servers — never sent.</td><td>—</td></tr>
-<tr><td>Your API key</td><td>Stays on your machine, in Discord's own settings. Goes only to your AI, only when you translate.</td><td>Your machine.</td></tr>
+<tr><td>Your Subline code</td><td>Just an access token to unlock the ● AI — no name, email or personal info is attached. Goes to the relay only when you translate.</td><td>A usage count, nothing more.</td></tr>
 <tr><td>Usage data</td><td>None. No analytics, no tracking, nothing.</td><td>—</td></tr>
 </tbody></table>
 <ul class="off">
@@ -310,6 +354,7 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
   <li><span class="t">off</span><div><b>Your own language never leaves.</b> Subline checks on your machine first and skips it.</div></li>
   <li><span class="t">you</span><div><b>Kill it per channel.</b> Nothing leaves a channel you've switched off.</div></li>
 </ul>
+<p class="fine" style="margin-top:30px;max-width:64ch">Subline is an independent, open-source project (GPL-3.0). It is not affiliated with, endorsed by, or connected to Discord. It's a client modification you install yourself — use it at your own discretion.</p>
 </div>
 </section>
 
