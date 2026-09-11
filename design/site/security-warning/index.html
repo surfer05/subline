@@ -4,7 +4,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Subline Security warning walkthrough</title>
+<title>Subline security warning</title>
 <link rel="stylesheet" href="../../tokens.css">
 <style>
 *,*::before,*::after{box-sizing:border-box}
@@ -54,24 +54,24 @@ blockquote.os .src{display:block;font-family:var(--font-mono);font-size:10.5px;l
 </head>
 <body>
 <p class="kicker">Installing</p>
-<h2 class="sec">About that warning</h2>
-<p class="lead">The builds aren't code-signed yet. I haven't paid for a certificate, so your computer warns you once. It means "unverified," not "unsafe." Here's the click-through.</p>
+<h2 class="sec">The security warning</h2>
+<p class="lead">The builds aren't code-signed. I haven't paid for a certificate, so your computer shows a warning the first time you open the app. It's the unknown-developer warning, not a malware detection. Here are the steps.</p>
 <div class="tabs" role="tablist"><button class="tab" role="tab" data-tab="macos" aria-selected="true">macOS</button><button class="tab" role="tab" data-tab="windows" aria-selected="false">Windows</button></div>
 <ol class="steps" data-panel="macos">
   <li><div><h3>Drag Subline to Applications.</h3>
     <p>From the .dmg you downloaded.</p></div></li>
   <li><div><h3>Right-click Subline → Open.</h3>
     <blockquote class="os"><span class="src">macOS says</span>Apple could not verify "Subline" is free of malware…</blockquote>
-    <p>Right-click, not double-click. That gives you an <b>Open</b> button the double-click doesn't.</p></div></li>
-  <li><div><h3>Still stuck? Settings → Privacy &amp; Security → Open Anyway.</h3>
-    <p>Confirm with your password. Once, for this app, done.</p></div></li>
+    <p>Use right-click, not double-click. Right-click gives you an <b>Open</b> button.</p></div></li>
+  <li><div><h3>If that doesn't work: Settings → Privacy &amp; Security → Open Anyway.</h3>
+    <p>Confirm with your password. You only do this once.</p></div></li>
 </ol>
 <ol class="steps" data-panel="windows" hidden>
   <li><div><h3>Run Subline-Setup.exe.</h3>
     <blockquote class="os"><span class="src">Windows says</span>Windows protected your PC.</blockquote>
-    <p><b>More info</b> → <b>Run anyway</b>. That's the whole trick.</p></div></li>
+    <p>Click <b>More info</b>, then <b>Run anyway</b>.</p></div></li>
   <li><div><h3>Click Install.</h3>
-    <p>It closes Discord, patches it, reopens it. You're done.</p></div></li>
+    <p>It closes Discord, patches it, and reopens it.</p></div></li>
 </ol>
 </body>
 </html>
