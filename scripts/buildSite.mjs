@@ -117,7 +117,7 @@ const page = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Subline — read every Discord message in your language</title>
+<title>Subline: read Discord in your language</title>
 <meta name="description" content="Subline puts a translation underneath any Discord message written in a language you don't read. It runs inside the Discord you already have.">
 <meta property="og:title" content="Subline">
 <meta property="og:description" content="Read what your friends are actually saying.">
@@ -158,7 +158,7 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}">\n<div class="wrap
   }
 
   // GitHub's /releases/latest/download/<name> shortcut needs the literal asset
-  // name, and ours carry the version — so anything hardcoded here would keep
+  // name, and ours carry the version, so anything hardcoded here would keep
   // serving an old build forever. Resolve at runtime instead.
   fetch("https://api.github.com/repos/" + REPO + "/releases/latest", {
     headers: { Accept: "application/vnd.github+json" }

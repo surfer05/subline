@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Subline — read every Discord message in your language</title>
+<title>Subline: read Discord in your language</title>
 <meta name="description" content="Subline puts a translation underneath any Discord message written in a language you don't read. It runs inside the Discord you already have.">
 <meta property="og:title" content="Subline">
 <meta property="og:description" content="Read what your friends are actually saying.">
@@ -13,11 +13,11 @@
      the next `pnpm build:site` will overwrite it. Change design/ instead. -->
 
 <style>
-/* Subline — design tokens · "Paper"
+/* Subline - design tokens · "Paper"
    Single source of truth. Both surfaces (installer renderer + site) import this
    and define no colour of their own.
 
-   Contract: docs/DESIGN-SYSTEM.md §2. The list is additive — never rename or drop.
+   Contract: docs/DESIGN-SYSTEM.md §2. The list is additive - never rename or drop.
    No external requests: system font stacks only (strict CSP). --font-serif resolves
    to a face that ships with macOS and Windows, and falls back to Georgia. */
 
@@ -25,20 +25,20 @@
   color-scheme: light dark;
 
   /* surfaces */
-  --bg:            #faf7f0;   /* page / window background — warm stock */
+  --bg:            #faf7f0;   /* page / window background - warm stock */
   --panel:         #fffdf7;   /* raised block: sample, callout, list rows */
   --line:          #e4dccb;   /* borders and rules */
   --line-strong:   #cfc5ae;   /* emphasised rule, input borders */
   --desk:          #eae3d4;   /* ground behind the installer window (previews) */
 
   /* text */
-  --fg:            #1c1813;   /* primary text — warm ink */
+  --fg:            #1c1813;   /* primary text - warm ink */
   --muted:         #6b6355;   /* secondary text, captions, help */
 
-  /* meaning — semantics, not decoration */
+  /* meaning - semantics, not decoration */
   --accent:        #14544f;   /* primary action, brand */
   --accent-fg:     #fbf8f1;   /* text on --accent */
-  --ok:            #1a6b41;   /* verified success — §4.1 */
+  --ok:            #1a6b41;   /* verified success - §4.1 */
   --warn:          #8a6410;   /* recoverable problem, caution */
   --danger:        #8a2f24;   /* destructive or hard failure */
 
@@ -377,7 +377,7 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
   }
 
   // GitHub's /releases/latest/download/<name> shortcut needs the literal asset
-  // name, and ours carry the version — so anything hardcoded here would keep
+  // name, and ours carry the version, so anything hardcoded here would keep
   // serving an old build forever. Resolve at runtime instead.
   fetch("https://api.github.com/repos/" + REPO + "/releases/latest", {
     headers: { Accept: "application/vnd.github+json" }
