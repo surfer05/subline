@@ -5,10 +5,11 @@ import { popNotice, showNotice } from "@api/Notices";
 import { Logger } from "@utils/Logger";
 import definePlugin, { PluginNative } from "@utils/types";
 import { relaunch } from "@utils/native";
-import { ChannelStore, FluxDispatcher, LocaleStore, MessageStore, React, SelectedChannelStore, Toasts, UserStore } from "@webpack/common";
+import { ChannelStore, FluxDispatcher, GuildMemberStore, GuildRoleStore, LocaleStore, MessageStore, React, SelectedChannelStore, Toasts, UserStore } from "@webpack/common";
 import type { Message } from "@vencord/discord-types";
 
 import { createBatcher, type Batcher } from "./batcher";
+import { renderDiscordMarkup, type MarkupResolvers } from "./discordMarkup";
 import { isChannelEnabled, loadEnabledChannels, toggleChannel } from "./channels";
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
 import { isConfidentlyTargetLanguage } from "./detectLang";
@@ -1607,6 +1608,54 @@ function rebuildBatcher() {
 }
 
 /**
+ * Bind renderDiscordMarkup's resolver callbacks to the live Discord stores for
+ * one channel. Snowflake -> readable-name lookups need the guild the channel
+ * belongs to (a nickname and a role are both guild-scoped); a DM has none, so
+ * user mentions fall back to the global name/username and roles to the neutral
+ * placeholder. Every lookup is defensive — renderDiscordMarkup also wraps each
+ * call — so a store that has not loaded yet degrades to the placeholder rather
+ * than throwing.
+ */
+function markupResolversFor(channelId: string): MarkupResolvers {
+    let guildId: string | undefined;
+    try {
+        guildId = (ChannelStore.getChannel(channelId) as { guild_id?: string } | undefined)?.guild_id;
+    } catch {
+        guildId = undefined;
+    }
+    return {
+        user(id) {
+            // Guild nickname first (what Discord's own client shows in that
+            // server), then the account's global display name, then username.
+            if (guildId) {
+                const nick = GuildMemberStore.getNick(guildId, id);
+                if (nick) return nick;
+            }
+            const u = UserStore.getUser(id) as { globalName?: string | null; username?: string } | undefined;
+            return u?.globalName ?? u?.username ?? undefined;
+        },
+        channel(id) {
+            return (ChannelStore.getChannel(id) as { name?: string } | undefined)?.name ?? undefined;
+        },
+        role(id) {
+            if (!guildId) return undefined;
+            return (GuildRoleStore.getRole(guildId, id) as { name?: string } | undefined)?.name ?? undefined;
+        }
+    };
+}
+
+/**
+ * Rewrite Discord entity markup (`<@id>`, `<#id>`, `<@&id>`, `<:name:id>`) in a
+ * message's content to the readable text Discord itself paints, so the
+ * translator sees and returns "@deniz"/"#general"/":blob:" instead of a numeric
+ * id it would mistranslate or mangle. See discordMarkup.ts for why this is
+ * resolve-before-translate rather than mask-and-restore.
+ */
+function readableContent(text: string, channelId: string): string {
+    return renderDiscordMarkup(text, markupResolversFor(channelId));
+}
+
+/**
  * The single path from "this message needs handling" to the batcher, shared by
  * MESSAGE_CREATE, MESSAGE_UPDATE and catch-up. Keeping it in one place is what
  * stops the skip rule, the in-flight guard and the context bookkeeping from
@@ -1637,6 +1686,19 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true) {
     // not writing keeps a local guess out of the persisted cache, where a
     // heuristic mistake would otherwise outlive the session.
     const skipReason = localSkipReason(pending.text, isOwn);
+
+    // Rewrite Discord entity markup to readable text for EVERYTHING downstream:
+    // the batch text sent to the translator, the phrase-cache key, and the
+    // conversation context handed to other messages' batches. Done AFTER the
+    // skip decision above ON PURPOSE — shouldSkip/isConfidentlyTargetLanguage
+    // must keep judging the raw content (a bare "<@123>" is still nothing to
+    // translate and is still skipped; this is the separate transform skip.ts's
+    // header calls out). renderDiscordMarkup never throws and never emits the
+    // numeric id, so this cannot change whether a message is enqueued, only
+    // what text it carries once it is.
+    const readable = readableContent(pending.text, pending.channelId);
+    if (readable !== pending.text) pending = { ...pending, text: readable };
+
     if (skipReason !== null) {
         // Guarded, not just quiet: with the setting off this must cost
         // nothing beyond the one boolean read below — no template string is
@@ -1847,7 +1909,9 @@ function contextBefore(message: any, size: number): { author: string; text: stri
     return all
         .slice(Math.max(0, index - size), index)
         .filter(m => typeof m?.content === "string" && m.content.trim() !== "")
-        .map(m => ({ author: m.author?.username ?? "unknown", text: m.content as string }));
+        // Same readable-markup rewrite the enqueue path applies, so forced-path
+        // context shows the model "@deniz"/"#general" instead of raw "<@123>".
+        .map(m => ({ author: m.author?.username ?? "unknown", text: readableContent(m.content as string, channelId) }));
 }
 
 function onMessageCreate({ message, optimistic }: { message: Message; optimistic?: boolean; }) {

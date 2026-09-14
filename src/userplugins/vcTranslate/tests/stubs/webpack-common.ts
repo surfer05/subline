@@ -45,8 +45,42 @@ export const Toasts = {
 
 export const stubCurrentUser: { id: string } | undefined = { id: "me" };
 
+/** userId -> display fields, so a test can drive `<@id>` mention resolution. */
+export const stubUsers = new Map<string, { username?: string; globalName?: string | null }>();
+
+export function __stubSetUser(id: string, fields: { username?: string; globalName?: string | null }): void {
+    stubUsers.set(id, fields);
+}
+
 export const UserStore = {
-    getCurrentUser: () => stubCurrentUser
+    getCurrentUser: () => stubCurrentUser,
+    getUser: (id: string) => stubUsers.get(id)
+};
+
+/* ----------------------------------------------------- GuildMemberStore -- */
+
+/** `${guildId}:${userId}` -> nickname, for `<@id>` resolving to a guild nick. */
+export const stubNicks = new Map<string, string>();
+
+export function __stubSetNick(guildId: string, userId: string, nick: string): void {
+    stubNicks.set(`${guildId}:${userId}`, nick);
+}
+
+export const GuildMemberStore = {
+    getNick: (guildId: string, userId: string) => stubNicks.get(`${guildId}:${userId}`) ?? null
+};
+
+/* ------------------------------------------------------- GuildRoleStore -- */
+
+/** `${guildId}:${roleId}` -> role, for `<@&id>` resolving to a role name. */
+export const stubRoles = new Map<string, { name?: string }>();
+
+export function __stubSetRole(guildId: string, roleId: string, name: string): void {
+    stubRoles.set(`${guildId}:${roleId}`, { name });
+}
+
+export const GuildRoleStore = {
+    getRole: (guildId: string, roleId: string) => stubRoles.get(`${guildId}:${roleId}`)
 };
 
 /* ---------------------------------------------------------- MessageStore -- */
@@ -68,13 +102,22 @@ export const MessageStore = {
 // so the stub has to model it or that guard is untestable.
 const dmChannels = new Set<string>();
 
+/** channelId -> name, for `<#id>` mention resolution. Optional; absent = no name. */
+const channelNames = new Map<string, string>();
+
 export function __stubMarkAsDm(channelId: string): void {
     dmChannels.add(channelId);
 }
 
+export function __stubSetChannelName(channelId: string, name: string): void {
+    channelNames.set(channelId, name);
+}
+
 export const ChannelStore = {
     getChannel: (id: string) =>
-        dmChannels.has(id) ? { id } : { id, guild_id: "stub-guild" }
+        dmChannels.has(id)
+            ? { id, name: channelNames.get(id) }
+            : { id, guild_id: "stub-guild", name: channelNames.get(id) }
 };
 
 /* -------------------------------------------------- SelectedChannelStore -- */
@@ -123,6 +166,10 @@ export const LocaleStore = { locale: "en-US" };
 
 export function __resetWebpackCommon(): void {
     dmChannels.clear();
+    channelNames.clear();
+    stubUsers.clear();
+    stubNicks.clear();
+    stubRoles.clear();
     selectedChannelId = null;
     shownToasts.length = 0;
     stubMessages.clear();
