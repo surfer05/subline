@@ -344,11 +344,22 @@ describe("source language and detection confidence", () => {
         expect(urlOf(fetchImpl)).not.toContain("query.sourceLanguage=auto");
     });
 
-    it("passes the detection confidence through so the renderer can flag a guess", async () => {
-        // 0.217 is the number the live endpoint actually returned for "ne".
+    it("SUPPRESSES a low-confidence translation instead of showing a guess", async () => {
+        // 0.217 is the number the live endpoint actually returned for "ne" ->
+        // Hausa "it is" (the OPPOSITE of German "no"). Below GOOGLE_MIN_CONFIDENCE
+        // the line is not shown at all: a missing translation is invisible, a
+        // wrong one asserts a meaning the speaker never had.
         const fetchImpl = vi.fn().mockResolvedValue(okResponse("it is", "ha", 0.21705426));
         const [result] = await translateWithGoogle(req(["ne"]), fetchImpl as any);
-        expect(result).toMatchObject({ lang: "ha", text: "it is", conf: 0.21705426 });
+        expect(result).toEqual({ id: "0", skip: true });
+    });
+
+    it("shows a HIGH-confidence translation and passes its confidence through", async () => {
+        // Same response shape, confidence above the gate: the real translation
+        // is shown, and conf still rides along for the renderer.
+        const fetchImpl = vi.fn().mockResolvedValue(okResponse("no", "de", 0.95));
+        const [result] = await translateWithGoogle(req(["nein"]), fetchImpl as any);
+        expect(result).toEqual({ id: "0", lang: "de", text: "no", skip: false, conf: 0.95 });
     });
 
     it("reports no confidence when the response carries none", async () => {

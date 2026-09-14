@@ -42,7 +42,16 @@ export function buildPrompt(req: BatchRequest): string {
         "",
         "Rules:",
         `- Translate each message into ${tgt}.`,
-        `- If a message is already in ${tgt}, set skip to true and text to "".`,
+        "- Set skip to true and text to \"\" whenever a message does NOT need translating into "
+        + tgt + ". That covers two cases. (1) The message is already written in "
+        + tgt + " — INCLUDING slang, abbreviations, and memes written in "
+        + tgt + ". (2) The message is not really another language: a proper noun, "
+        + "username, brand or game name, an emoji or reaction, or a short abbreviation or bit of "
+        + "gibberish with no translatable meaning. Only translate a message genuinely written in a "
+        + "DIFFERENT language than " + tgt + " — foreign-language slang still gets "
+        + "translated. Use your own knowledge of the language, not a fixed word list: for an English "
+        + "reader, things like \"og\", \"gng\", \"less go\" are English and should skip; for a reader "
+        + "whose language is not English, English text should still be translated.",
         "- Write what a native speaker would actually say in " + tgt + ", not a word-by-word rendering.",
         "- Everyday address terms are the most common mistake. A word that literally means "
         + "'children', 'sacrifice', 'my eyes', 'my soul' is usually just 'guys', 'mate', 'dude' "

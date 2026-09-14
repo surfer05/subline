@@ -49,6 +49,33 @@ describe("mayReplace", () => {
         // An edited message is re-requested; the new answer must land.
         expect(mayReplace(gemini, { lang: "de", text: "yep", via: "gemini" })).toBe(true);
     });
+
+    it("lets an LLM SKIP retract a shown Google line", () => {
+        // FIX: when the ✦ tier decides a message should not be translated at all
+        // (English slang/name/meme Google mistranslated), its skip must be able
+        // to blank the Google line already on screen. A strictly-higher-rank
+        // skip retracts a real translation.
+        expect(mayReplace(google, { skipped: true, via: "gemini" })).toBe(true);
+        expect(mayReplace(google, { skipped: true, via: "relay" })).toBe(true);
+    });
+
+    it("still refuses a Google SKIP over an LLM line (equal-or-lower rank never retracts)", () => {
+        expect(mayReplace(gemini, { skipped: true, via: "google" })).toBe(false);
+        // An equal-rank skip (relay over gemini, both rank 1) must not erase either.
+        expect(mayReplace(gemini, { skipped: true, via: "relay" })).toBe(false);
+    });
+
+    it("keeps the LLM real-translation upgrade path intact", () => {
+        expect(mayReplace(google, { lang: "de", text: "nope", via: "relay" })).toBe(true);
+        expect(mayReplace(gemini, google)).toBe(false);
+    });
+
+    it("still never lets a failed/deferred marker retract a real translation", () => {
+        expect(mayReplace(google, { failed: true })).toBe(false);
+        expect(mayReplace(google, { deferred: true })).toBe(false);
+        // Even a would-be higher-rank failure is still a failure, not a skip.
+        expect(mayReplace(gemini, { failed: true })).toBe(false);
+    });
 });
 
 describe("isRealTranslation", () => {

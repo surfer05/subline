@@ -179,7 +179,7 @@ describe("subscription lifecycle (join via data.subscription_id, expiry from nex
     it("cancelled ≠ expired: does NOT revoke, keeps access until next_billing_date (period end)", async () => {
         const kv = fakeKV();
         await applyMorEvent(env(kv), licenseCreated(), NOW);
-        const ends = NOW + 5 * 86_400_000;
+        const ends = Date.now() + 5 * 86_400_000; // real-now-relative: authCode uses the wall clock, so a fixed-NOW date would drift into the past
         await applyMorEvent(env(kv), subEvent("subscription.cancelled", { status: "cancelled", next_billing_date: iso(ends), cancelled_at: iso(NOW) }), NOW);
         expect(rec(kv)!.status).toBe("active");
         expect(rec(kv)!.expiresAt).toBe(ends);

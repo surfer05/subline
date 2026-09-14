@@ -82,7 +82,16 @@ export function buildPrompt(req: BatchRequest): string {
         "",
         "Rules:",
         `- Translate each message into ${req.targetLang}.`,
-        `- If a message is already in ${req.targetLang}, set skip to true and text to "".`,
+        "- Set skip to true and text to \"\" whenever a message does NOT need translating into "
+        + req.targetLang + ". That covers two cases. (1) The message is already written in "
+        + req.targetLang + " — INCLUDING slang, abbreviations, and memes written in "
+        + req.targetLang + ". (2) The message is not really another language: a proper noun, "
+        + "username, brand or game name, an emoji or reaction, or a short abbreviation or bit of "
+        + "gibberish with no translatable meaning. Only translate a message genuinely written in a "
+        + "DIFFERENT language than " + req.targetLang + " — foreign-language slang still gets "
+        + "translated. Use your own knowledge of the language, not a fixed word list: for an English "
+        + "reader, things like \"og\", \"gng\", \"less go\" are English and should skip; for a reader "
+        + "whose language is not English, English text should still be translated.",
         // The register rules earned their length. "Preserve the casual register"
         // alone produced "hello kids" for a Persian greeting whose colloquial
         // sense is "hey guys" — a literally defensible reading that no speaker

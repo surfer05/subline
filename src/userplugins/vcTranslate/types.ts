@@ -151,6 +151,25 @@ export interface BatchRequest {
 export const MIN_DETECT_CONFIDENCE = 0.85;
 
 /**
+ * Below this, a Google translation is not SHOWN AT ALL.
+ *
+ * MIN_DETECT_CONFIDENCE (above) decides whether to trust a detected language
+ * for borrowing/pinning; this decides whether the translation Google built on
+ * top of a low-confidence detection is worth putting under the message. They
+ * share the 0.85 line because the same table drives both — every misdetection
+ * observed in real chat sat under it and inverted the meaning ("ne" -> Hausa
+ * "it is" at 0.217, the OPPOSITE of the German "no").
+ *
+ * The bias is deliberately toward SILENCE: a missing translation is invisible
+ * and self-corrects on the quality tier's pass, while a wrong one sits under
+ * the message asserting a meaning the speaker never had. When Google reports a
+ * confidence below this, google.ts suppresses the line (skip) rather than
+ * showing a guess. A response with NO confidence at all is not gated here —
+ * there is nothing to be unsure of, so it still translates.
+ */
+export const GOOGLE_MIN_CONFIDENCE = 0.85;
+
+/**
  * Texts at or below this length are the ones auto-detection gets wrong (see
  * the table above — every failure was 4 characters or fewer). Only these
  * borrow a reply-parent's language, which bounds the blast radius of the

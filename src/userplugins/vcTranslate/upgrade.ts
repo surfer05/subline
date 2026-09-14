@@ -33,12 +33,20 @@ export function isRealTranslation(
 /**
  * May `next` be written over `existing`?
  *
- * Two rules, both about never taking something away from the reader:
+ * The rules, all about not taking something USEFUL away from the reader:
  *  - a lower-ranked engine never replaces a higher-ranked one, so a slow
  *    Google reply cannot degrade a line the LLM already improved;
- *  - a marker (failed/deferred/skipped) never replaces a real translation, so
- *    a rate-limited quality tier leaves the readable Google line in place
- *    instead of turning it into an error.
+ *  - a marker (failed/deferred/skipped) generally does not replace a real
+ *    translation, so a rate-limited quality tier leaves the readable Google
+ *    line in place instead of turning it into an error;
+ *  - the ONE exception: an authoritative SKIP — `next.skipped === true` — from
+ *    a STRICTLY-higher-rank engine RETRACTS a real translation. When the ✦ tier
+ *    decides an English slang/name/meme should not be translated at all, its
+ *    skip must be able to blank the wrong Google line already on screen.
+ *    Strictly-higher-rank only: a Google skip (rank 0) must never erase an LLM
+ *    line, and an equal-rank skip must not erase either. And only `skipped` —
+ *    a failed/deferred marker is not a decision that the line is wrong, just
+ *    that a retry did not land, so it never retracts.
  */
 export function mayReplace(
     existing: StoredTranslation | undefined,
@@ -46,6 +54,13 @@ export function mayReplace(
 ): boolean {
     if (existing === undefined) return true;
     if (!isRealTranslation(existing)) return true;
-    if (!isRealTranslation(next)) return false;
+    if (!isRealTranslation(next)) {
+        // A strictly-higher-rank skip retracts the real line; every other
+        // marker leaves it in place.
+        if ("skipped" in next && next.skipped === true && next.via !== undefined) {
+            return ENGINE_RANK[next.via] > ENGINE_RANK[existing.via];
+        }
+        return false;
+    }
     return ENGINE_RANK[next.via] >= ENGINE_RANK[existing.via];
 }

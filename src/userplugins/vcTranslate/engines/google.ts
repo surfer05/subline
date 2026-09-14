@@ -1,6 +1,6 @@
 import { HttpError } from "../httpError";
 import { retryAfterFromHeader } from "../rateHint";
-import { isSameText, type BatchRequest, type Result } from "../types";
+import { GOOGLE_MIN_CONFIDENCE, isSameText, type BatchRequest, type Result } from "../types";
 
 // translate-pa, not translate_a/single. MEASURED 2026-09-03 on TWO throttled
 // networks (an Airtel connection and a friend's, a different country, first
@@ -132,6 +132,13 @@ async function translateOne(
     const confidences = body.detectedLanguages?.srclangsConfidences;
     const conf = Array.isArray(confidences) && typeof confidences[0] === "number" ? confidences[0] : undefined;
     if (detected === targetLang) return { id: msg.id, skip: true };
+
+    // A translation Google built on a low-confidence detection is a guess, and
+    // a wrong subtitle asserts a meaning the speaker never had — so below the
+    // gate we show NOTHING and let the quality tier's pass fill it in. Only when
+    // a confidence was actually reported: a pinned/undetected request carries
+    // none, and there is then nothing to be unsure of, so it still translates.
+    if (conf !== undefined && conf < GOOGLE_MIN_CONFIDENCE) return { id: msg.id, skip: true };
 
     const text = body.translation.trim();
     if (text.length === 0) throw new MessageError("google: empty translation");
