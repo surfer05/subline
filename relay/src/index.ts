@@ -18,7 +18,7 @@
  * expose. A valid code is not a general Groq proxy.
  */
 import { authCode, reserve, refund, usage, mintCode, applyMorEvent, type Env, type CodeRecord } from "./codes";
-import { translate, type BatchRequest, type TranslateError } from "./translate";
+import { translateWithFallback, type BatchRequest, type TranslateError, type Provider } from "./translate";
 import { record, type Outcome } from "./metrics";
 export { Budget } from "./budget";
 
@@ -28,6 +28,21 @@ const MAX_BODY_BYTES = 32_768;
 const MAX_TEXT_CHARS = 4_000;
 const MAX_TARGET_CHARS = 40; // a language name; anything longer is an injection payload
 const GROQ_TIMEOUT_MS = 20_000;
+const GROQ_FALLBACK_MODEL = "openai/gpt-oss-120b";
+
+/** Resolve which model/key answers this request. If a Gemini key is set, Gemini
+ *  (env.MODEL) is primary and Groq (FALLBACK_MODEL) is the automatic fallback on
+ *  any Gemini failure. With no Gemini key the relay is Groq-only: primary is
+ *  Groq at env.MODEL (or the gpt-oss default) and there is no second provider.
+ *  Guards a misconfig where MODEL is a gemini id but no GEMINI_KEY is set —
+ *  that would 401 every call, so fall back to Groq-only. */
+function providers(env: Env): { primary: Provider; fallback: Provider | null } {
+    const groq: Provider = { apiKey: env.GROQ_KEY, model: env.FALLBACK_MODEL || GROQ_FALLBACK_MODEL };
+    if (env.GEMINI_KEY && /^gemini/i.test(env.MODEL || "")) {
+        return { primary: { apiKey: env.GEMINI_KEY, model: env.MODEL }, fallback: groq };
+    }
+    return { primary: { apiKey: env.GROQ_KEY, model: env.MODEL || GROQ_FALLBACK_MODEL }, fallback: null };
+}
 
 const json = (body: unknown, status = 200): Response =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -151,7 +166,8 @@ export default {
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), GROQ_TIMEOUT_MS);
             try {
-                const results = await translate(batch, env.GROQ_KEY, env.MODEL || "openai/gpt-oss-120b", controller.signal);
+                const { primary, fallback } = providers(env);
+                const results = await translateWithFallback(batch, primary, fallback, controller.signal);
                 clearTimeout(timer);
                 return done(json({ ok: true, results, used: res.used, cap: res.cap }), "ok", code, cost);
             } catch (e) {

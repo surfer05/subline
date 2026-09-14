@@ -38,9 +38,12 @@ npx wrangler kv namespace create CODES   # paste the returned id into wrangler.j
 # npx wrangler kv namespace create CODES --env staging
 
 # 2. Secrets (never in git)
-npx wrangler secret put GROQ_KEY         # your PAID Groq key
+npx wrangler secret put GEMINI_KEY       # billing-enabled Google Gemini key — PRIMARY provider (MODEL=gemini-3.8-flash)
+npx wrangler secret put GROQ_KEY         # a Groq key — the automatic FALLBACK when Gemini fails
 npx wrangler secret put ADMIN_TOKEN      # a long random string: openssl rand -hex 32
 # npx wrangler secret put MOR_WEBHOOK_SECRET   # only when payments go live
+# Provider routing: MODEL=gemini* + GEMINI_KEY → Gemini primary, Groq fallback.
+# Drop GEMINI_KEY (or set MODEL to a Groq id) to run Groq-only.
 
 # 3. Ship
 npm test                                 # cap/kill-switch/parse/drift guards must pass

@@ -18,8 +18,18 @@ export interface Env {
     /** The atomic global spend guard (see budget.ts) — the real $50 ceiling. */
     BUDGET: DurableObjectNamespace;
     GROQ_KEY: string;
+    /** Google Gemini API key (billing-enabled/paid tier). When set, Gemini is
+     *  the PRIMARY translation provider and Groq becomes the fallback; when
+     *  absent the relay runs Groq-only exactly as before. A secret, never in
+     *  wrangler.jsonc. */
+    GEMINI_KEY?: string;
     ADMIN_TOKEN: string;
+    /** Primary model id. `gemini*` routes to Gemini (needs GEMINI_KEY); anything
+     *  else routes to Groq. */
     MODEL: string;
+    /** Groq model used as the fallback when Gemini is primary and a call fails
+     *  (rate limit, overload, bad key). Defaults to openai/gpt-oss-120b. */
+    FALLBACK_MODEL?: string;
     METRICS?: AnalyticsEngineDataset;
     /** Freeze the whole relay once this many messages have been spent, ever.
      *  ~1.4M messages ≈ $45 on Groq at $0.032/1k, leaving slack under $50. */

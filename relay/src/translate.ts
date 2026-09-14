@@ -122,11 +122,17 @@ const REASONING_HINT = /gpt-oss|qwen|reasoning|o1|o3|deepseek-r/i;
 
 export interface TranslateError { status: number; retryAfterMs?: number }
 
-/** Call Groq with the relay's key and return one verdict per message. Throws a
- *  TranslateError on a non-OK status so the Worker can map it to the client's
- *  { ok:false } shape. Never logs or returns the request text. */
-export async function translate(req: BatchRequest, apiKey: string, model: string, signal?: AbortSignal): Promise<Result[]> {
-    const prompt = buildPrompt(req);
+/** A `retry-after` header (seconds) → an err carrying the status + ms hint. */
+function errFor(res: Response): TranslateError {
+    const ra = res.headers.get("retry-after");
+    const err: TranslateError = { status: res.status };
+    if (ra) { const s = Number(ra); if (Number.isFinite(s)) err.retryAfterMs = s * 1000; }
+    return err;
+}
+
+/** Call Groq (OpenAI-shaped) and return the raw model content string. Throws a
+ *  TranslateError on a non-OK status or an empty 200. */
+async function callGroq(prompt: string, apiKey: string, model: string, signal?: AbortSignal): Promise<string> {
     const send = (withReasoning: boolean) => fetch(GROQ_ENDPOINT, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
@@ -144,12 +150,7 @@ export async function translate(req: BatchRequest, apiKey: string, model: string
         const t = await res.clone().text().catch(() => "");
         if (/reasoning_(effort|format)/i.test(t)) res = await send(false);
     }
-    if (!res.ok) {
-        const ra = res.headers.get("retry-after");
-        const err: TranslateError = { status: res.status };
-        if (ra) { const s = Number(ra); if (Number.isFinite(s)) err.retryAfterMs = s * 1000; }
-        throw err;
-    }
+    if (!res.ok) throw errFor(res);
     const body = await res.json() as any;
     const content = body?.choices?.[0]?.message?.content;
     if (typeof content !== "string" || content.trim() === "") {
@@ -158,5 +159,99 @@ export async function translate(req: BatchRequest, apiKey: string, model: string
         // like an upstream failure so index.ts refunds and the client retries.
         throw { status: 502 } as TranslateError;
     }
+    return content;
+}
+
+const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models/";
+/** Force machine-readable JSON out of Gemini: a strict schema beats the prompt's
+ *  free-form "reply with JSON" and removes the fence/prose failure modes. Only
+ *  id + skip are required so a skipped row need not carry lang/text; parseRows
+ *  still demands a real lang+text for anything not skipped. */
+const GEMINI_SCHEMA = {
+    type: "object",
+    properties: {
+        translations: {
+            type: "array",
+            items: {
+                type: "object",
+                properties: {
+                    id: { type: "string" },
+                    lang: { type: "string" },
+                    text: { type: "string" },
+                    skip: { type: "boolean" }
+                },
+                required: ["id", "skip"]
+            }
+        }
+    },
+    required: ["translations"]
+} as const;
+
+/** Call Gemini (generateContent) and return the raw model content string. The
+ *  key travels in the x-goog-api-key header, never the URL, so it can't leak
+ *  into a proxy/access log. thinkingBudget:0 keeps a Flash "thinking" model from
+ *  burning output tokens (billed) on latency we don't want for chat lines; if a
+ *  model rejects that control we retry once without it, mirroring the Groq path.
+ *  Throws a TranslateError on a non-OK status, a safety block, or an empty 200. */
+async function callGemini(prompt: string, apiKey: string, model: string, signal?: AbortSignal): Promise<string> {
+    const send = (withThinking: boolean) => fetch(`${GEMINI_BASE}${encodeURIComponent(model)}:generateContent`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+        signal,
+        body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: {
+                temperature: 0.2,
+                responseMimeType: "application/json",
+                responseSchema: GEMINI_SCHEMA,
+                ...(withThinking ? {} : { thinkingConfig: { thinkingBudget: 0 } })
+            }
+        })
+    });
+
+    let res = await send(false);
+    if (res.status === 400) {
+        const t = await res.clone().text().catch(() => "");
+        if (/thinking/i.test(t)) res = await send(true);
+    }
+    if (!res.ok) throw errFor(res);
+    const body = await res.json() as any;
+    // A prompt-level safety block returns 200 with no candidate — treat as an
+    // upstream failure (refund + fall back), not a silent empty translation.
+    const content = body?.candidates?.[0]?.content?.parts
+        ?.map((p: any) => (typeof p?.text === "string" ? p.text : "")).join("") ?? "";
+    if (content.trim() === "") throw { status: 502 } as TranslateError;
+    return content;
+}
+
+/** Call ONE provider (chosen by model id — `gemini*` → Gemini, else Groq) with
+ *  the relay's key and return one verdict per message. Throws a TranslateError
+ *  on a non-OK status so the Worker can map it to the client's { ok:false }
+ *  shape. Never logs or returns the request text. */
+export async function translate(req: BatchRequest, apiKey: string, model: string, signal?: AbortSignal): Promise<Result[]> {
+    const prompt = buildPrompt(req);
+    const content = /^gemini/i.test(model)
+        ? await callGemini(prompt, apiKey, model, signal)
+        : await callGroq(prompt, apiKey, model, signal);
     return parseRows(content, req);
+}
+
+export interface Provider { apiKey: string; model: string }
+
+/** Try the primary provider (Gemini by default); on ANY upstream failure —
+ *  rate limit, overload, or even a bad primary key — fall back to a second
+ *  provider (Groq) so a paying user still gets a translation. The fallback
+ *  shares the caller's abort signal, so once the request's time budget is spent
+ *  (signal already aborted) we surface the primary error instead of starting a
+ *  second call that can only abort. With no fallback configured this is just
+ *  `translate`. */
+export async function translateWithFallback(
+    req: BatchRequest, primary: Provider, fallback: Provider | null, signal?: AbortSignal
+): Promise<Result[]> {
+    try {
+        return await translate(req, primary.apiKey, primary.model, signal);
+    } catch (e) {
+        if (!fallback || signal?.aborted) throw e;
+        return await translate(req, fallback.apiKey, fallback.model, signal);
+    }
 }

@@ -1,7 +1,13 @@
 {
   // Subline translation relay — Cloudflare Worker.
-  // Deploy: see README.md. Secrets (GROQ_KEY, ADMIN_TOKEN, MOR_WEBHOOK_SECRET)
-  // are set with `wrangler secret put`, NEVER in this file or git.
+  // Deploy: see README.md. Secrets (GROQ_KEY, GEMINI_KEY, ADMIN_TOKEN,
+  // MOR_WEBHOOK_SECRET) are set with `wrangler secret put`, NEVER in this file
+  // or git.
+  //   GEMINI_KEY is a billing-enabled Google Gemini API key. When it is set AND
+  //   MODEL is a `gemini*` id, Gemini is the PRIMARY translation provider and
+  //   Groq (FALLBACK_MODEL) is the automatic fallback on any Gemini failure
+  //   (rate limit / overload / bad key). Drop the key or point MODEL back at a
+  //   Groq id to run Groq-only.
   //   MOR_WEBHOOK_SECRET is the Dodo Payments webhook SIGNING SECRET — the
   //   `whsec_...` value from the endpoint's Overview tab in the Dodo dashboard.
   //   Dodo follows the Standard Webhooks spec: the relay HMAC-SHA256s
@@ -14,12 +20,18 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
   "vars": {
-    "MODEL": "openai/gpt-oss-120b",
+    // Primary model. `gemini*` → Gemini (needs the GEMINI_KEY secret); any other
+    // id → Groq. gemini-3.8-flash is the current GA Flash: Indic/low-resource and
+    // informal chat beat every open Groq model, ~$0.50/1M in + $3/1M out.
+    "MODEL": "gemini-3.8-flash",
+    // Groq model used as the automatic fallback when Gemini is primary and a call
+    // fails. Keeps the product answering through a Gemini rate-limit/outage.
+    "FALLBACK_MODEL": "openai/gpt-oss-120b",
     // Freeze the whole relay after this many cost-units, ever. A unit is ~1
-    // message (cost = messages + ceil(promptChars/1000)). On gpt-oss-120b with
-    // reasoning_effort=low, ~$0.04-0.07 per 1,000 units, so 400,000 is a
-    // conservative ~$15-25 launch wall. Raise it deliberately after watching
-    // real Groq spend vs the cost-units in metrics (Analytics Engine).
+    // message (cost = messages + ceil(promptChars/1000)). On gpt-oss-120b that
+    // was ~$0.04-0.07/1k; Gemini 3.8 Flash is ~2-3x that per unit, so 400,000
+    // units is now a ~$30-60 launch wall depending on output length. Raise it
+    // deliberately after watching real spend vs the cost-units in metrics.
     "GLOBAL_BUDGET_MESSAGES": "400000",
     // Dodo Payments product_id → { plan, dailyCap }. The webhook maps each paid
     // license key to a plan + fair-use cap by its data.product_id. FILL IN the
