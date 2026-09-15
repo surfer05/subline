@@ -23,6 +23,7 @@ import type { LaunchctlPort } from "../src/helper/launchAgent.js";
 import type { SchtasksPort } from "../src/helper/scheduledTask.js";
 import { buildAsar } from "../src/patcher/asar.js";
 import type { DiscordInstall } from "../src/patcher/locate.js";
+import { stableIdFor } from "../src/patcher/locate.js";
 import { buildStubAsar } from "../src/patcher/stub.js";
 
 /** Exactly the fields the real build_info.json carries. */
@@ -233,6 +234,7 @@ export function makeDiscordFixture(options: FixtureOptions = {}): Fixture {
     const install: DiscordInstall = {
         branch: "stable",
         rootPath,
+        stableId: stableIdFor(rootPath, "darwin"),
         resourcesPath,
         asarPath: join(resourcesPath, "app.asar"),
         backupPath: join(resourcesPath, "_app.asar"),

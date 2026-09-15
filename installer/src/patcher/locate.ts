@@ -12,7 +12,7 @@
 
 import { existsSync, readdirSync, realpathSync, statSync } from "./realFs.js";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import type { Result } from "./result.js";
 import { err, errnoOf, ok } from "./result.js";
@@ -43,6 +43,19 @@ export interface DiscordInstall {
     branch: DiscordBranch;
     /** The thing a user would point at: `/Applications/Discord.app`, or the versioned folder on Windows. */
     rootPath: string;
+    /**
+     * A key for "this Discord" that SURVIVES Discord updating itself.
+     *
+     * `rootPath` does NOT: on Windows an update swaps the versioned
+     * `…\Discord\app-1.0.<old>` folder for `…\app-1.0.<new>`, so anything that
+     * remembers an install by `rootPath` is orphaned the moment Discord updates
+     * — which is exactly when the self-healer needs to recognise it. The branch
+     * DIRECTORY that holds those versioned folders is stable, so that is the
+     * Windows identity. On macOS the `.app` bundle path is itself stable across
+     * updates (only its inner `app.asar` is replaced), so it stays `rootPath`.
+     * Use THIS, not `rootPath`, as the key for any cross-run memory of an install.
+     */
+    stableId: string;
     /** Directory holding `app.asar` — `Contents/Resources` on macOS, `resources` on Windows. */
     resourcesPath: string;
     /** The patch target. */
@@ -52,6 +65,19 @@ export interface DiscordInstall {
     buildInfoPath: string;
     /** True when the branch was inferred from an explicitly supplied path. */
     fromExplicitPath: boolean;
+}
+
+/**
+ * The stable, update-surviving identity of an install (see `stableId`).
+ *
+ * Windows: the directory holding the versioned `app-1.0.xxxx` folders. When the
+ * root already IS such a versioned folder we climb one level to that directory;
+ * a hand-picked path that is not versioned is taken as-is. macOS: the root path,
+ * which does not move across updates.
+ */
+export function stableIdFor(rootPath: string, platform: NodeJS.Platform): string {
+    if (platform !== "win32") return rootPath;
+    return /^app-[\d.]+$/.test(basename(rootPath)) ? dirname(rootPath) : rootPath;
 }
 
 export interface LocateOptions {
@@ -103,6 +129,7 @@ function makeInstall(
     return {
         branch,
         rootPath,
+        stableId: stableIdFor(rootPath, platform),
         resourcesPath,
         asarPath: join(resourcesPath, "app.asar"),
         backupPath: join(resourcesPath, "_app.asar"),

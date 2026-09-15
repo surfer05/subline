@@ -268,6 +268,7 @@ describe("uninstall consumes what removeHelperFor produces", () => {
                     install: {
                         branch: "stable",
                         rootPath: "/x",
+                        stableId: "/x",
                         resourcesPath: "/x/r",
                         asarPath: "/x/r/app.asar",
                         backupPath: "/x/r/_app.asar",
@@ -292,6 +293,7 @@ describe("uninstall consumes what removeHelperFor produces", () => {
     const INSTALL = {
         branch: "stable" as const,
         rootPath: "/x",
+        stableId: "/x",
         resourcesPath: "/x/r",
         asarPath: "/x/r/app.asar",
         backupPath: "/x/r/_app.asar",

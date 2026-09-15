@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { defaultSearchRoots, findWindowsAppDirs, locateDiscordInstalls, locatePatchedResidue, uninstallTargets } from "../src/patcher/locate.js";
+import { defaultSearchRoots, findWindowsAppDirs, locateDiscordInstalls, locatePatchedResidue, stableIdFor, uninstallTargets } from "../src/patcher/locate.js";
 import { buildOriginalDiscordAsar } from "./fixture.js";
 
 const roots: string[] = [];
@@ -161,6 +161,24 @@ describe("locateDiscordInstalls", () => {
         expect(result.value).toHaveLength(1);
         expect(result.value[0]!.rootPath).toBe(join(branchDir, "app-1.0.10"));
         expect(result.value[0]!.asarPath).toBe(join(branchDir, "app-1.0.10", "resources", "app.asar"));
+        // stableId is the BRANCH DIR, not the versioned folder — so it does not
+        // move when Discord updates to app-1.0.<next>. This is what lets the
+        // self-healer still recognise the install after an update.
+        expect(result.value[0]!.stableId).toBe(branchDir);
+    });
+
+    it("gives an install a stableId that survives a Windows version bump, and is the app itself on macOS", () => {
+        const branchDir = join("C:", "Users", "z", "AppData", "Local", "Discord");
+        // Every versioned folder under one branch resolves to the SAME identity,
+        // so memory written against one version matches the next.
+        expect(stableIdFor(join(branchDir, "app-1.0.9256"), "win32")).toBe(branchDir);
+        expect(stableIdFor(join(branchDir, "app-1.0.9257"), "win32")).toBe(branchDir);
+        expect(stableIdFor(join(branchDir, "app-1.0.9256"), "win32"))
+            .toBe(stableIdFor(join(branchDir, "app-1.0.9257"), "win32"));
+        // A hand-picked Windows path that is NOT a versioned folder is taken as-is.
+        expect(stableIdFor(join(branchDir, "custom"), "win32")).toBe(join(branchDir, "custom"));
+        // macOS: the .app bundle path is already stable across updates.
+        expect(stableIdFor("/Applications/Discord.app", "darwin")).toBe("/Applications/Discord.app");
     });
 
     it("falls back to the next-newest Windows folder when the newest is not a Discord", () => {

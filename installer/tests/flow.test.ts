@@ -26,6 +26,7 @@ import type { VerificationReport, VerificationStatus } from "../src/verify/verif
 const INSTALL: DiscordInstall = {
     branch: "stable",
     rootPath: "/Applications/Discord.app",
+    stableId: "/Applications/Discord.app",
     resourcesPath: "/Applications/Discord.app/Contents/Resources",
     asarPath: "/Applications/Discord.app/Contents/Resources/app.asar",
     backupPath: "/Applications/Discord.app/Contents/Resources/_app.asar",

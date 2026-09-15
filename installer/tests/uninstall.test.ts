@@ -23,13 +23,14 @@ import type { ModBundleFixture } from "./fixture.js";
 const INSTALL: DiscordInstall = {
     branch: "stable",
     rootPath: "/Applications/Discord.app",
+    stableId: "/Applications/Discord.app",
     resourcesPath: "/Applications/Discord.app/Contents/Resources",
     asarPath: "/Applications/Discord.app/Contents/Resources/app.asar",
     backupPath: "/Applications/Discord.app/Contents/Resources/_app.asar",
     buildInfoPath: "/Applications/Discord.app/Contents/Resources/build_info.json",
     fromExplicitPath: false
 };
-const PTB: DiscordInstall = { ...INSTALL, branch: "ptb", rootPath: "/Applications/Discord PTB.app" };
+const PTB: DiscordInstall = { ...INSTALL, branch: "ptb", rootPath: "/Applications/Discord PTB.app", stableId: "/Applications/Discord PTB.app" };
 
 /** The ordinary precondition: the caller stopped the helper before calling us. */
 const HELPER_GONE: HelperRemoval = { applicable: true, removed: true, error: null };

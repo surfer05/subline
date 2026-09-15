@@ -356,7 +356,10 @@ function collectManaged(run: Run): ManagedInstall[] {
             continue;
         }
         const state = inspected.value;
-        const remembered = run.state.installs[install.rootPath];
+        // Keyed by stableId, not rootPath: after a Windows update rootPath is a
+        // brand-new versioned folder, and only stableId still matches the memory
+        // written when we patched the previous version. (This IS the self-heal.)
+        const remembered = run.state.installs[install.stableId];
         const oursNow = state.kind === "patched-by-us";
         const oursOnce = remembered !== undefined;
 
@@ -538,8 +541,8 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
 }
 
 function rememberInstall(run: Run, entry: ManagedInstall, buildId: string, patchedNow: boolean): void {
-    const previous = run.state.installs[entry.install.rootPath];
-    run.state.installs[entry.install.rootPath] = {
+    const previous = run.state.installs[entry.install.stableId];
+    run.state.installs[entry.install.stableId] = {
         discordVersion: entry.version ?? previous?.discordVersion ?? null,
         buildId: patchedNow ? buildId : (entry.marker?.pluginBuildId ?? previous?.buildId ?? null),
         patchedAt: patchedNow ? run.ports.now() : (previous?.patchedAt ?? null),
@@ -566,9 +569,9 @@ async function handlePatchFailure(
     const { install } = entry;
     run.failed.push(install.rootPath);
 
-    const previous = run.state.installs[install.rootPath];
+    const previous = run.state.installs[install.stableId];
     const failures = (previous?.failures ?? 0) + 1;
-    run.state.installs[install.rootPath] = {
+    run.state.installs[install.stableId] = {
         discordVersion: entry.version ?? previous?.discordVersion ?? null,
         buildId: previous?.buildId ?? null,
         patchedAt: previous?.patchedAt ?? null,
@@ -870,7 +873,7 @@ async function checkHealth(run: Run, managed: ManagedInstall[]): Promise<void> {
     // whether a fix exists: if the feed has a newer build we could not install,
     // `update-failed` already says so, and two notifications for one problem is
     // how notifications get ignored.
-    const installedBuildId = run.state.installs[newest.install.rootPath]?.buildId ?? expectedBuildId;
+    const installedBuildId = run.state.installs[newest.install.stableId]?.buildId ?? expectedBuildId;
     const feedHasNewer = run.state.lastReleaseBuildId !== null && run.state.lastReleaseBuildId !== installedBuildId;
     if (feedHasNewer) {
         run.decide("health", "broken-update-pending", "a newer build exists and is what the update path is for", {

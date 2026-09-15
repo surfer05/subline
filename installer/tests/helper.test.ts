@@ -336,6 +336,41 @@ describe("trigger A — Discord updated and wiped the injection", () => {
         expect(report.repatched).toHaveLength(1);
     });
 
+    it("re-patches across a Windows version bump, where the install's folder path changes", async () => {
+        // THE zehra BUG. On Windows a Discord update swaps `…\Discord\app-1.0.<old>`
+        // for a NEW `…\app-1.0.<new>` folder, so the install's rootPath changes.
+        // The memory of "we patched this" must be keyed by the STABLE identity
+        // (the branch dir), not the versioned rootPath — otherwise the updated
+        // Discord looks like one we never touched and self-heal never runs.
+        harness.platform = "win32";
+        const branchId = "C:\\Users\\z\\AppData\\Local\\Discord"; // stable across versions
+        harness.fixture.install.stableId = branchId;
+
+        // We patched it before, at an older version (what a healthy run records).
+        const statePath = helperStatePathFor(harness.productDir);
+        const seeded = readHelperState(statePath);
+        seeded.installs[branchId] = {
+            discordVersion: "0.0.406",
+            buildId: harness.shipped.buildId,
+            patchedAt: START,
+            failures: 0
+        };
+        writeHelperState(statePath, seeded);
+
+        // Discord updated: fresh unpatched archive, new version — and the memory
+        // is NOT keyed by this install's rootPath, only by its stable identity.
+        simulateDiscordUpdate(harness.fixture.install, "0.0.407");
+
+        const report = await harness.run();
+
+        expect(report.managed).toBe(1);
+        expect(report.repatched).toEqual([harness.fixture.install.rootPath]);
+        expect(harness.logged).toContain("helper.scan discord-version-changed");
+        // Really re-patched: the loader stub is back in the archive.
+        const stub = readStub(harness.fixture.install.asarPath);
+        expect(stub.ok && stub.value).not.toBeNull();
+    });
+
     it("ignores a Discord Subline has never patched", async () => {
         const report = await harness.run();
 
