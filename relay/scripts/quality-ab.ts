@@ -88,6 +88,9 @@ const GEMINI_SCHEMA = { type: "object", properties: { translations: { type: "arr
     required: ["id", "skip"] } } }, required: ["translations"] };
 
 interface Raw { content: string; inTok: number; outTok: number }
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+const httpErr = (status: number, retryAfter: string | null, body: string) =>
+    Object.assign(new Error(`${status} ${body.slice(0, 200)}`), { status, retryAfterMs: retryAfter && Number.isFinite(+retryAfter) ? +retryAfter * 1000 : undefined });
 
 async function callGroqLike(endpoint: string, prompt: string, key: string, model: string): Promise<Raw> {
     const reasoning = /gpt-oss|qwen|reasoning|deepseek-r/i.test(model)
@@ -97,7 +100,7 @@ async function callGroqLike(endpoint: string, prompt: string, key: string, model
         headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
         body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], temperature: 0.2, ...reasoning })
     });
-    if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 200)}`);
+    if (!res.ok) throw httpErr(res.status, res.headers.get("retry-after"), await res.text());
     const b: any = await res.json();
     return { content: b?.choices?.[0]?.message?.content ?? "", inTok: b?.usage?.prompt_tokens ?? 0, outTok: b?.usage?.completion_tokens ?? 0 };
 }
@@ -109,16 +112,32 @@ async function callGemini(prompt: string, key: string, model: string): Promise<R
         body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }],
             generationConfig: { temperature: 0.2, responseMimeType: "application/json", responseSchema: GEMINI_SCHEMA, thinkingConfig: { thinkingBudget: 0 } } })
     });
-    if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 200)}`);
+    if (!res.ok) throw httpErr(res.status, res.headers.get("retry-after"), await res.text());
     const b: any = await res.json();
     const content = b?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text ?? "").join("") ?? "";
     return { content, inTok: b?.usageMetadata?.promptTokenCount ?? 0, outTok: b?.usageMetadata?.candidatesTokenCount ?? 0 };
 }
 
-function callModel(m: Model, prompt: string, key: string): Promise<Raw> {
+function callOnce(m: Model, prompt: string, key: string): Promise<Raw> {
     if (m.kind === "gemini") return callGemini(prompt, key, m.model);
     if (m.kind === "openrouter") return callGroqLike("https://openrouter.ai/api/v1/chat/completions", prompt, key, m.model);
     return callGroqLike("https://api.groq.com/openai/v1/chat/completions", prompt, key, m.model);
+}
+
+// Auto-wait through rate limits so a FREE-tier key (e.g. Gemini ~10/min) still
+// completes the whole run — just slower. Paid keys never hit this path.
+async function callModel(m: Model, prompt: string, key: string): Promise<Raw> {
+    for (let i = 0; ; i++) {
+        try { return await callOnce(m, prompt, key); }
+        catch (e: any) {
+            if (e.status === 429 && i < 6) {
+                const wait = e.retryAfterMs ?? Math.min(4000 * 2 ** i, 30000);
+                process.stdout.write(`  (rate-limited, waiting ${Math.round(wait / 1000)}s…) `);
+                await sleep(wait); continue;
+            }
+            throw e;
+        }
+    }
 }
 
 // Tolerant parse → the one row's verdict as a printable string.
