@@ -36,6 +36,9 @@ import {
     readPendingAlerts, releaseManifestUrl, runHelperOnce
 } from "../helper/index.js";
 import { productDirFor } from "../bundle/layout.js";
+import { inspectModBundle } from "../bundle/bundle.js";
+import { shippedModDirFor } from "../app/modInstall.js";
+import { shouldRelaunchForNewerBundle } from "../app/relaunch.js";
 import { findDiscordProcesses, quitDiscord } from "../app/discordProcess.js";
 import { uninstallTargets } from "../patcher/locate.js";
 import { unpatchInstall } from "../patcher/patch.js";
@@ -185,12 +188,52 @@ function send(channel: string, payload: unknown): void {
     if (window !== null && !window.isDestroyed()) window.webContents.send(channel, payload);
 }
 
+/**
+ * In a packaged app `process.resourcesPath` is `…/Contents/Resources`; in
+ * development it is Electron's own, so the repo's build output is used instead.
+ * Both are "the directory the shipped mod sits beside".
+ */
+function appResourcesPath(): string {
+    return app.isPackaged ? process.resourcesPath : join(here, "..", "..", "build");
+}
+
+/**
+ * The identity of the mod bundle sitting on disk right now, or null if it
+ * cannot be read. Never throws: an unreadable bundle is a fact to compare, not
+ * a reason to take the app down.
+ */
+function modBuildIdOnDisk(): string | null {
+    try {
+        const inspected = inspectModBundle(shippedModDirFor(appResourcesPath()));
+        return inspected.ok ? inspected.value.buildId : null;
+    } catch {
+        return null;
+    }
+}
+
+/** The bundle this process was launched with, recorded once at startup. */
+let startedWithBuildId: string | null = null;
+let relaunching = false;
+
+/**
+ * Restart into a newer bundle written over this running copy (see
+ * `app/relaunch.ts` for the observed problem). Returns true when the app is on
+ * its way out, so callers skip whatever they were about to show.
+ */
+function relaunchIfBundleChanged(): boolean {
+    if (relaunching) return true;
+    const onDisk = modBuildIdOnDisk();
+    if (!shouldRelaunchForNewerBundle(startedWithBuildId, onDisk)) return false;
+    relaunching = true;
+    log.info("app.relaunch-for-newer-bundle", { from: startedWithBuildId, to: onDisk });
+    app.relaunch();
+    app.exit(0);
+    return true;
+}
+
 function createFlow(): InstallFlow {
     const ports = createFlowPorts({
-        // In a packaged app `process.resourcesPath` is `…/Contents/Resources`;
-        // in development it is Electron's own, so the repo's build output is
-        // used instead. Both are "the directory the shipped mod sits beside".
-        appResourcesPath: app.isPackaged ? process.resourcesPath : join(here, "..", "..", "build"),
+        appResourcesPath: appResourcesPath(),
         productVersion: app.getVersion(),
         log,
         helper: helperWiring()
@@ -245,10 +288,16 @@ if (!isHelperRun) app.whenReady().then(() => {
             originalFs: usingOriginalFs
     });
 
+    startedWithBuildId = modBuildIdOnDisk();
+
     flow = createFlow();
     createWindow();
 
     app.on("activate", () => {
+        // A macOS `open` on a bundle whose app is already running re-activates
+        // this process rather than launching the new copy, so this is the first
+        // moment we can notice that the bundle underneath us changed.
+        if (relaunchIfBundleChanged()) return;
         if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
 }).catch((cause: unknown) => {
@@ -268,7 +317,13 @@ app.on("window-all-closed", () => {
  * IPC — the whole renderer contract
  * ------------------------------------------------------------------------ */
 
-ipcMain.handle("flow:start", () => (flow ??= createFlow()).start());
+ipcMain.handle("flow:start", () => {
+    // Also here, not only on activate: a window that was already open when the
+    // new bundle landed asks for its first state through this handler, and
+    // starting the flow would run the old build's install.
+    if (relaunchIfBundleChanged()) return null;
+    return (flow ??= createFlow()).start();
+});
 
 ipcMain.handle("flow:send", async (_event, action: FlowAction) => {
     flow ??= createFlow();
