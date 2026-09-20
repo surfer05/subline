@@ -695,7 +695,12 @@ function enterCooldown(
     engine: LlmEngineId,
     retryAfterMs: number | undefined,
     quotaLimitPerMinute: number | undefined,
-    quotaModel?: string
+    quotaModel?: string,
+    // The engine's own error text, ONLY so the announcement can tell the
+    // relay's daily allowance apart from an ordinary minute of throttling:
+    // they arrive as the same 429 and have opposite remedies (wait / come back
+    // tomorrow). Nothing else reads it, and it never reaches the DOM.
+    errorText?: string
 ): void {
     const asked = typeof retryAfterMs === "number" && retryAfterMs > 0
         ? retryAfterMs
@@ -723,42 +728,81 @@ function enterCooldown(
     const cooldownMs = Math.max(asked, rateGateSettings().refillMs);
     setCooldown(engine, Date.now() + cooldownMs);
 
-    announceCooldownOnce(engine, cooldownMs, quotaModel);
+    announceCooldownOnce(engine, cooldownMs, quotaModel, isDailyLimit(errorText));
 }
 
 /**
- * Same one-toast-per-session discipline as announceMissingKeyOnce(): a
- * catch-up storm can enter cooldown on several batches in a row, and a toast
- * per batch would be worse than the problem it describes.
+ * Did the relay say the DAY's allowance is gone, rather than this minute's?
  *
- * TWO MESSAGES, because there are two genuinely different problems and they
- * arrive as the identical HTTP status.
- *
- *  - No model named: ordinary throttling. Wait it out; the ≈ line stands. This
- *    is the message that has always been shown.
- *  - A model named ("Quota exceeded for metric: ..., model: <name>"): the quota
- *    that was exceeded belongs to THAT MODEL. On a free-tier key that is
- *    usually not a rate at all — a model the key has no allowance for returns
- *    429 on the first request of a session and on every request thereafter, so
- *    waiting changes nothing and the ✦ upgrade never arrives. Days were lost to
- *    reading exactly that as throttling, so the model name and the setting that
- *    changes it go into the toast. See `geminiModel` in settings.ts.
+ * The relay answers both with 429. The daily one carries "daily limit reached"
+ * and a `retryAfterMs` that runs to UTC midnight, so the ordinary "back in
+ * about <duration>" wording would tell somebody at 9am to wait about 15h,
+ * which reads as a broken plugin rather than a used-up allowance.
  */
+function isDailyLimit(errorText: string | undefined): boolean {
+    return typeof errorText === "string" && /daily limit reached/i.test(errorText);
+}
+
+/**
+ * A pause is not a failure, and must not be dressed as one.
+ *
+ * A 429 used to raise a RED toast saying "rate limited" for what is usually a
+ * few seconds of waiting. Red means broken; ordinary users read it as the
+ * plugin dying, on a pause that resolves itself before they finish reading the
+ * sentence. Three cases, told apart by how long the wait really is and by what
+ * the server said:
+ *
+ *  - 60 SECONDS OR LESS: SILENT. Nothing is wrong and nothing is lost. The ≈
+ *    line is already on screen (the fast tier answered before the LLM was ever
+ *    asked) and ✦ resumes by itself. The quota indicator shows the countdown
+ *    for anybody who wants it — see QuotaIndicator.
+ *  - LONGER: one NEUTRAL note, saying how long and that reading continues. Long
+ *    enough to be noticed, so it is worth a sentence; still not a failure.
+ *  - THE DAY'S ALLOWANCE GONE (relay 429, "daily limit reached"): waiting is
+ *    not the remedy, so the wording says tomorrow rather than a duration.
+ *
+ * A MODEL NAMED ("Quota exceeded for metric: ..., model: <name>") is the one
+ * case that stays a red failure, and deliberately: the quota belongs to THAT
+ * MODEL, and on a free-tier key a model with no allowance returns 429 on the
+ * first request of a session and on every request after it. Waiting changes
+ * nothing, the ✦ upgrade never arrives, and the only fix is a setting. Days
+ * were lost reading exactly that as throttling. See `geminiModel` in
+ * settings.ts.
+ *
+ * Whatever is shown is shown ONCE per session, the same discipline as
+ * announceMissingKeyOnce(): a catch-up storm can enter cooldown on several
+ * batches in a row, and a toast per batch would be worse than the problem it
+ * describes. A silent cooldown does not spend that one chance — it is not an
+ * announcement, so a genuinely long pause later still gets its note.
+ */
+const QUIET_COOLDOWN_MS = 60_000;
+
 function announceCooldownOnce(
-    engine: LlmEngineId, cooldownMs: number, quotaModel?: string
+    engine: LlmEngineId, cooldownMs: number, quotaModel?: string, dailyLimit = false
 ): void {
-    if (announcedCooldown) return;
-    announcedCooldown = true;
     const { label } = LLM_ENGINES[engine];
 
-    const message = typeof quotaModel === "string" && quotaModel !== ""
-        ? `VcTranslate: ${label} model "${quotaModel}" is over quota (429). This model may `
-        + "have no free-tier availability on your key. Change the model in VcTranslate "
-        + "settings to try another. Translations are using Google (≈) meanwhile."
-        : `VcTranslate: ${label} is rate limited. Translations are using Google `
-        + `(≈) for about ${formatDuration(cooldownMs)}.`;
+    let type: string = Toasts.Type.MESSAGE;
+    let message: string;
 
-    Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message });
+    if (typeof quotaModel === "string" && quotaModel !== "") {
+        type = Toasts.Type.FAILURE;
+        message = `VcTranslate: ${label} model "${quotaModel}" is over quota (429). This model may `
+            + "have no free-tier availability on your key. Change the model in VcTranslate "
+            + "settings to try another. Translations are using Google (≈) meanwhile.";
+    } else if (dailyLimit) {
+        message = "Today's ✦ allowance is used up. ≈ keeps working. ✦ is back tomorrow.";
+    } else if (cooldownMs <= QUIET_COOLDOWN_MS) {
+        // Say nothing, and stay unannounced: this is the common case, and it is
+        // over before a toast would have finished fading in.
+        return;
+    } else {
+        message = `✦ is catching up. Back in about ${formatDuration(cooldownMs)}. ≈ keeps working.`;
+    }
+
+    if (announcedCooldown) return;
+    announcedCooldown = true;
+    Toasts.show({ id: Toasts.genId(), type, message });
 }
 
 /**
@@ -1262,7 +1306,8 @@ async function runTier(
                 // (`retryAfterMs` is only ever set for a 429 — see native.ts.)
                 if (isLlmEngine(engine) && res.retryAfterMs) {
                     enterCooldown(
-                        engine, res.retryAfterMs, res.quotaLimitPerMinute, res.quotaModel
+                        engine, res.retryAfterMs, res.quotaLimitPerMinute, res.quotaModel,
+                        res.error
                     );
                 } else if (!isLlmEngine(engine) && /\b429\b/.test(res.error)) {
                     // GOOGLE_COOLDOWN_MS, not the 60s default - see types.ts.

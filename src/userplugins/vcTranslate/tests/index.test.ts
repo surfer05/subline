@@ -806,11 +806,20 @@ describe("a rate-limited LLM leaves the reader the fast tier's Google line", () 
         expect(until).toBeLessThanOrEqual(Date.now() + 6_500);
     });
 
-    it("says so once per session, not once per batch", async () => {
+    /**
+     * UPDATED, whole group. This test used to assert that a 429 raised exactly
+     * one RED toast saying "rate limited". It now asserts the opposite for the
+     * short case, because that is what the red toast actually did to people: a
+     * pause of a few seconds, which resolves itself before the sentence has
+     * been read, was announced in the colour reserved for "something broke".
+     * The once-per-session discipline it protected is still asserted, one test
+     * down, for the case that still speaks.
+     */
+    it("says NOTHING for a short pause, however many times it happens", async () => {
         useGemini();
-        // A 2s cooldown that lapses between the two messages, so the engine is
-        // genuinely re-entered into cooldown a second time — otherwise this
-        // would pass without any guard at all.
+        // A 2s cooldown (floored to the gate's 10s refill) that lapses between
+        // the two messages, so the engine is genuinely re-entered into cooldown
+        // a second time — otherwise this would pass without any guard at all.
         respondByEngine({
             gemini: { ok: false, error: "gemini: HTTP 429", retryAfterMs: 2_000 },
             google: googleTranslated("1")
@@ -824,11 +833,86 @@ describe("a rate-limited LLM leaves the reader the fast tier's Google line", () 
         const geminiAttempts = native.translateBatch.mock.calls.filter(c => c[0] === "gemini");
         expect(geminiAttempts.length).toBeGreaterThan(1);   // cooldown entered twice
 
-        const cooldownToasts = shownToasts.filter(t => /rate limited/i.test(t.message));
-        expect(cooldownToasts).toHaveLength(1);
-        // ...and it says what happened and roughly for how long.
-        expect(cooldownToasts[0].message).toMatch(/Google/);
-        expect(cooldownToasts[0].message).toMatch(/\d+[sm]/);
+        // Not a quieter toast: no toast. The ≈ line is already on screen and ✦
+        // comes back by itself.
+        expect(shownToasts).toHaveLength(0);
+    });
+
+    it("says it calmly, once, when the pause is a long one", async () => {
+        useGemini();
+        respondByEngine({
+            // Five minutes: long enough that somebody would otherwise wonder
+            // whether ✦ is coming back at all.
+            gemini: { ok: false, error: "gemini: HTTP 429", retryAfterMs: 300_000 },
+            google: googleTranslated("1")
+        });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+
+        expect(shownToasts).toHaveLength(1);
+        expect(shownToasts[0].message).toBe("✦ is catching up. Back in about 5m. ≈ keeps working.");
+        // NEUTRAL. A wait is not a failure, and red is what made a five-minute
+        // pause read as a dead plugin.
+        expect(shownToasts[0].type).toBe("MESSAGE");
+        expect(shownToasts[0].type).not.toBe("FAILURE");
+    });
+
+    it("does not let a silent short pause use up the one announcement", async () => {
+        // The guard is "have we said this yet", so a cooldown that said nothing
+        // must not count as having said it — otherwise the first few seconds of
+        // throttling would permanently mute the note that matters.
+        useGemini();
+        let geminiCalls = 0;
+        native.translateBatch.mockImplementation(async (engine: string) => {
+            if (engine !== "gemini") return googleTranslated("1");
+            geminiCalls++;
+            return {
+                ok: false, error: "gemini: HTTP 429",
+                retryAfterMs: geminiCalls === 1 ? 2_000 : 300_000
+            };
+        });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        expect(shownToasts).toHaveLength(0);
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+
+        expect(geminiCalls).toBeGreaterThan(1);
+        expect(shownToasts).toHaveLength(1);
+        expect(shownToasts[0].message).toMatch(/catching up/);
+    });
+
+    /**
+     * The relay's DAILY allowance, which arrives as the same 429 as a minute of
+     * throttling but with "daily limit reached" and a retryAfterMs that runs to
+     * UTC midnight. "Back in about 15h" is technically true and reads as a
+     * broken plugin; what the user needs to know is that ≈ carries on and ✦
+     * returns tomorrow.
+     */
+    it("says tomorrow, not a duration, when the day's allowance is gone", async () => {
+        useGemini();
+        respondByEngine({
+            gemini: {
+                ok: false, error: "relay: HTTP 429 daily limit reached",
+                retryAfterMs: 15 * 60 * 60 * 1_000
+            },
+            google: googleTranslated("1")
+        });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(shownToasts).toHaveLength(1);
+        expect(shownToasts[0].message)
+            .toBe("Today's ✦ allowance is used up. ≈ keeps working. ✦ is back tomorrow.");
+        expect(shownToasts[0].type).toBe("MESSAGE");
+        // No countdown: waiting it out is not the remedy.
+        expect(shownToasts[0].message).not.toMatch(/\d+[sm]\b/);
     });
 
     it("retunes the rate gate from the quota the 429 reported", async () => {
@@ -893,19 +977,34 @@ describe("a rate-limited LLM leaves the reader the fast tier's Google line", () 
         expect(toast!.message).toMatch(/Google/);
     });
 
-    it("keeps the plain rate-limit wording when the 429 names no model", async () => {
+    it("keeps the plain wording when the 429 names no model", async () => {
         // The two cases must stay distinguishable in BOTH directions: showing
         // "try another model" for genuine throttling would send a user off
         // changing a setting that was never the problem.
+        //
+        // UPDATED: a 429 naming no model is now a wait, so what is asserted is
+        // that the user is never sent to a setting for one. RATE_LIMITED's 30s
+        // says nothing at all; a long one says so without mentioning settings.
         useGemini();
         respondByEngine({ gemini: RATE_LIMITED, google: googleTranslated("1") });
 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
+        expect(shownToasts).toHaveLength(0);
 
-        const toast = shownToasts.find(t => /rate limited/i.test(t.message));
-        expect(toast).toBeDefined();
-        expect(toast!.message).not.toMatch(/settings/i);
+        // RATE_LIMITED's 30s outlasts one settle(), which advances 21s.
+        await settle();
+
+        respondByEngine({
+            gemini: { ok: false, error: "gemini: HTTP 429", retryAfterMs: 300_000 },
+            google: googleTranslated("2")
+        });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("2", "que tal") });
+        await settle();
+
+        expect(shownToasts).toHaveLength(1);
+        expect(shownToasts[0].message).not.toMatch(/settings/i);
+        expect(shownToasts[0].type).toBe("MESSAGE");
     });
 
     it("shows the model toast once per session too, not once per batch", async () => {
