@@ -256,7 +256,12 @@ if (!isHelperRun) app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
-    if (process.platform !== "darwin") app.quit();
+    // Every platform, macOS included. This is a run-once installer, not a
+    // document app: once its window is closed there is nothing left for it to
+    // do, and a copy lingering in the Dock is what a later `open` reactivates
+    // into a stale screen. The background helper is a separate launch
+    // (isHelperRun) and is not affected.
+    app.quit();
 });
 
 /* ------------------------------------------------------------------------ *
