@@ -926,42 +926,35 @@ export class InstallFlow {
         this.permissionPrompted = true;
         return this.set(state({
             step: "permission-explain",
-            // Describes what Continue DOES, rather than sending the user off to
-            // find System Settings themselves — the next step opens the exact
-            // pane for them and then polls. Instructions that ignore the button
-            // sitting right there are how a one-click installer starts feeling
-            // like homework.
-            // Two things this copy has to do, both learned from a real run.
+            // THREE NUMBERED LINES, and the words to look for are bold.
             //
-            // Pre-empt macOS's own wording. After the toggle, macOS says
-            // Subline "will not be able to update or delete other applications
-            // until it is quit". That sentence is Apple's and we cannot change
-            // a word of it — but to someone who has not been warned it reads
-            // like malware asking to delete their apps. Naming it first turns
-            // an alarm into an expected step.
+            // This screen used to be two paragraphs that explained macOS's own
+            // wording before saying what to click. It was accurate and nobody
+            // read it: the thing a person has to DO was the fourth clause of
+            // the second sentence. Steps first, one action each, with the
+            // control named in bold so it can be found by skimming.
             //
-            // And do not promise no restart. The earlier copy said "you do not
-            // need to quit or restart anything"; macOS then offered exactly
-            // "Quit & Reopen", because the grant does not apply to a running
-            // process. Reopening is the normal path, not a fallback.
-            // Everything after the first sentence exists because a real run
-            // produced three macOS interruptions at once — a permission dialog,
-            // a background-activity notification, and Discord relaunching — and
-            // none of them had been mentioned beforehand.
+            // "Later" survives from the old copy and is a measured claim: on
+            // the run that copy was written from, the patch completed while the
+            // app was still running. Apple's dialog is about FUTURE
+            // modifications, not the one that already happened. Earlier copy
+            // said to choose Quit & Reopen, which sent the user through the
+            // whole flow again for no reason.
             //
-            // "Later" is the right button, and that is a measured claim: on the
-            // run this copy was written from, the patch completed while the app
-            // was still running. Apple's dialog is about FUTURE modifications,
-            // not the one that already happened. Earlier copy here said to
-            // choose Quit & Reopen, which sent the user through the whole flow
-            // again for no reason.
+            // The last line is the reassurance the deleted paragraph was really
+            // for. Apple's sentence says Subline "will not be able to update or
+            // delete other applications"; one short line of ours saying what
+            // Subline does touch answers that without reciting it first.
+            //
+            // The `**` is emphasis for the renderer (src/renderer/emphasis.ts).
+            // `state.detail` stays a plain string: this module knows nothing
+            // about a DOM, and the tests read it as text.
             detail:
-                "macOS needs your permission before Subline can change Discord. Continue, and Subline will open the "
-                + "right settings page. Switch Subline on under App Management.\n\n"
-                + "macOS will then say Subline cannot \"update or delete other applications\" until it is quit. That is "
-                + "Apple's wording for this permission, not something Subline asks for. The only app it ever changes "
-                + "is Discord. You can choose Later: the install finishes without restarting anything. Discord will "
-                + "reopen by itself when it is done.",
+                "Discord can only be changed with your permission.\n\n"
+                + "1. Click **Continue**. System Settings opens.\n"
+                + "2. Turn **Subline** on under **App Management**.\n"
+                + "3. If macOS asks to quit Subline, choose **Later**.\n\n"
+                + "Subline only ever changes Discord.",
             permissionStatus: status,
             permissionSettingsUrl: this.ports.permissionSettingsUrl,
             install: this.chosenInstall ?? undefined,
@@ -975,7 +968,12 @@ export class InstallFlow {
 
         this.set(state({
             step: "permission-waiting",
-            detail: "Waiting for permission. Turn Subline on under Privacy & Security › App Management. This screen will move on by itself.",
+            // The pane path is already on screen, as the note under this line
+            // (renderer.ts renders it whenever `permissionSettingsUrl` is set),
+            // so repeating "Privacy & Security ›" here only buried the toggle
+            // name. One sentence, the toggle in bold, and the promise that
+            // waiting is all that is being asked.
+            detail: "Waiting for you to turn **Subline** on under **App Management**. This screen moves on by itself.",
             busy: true,
             permissionSettingsUrl: this.ports.permissionSettingsUrl,
             actions: ["open-permission-settings", "cancel"]
@@ -999,9 +997,13 @@ export class InstallFlow {
         // NOT a dead end: retry is right there, and nothing has to be redone.
         return this.set(state({
             step: "permission-blocked",
+            // The summary is computed (appManagement.ts) and says what macOS is
+            // doing, so it leads. What follows is the two things the user needs:
+            // the exact toggle and the exact button, both bold, and the fact
+            // that retrying costs them nothing they already chose.
             detail:
-                `${report.summary} Without it, Subline cannot add translation to Discord. Everything else you have `
-                + "chosen is saved, so you can grant it and try again at any time.",
+                `${report.summary} Turn **Subline** on under **App Management**, then press **Try again**. `
+                + "Nothing you chose is lost.",
             permission: report,
             permissionStatus: report.status,
             permissionSettingsUrl: this.ports.permissionSettingsUrl,

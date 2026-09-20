@@ -939,17 +939,18 @@ describe("macOS App Management", () => {
         // Nothing was attempted: no patch, and the user has not yet been sent anywhere.
         expect(h.patchCalls).toHaveLength(0);
         expect(h.settingsOpened).toBe(0);
-        expect(state.detail).toContain("App Management");
-        // Pre-empts macOS's own wording. After the toggle, macOS says Subline
-        // cannot "update or delete other applications" until it is quit, and
-        // offers Quit & Reopen, because the grant does not reach a running
-        // process. A user who has not been warned reads that as malware asking
-        // to delete their apps; naming it first makes it an expected step.
-        //
-        // The previous assertion pinned "do not need to" — from copy promising
-        // no quit or restart. A real run disproved that promise, so the promise
-        // and the test holding it both had to go.
-        expect(state.detail).toContain("choose Later");
+        // UPDATED with the copy: the screen is now three numbered steps with
+        // the words to look for in `**bold**` (rendered as <strong> by
+        // src/renderer/emphasis.ts). The assertions pin the BOLD words, because
+        // the emphasis is the part a skimming user acts on. The old assertions
+        // pinned sentences from two paragraphs that pre-empted Apple's "update
+        // or delete other applications" wording before ever saying what to
+        // click; that explanation went, the instruction stayed.
+        expect(state.detail).toContain("**App Management**");
+        expect(state.detail).toContain("**Subline**");
+        expect(state.detail).toContain("**Continue**");
+        // "Later" is still the right button and is still named, in bold now.
+        expect(state.detail).toContain("**Later**");
         expect(state.detail).not.toContain("do not need to quit");
     });
 
@@ -1015,7 +1016,14 @@ describe("macOS App Management", () => {
         expect(state.error?.code).toBe("PERMISSION_DENIED");
         expect(state.actions).toContain("retry");
         expect(state.actions).toContain("open-permission-settings");
-        expect(state.detail).toContain("Everything else you have chosen is saved");
+        // UPDATED with the copy. Same two promises as before, said shorter: the
+        // way out is bold (the toggle and the button), and nothing already
+        // chosen is lost. Was "Everything else you have chosen is saved".
+        expect(state.detail).toContain("**App Management**");
+        expect(state.detail).toContain("**Try again**");
+        expect(state.detail).toContain("Nothing you chose is lost");
+        // The computed summary still leads, so the screen says what macOS did.
+        expect(state.detail.startsWith(state.error?.message ?? "")).toBe(true);
     });
 
     it("retries from where it left off, without redoing the language step", async () => {

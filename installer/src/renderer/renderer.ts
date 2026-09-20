@@ -16,6 +16,7 @@ import { ACTION_LABELS, IS_PRIMARY } from "../app/actions.js";
 import type { FlowAction, FlowActionType, FlowState } from "../app/flow.js";
 import type { LanguageOption } from "../app/language.js";
 import type { UninstallReport } from "../app/uninstall.js";
+import { emphasisParts } from "./emphasis.js";
 
 interface SublineApi {
     start(): Promise<FlowState>;
@@ -117,10 +118,36 @@ function headingFor(state: FlowState): string {
     return STEP_TITLES[state.step];
 }
 
+/**
+ * Write a line of copy, honouring the only markup the copy carries.
+ *
+ * `**like this**` becomes a <strong>, `\n` becomes a <br>, everything else is a
+ * text node. Built as NODES, never as a string of HTML: the copy is ours today,
+ * but `permission-blocked` interpolates a computed summary into it and an
+ * uninstall report can carry a filesystem path, and innerHTML would make either
+ * of those an injection point for the sake of two bold words.
+ */
+function setDetail(el: HTMLElement, text: string): void {
+    el.replaceChildren();
+    for (const part of emphasisParts(text)) {
+        if (part === "br") {
+            el.append(document.createElement("br"));
+            continue;
+        }
+        if (part.strong) {
+            const strong = document.createElement("strong");
+            strong.textContent = part.text;
+            el.append(strong);
+            continue;
+        }
+        el.append(document.createTextNode(part.text));
+    }
+}
+
 function render(state: FlowState): void {
     stepName.textContent = headingFor(state);
 
-    detail.textContent = state.detail;
+    setDetail(detail, state.detail);
     if (state.busy) {
         const spinner = document.createElement("span");
         spinner.className = "spin";
@@ -545,11 +572,18 @@ function runUninstall(
         actionBar.replaceChildren();
         if (phase === "permission") {
             stepName.textContent = "macOS needs your permission";
-            detail.textContent =
-                "macOS needs your permission before Subline can put Discord's original files back. Subline has "
-                + "opened the right settings page: switch Subline on under App Management. This screen moves on "
-                + "by itself. If macOS says Subline cannot \"update or delete other applications\" until it is "
-                + "quit, choose Later. That is Apple's wording for this permission, not something Subline asks for.";
+            // Same shape as the install's permission screen, for the same gate:
+            // what is being asked, the one toggle to flip in bold, and the fact
+            // that nothing else is wanted. The settings page is already open and
+            // its path is in the note below, so neither needs a sentence. The
+            // old copy spent half its length quoting Apple's "update or delete
+            // other applications" warning before reaching the toggle.
+            setDetail(
+                detail,
+                "Discord can only be changed with your permission.\n\n"
+                + "Turn **Subline** on under **App Management**. If macOS asks to quit Subline, choose **Later**.\n\n"
+                + "This continues by itself."
+            );
             const hint = document.createElement("p");
             hint.className = "note";
             hint.textContent = "System Settings › Privacy & Security › App Management";
