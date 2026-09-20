@@ -346,9 +346,14 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
                     + (errorCode === "rate-limited"
                         ? " Google is rate-limiting this network right now, so some messages show as waiting; they retry on their own."
                         : "")
+                    // The first line to paint is ALWAYS the fast ≈ one; the ✦
+                    // upgrade lands a few seconds behind it. A single sample that
+                    // caught the ≈ line says nothing about whether ✦ is coming,
+                    // so a configured code is told what to expect, not that
+                    // something is broken.
                     + (options.expectUpgrade === true
-                        ? " The ✦ quality upgrade is not arriving. Check the engine settings in Discord."
-                        : " Add a free key in Discord's Subline settings whenever you want the smarter ✦ upgrades.")
+                        ? " Your Subline code is set: the ✦ quality upgrade follows a few seconds behind each ≈ line."
+                        : " Paste a Subline code in Discord's Subline settings whenever you want the ✦ quality upgrades.")
             });
     }
 
