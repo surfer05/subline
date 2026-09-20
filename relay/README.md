@@ -26,6 +26,27 @@ translation** to Subline clients presenting an opaque per-user **code**.
 Responses use the plugin's exact `NativeResponse` shape, so the client `relay`
 engine needs no reshaping.
 
+## The taste tier (keyless installs)
+
+An install with no purchased code sends `Bearer free_<32 lowercase hex>`, a
+random id it generates once and keeps. No mint, no KV row, nothing to revoke:
+`authCode` resolves that bearer to a synthetic record
+(`{ status:"active", plan:"taste", dailyCap:3 }`) without a lookup, so a `free_`
+bearer can never be minted, revoked, or given a bigger cap. Any other `free_`
+shape is rejected exactly like an unknown code.
+
+- **3 quality translations a day**, counted as MESSAGES only (no prompt-size
+  surcharge), so 3 presses means 3 translations however long they are.
+- Same daily counter as every plan (`use:free_<id>:<day>`), same UTC midnight
+  reset, same `{ok:false,error:"daily limit reached",retryAfterMs}` on the cap.
+- **6 messages a day per IP** (`use:ip:<ip>:<day>`, from `cf-connecting-ip`), so
+  rerolling the random id does not simply reset the cap. Skipped when the header
+  is absent; the global budget guard applies as it does to everything.
+- `GET /v1/status` answers `{ok:true,plan:"taste",used,cap:3,resetsInMs}`, which
+  is what the plugin reads at startup to show "2 of 3 left today".
+- Metrics rows carry a plan label, so `ok`/`taste` (installs that tasted it) and
+  `cap_exceeded`/`taste` (installs that hit the wall) are countable.
+
 ## Deploy runbook
 
 ```sh

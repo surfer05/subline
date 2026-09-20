@@ -17,7 +17,7 @@
  * system prompt, or reach the key — which is what makes a keyless relay safe to
  * expose. A valid code is not a general Groq proxy.
  */
-import { authCode, reserve, refund, usage, mintCode, applyMorEvent, rpmLimitFor, type Env, type CodeRecord } from "./codes";
+import { authCode, reserve, refund, usage, mintCode, applyMorEvent, rpmLimitFor, costFor, type Env, type CodeRecord } from "./codes";
 import { translateWithFallback, type BatchRequest, type TranslateError, type Provider } from "./translate";
 import { record, type Outcome } from "./metrics";
 export { Budget } from "./budget";
@@ -126,8 +126,10 @@ async function readBody(req: Request): Promise<unknown | null> {
 export default {
     async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
         const url = new URL(req.url);
-        const done = (r: Response, outcome: Outcome, code: string | null, msgs: number) => {
-            ctx.waitUntil(record(env, outcome, code, msgs));
+        // `plan` rides every metric row so the taste tier is countable: how many
+        // keyless installs tasted the AI tier, and how many hit the wall.
+        const done = (r: Response, outcome: Outcome, code: string | null, msgs: number, plan?: string | null) => {
+            ctx.waitUntil(record(env, outcome, code, msgs, plan));
             return r;
         };
 
@@ -148,18 +150,23 @@ export default {
                 return done(fail(msg, map[auth.reason]), auth.reason, code, 0);
             }
 
+            const plan = auth.record.plan ?? "free";
             const body = await readBody(req);
-            if (body === null) return done(fail("payload too large or malformed", 413), "too_large", code, 0);
-            if (!validBatch(body)) return done(fail("bad request", 400), "bad_payload", code, 0);
+            if (body === null) return done(fail("payload too large or malformed", 413), "too_large", code, 0, plan);
+            if (!validBatch(body)) return done(fail("bad request", 400), "bad_payload", code, 0, plan);
             const batch = body as BatchRequest;
             const promptChars =
                 batch.context.reduce((n, c) => n + c.text.length + c.author.length, 0) +
                 batch.messages.reduce((n, m) => n + m.text.length + (m.author?.length ?? 0), 0) +
                 batch.targetLang.length;
-            const cost = batch.messages.length + Math.ceil(promptChars / 1000);
+            const cost = costFor(auth.record, batch.messages.length, promptChars);
+            // The per-IP taste ceiling needs the caller's address, and ONLY for a
+            // taste request: no other plan grows an ip counter, and a request with
+            // no cf-connecting-ip (not fronted by Cloudflare) just skips the cap.
+            const tasteIp = plan === "taste" ? req.headers.get("cf-connecting-ip") : null;
 
             const now = Date.now();
-            const res = await reserve(env, code!, auth.record, cost, now);
+            const res = await reserve(env, code!, auth.record, cost, now, tasteIp);
             if (!res.ok) {
                 const status = 429; // cap_exceeded / rate_limited / capacity all park the engine
                 const label = res.reason === "capacity" ? "capacity" : res.reason;
@@ -171,12 +178,12 @@ export default {
                     return done(json({
                         ok: false, error: "slow down", retryAfterMs: res.retryAfterMs,
                         quotaLimitPerMinute: rpmLimitFor(auth.record)
-                    }, status), label as Outcome, code, 0);
+                    }, status), label as Outcome, code, 0, plan);
                 }
                 return done(fail(
                     res.reason === "cap_exceeded" ? "daily limit reached" : "temporarily unavailable",
                     status, res.retryAfterMs
-                ), label as Outcome, code, 0);
+                ), label as Outcome, code, 0, plan);
             }
 
             const controller = new AbortController();
@@ -187,7 +194,7 @@ export default {
                 clearTimeout(timer);
                 // `rpmLimit` rides every success so the plugin's rate gate can
                 // tune itself to this code's ceiling without ever hitting it.
-                return done(json({ ok: true, results, used: res.used, cap: res.cap, rpmLimit: rpmLimitFor(auth.record) }), "ok", code, cost);
+                return done(json({ ok: true, results, used: res.used, cap: res.cap, rpmLimit: rpmLimitFor(auth.record) }), "ok", code, cost, plan);
             } catch (e) {
                 clearTimeout(timer);
                 const err = e as TranslateError;
@@ -197,21 +204,24 @@ export default {
                 // also stops a client forcing slow batches to burn the key for
                 // free while their daily cap never advances.
                 if (!timedOut && err.status !== 401 && err.status !== 403) {
-                    ctx.waitUntil(refund(env, code!, cost, now));
+                    ctx.waitUntil(refund(env, code!, cost, now, tasteIp));
                 }
                 // The relay's OWN key failing (401/403 from Groq) is a SERVER
                 // fault, never surfaced as "your key is bad".
                 if (err.status === 401 || err.status === 403) {
-                    return done(fail("translation service unavailable", 503), "relay_key_fail", code, 0);
+                    return done(fail("translation service unavailable", 503), "relay_key_fail", code, 0, plan);
                 }
                 if (err.status === 429) {
-                    return done(fail("translation service busy", 429, err.retryAfterMs ?? 30_000), "upstream_error", code, 0);
+                    return done(fail("translation service busy", 429, err.retryAfterMs ?? 30_000), "upstream_error", code, 0, plan);
                 }
-                return done(fail("translation service unavailable", 503, 15_000), "upstream_error", code, 0);
+                return done(fail("translation service unavailable", 503, 15_000), "upstream_error", code, 0, plan);
             }
         }
 
         // ---- GET /v1/status — usage for the settings pane -----------------
+        // A taste bearer answers here exactly like a real code, with plan:"taste"
+        // and cap 3, which is what the plugin reads at startup to show
+        // "2 of 3 left today" before anyone presses anything.
         if (url.pathname === "/v1/status") {
             const code = bearer(req);
             const auth = await authCode(env, code);
@@ -231,6 +241,11 @@ export default {
 
             if (body.action === "mint") {
                 const code = typeof body.code === "string" ? body.code : mintCode();
+                // The free_ prefix belongs to the synthetic taste tier, which
+                // authCode answers WITHOUT reading KV. A minted free_ record
+                // would therefore be unreadable dead state that silently looks
+                // like a 3/day install, so refuse it rather than pretend.
+                if (code.startsWith("free_")) return fail("free_ is reserved for the taste tier", 400);
                 const rec: CodeRecord = {
                     status: "active",
                     dailyCap: Number(body.dailyCap) || 500,

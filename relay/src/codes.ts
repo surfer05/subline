@@ -51,8 +51,10 @@ export interface CodeRecord {
     dailyCap: number;
     // "paid" is the legacy admin-mint tier and is kept so POST /admin/codes and
     // reserve()'s per-plan rate limit keep working; the paid spine adds the
-    // Merchant-of-Record subscription/lifetime tiers alongside it.
-    plan?: "free" | "paid" | "monthly" | "annual" | "lifetime";
+    // Merchant-of-Record subscription/lifetime tiers alongside it. "taste" is
+    // the keyless FREE install (see TASTE below): it is SYNTHETIC and never
+    // stored, so it can be enumerated here without ever being mintable.
+    plan?: "free" | "taste" | "paid" | "monthly" | "annual" | "lifetime";
     /** Maker-facing note. NEVER put PII here — the relay stores no identity. */
     note?: string;
     /** Opaque Merchant-of-Record join id (subscription id, else payment id), kept
@@ -99,6 +101,40 @@ async function readCount(env: Env, key: string): Promise<number> {
     return Number.isFinite(n) ? n : 0;
 }
 
+// ===========================================================================
+//  THE TASTE TIER — keyless FREE installs
+// ===========================================================================
+//
+// An install with no purchased code still wants to SEE the quality tier once.
+// It generates 32 hex chars of local randomness at install time and presents
+// `free_<id>` as its bearer. That id is never minted, never stored, and never
+// revocable: it exists only so two installs meter separately. authCode resolves
+// it to a SYNTHETIC record and never reads KV, which is what makes it
+// impossible to mint one, revoke one, or hand one a bigger cap.
+//
+// The id is client-chosen, so it is farmable by construction — rerolling it
+// buys another 3. The per-IP ceiling in reserve() is what makes farming
+// tedious; the global budget guard is what makes it harmless.
+
+/** The exact bearer shape a keyless install may present. */
+const TASTE_BEARER_RE = /^free_[0-9a-f]{32}$/;
+/** Quality translations one free install gets per UTC day, before the nudge. */
+export const TASTE_DAILY_CAP = 3;
+/** Messages per UTC day across ALL taste ids from one address, so rerolling the
+ *  random id does not simply reset the cap. */
+export const TASTE_IP_DAILY_CAP = 6;
+
+/** True for a WELL-FORMED taste bearer. */
+export function isTasteBearer(code: string | null): boolean {
+    return !!code && TASTE_BEARER_RE.test(code);
+}
+
+/** The synthetic record a valid taste bearer resolves to. Built fresh per
+ *  request and never persisted, so nothing can raise the cap. */
+export function tasteRecord(): CodeRecord {
+    return { status: "active", plan: "taste", dailyCap: TASTE_DAILY_CAP };
+}
+
 export type AuthOutcome =
     | { ok: true; record: CodeRecord }
     | { ok: false; reason: "no_code" | "unknown_code" | "revoked" | "expired" };
@@ -107,6 +143,13 @@ export type AuthOutcome =
  *  vs. is malformed — both read as unknown_code — to avoid an enumeration oracle. */
 export async function authCode(env: Env, code: string | null): Promise<AuthOutcome> {
     if (!code) return { ok: false, reason: "no_code" };
+    // A keyless install resolves WITHOUT touching KV. Anything else wearing the
+    // free_ prefix is malformed or forged and reads as unknown_code — and it
+    // never falls through to a KV lookup, so the prefix can never resolve to a
+    // stored (and therefore mintable, or bigger-capped) record.
+    if (code.startsWith("free_")) {
+        return isTasteBearer(code) ? { ok: true, record: tasteRecord() } : { ok: false, reason: "unknown_code" };
+    }
     const raw = await env.CODES.get(`code:${code}`);
     if (raw === null) return { ok: false, reason: "unknown_code" };
     let rec: CodeRecord;
@@ -138,16 +181,34 @@ export type ReserveOutcome =
  * Requests per minute a code may make. A request is a BATCH of up to 25
  * messages, so even 20/min is far above a human reading and scrolling; the
  * daily message cap is the real spend limit. Any paid tier (legacy "paid" or a
- * MoR subscription/lifetime plan) gets the higher ceiling; only "free"/unset
- * stays at 20. STATED TO THE CLIENT on every response (`rpmLimit`) and on a
- * 429 (`quotaLimitPerMinute`) so the plugin's own rate gate tunes itself to
- * this number instead of a conservative guess.
+ * MoR subscription/lifetime plan) gets the higher ceiling; the unpaid plans
+ * ("free", "taste", unset) stay at 20 — a taste install has 3 messages a day
+ * anyway, so its rate gate only has to look like the free one. STATED TO THE
+ * CLIENT on every response (`rpmLimit`) and on a 429 (`quotaLimitPerMinute`) so
+ * the plugin's own rate gate tunes itself to this number instead of a
+ * conservative guess.
  */
+const UNPAID_PLANS = new Set(["free", "taste"]);
 export function rpmLimitFor(rec: CodeRecord): number {
-    return rec.plan && rec.plan !== "free" ? 60 : 20;
+    return rec.plan && !UNPAID_PLANS.has(rec.plan) ? 60 : 20;
 }
 
-export async function reserve(env: Env, code: string, rec: CodeRecord, cost: number, now: number): Promise<ReserveOutcome> {
+/**
+ * What one batch costs against the daily cap.
+ *
+ * A CODE is charged messages plus a prompt-size surcharge, so a client cannot
+ * buy cheap tokens by stuffing huge texts into few messages. A TASTE install is
+ * charged MESSAGES ONLY: its cap is 3, and "3 free translations" has to mean 3
+ * presses whatever the length, or the nudge ("2 of 3 left today") lies. The
+ * surcharge is pointless there anyway — 3 messages cannot move the budget.
+ */
+export function costFor(rec: CodeRecord, messages: number, promptChars: number): number {
+    return rec.plan === "taste" ? messages : messages + Math.ceil(promptChars / 1000);
+}
+
+/** `ip` is the caller's cf-connecting-ip, passed ONLY for taste requests (and
+ *  absent when the header is missing) — it enables the per-IP ceiling below. */
+export async function reserve(env: Env, code: string, rec: CodeRecord, cost: number, now: number, ip?: string | null): Promise<ReserveOutcome> {
     // 1) Per-minute rate limit (KV, soft): one shared paid key must not be
     //    drained by a runaway/scraping client. Well above a real user's rate.
     const rpmKey = `rl:${code}:${Math.floor(now / 60_000)}`;
@@ -161,6 +222,24 @@ export async function reserve(env: Env, code: string, rec: CodeRecord, cost: num
     const used = await readCount(env, dayKey);
     if (used + cost > rec.dailyCap) {
         return { ok: false, reason: "cap_exceeded", retryAfterMs: msUntilUtcMidnight(now), used, cap: rec.dailyCap };
+    }
+
+    // 2b) TASTE ONLY: daily ceiling per ADDRESS, shared by every free id behind
+    //     it. The taste id is generated by the client, so it can be rerolled for
+    //     another 3; the address behind it cannot be, cheaply. Checked BEFORE the
+    //     budget guard so a farmed request never spends. No header (not fronted
+    //     by Cloudflare, or a unit test) ⇒ skip the cap, never deny on its absence.
+    const ipKey = rec.plan === "taste" && ip ? `use:ip:${ip}:${today(now)}` : null;
+    let ipUsed = 0;
+    if (ipKey) {
+        ipUsed = await readCount(env, ipKey);
+        if (ipUsed + cost > TASTE_IP_DAILY_CAP) {
+            // Same shape as the per-bearer cap (the client cannot act on the
+            // difference, and spelling out "your address is capped" would only
+            // teach a farmer what to evade). used/cap stay the BEARER's numbers
+            // so the plugin's "n of 3 left today" line never goes incoherent.
+            return { ok: false, reason: "cap_exceeded", retryAfterMs: msUntilUtcMidnight(now), used, cap: rec.dailyCap };
+        }
     }
 
     // 3) Global spend guard (ATOMIC — Durable Object). This is the real money
@@ -178,6 +257,7 @@ export async function reserve(env: Env, code: string, rec: CodeRecord, cost: num
     // 4) Commit the per-code counters (soft). Self-purge (daily 2d, rpm 2min).
     await env.CODES.put(dayKey, String(used + cost), { expirationTtl: 172_800 });
     await env.CODES.put(rpmKey, String(rpm + 1), { expirationTtl: 120 });
+    if (ipKey) await env.CODES.put(ipKey, String(ipUsed + cost), { expirationTtl: 172_800 });
 
     return { ok: true, used: used + cost, cap: rec.dailyCap };
 }
@@ -185,10 +265,18 @@ export async function reserve(env: Env, code: string, rec: CodeRecord, cost: num
 /** Return a reservation when the upstream call failed, so a Groq outage never
  *  costs a user their quota. Best-effort; the global counter is left as-is
  *  (slack-tolerant) so the budget guard stays conservative. */
-export async function refund(env: Env, code: string, cost: number, now: number): Promise<void> {
+export async function refund(env: Env, code: string, cost: number, now: number, ip?: string | null): Promise<void> {
     const dayKey = `use:${code}:${today(now)}`;
     const used = await readCount(env, dayKey);
     await env.CODES.put(dayKey, String(Math.max(0, used - cost)), { expirationTtl: 172_800 });
+    // A taste request also held a per-IP reservation; give that back too, or one
+    // upstream outage burns a whole household's free taste for the day. Passed
+    // only for taste requests, so nothing else grows an ip counter.
+    if (ip) {
+        const ipKey = `use:ip:${ip}:${today(now)}`;
+        const ipUsed = await readCount(env, ipKey);
+        await env.CODES.put(ipKey, String(Math.max(0, ipUsed - cost)), { expirationTtl: 172_800 });
+    }
 }
 
 /** Current usage for GET /v1/status. */
@@ -271,6 +359,9 @@ export function mintCode(): string {
 // paywall-bypass replay without any dedup state.
 
 const FREE_FALLBACK_CAP = 500; // the conservative cap for an unmapped/misconfigured variant
+// The plans a PURCHASE may map to. "taste" is deliberately NOT here: it is the
+// synthetic keyless tier, so a product-id map must never be able to mint one
+// (that would be a stored free_-style record with a purchased cap).
 const KNOWN_PLANS = new Set(["free", "paid", "monthly", "annual", "lifetime"]);
 
 // Provisional expiry stamped on a SUBSCRIPTION code at license_key.created so it
