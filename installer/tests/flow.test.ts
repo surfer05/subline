@@ -534,6 +534,10 @@ describe("a Discord we already patched", () => {
         expect(seen).not.toContain("choose-language");
         expect(seen).not.toContain("choose-code");
         expect(h.patchCalls.length).toBeGreaterThan(0);
+        // The saved code is honoured on the last screen: the update is a
+        // code-holder's install, and says so.
+        expect(first.step).toBe("done");
+        expect(first.detail).toContain("✦");
     });
 
     // OBSERVED 2026-09-20: a friend who skipped the code on first install had

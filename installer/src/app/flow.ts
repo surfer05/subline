@@ -761,6 +761,10 @@ export class InstallFlow {
             this.ports.log.info("flow.update-offers-code", { reason: "no code in saved settings" });
             return this.codeStep();
         }
+        // The saved code counts as configured for the rest of this run: the last
+        // screen's wording and the background confirmation's expectations are
+        // those of a code-holder, not of a keyless install.
+        this.codeConfigured = true;
         return this.permissionStep();
     }
 
