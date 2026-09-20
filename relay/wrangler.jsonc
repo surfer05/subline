@@ -37,18 +37,19 @@
     // deliberately after watching real spend vs the cost-units in metrics.
     "GLOBAL_BUDGET_MESSAGES": "400000",
     // Dodo Payments product_id → { plan, dailyCap }. The webhook maps each paid
-    // license key to a plan + fair-use cap by its data.product_id. FILL IN the
-    // real Dodo product ids after creating the products in the Dodo dashboard
-    // (the keys below are PLACEHOLDERS). An UNMAPPED or misconfigured product
+    // license key to a plan + fair-use cap by its data.product_id. These are the
+    // LIVE Dodo product ids as of 2026-09-21: the two products actually on sale,
+    // monthly and annual. Lifetime was dropped, and the old TEST-mode ids are no
+    // longer mapped, so a test-mode purchase now fails safe to the free cap
+    // rather than minting a paid code. An UNMAPPED or misconfigured product
     // fails SAFE: the code is minted at the free default cap (500/day) and
     // flagged in its note — never at an unbounded cap. A `monthly`/`annual` plan
     // is treated as a SUBSCRIPTION (gets a finite provisional expiry + renews via
     // subscription.* events); `lifetime` is a one-time purchase (never expires).
     // plan ∈ free|paid|monthly|annual|lifetime.
     "VARIANTS": {
-      "pdt_0NnIsRwbVPPj5DiRqfTK4": { "plan": "monthly", "dailyCap": 2000 },
-      "pdt_0NnFPWmBGAvS6n0XioM7E": { "plan": "annual", "dailyCap": 2000 },
-      "pdt_0NnFNIFZempWa5YVSk4AE": { "plan": "lifetime", "dailyCap": 2000 }
+      "pdt_0No1xmbcAqHdYAvt1RNPR": { "plan": "monthly", "dailyCap": 2000 },
+      "pdt_0No1yAve1ozdxryVGZvf6": { "plan": "annual", "dailyCap": 2000 }
     }
   },
   "durable_objects": { "bindings": [{ "name": "BUDGET", "class_name": "Budget" }] },

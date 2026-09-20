@@ -38,7 +38,7 @@ a:hover{color:var(--fg)}
 .anchor{font-family:var(--font-serif);font-size:19px;line-height:1.42;font-weight:400;margin:26px 0 0;max-width:44ch;
   padding-left:14px;border-left:3px solid var(--accent)}
 .anchor b{font-weight:600}
-.plans{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:26px}
+.plans{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:26px}
 @media (max-width:700px){.plans{grid-template-columns:1fr}}
 .plans .card{min-width:0;overflow-wrap:anywhere}
 .badge{align-self:flex-start;font-family:var(--font-mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;
@@ -52,26 +52,19 @@ a:hover{color:var(--fg)}
 <p class="kicker">Upgrade</p>
 <h2 class="sec">Turn on AI translation</h2>
 <p class="lead">The free tier is instant Google translation, the <span class="gl">≈</span> line under every message. It stays free. The paid tier is an AI, the <span class="gl">✦</span> line. It reads the surrounding conversation, so slang and replies come out right. After you pay, your code arrives by email. Paste it into the Subline installer, or any time later in Subline's settings inside Discord. No API key, no setup.</p>
-<!-- TODO go-live: swap test.checkout → checkout and to live product ids -->
 <div class="plans">
   <div class="panel card">
     <h3>Monthly</h3>
-    <div class="price">$1.99<span class="per">/mo</span></div>
-    <p>Try it, cancel anytime.</p>
-    <a class="btn btn-secondary" href="https://test.checkout.dodopayments.com/buy/pdt_0NnIsRwbVPPj5DiRqfTK4?quantity=1">Get Monthly</a>
+    <div class="price">$2.49<span class="per">/mo</span></div>
+    <p>Cancel anytime.</p>
+    <a class="btn btn-secondary" href="https://checkout.dodopayments.com/buy/pdt_0No1xmbcAqHdYAvt1RNPR?quantity=1">Buy</a>
   </div>
   <div class="panel card">
-    <span class="badge">~$1/mo</span>
+    <span class="badge">2 months free</span>
     <h3>Annual</h3>
-    <div class="price">$9.99<span class="per">/yr</span></div>
-    <p>Twelve months up front.</p>
-    <a class="btn btn-primary" href="https://test.checkout.dodopayments.com/buy/pdt_0NnFPWmBGAvS6n0XioM7E?quantity=1">Get Annual</a>
-  </div>
-  <div class="panel card">
-    <h3>Lifetime</h3>
-    <div class="price">$19.99</div>
-    <p>One-time. No renewal.</p>
-    <a class="btn btn-secondary" href="https://test.checkout.dodopayments.com/buy/pdt_0NnFNIFZempWa5YVSk4AE?quantity=1">Get Lifetime</a>
+    <div class="price">$19.99<span class="per">/yr</span></div>
+    <p>Billed once a year.</p>
+    <a class="btn btn-primary" href="https://checkout.dodopayments.com/buy/pdt_0No1yAve1ozdxryVGZvf6?quantity=1">Buy</a>
   </div>
 </div>
 <p class="fine">Free <span class="gl">≈</span> Google translation never expires. Paying unlocks the <span class="gl">✦</span> AI. Prices in USD; tax added at checkout.</p>
