@@ -507,12 +507,21 @@ function showUninstall(report: UninstallReport, mayRetry: boolean): void {
 
 let lastKeepSettings = true;
 
+/**
+ * Once an uninstall has started, the install flow's screens are history. Its
+ * background confirmation (see InstallFlow.verify) can still report after the
+ * user pressed Uninstall on the last screen, and rendering that would paint
+ * "Finished" over "Removed". Flow states are ignored from here on.
+ */
+let uninstalling = false;
+
 function runUninstall(
     keepSettings: boolean,
     closeDiscord: "ask" | "force" | null,
     mayRetry: boolean
 ): Promise<void> {
     lastKeepSettings = keepSettings;
+    uninstalling = true;
     // The wait is real: quitting Discord, waiting for its files to settle,
     // restoring the original app.asar. Ten to twenty seconds of a frozen
     // screen reads as a hang, so say what is happening for all of them.
@@ -572,5 +581,5 @@ document.getElementById("uninstall")?.addEventListener("click", () => {
     void runUninstall(keepSettings, null, true);
 });
 
-api.onState(render);
+api.onState(state => { if (!uninstalling) render(state); });
 void api.start().then(render);

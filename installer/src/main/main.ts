@@ -271,6 +271,10 @@ ipcMain.handle("flow:send", async (_event, action: FlowAction) => {
 });
 
 ipcMain.handle("flow:restart", () => {
+    // The old flow may still have a background confirmation running (see
+    // InstallFlow.verify); detach it so a late result cannot repaint the new
+    // run's screen with the previous run's verdict.
+    if (flow !== null) flow.onChange = null;
     flow = createFlow();
     return flow.start();
 });
