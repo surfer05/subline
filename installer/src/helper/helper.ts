@@ -662,7 +662,8 @@ async function maybeUpdate(run: Run, managed: ManagedInstall[], bundle: ModBundl
 
     run.state.lastReleaseBuildId = manifest.buildId;
     const installedBuildId = bundle?.buildId ?? null;
-    if (!isNewerBuild(manifest, installedBuildId)) {
+    const installed = bundle === null ? null : { buildId: bundle.buildId, pluginVersion: bundle.pluginVersion };
+    if (installed !== null && installed.buildId === manifest.buildId) {
         run.state.updateFailures = 0;
         run.clear("update-failed");
         run.decide("update", "up-to-date", "the published build is the one already installed", {
@@ -670,8 +671,21 @@ async function maybeUpdate(run: Run, managed: ManagedInstall[], bundle: ModBundl
         });
         return;
     }
+    if (!isNewerBuild(manifest, installed)) {
+        // The feed moves installs FORWARD only (see isNewerBuild). A different
+        // but older — or same-version — build on the feed is not an update,
+        // and installing it downgraded a real machine on 2026-09-20.
+        run.state.updateFailures = 0;
+        run.clear("update-failed");
+        run.decide("update", "not-newer", "the published build is not newer than the installed one, so it is left alone", {
+            installed: installed?.pluginVersion ?? null,
+            published: manifest.pluginVersion,
+            buildId: manifest.buildId
+        });
+        return;
+    }
 
-    run.decide("update", "available", "the release feed offers a different build from the installed one", {
+    run.decide("update", "available", "the release feed offers a newer build than the installed one", {
         from: installedBuildId,
         to: manifest.buildId,
         pluginVersion: manifest.pluginVersion

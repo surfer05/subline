@@ -225,7 +225,14 @@ function renderExtra(state: FlowState): void {
         extra.append(note);
     }
 
-    if (state.step === "done" && state.verification) {
+    // "No message in another language has come by yet" is not a verdict. The
+    // sentence above already says what happens when one does, and a "?" card
+    // for it was the tension the old waiting screen caused. Only a real
+    // confirmation, or a real problem, earns a card.
+    const quiet = state.verification !== undefined
+        && !state.verification.confirmed
+        && state.verification.status === "loaded-idle";
+    if (state.step === "done" && state.verification && !quiet) {
         // THE ONLY PLACE A TICK IS DRAWN, and it reads `confirmed` — never
         // "we got to the last screen". The two endings are different shapes as
         // well as different colours (✓ against a ring), because the design

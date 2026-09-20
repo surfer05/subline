@@ -303,10 +303,40 @@ export function verifyDownload(
     return ok({ manifest, bytes, verifiedBy });
 }
 
-/** Is `manifest` offering something other than what is installed? */
-export function isNewerBuild(manifest: ReleaseManifest, installedBuildId: string | null): boolean {
-    // Compared by identity, never by ordering. Build ids are digests, so "newer"
-    // is not a thing they can express — and a rolled-back release that we must
-    // move BACK to is exactly as different as a forward one.
-    return manifest.buildId !== installedBuildId;
+/** Ordering for dotted numeric versions ("0.1.10" > "0.1.9"); a non-numeric part counts as 0. */
+export function compareVersions(a: string, b: string): number {
+    const pa = a.split(".").map(part => Number.parseInt(part, 10) || 0);
+    const pb = b.split(".").map(part => Number.parseInt(part, 10) || 0);
+    const len = Math.max(pa.length, pb.length);
+    for (let i = 0; i < len; i++) {
+        const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+        if (diff !== 0) return diff;
+    }
+    return 0;
+}
+
+/** What the helper knows about the bundle it has, for `isNewerBuild`. */
+export interface InstalledBuild {
+    buildId: string | null;
+    pluginVersion: string | null;
+}
+
+/**
+ * Is `manifest` a build the helper should install over what it has?
+ *
+ * FORWARD ONLY. Build ids are digests and cannot say which is newer, so the
+ * plugin version decides: the feed installs only a HIGHER version. "Any
+ * different id" used to be enough, in either direction, so that a rolled-back
+ * release would be applied — and on 2026-09-20 that replaced a freshly
+ * installed 0.1.1 with the 0.1.0 still on the feed, seven seconds after the
+ * installer finished, and re-patched Discord with it. A rollback is published
+ * as a higher version that reverts the code. The same version under a
+ * different id is left alone: a release always bumps the version.
+ */
+export function isNewerBuild(manifest: ReleaseManifest, installed: InstalledBuild | null): boolean {
+    if (installed === null) return true;
+    if (installed.buildId === manifest.buildId) return false;
+    // A bundle whose version cannot be read is not evidence of being current.
+    if (installed.pluginVersion === null) return true;
+    return compareVersions(manifest.pluginVersion, installed.pluginVersion) > 0;
 }

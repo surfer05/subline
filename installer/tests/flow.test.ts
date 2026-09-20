@@ -279,9 +279,15 @@ async function toDetection(h: Harness): Promise<FlowState> {
  * state to cross. Routed through here rather than repeated inline, so adding
  * another optional step later is one edit and not forty.
  */
-async function setLanguage(flow: { send: (a: any) => Promise<any> }, code = "tr"): Promise<any> {
+async function setLanguage(
+    flow: { send: (a: any) => Promise<any>; settled?: () => Promise<any> },
+    code = "tr"
+): Promise<any> {
     const next = await flow.send({ type: "set-language", code });
-    return next.step === "choose-code" ? flow.send({ type: "skip-code" }) : next;
+    const after = next.step === "choose-code" ? await flow.send({ type: "skip-code" }) : next;
+    // The last screen shows at once and the confirmation lands in the
+    // background, so tests read the SETTLED state: what the user finally sees.
+    return after.step === "done" && flow.settled ? flow.settled() : after;
 }
 
 describe("the happy path", () => {
@@ -1247,8 +1253,10 @@ describe("the machine", () => {
         expect(seen).toContain("detecting");
         expect(seen).toContain("choose-language");
         expect(seen).toContain("patching");
-        expect(seen).toContain("verifying");
-        expect(seen).toContain("done");
+        // No "verifying" screen any more: the last screen shows at once and the
+        // confirmation arrives as a second "done" transition (see settled()).
+        expect(seen).not.toContain("verifying");
+        expect(seen.filter(step => step === "done").length).toBeGreaterThanOrEqual(2);
     });
 
     it("logs every state and never logs anything resembling message text", async () => {
@@ -1273,7 +1281,9 @@ describe("the machine", () => {
         await toDetection(h);
         await setLanguage(h.flow, "tr");
         expect(seen.some(s => s.step === "patching" && s.busy)).toBe(true);
-        expect(seen.some(s => s.step === "verifying" && s.busy)).toBe(true);
+        // The last screen is never busy: confirmation happens in the background,
+        // and a spinner next to a Discord that is opening read as "still wrong".
+        expect(seen.filter(s => s.step === "done").every(s => !s.busy)).toBe(true);
         expect(seen.at(-1)?.busy).toBe(false);
     });
 });

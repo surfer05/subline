@@ -323,6 +323,8 @@ export class InstallFlow {
     private patchReport: PatchReport | null = null;
     private patchedAt = 0;
     private launchedAt = 0;
+    /** The background confirmation, once the last screen is up. See `verify`. */
+    private verifying: Promise<FlowState> | null = null;
     /**
      * True once the macOS permission step was actually shown this run.
      *
@@ -1197,19 +1199,29 @@ export class InstallFlow {
     private updating = false;
 
     private async verify(): Promise<FlowState> {
-        this.set(state({
-            step: "verifying",
-            detail: "Subline confirms itself the moment a message in another language arrives. There is no need to go "
-                + "looking for one: if none shows up while we watch, Subline keeps checking in the background and "
-                + "everything still works.",
-            busy: true,
-            actions: []
-        }));
-
         const patch = this.patchReport;
         if (patch === null) return this.detect();
 
-        const report = await this.ports.verify({
+        // NO WAITING SCREEN. Discord is opening in front of the user, and a
+        // spinner beside it read as "something is still wrong" for as long as
+        // it spun — which was until a message in another language happened to
+        // arrive, up to the timeout. So the last screen shows at once, in
+        // plain words, and the confirmation lands in the background: a green
+        // tick when a translation is actually seen, a warning when something is
+        // wrong, and nothing at all for "no foreign message has come by yet".
+        const done = this.set(state({
+            step: "done",
+            detail: this.plainDoneDetail(),
+            patch,
+            bundle: this.installedBundle ?? undefined,
+            // Carried to the last screen so "installed, but it will not repair
+            // itself" is visible where the user actually looks, rather than only
+            // in the log.
+            helper: this.helperOutcome ?? undefined,
+            actions: ["finish"]
+        }));
+
+        this.verifying = this.ports.verify({
             // The build id comes from the patch we just made, so a beacon
             // written by somebody else's copy of the plugin cannot confirm this
             // install. Never a guess, in either direction.
@@ -1221,31 +1233,46 @@ export class InstallFlow {
             clock: () => this.ports.now(),
             ...(this.ports.verifyTimeoutMs === undefined ? {} : { timeoutMs: this.ports.verifyTimeoutMs }),
             ...(this.ports.verifyPollIntervalMs === undefined ? {} : { pollIntervalMs: this.ports.verifyPollIntervalMs })
-        });
-        this.ports.log.info("verify.result", {
-            status: report.status,
-            confirmed: report.confirmed,
-            loaded: report.loaded,
-            identity: report.identity,
-            tier: report.tier,
-            errorCode: report.errorCode ?? null
+        }).then(report => {
+            this.ports.log.info("verify.result", {
+                status: report.status,
+                confirmed: report.confirmed,
+                loaded: report.loaded,
+                identity: report.identity,
+                tier: report.tier,
+                errorCode: report.errorCode ?? null
+            });
+            // Only while the user is still on the last screen. A run that moved
+            // on (Cancel, Uninstall, a restart) keeps whatever it is showing.
+            if (this.current.step !== "done") return this.current;
+            return this.set(state({
+                ...this.current,
+                // The report's own sentence, unedited, whenever it has something
+                // to say: `verifyOnce` is the module that decides what may be
+                // claimed, and rewording it here is exactly how a "could not
+                // confirm" becomes a green tick. "Nothing arrived yet" is not
+                // news, so the plain sentence stays.
+                detail: report.status === "loaded-idle" ? this.current.detail : report.summary,
+                verification: report
+            }));
         });
 
-        return this.set(state({
-            step: "done",
-            // The report's own sentence, unedited. `verifyOnce` is the module
-            // that decides what may be claimed, and rewording it here is exactly
-            // how a "could not confirm" becomes a green tick.
-            detail: report.summary,
-            verification: report,
-            patch: patch,
-            bundle: this.installedBundle ?? undefined,
-            // Carried to the last screen so "installed, but it will not repair
-            // itself" is visible where the user actually looks, rather than only
-            // in the log.
-            helper: this.helperOutcome ?? undefined,
-            actions: ["finish"]
-        }));
+        return done;
+    }
+
+    /**
+     * Resolves once the background confirmation has reported, with the state it
+     * left behind — or at once with the current state when none is running.
+     */
+    settled(): Promise<FlowState> {
+        return this.verifying ?? Promise.resolve(this.current);
+    }
+
+    private plainDoneDetail(): string {
+        return "Subline is installed and Discord is opening. Messages in other languages get a translation "
+            + "underneath them."
+            + (this.codeConfigured ? " With your code, the ✦ line follows a few seconds after the ≈ line." : "")
+            + " You can close this window.";
     }
 }
 

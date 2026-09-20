@@ -399,7 +399,9 @@ describe("the install flow installs the helper", () => {
         // to re-patch before it; before the launch, because the launch and the
         // verification are minutes of watching Discord start and a step after the
         // last screen is a step everybody skips.
-        const order = h.steps.filter(step => ["patching", "installing-helper", "launching", "done"].includes(step));
+        // "done" is entered twice (at once, then again when the background
+        // confirmation lands), so compare the sequence of DISTINCT steps.
+        const order = [...new Set(h.steps.filter(step => ["patching", "installing-helper", "launching", "done"].includes(step)))];
         expect(order).toEqual(["patching", "installing-helper", "launching", "done"]);
     });
 

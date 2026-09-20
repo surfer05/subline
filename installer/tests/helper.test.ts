@@ -250,12 +250,12 @@ function writeBeacon(path: string, buildId: string, fields: Record<string, unkno
     );
 }
 
-function releaseDocument(buildId: string, bytes: Uint8Array): string {
+function releaseDocument(buildId: string, bytes: Uint8Array, pluginVersion = "0.2.0"): string {
     return JSON.stringify({
         format: RELEASE_MANIFEST_FORMAT,
         product: "subline",
         buildId,
-        pluginVersion: "0.2.0",
+        pluginVersion,
         publishedAt: "2026-08-07T00:00:00.000Z",
         artifact: {
             name: "subline-mod.zip",
@@ -811,6 +811,32 @@ describe("trigger B — a new mod build", () => {
         harness.advance(60 * 60_000);
         const third = await harness.run({ forceUpdateCheck: true });
         expect(third.alerts.map(entry => entry.alert.code)).toEqual(["update-failed"]);
+    });
+
+    // OBSERVED 2026-09-20, on the maker's own Mac: a freshly installed 0.1.1
+    // (feed on) was replaced seven seconds later by the 0.1.0 still published
+    // on the feed, and Discord was re-patched with it. The feed moves installs
+    // forward only.
+    it("never downgrades to an OLDER version published on the feed", async () => {
+        patchForReal(harness);
+        await harness.run();
+        const older = makeModBundleFixture({ buildId: "0000aaaa1111bbbb", pluginVersion: "0.0.9" });
+        try {
+            harness.feed = ok(releaseDocument(older.buildId, new TextEncoder().encode("x"), "0.0.9"));
+            harness.nextBundle = older;
+
+            const report = await harness.run({ forceUpdateCheck: true });
+
+            expect(report.updateInstalled).toBeNull();
+            expect(harness.unpacked).toEqual([]);
+            expect(harness.logged).toContain("helper.update not-newer");
+            expect(harness.notifications).toEqual([]);
+            // Discord still carries the build that was installed.
+            const marker = readMarker(harness.fixture.install.resourcesPath);
+            expect(marker.ok && marker.value?.pluginBuildId).toBe(harness.shipped.buildId);
+        } finally {
+            older.cleanup();
+        }
     });
 
     it("does nothing at all when the feed offers the build already installed", async () => {

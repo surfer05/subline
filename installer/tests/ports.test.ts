@@ -97,9 +97,14 @@ const RUNTIME_MOD_DIR = () => join(home, "Library", "Application Support", "Subl
  * state to cross. Routed through here rather than repeated inline, so adding
  * another optional step later is one edit and not forty.
  */
-async function setLanguage(flow: { send: (a: any) => Promise<any> }, code = "tr"): Promise<any> {
+async function setLanguage(
+    flow: { send: (a: any) => Promise<any>; settled?: () => Promise<any> },
+    code = "tr"
+): Promise<any> {
     const next = await flow.send({ type: "set-language", code });
-    return next.step === "choose-code" ? flow.send({ type: "skip-code" }) : next;
+    const after = next.step === "choose-code" ? await flow.send({ type: "skip-code" }) : next;
+    // The last screen shows at once; the verification lands in the background.
+    return after.step === "done" && flow.settled ? flow.settled() : after;
 }
 
 describe("the real ports, end to end", () => {

@@ -210,11 +210,26 @@ describe("verifying a download", () => {
 });
 
 describe("deciding whether a release is worth installing", () => {
-    it("treats any different build id as something to install, in either direction", () => {
-        // Build ids are digests, so "newer" is not something they can express —
-        // and a release that ROLLS BACK to a previous build must still be applied.
-        expect(isNewerBuild(parsed(), "0011223344556677")).toBe(true);
+    // OBSERVED 2026-09-20: a freshly installed 0.1.1 was replaced within
+    // seconds by the 0.1.0 on the feed, because "different id" counted as an
+    // update in either direction. The feed may only ever move an install
+    // FORWARD: a higher plugin version. A rollback is published as a higher
+    // version that reverts the code, never by pointing the feed at an old build.
+    it("installs a HIGHER plugin version", () => {
+        expect(isNewerBuild(parsed(), { buildId: "0011223344556677", pluginVersion: "0.1.9" })).toBe(true);
+        expect(isNewerBuild(parsed({ pluginVersion: "0.10.0" }), { buildId: "0011223344556677", pluginVersion: "0.9.9" })).toBe(true);
+    });
+    it("installs when nothing is installed at all", () => {
         expect(isNewerBuild(parsed(), null)).toBe(true);
-        expect(isNewerBuild(parsed(), "1f2e3d4c5b6a7980")).toBe(false);
+    });
+    it("never DOWNGRADES: a lower version on the feed is left alone", () => {
+        expect(isNewerBuild(parsed({ pluginVersion: "0.1.0" }), { buildId: "0011223344556677", pluginVersion: "0.1.1" })).toBe(false);
+    });
+    it("leaves the same build, and the same version under a different id, alone", () => {
+        expect(isNewerBuild(parsed(), { buildId: "1f2e3d4c5b6a7980", pluginVersion: "0.2.0" })).toBe(false);
+        expect(isNewerBuild(parsed(), { buildId: "0011223344556677", pluginVersion: "0.2.0" })).toBe(false);
+    });
+    it("an installed bundle with no readable version is treated as older", () => {
+        expect(isNewerBuild(parsed(), { buildId: "0011223344556677", pluginVersion: null })).toBe(true);
     });
 });
