@@ -515,7 +515,7 @@ export class InstallFlow {
                 // A permission failure that survived the probe goes back to the
                 // permission screen rather than retrying the same blocked write.
                 if (this.current.error?.code === "PERMISSION_DENIED") return this.explainPermission("blocked");
-                return this.applyPatch();
+                return this.patchStep();
 
             // Discord is ALREADY PATCHED by the time this screen can appear, so
             // retry re-runs only the helper — never the patch. Repeating a
@@ -523,7 +523,7 @@ export class InstallFlow {
             // would not register is a much worse failure than the one being
             // retried.
             case "helper-failed":
-                if (action.type === "skip-helper") return this.launch();
+                if (action.type === "skip-helper") return this.afterHelper();
                 return this.installHelper();
 
             case "launch-failed":
@@ -731,6 +731,33 @@ export class InstallFlow {
         const running = findDiscordProcesses(processes, install.branch, this.ports.platform);
 
         if (running.length > 0) {
+            // AN UPDATE NEVER ASKS THE USER TO CLOSE DISCORD, and never closes
+            // it for them. The maker's rule, verbatim in spirit: "we do not
+            // control when they want to quit." Someone who already has a
+            // working Subline is mid-conversation; interrupting that to deliver
+            // an improvement they did not ask for is the installer putting its
+            // own schedule ahead of theirs.
+            //
+            // There is a real way to finish on both platforms without the quit
+            // gate, which is why this is a skip and not a postponement. macOS
+            // lets the archive be renamed underneath a running Discord, so the
+            // new build is written now and picked up at the next launch.
+            // Windows will not rename a file a live process holds, so the
+            // bundle is staged and the background helper re-patches once the
+            // user closes Discord in their own time.
+            //
+            // A FRESH install is unchanged: there is no working translation to
+            // protect, and nothing to fall back on if the write cannot happen.
+            if (this.updating) {
+                this.updatingWithDiscordOpen = true;
+                this.ports.log.info("flow.update-under-running-discord", {
+                    branch: install.branch,
+                    platform: this.ports.platform,
+                    processes: running.length
+                });
+                return this.afterDiscordClosed();
+            }
+
             return this.set(state({
                 step: "discord-running",
                 detail: "Discord is running and has to close before it can be changed. Subline can ask it to quit for you.",
@@ -740,6 +767,7 @@ export class InstallFlow {
             }));
         }
 
+        this.updatingWithDiscordOpen = false;
         return this.afterDiscordClosed();
     }
 
@@ -912,7 +940,7 @@ export class InstallFlow {
 
         const status = this.ports.probePermission(install);
         this.ports.log.info("permission.probe", { status });
-        if (status === "granted" || status === "not-required") return this.applyPatch();
+        if (status === "granted" || status === "not-required") return this.patchStep();
 
         // EXPLAIN BEFORE ATTEMPTING (§4). We already know the write would be
         // refused, so the user meets this as a step rather than as a failure.
@@ -992,7 +1020,7 @@ export class InstallFlow {
         });
         this.ports.log.info("permission.result", { status: report.status, attempts: report.attempts });
 
-        if (report.permitted) return this.applyPatch();
+        if (report.permitted) return this.patchStep();
 
         // NOT a dead end: retry is right there, and nothing has to be redone.
         return this.set(state({
@@ -1020,6 +1048,53 @@ export class InstallFlow {
      * §3 step 8: patch
      * -------------------------------------------------------------------- */
 
+    /**
+     * Write the update, or stage it where writing is impossible.
+     *
+     * One place decides, because three callers used to call `applyPatch`
+     * directly and a rule that holds on only two of them is not a rule.
+     * Windows cannot rename Discord's archive while Discord holds it open, so
+     * an update over a running Discord copies the bundle into place and stops
+     * there; everything else patches as it always did.
+     */
+    private async patchStep(): Promise<FlowState> {
+        if (this.updatingWithDiscordOpen && this.ports.platform === "win32") return this.stageUpdate();
+        return this.applyPatch();
+    }
+
+    /**
+     * Windows, updating, Discord open: put the new bundle in place and leave.
+     *
+     * The patch itself is the one thing that cannot happen here, and it is also
+     * the one thing that does not have to happen now. `helper.ts` compares the
+     * installed bundle's build id against the marker Discord carries, gets
+     * `build-changed`, and re-patches on its own schedule once
+     * `requireDiscordClosed` is satisfied. So the write is not skipped, it is
+     * handed to the process that can wait, which is the one thing the user
+     * should never be asked to do.
+     */
+    private async stageUpdate(): Promise<FlowState> {
+        const install = this.chosenInstall;
+        if (install === null) return this.detect();
+
+        this.set(state({ step: "patching", detail: "Getting the update ready…", busy: true, actions: [] }));
+
+        const installed = this.ports.installModBundle();
+        if (!installed.ok) {
+            this.ports.log.error("bundle.install-failed", errorFields(installed.error));
+            return this.failPatch(installed.error);
+        }
+        this.installedBundle = installed.value;
+        this.updateStaged = true;
+        this.ports.log.info("bundle.staged", {
+            build: installed.value.buildId,
+            replaced: installed.value.replaced,
+            dir: installed.value.dir,
+            reason: "Discord is open on Windows, so the helper applies this after it closes"
+        });
+        return this.installHelper();
+    }
+
     private async applyPatch(): Promise<FlowState> {
         const install = this.chosenInstall;
         if (install === null) return this.detect();
@@ -1035,8 +1110,21 @@ export class InstallFlow {
         // them to close Discord. Checking here is cheap; the failure is not.
         const stillRunning = await this.ports.listProcesses();
         if (findDiscordProcesses(stillRunning, install.branch, this.ports.platform).length > 0) {
-            this.ports.log.warn("patch.discord-reappeared", { branch: install.branch });
-            return this.checkRunning();
+            // An UPDATE must not bounce back to the quit screen, whether Discord
+            // was open all along or came back while the user was reading. On
+            // macOS the write works anyway, so this is a note and not a detour;
+            // on Windows it cannot, so the bundle is staged instead.
+            if (this.updating) {
+                this.updatingWithDiscordOpen = true;
+                this.ports.log.info("patch.discord-open-during-update", {
+                    branch: install.branch,
+                    platform: this.ports.platform
+                });
+                if (this.ports.platform === "win32") return this.stageUpdate();
+            } else {
+                this.ports.log.warn("patch.discord-reappeared", { branch: install.branch });
+                return this.checkRunning();
+            }
         }
 
         // The bundle goes to its runtime location FIRST, and the patch points at
@@ -1122,7 +1210,35 @@ export class InstallFlow {
             installed: result.value.installed,
             label: result.value.label
         });
+        return this.afterHelper();
+    }
+
+    /**
+     * Launch and verify, unless Discord is already open under an update.
+     *
+     * There is nothing to launch, and a verification would read the beacon the
+     * OLD build is still writing and report a foreign build: a working install
+     * told it is somebody else's. Silence is the honest answer until the user
+     * opens Discord themselves.
+     */
+    private afterHelper(): FlowState | Promise<FlowState> {
+        if (this.updatingWithDiscordOpen) return this.finishWithoutLaunch();
         return this.launch();
+    }
+
+    private finishWithoutLaunch(): FlowState {
+        return this.set(state({
+            step: "done",
+            detail: this.updateStaged
+                ? "Update ready. It finishes on its own after you close Discord, and starts the next time you open it."
+                    + "\n\nNo need to close Discord now."
+                : "Update installed. It starts the next time you open Discord.\n\nNo need to close Discord now.",
+            install: this.chosenInstall ?? undefined,
+            patch: this.patchReport ?? undefined,
+            bundle: this.installedBundle ?? undefined,
+            helper: this.helperOutcome ?? undefined,
+            actions: ["finish"]
+        }));
     }
 
     private failPatch(error: PatcherError): FlowState {
@@ -1203,6 +1319,19 @@ export class InstallFlow {
      * advice treats the engine configuration as the user's standing choice.
      */
     private updating = false;
+
+    /**
+     * This update found Discord open, and is finishing without touching it.
+     * Set on an update only: it is what suppresses the quit gate, the launch
+     * and the verification, none of which a fresh install may skip.
+     */
+    private updatingWithDiscordOpen = false;
+
+    /**
+     * The bundle is in place but Discord has not been patched with it yet
+     * (Windows, Discord open). Decides which of the two last sentences is true.
+     */
+    private updateStaged = false;
 
     private async verify(): Promise<FlowState> {
         const patch = this.patchReport;

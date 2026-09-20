@@ -136,6 +136,8 @@ interface Harness {
     languageWrites: string[];
     codeWrites: string[];
     verifyCalls: Array<{ expectedBuildId: string; patchedAt: number; launchedAt: number }>;
+    /** How many times the mod bundle was copied to its runtime location. */
+    bundleInstalls: number;
     helperInstalls: number;
     launched: number;
     /** The step names, in order, every transition passed through. */
@@ -157,6 +159,7 @@ function harness(script: Script = {}): Harness {
         languageWrites: [],
         codeWrites: [],
         verifyCalls: [],
+        bundleInstalls: 0,
         helperInstalls: 0,
         launched: 0,
         steps: []
@@ -174,8 +177,10 @@ function harness(script: Script = {}): Harness {
         sleep: async (ms: number) => { t += ms; },
 
         inspectShippedBundle: () => script.bundle ?? { ok: true, value: BUNDLE },
-        installModBundle: () =>
-            script.installBundle ?? { ok: true, value: { ...BUNDLE, replaced: false } },
+        installModBundle: () => {
+            h.bundleInstalls += 1;
+            return script.installBundle ?? { ok: true, value: { ...BUNDLE, replaced: false } };
+        },
 
         locate: () => script.installs ?? { ok: true, value: [INSTALL] },
         inspect: (install: DiscordInstall) => {
@@ -840,6 +845,138 @@ describe("Discord running", () => {
         // Back to the screen that explains what to do — not a write failure
         // that surfaces as an unexplained IO error on Windows.
         expect(state.step).toBe("discord-running");
+        expect(h.patchCalls).toHaveLength(0);
+    });
+});
+
+/* ------------------------------------------------------------------------ *
+ * An update never asks the user to close Discord
+ * ------------------------------------------------------------------------ */
+
+const WINDOWS_DISCORD_PROCESS = {
+    pid: 200,
+    command: "C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.9044\\Discord.exe"
+};
+
+/** An install of ours carrying an older build id, which is what makes a run an update. */
+function updatedInstallState(): InstallState {
+    const marker = { pluginBuildId: "0000000000000000" } as unknown as InstallState["marker"];
+    return { ...installState("patched-by-us", "subline"), marker };
+}
+
+describe("an update while Discord is running", () => {
+    /**
+     * The product rule, from the maker: an update must never ask the user to
+     * quit Discord and must never quit it for them. "We do not control when
+     * they want to quit." Someone updating already has a working Subline, and
+     * interrupting their conversation to deliver an improvement they did not
+     * ask for is the installer putting its schedule ahead of theirs.
+     */
+    it("macOS: applies it under the running Discord, with no quit screen and no launch", async () => {
+        let quitRequests = 0;
+        let forced = 0;
+        const h = harness({
+            platform: "darwin",
+            inspect: { ok: true, value: updatedInstallState() },
+            hasSublineCode: true,
+            processes: [[DISCORD_PROCESS]],
+            requestQuit: async () => { quitRequests += 1; },
+            forceQuit: async () => { forced += 1; }
+        });
+        const seen: FlowStep[] = [];
+        h.flow.onChange = next => seen.push(next.step);
+
+        const done = await h.flow.start();
+
+        // The screen that asks is never reached, so the buttons that close
+        // Discord are never even on offer.
+        expect(seen).not.toContain("discord-running");
+        expect(seen).not.toContain("quit-blocked");
+        expect(quitRequests).toBe(0);
+        expect(forced).toBe(0);
+
+        // macOS lets the archive be renamed underneath a live Discord, so the
+        // new build really is installed now.
+        expect(h.patchCalls).toHaveLength(1);
+        expect(h.helperInstalls).toBe(1);
+
+        // Nothing to launch, and verifying would read the OLD build's beacon
+        // and report a working install as somebody else's copy.
+        expect(h.launched).toBe(0);
+        expect(h.verifyCalls).toEqual([]);
+
+        expect(done.step).toBe("done");
+        expect(done.detail).toContain("next time you open Discord");
+        expect(done.detail).toContain("No need to close Discord now");
+        expect(done.actions).toEqual(["finish"]);
+    });
+
+    /**
+     * Windows will not rename a file a running process holds open, so the
+     * patch genuinely cannot happen now. It does not have to: `helper.ts`
+     * compares the installed bundle against the marker Discord carries, gets
+     * `build-changed`, and re-patches once `requireDiscordClosed` is satisfied.
+     */
+    it("Windows: stages the bundle and leaves the patch to the helper", async () => {
+        let quitRequests = 0;
+        let forced = 0;
+        const h = harness({
+            platform: "win32",
+            permission: ["not-required"],
+            inspect: { ok: true, value: updatedInstallState() },
+            hasSublineCode: true,
+            processes: [[WINDOWS_DISCORD_PROCESS]],
+            requestQuit: async () => { quitRequests += 1; },
+            forceQuit: async () => { forced += 1; }
+        });
+        const seen: FlowStep[] = [];
+        h.flow.onChange = next => seen.push(next.step);
+
+        const done = await h.flow.start();
+
+        expect(seen).not.toContain("discord-running");
+        expect(quitRequests).toBe(0);
+        expect(forced).toBe(0);
+
+        // The bundle IS in place. That is what the helper acts on.
+        expect(h.bundleInstalls).toBe(1);
+        expect(h.patchCalls).toHaveLength(0);
+        expect(h.helperInstalls).toBe(1);
+
+        expect(h.launched).toBe(0);
+        expect(h.verifyCalls).toEqual([]);
+
+        expect(done.step).toBe("done");
+        expect(done.detail).toContain("finishes on its own after you close Discord");
+        expect(done.detail).toContain("No need to close Discord now");
+        expect(done.actions).toEqual(["finish"]);
+    });
+
+    it("still launches and verifies when Discord is closed", async () => {
+        // The skip belongs to a running Discord alone. With nothing open there
+        // is something to launch and a beacon the new build will write, so the
+        // update finishes exactly as it always did.
+        const h = harness({
+            inspect: { ok: true, value: updatedInstallState() },
+            hasSublineCode: true,
+            processes: [[]]
+        });
+
+        const done = await h.flow.start();
+        const settled = await h.flow.settled();
+
+        expect(done.step).toBe("done");
+        expect(h.patchCalls).toHaveLength(1);
+        expect(h.launched).toBe(1);
+        expect(h.verifyCalls).toHaveLength(1);
+        expect(settled.detail).not.toContain("No need to close Discord now");
+    });
+
+    it("a FRESH install with Discord running still asks, because it has nothing to fall back on", async () => {
+        const h = harness({ inspect: { ok: true, value: installState("unpatched") }, processes: [[DISCORD_PROCESS]] });
+        const state = await toDetection(h);
+        expect(state.step).toBe("discord-running");
+        expect(state.actions).toContain("quit-discord");
         expect(h.patchCalls).toHaveLength(0);
     });
 });
