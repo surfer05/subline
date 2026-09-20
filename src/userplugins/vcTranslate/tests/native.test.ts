@@ -22,18 +22,24 @@ vi.mock("../engines/groq", async importOriginal => ({
     ...(await importOriginal() as typeof import("../engines/groq")),
     translateWithGroq: vi.fn()
 }));
+vi.mock("../engines/relay", async importOriginal => ({
+    ...(await importOriginal() as typeof import("../engines/relay")),
+    fetchRelayStatus: vi.fn()
+}));
 
 import { translateWithClaude, TRUNCATED_ERROR } from "../engines/claude";
 import { translateWithGemini } from "../engines/gemini";
 import { translateWithGoogle } from "../engines/google";
 import { translateWithGroq } from "../engines/groq";
-import { translateBatch } from "../native";
+import { fetchRelayStatus } from "../engines/relay";
+import { relayStatus, translateBatch } from "../native";
 import type { BatchRequest, Result } from "../types";
 
 const google = vi.mocked(translateWithGoogle);
 const claude = vi.mocked(translateWithClaude);
 const gemini = vi.mocked(translateWithGemini);
 const groq = vi.mocked(translateWithGroq);
+const relayStatusFetch = vi.mocked(fetchRelayStatus);
 
 const req: BatchRequest = {
     messages: [{ id: "1", author: "ana", text: "hola" }],
@@ -71,6 +77,7 @@ beforeEach(() => {
     claude.mockReset();
     gemini.mockReset();
     groq.mockReset();
+    relayStatusFetch.mockReset();
 });
 
 afterEach(() => {
@@ -587,5 +594,40 @@ describe("translateBatch — engines that report no rate limit are UNCHANGED", (
             expect(res).toEqual({ ok: true, results: [{ id: "1", skip: true }] });
             expect((res as { providerRateLimit?: unknown }).providerRateLimit).toBeUndefined();
         }
+    });
+});
+
+describe("relayStatus — today's taste count, read without spending one", () => {
+    it("returns the plan and the count the relay stated", async () => {
+        relayStatusFetch.mockResolvedValue({ plan: "taste", used: 2, cap: 3 });
+
+        expect(await relayStatus(EV, "free_abc")).toEqual({
+            ok: true, plan: "taste", used: 2, cap: 3
+        });
+    });
+
+    it("never throws — an unreachable relay means the count is unknown, not zero", async () => {
+        // A free install's three tastes must survive a transient network
+        // fault. The renderer reads ok:false as "count unknown" and still
+        // offers the button (see taste.ts).
+        relayStatusFetch.mockRejectedValue(new Error("relay: HTTP 502"));
+
+        const res = await relayStatus(EV, "free_abc");
+
+        expect(res.ok).toBe(false);
+        expect((res as { error: string }).error).toContain("HTTP 502");
+    });
+
+    it("never returns the install id in the error string", async () => {
+        // Same discipline as scrubbing an API key out of translateBatch's
+        // error: the id is the one identifier this tier sends, and it has no
+        // business in a log or a toast.
+        const id = `free_${"a".repeat(32)}`;
+        relayStatusFetch.mockRejectedValue(new Error(`relay: HTTP 401 for ${id}`));
+
+        const res = await relayStatus(EV, id);
+
+        expect(res.ok).toBe(false);
+        expect((res as { error: string }).error).not.toContain(id);
     });
 });

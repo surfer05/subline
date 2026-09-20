@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { translateWithRelay, translateWithRelayDetailed } from "../engines/relay";
+import {
+    fetchRelayStatus, RELAY_STATUS_URL, translateWithRelay, translateWithRelayDetailed
+} from "../engines/relay";
 import type { BatchRequest } from "../types";
 
 const req = (texts: string[]): BatchRequest => ({
@@ -39,7 +41,11 @@ describe("translateWithRelay", () => {
             json: async () => ({ ok: true, results: [{ id: "0", skip: true }], used: 1, cap: 2000, rpmLimit: 60 })
         });
         const out = await translateWithRelayDetailed(req(["hola"]), "slp_abc", fetchImpl as any);
-        expect(out).toEqual({ results: [{ id: "0", skip: true }], rpmLimit: 60 });
+        // `used`/`cap` are new on this outcome (the taste tier reads them —
+        // see taste.ts). They were always in this fixture's body and were
+        // always parsed and dropped; now they are carried, so an exact-match
+        // assertion has to name them.
+        expect(out).toEqual({ results: [{ id: "0", skip: true }], rpmLimit: 60, used: 1, cap: 2000 });
     });
 
     it("leaves the ceiling undefined when an older relay states none", async () => {
@@ -70,5 +76,42 @@ describe("translateWithRelay", () => {
             ok: false, status: 503, json: async () => { throw new Error("not json"); }
         });
         await expect(translateWithRelay(req(["hola"]), "slp_abc", fetchImpl as any)).rejects.toThrow(/relay: HTTP 503/);
+    });
+});
+
+describe("fetchRelayStatus", () => {
+    it("reads today's count with the same bearer, spending nothing", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: true, status: 200,
+            json: async () => ({ ok: true, plan: "taste", used: 2, cap: 3 })
+        });
+        const out = await fetchRelayStatus("free_" + "a".repeat(32), fetchImpl as any);
+        expect(out).toEqual({ plan: "taste", used: 2, cap: 3 });
+
+        const [url, init] = fetchImpl.mock.calls[0];
+        expect(url).toBe(RELAY_STATUS_URL);
+        expect(init.method).toBe("GET");
+        expect(init.headers.authorization).toBe(`Bearer free_${"a".repeat(32)}`);
+        // No body, and no message text anywhere near it: asking how many are
+        // left must never itself be a translation request.
+        expect(init.body).toBeUndefined();
+    });
+
+    it("throws rather than inventing a count when the relay is unreachable", async () => {
+        // The caller treats a throw as "count unknown", never as "none left" —
+        // a transient network fault must not take a free user's three away.
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: false, status: 502, json: async () => { throw new Error("not json"); }
+        });
+        await expect(fetchRelayStatus("free_abc", fetchImpl as any)).rejects.toThrow(/relay: HTTP 502/);
+    });
+
+    it("rejects a malformed count instead of showing it to the user", async () => {
+        // This number is rendered as "N of 3 left today". A NaN or a missing
+        // cap reaching the button is worse than no button at all.
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: true, status: 200, json: async () => ({ ok: true, plan: "taste", used: "two" })
+        });
+        await expect(fetchRelayStatus("free_abc", fetchImpl as any)).rejects.toThrow(/malformed status/);
     });
 });

@@ -4,7 +4,7 @@ import { translateWithClaude, TRUNCATED_ERROR } from "./engines/claude";
 import { translateWithGemini } from "./engines/gemini";
 import { translateWithGoogle } from "./engines/google";
 import { translateWithGroq } from "./engines/groq";
-import { translateWithRelayDetailed } from "./engines/relay";
+import { fetchRelayStatus, translateWithRelayDetailed } from "./engines/relay";
 import type { ProviderRateLimit } from "./rateHint";
 import { withRetry } from "./retry";
 import { readStagedBuildIdSync } from "./stagedBuild";
@@ -39,6 +39,18 @@ export type NativeResponse =
          * rate without ever having to hit a 429 to learn it.
          */
         quotaLimitPerMinute?: number;
+        /**
+         * The TASTE tier's daily count, as the relay stated it on this
+         * success: `quotaUsed` messages spent today out of `quotaCap` (three).
+         *
+         * Same route and same reason as `quotaLimitPerMinute` above — the
+         * engine is the only code that ever sees a Response — but a different
+         * consumer: this is what the ⚡ button reads to say "2 of 3 left
+         * today" to a free install. Undefined for every other engine, and for
+         * a paid code, which has no daily count worth showing.
+         */
+        quotaUsed?: number;
+        quotaCap?: number;
     }
     | {
         ok: false;
@@ -68,6 +80,9 @@ interface EngineOutcome {
     rateLimit?: ProviderRateLimit;
     /** The per-minute ceiling the provider stated on this success (the relay's `rpmLimit`). */
     statedLimitPerMinute?: number;
+    /** The relay's taste-tier daily count on this success (`used`/`cap`). */
+    quotaUsed?: number;
+    quotaCap?: number;
 }
 
 /**
@@ -146,7 +161,12 @@ async function runEngine(
     // the only engine that reports a remaining count of its own.
     if (engine === "relay") {
         const out = await translateWithRelayDetailed(req, apiKey, fetch);
-        return { results: out.results, statedLimitPerMinute: out.rpmLimit };
+        return {
+            results: out.results,
+            statedLimitPerMinute: out.rpmLimit,
+            quotaUsed: out.used,
+            quotaCap: out.cap
+        };
     }
     if (engine === "groq") return translateWithGroq(req, apiKey, fetch, model, debug);
     if (engine === "claude") return { results: await translateWithClaude(req, apiKey, fetch, debug) };
@@ -197,7 +217,9 @@ export async function translateBatch(
             ok: true,
             results: outcome.results,
             providerRateLimit: outcome.rateLimit,
-            quotaLimitPerMinute: outcome.statedLimitPerMinute
+            quotaLimitPerMinute: outcome.statedLimitPerMinute,
+            quotaUsed: outcome.quotaUsed,
+            quotaCap: outcome.quotaCap
         };
     } catch (err) {
         const raw = err instanceof Error ? err.message : "unknown error";
@@ -245,6 +267,37 @@ export async function translateBatch(
             quotaLimitPerMinute,
             quotaModel
         };
+    }
+}
+
+export type RelayStatusResponse =
+    | { ok: true; plan: string; used: number; cap: number }
+    | { ok: false; error: string };
+
+/**
+ * Today's taste count for one credential, read without spending one.
+ *
+ * Here for the same reason `translateBatch` is: THE RENDERER DOES NO NETWORK
+ * for the relay, so the one place that holds a bearer and calls fetch is this
+ * file. The credential is scrubbed out of any error on the way back, exactly as
+ * `translateBatch` scrubs an API key — an install id is not a secret in the way
+ * a key is, but it is the one identifier the taste tier sends and it has no
+ * business in a log.
+ *
+ * Never throws: an unreachable status endpoint means "count unknown", and the
+ * renderer treats unknown as "tastes may still be available" rather than taking
+ * a free user's three away over a transient network fault.
+ */
+export async function relayStatus(
+    _: IpcMainInvokeEvent,
+    code: string
+): Promise<RelayStatusResponse> {
+    try {
+        const status = await fetchRelayStatus(code, fetch);
+        return { ok: true, plan: status.plan, used: status.used, cap: status.cap };
+    } catch (err) {
+        const raw = err instanceof Error ? err.message : "unknown error";
+        return { ok: false, error: scrubKey(raw, code) };
     }
 }
 

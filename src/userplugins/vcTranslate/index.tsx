@@ -22,6 +22,10 @@ import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
 import {
+    installIdOnce, markTasteExhausted, recordTasteQuota, rolloverTasteIfNewUtcDay, tasteBearer,
+    tasteCap, tasteExhausted, tasteLabel, tasteLimitMessage, tasteUsed, tasteUsedUpMessage
+} from "./taste";
+import {
     recordError, recordPluginLoaded, recordRendered, recordTranslation, resetStatusBeacon
 } from "./statusBeacon";
 import { BUILD_ID, type BeaconErrorCode } from "./statusShape";
@@ -448,6 +452,87 @@ function effectiveEngine(): EngineId {
     }
     if (sessionFallback || apiKeyFor(configured).trim() === "") return "google";
     return configured;
+}
+
+/* -------------------------------------------------------------- taste -- */
+
+/**
+ * Is this a FREE install — the one the taste tier is for?
+ *
+ * Two conditions, and both matter. `effectiveEngine() === "google"` says there
+ * is no quality tier running right now; "no code configured" says that is
+ * because nothing was paid for, rather than because a paid code was rejected
+ * or blocked this session (see `sessionFallback`). A paying user whose code hit
+ * a 401 must get their own error, not a funnel nudge — and must never have a
+ * `free_` bearer sent on their behalf.
+ */
+function isTasteInstall(): boolean {
+    const configured = settings.store.engine as EngineId;
+    const code = typeof settings.store.sublineCode === "string"
+        ? settings.store.sublineCode.trim()
+        : "";
+    if (configured === "relay" && code !== "") return false;
+    return effectiveEngine() === "google";
+}
+
+/**
+ * How one taste request differs from every other quality request: it carries a
+ * bearer that is not in settings at all (see taste.ts), and a failure means
+ * something different — the day's three are gone, not that the engine is
+ * unwell. Passed into `runTier` so a taste still goes through the SAME
+ * `writeResult`/`mayReplace` path as an automatic ✦, which is what stops a
+ * Google result arriving later from clobbering the line the user just spent one
+ * of their three on.
+ */
+interface TasteRun {
+    credential: string;
+    /** The relay answered "daily limit reached" — handled quietly, never as an error. */
+    onDailyLimit: () => void;
+}
+
+function tasteLog(message: string): void {
+    if (settings.store.debugLogging) logger.debug(`[taste] ${message}`);
+}
+
+/**
+ * Read today's count from the relay without spending one (see taste.ts and
+ * native.ts's `relayStatus`).
+ *
+ * Best effort in every direction: a failure leaves the count UNKNOWN, which
+ * reads as "tastes may still be available", because a status endpoint that is
+ * briefly unreachable must not take a free user's three away. Never awaited by
+ * anything the user is waiting on.
+ */
+async function refreshTasteQuota(): Promise<void> {
+    try {
+        const id = await installIdOnce();
+        const res = await Native.relayStatus(tasteBearer(id));
+        if (res.ok) {
+            recordTasteQuota(res.used, res.cap);
+            tasteLog(`the relay says ${tasteUsed()} of ${tasteCap()} used today`);
+        } else {
+            tasteLog(`today's count is unknown: ${res.error}`);
+        }
+    } catch {
+        tasteLog("today's count is unknown: the status call did not complete");
+    }
+}
+
+/** The funnel's two messages. Neutral (MESSAGE), never red — nothing is broken. */
+function showTasteLimitNudge(): void {
+    Toasts.show({
+        id: Toasts.genId(),
+        type: Toasts.Type.MESSAGE,
+        message: tasteLimitMessage()
+    });
+}
+
+function showTasteUsedUp(): void {
+    Toasts.show({
+        id: Toasts.genId(),
+        type: Toasts.Type.MESSAGE,
+        message: tasteUsedUpMessage()
+    });
 }
 
 /* ------------------------------------------------- LLM cooldown / fallback -- */
@@ -1116,7 +1201,14 @@ async function runTier(
     // ForcedHint's own doc). Both onFlush closures in rebuildBatcher leave
     // this undefined, so every `report?.(...)` below is a no-op for the
     // automatic pipeline — its invisible-failure behaviour is unchanged.
-    report?: (outcome: ForcedHint) => void
+    report?: (outcome: ForcedHint) => void,
+    // Set ONLY by a free install's ⚡ press (see `tasteTranslate`). Undefined
+    // everywhere else, so every paid and keyed path below reads exactly as it
+    // did before the taste tier existed. Three things change when it is set:
+    // where the credential comes from, that the relay's daily count is
+    // recorded, and that a refusal is handled quietly instead of parking the
+    // engine and announcing a paid user's quota.
+    taste?: TasteRun
 ): Promise<void> {
     const isQuality = engine !== "google";
     // The in-flight set belonging to THIS tier. The other tier's request for
@@ -1233,9 +1325,19 @@ async function runTier(
         try {
             res = await Native.translateBatch(
                 engine,
-                isLlmEngine(engine) ? apiKeyFor(engine) : "",
+                // A taste's bearer is NOT in settings — it is the install id
+                // (see taste.ts), which is exactly why it is passed in rather
+                // than looked up. `apiKeyFor("relay")` would read the empty
+                // sublineCode of a free install and send no credential at all.
+                taste !== undefined
+                    ? taste.credential
+                    : isLlmEngine(engine) ? apiKeyFor(engine) : "",
                 JSON.stringify(engine === "google" ? withSourceLangs(req) : req),
-                modelFor(engine),
+                // The relay has no model setting, so `modelFor("relay")` is ""
+                // either way; `undefined` is what the relay contract states a
+                // taste request sends, and saying so here keeps this call site
+                // readable against that contract.
+                taste !== undefined ? undefined : modelFor(engine),
                 debug
             );
         } catch {
@@ -1299,7 +1401,22 @@ async function runTier(
             // error string into the DOM.
             report?.({ kind: "failed", code: errorCode });
 
-            if (res !== null) {
+            if (res !== null && taste !== undefined) {
+                // A FREE TASTE IS NOT A PAID USER'S QUOTA, so none of the
+                // machinery below applies to it. `enterCooldown` would retune
+                // the rate gate from a free tier's ceiling and announce "Today's
+                // ✦ allowance is used up" — the paid wording, with no way to
+                // act on it; `fallBackToGoogle` would pin the session and raise
+                // a RED toast about a rejected key that the user never entered.
+                // The only fact worth keeping is the one the relay stated: the
+                // day's three are gone. The caller turns that into the nudge.
+                if (isDailyLimit(res.error)) {
+                    tasteLog("the relay says today's three are used — nothing more is sent today");
+                    taste.onDailyLimit();
+                } else {
+                    tasteLog(`the request failed (${errorCode}); nothing is counted against today`);
+                }
+            } else if (res !== null) {
                 // Park the engine for as long as the API asked for. Still the
                 // whole point of the cooldown: retrying into a wall that just
                 // rejected us is how half the observed traffic became 429s.
@@ -1413,6 +1530,16 @@ async function runTier(
             }
         }
 
+        // Today's taste count, straight from the relay. Recorded before the
+        // writes below for the same reason the provider reading above is: a
+        // throw in the write loop must not lose the one number the ⚡ button
+        // has to show, and a press whose count was lost would be a press the
+        // user is never told about.
+        if (taste !== undefined) {
+            recordTasteQuota(res.quotaUsed, res.quotaCap);
+            tasteLog(`press accepted — ${tasteUsed()} of ${tasteCap()} used today`);
+        }
+
         for (const r of res.results) {
             const key = makeKey(r.id, req.targetLang);
             if (debug) {
@@ -1510,6 +1637,14 @@ async function forceQualityTranslate(message: Message): Promise<void> {
     // hides the button in exactly this case, but the engine can change
     // between render and click, so check again rather than trust stale props.
     if (!isLlmEngine(engine)) {
+        // ...unless this is a FREE install, where ⚡ is now the taste tier's
+        // one deliberate press rather than a dead button. Checked here, after
+        // the engine, so a paid install pinned to Google by a rejected code
+        // still takes the branch below and gets its own error.
+        if (isTasteInstall()) {
+            await tasteTranslate(message);
+            return;
+        }
         if (debug) logger.debug(`[force-quality] ${message.id}: blocked — no LLM engine usable right now`);
         return;
     }
@@ -1577,6 +1712,104 @@ async function forceQualityTranslate(message: Message): Promise<void> {
         forcedInFlight.delete(message.id);
         notifyForcedInFlight();
     }
+}
+
+/**
+ * ONE free taste: send this one message to the relay under the install id, and
+ * render the ✦ it comes back with.
+ *
+ * DELIBERATE PRESSES ONLY. Nothing here is reachable from MESSAGE_CREATE,
+ * catch-up or scroll-back — a free install builds no quality batcher at all
+ * (see `rebuildBatcher`), so automatic ✦ stays off exactly as it was. Three a
+ * day is only meaningful if the user spends them on messages they chose.
+ *
+ * Routed through `runTier` rather than calling `Native.translateBatch` here,
+ * for the same reason `forceQualityTranslate` is: the write then lands through
+ * `writeResult()`/`mayReplace()` with `via: "relay"`, so a Google result
+ * arriving a moment later cannot clobber the line the user just spent one of
+ * their three on — which, on this tier, is the entire product demonstration.
+ */
+async function tasteTranslate(message: Message): Promise<void> {
+    // A new UTC day is a new three. Checked on the press rather than on a
+    // timer (see taste.ts): nothing has to be armed, and the count is refreshed
+    // from the relay in the background so the button's label catches up too.
+    if (rolloverTasteIfNewUtcDay()) {
+        tasteLog("a new UTC day began — today's count is cleared and re-read");
+        void refreshTasteQuota();
+    }
+
+    if (tasteExhausted()) {
+        // NOTHING IS SENT. The relay would refuse it, and a refusal the user
+        // can see coming is a request nobody should spend.
+        tasteLog(`${message.id}: press ignored — today's ${tasteCap()} are used, nothing sent`);
+        showTasteLimitNudge();
+        return;
+    }
+
+    if (inFlightQuality.has(message.id)) {
+        tasteLog(`${message.id}: press ignored — already translating this message`);
+        return;
+    }
+
+    const id = await installIdOnce();
+
+    // A second press can land while the id above is being read from disk. Ask
+    // again rather than trust the answer from before the await — otherwise two
+    // presses on one message would both go out and both be counted.
+    if (inFlightQuality.has(message.id)) {
+        tasteLog(`${message.id}: press ignored — already translating this message`);
+        return;
+    }
+
+    inFlightQuality.add(message.id);
+    clearForcedHint(message.id);
+    forcedInFlight.add(message.id);
+    notifyForcedInFlight();
+
+    const req: BatchRequest = {
+        messages: [{
+            id: message.id,
+            author: message.author?.username ?? "unknown",
+            text: message.content ?? "",
+            replyToId: replyParentId(message)
+        }],
+        // The same conversation context a paid ⚡ press sends — see
+        // forceQualityTranslate. A taste is the one ✦ this user will ever see;
+        // it is the last request that should be handicapped.
+        context: contextBefore(message, FORCED_CONTEXT_SIZE),
+        targetLang: settings.store.targetLang
+    };
+
+    const wasExhausted = tasteExhausted();
+    let hitDailyLimit = false;
+
+    try {
+        await runTier(
+            "relay", req, batcherGeneration, undefined,
+            outcome => setForcedHint(message.id, outcome),
+            {
+                credential: tasteBearer(id),
+                onDailyLimit: () => {
+                    hitDailyLimit = true;
+                    markTasteExhausted();
+                }
+            }
+        );
+    } finally {
+        forcedInFlight.delete(message.id);
+        notifyForcedInFlight();
+    }
+
+    if (hitDailyLimit) {
+        // The relay knew before we did. Same neutral nudge as a press the
+        // local count already refused — the user cannot tell the two apart,
+        // and should not have to.
+        showTasteLimitNudge();
+        return;
+    }
+    // The transition, not the state: said once, right after the third lands,
+    // and never again on a day whose three were already gone when it started.
+    if (!wasExhausted && tasteExhausted()) showTasteUsedUp();
 }
 
 function rebuildBatcher() {
@@ -2587,10 +2820,32 @@ function forceQualityPopoverRender(message: Message) {
     if (!channel) return null;
 
     const engine = effectiveEngine();
-    if (!isLlmEngine(engine)) return null;
+    // A FREE INSTALL GETS THE BUTTON TOO, and this is the change that opens the
+    // funnel: it used to return null here, so the one action that shows a free
+    // user what ✦ reads like was invisible to exactly the people who had never
+    // seen it. Three deliberate presses a day (see `tasteTranslate`); automatic
+    // ✦ stays off.
+    const taste = !isLlmEngine(engine) && isTasteInstall();
+    if (!isLlmEngine(engine) && !taste) return null;
 
     const key = makeKey(message.id, settings.store.targetLang);
     if (hasQualityVerdict(key)) return null;
+
+    if (taste) {
+        // The count is the whole label, because it is the only thing about
+        // this press the user cannot work out for themselves. No countdown and
+        // no readiness: a taste is not paced by the rate gate the way a paid
+        // stream of batches is, and three a day is the only limit that bites.
+        return {
+            label: `Translate with Subline ✦ (${tasteLabel()})`,
+            icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
+            message,
+            channel,
+            onClick: () => {
+                void forceQualityTranslate(message);
+            }
+        };
+    }
 
     const { label } = LLM_ENGINES[engine];
 
@@ -2898,6 +3153,13 @@ export default definePlugin({
                 }
             )
         });
+
+        // How many of today's three tastes are left, for a free install (see
+        // taste.ts). Read once per session and never awaited: the count only
+        // has to be right by the time somebody looks at the ⚡ button, and a
+        // slow or unreachable relay must not delay a single translation. It
+        // exists so closing Discord does not silently hand the user three more.
+        if (isTasteInstall()) void refreshTasteQuota();
 
         await loadEnabledChannels();
         // AWAITED, unlike the translation cache below: this decides whether the
