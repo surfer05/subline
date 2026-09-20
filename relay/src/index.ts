@@ -36,12 +36,19 @@ const GROQ_FALLBACK_MODEL = "openai/gpt-oss-120b";
  *  Groq at env.MODEL (or the gpt-oss default) and there is no second provider.
  *  Guards a misconfig where MODEL is a gemini id but no GEMINI_KEY is set —
  *  that would 401 every call, so fall back to Groq-only. */
-function providers(env: Env): { primary: Provider; fallback: Provider | null } {
+export function providers(env: Env): { primary: Provider; fallback: Provider | null } {
     const groq: Provider = { apiKey: env.GROQ_KEY, model: env.FALLBACK_MODEL || GROQ_FALLBACK_MODEL };
-    if (env.GEMINI_KEY && /^gemini/i.test(env.MODEL || "")) {
+    const wantsGemini = /^gemini/i.test(env.MODEL || "");
+    if (wantsGemini && env.GEMINI_KEY) {
         return { primary: { apiKey: env.GEMINI_KEY, model: env.MODEL }, fallback: groq };
     }
-    return { primary: { apiKey: env.GROQ_KEY, model: env.MODEL || GROQ_FALLBACK_MODEL }, fallback: null };
+    // MODEL names Gemini but no GEMINI_KEY is set: handing a Gemini model id to
+    // Groq (or the Groq key to Gemini) fails EVERY call, so run Groq-only on the
+    // Groq fallback model instead. Otherwise MODEL is a Groq id: use it as-is.
+    return {
+        primary: wantsGemini ? groq : { apiKey: env.GROQ_KEY, model: env.MODEL || GROQ_FALLBACK_MODEL },
+        fallback: null
+    };
 }
 
 const json = (body: unknown, status = 200): Response =>

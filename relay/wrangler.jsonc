@@ -21,9 +21,12 @@
   "observability": { "enabled": true },
   "vars": {
     // Primary model. `gemini*` → Gemini (needs the GEMINI_KEY secret); any other
-    // id → Groq. gemini-3.8-flash is the current GA Flash: Indic/low-resource and
-    // informal chat beat every open Groq model, ~$0.50/1M in + $3/1M out.
-    "MODEL": "gemini-3.8-flash",
+    // id → Groq. LAUNCH SETTING: Groq gpt-oss-120b (free tier, proven on real
+    // chat). To move to Gemini later: set this to "gemini-3.8-flash" AND
+    // `wrangler secret put GEMINI_KEY` (a billing-enabled key) — the code
+    // routes by this id and falls back to Groq on any Gemini failure. Without
+    // the key, a gemini id here is ignored and the relay stays Groq-only.
+    "MODEL": "openai/gpt-oss-120b",
     // Groq model used as the automatic fallback when Gemini is primary and a call
     // fails. Keeps the product answering through a Gemini rate-limit/outage.
     "FALLBACK_MODEL": "openai/gpt-oss-120b",
