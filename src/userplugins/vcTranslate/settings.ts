@@ -49,9 +49,11 @@ export const settings = definePluginSettings({
     },
     sublineCode: {
         type: OptionType.STRING,
-        description: "Subline code — paste the code from your purchase or invite to turn on ✦ AI translation. Without one, Subline still translates everything with Google (≈).",
+        // Says where the code CAME FROM, not what it looks like: a bought code is
+        // the store's license key and does not start with slp_.
+        description: "Subline code. It arrived by email when you bought Subline, or from the friend who set you up. Turns on ✦ AI translation. Without one, Subline translates everything with Google (≈).",
         default: "",
-        placeholder: "slp_...",
+        placeholder: "Paste your code",
         // Same immediacy requirement as the API keys — effectiveEngine() must
         // see a pasted/cleared code right away, not on next reload.
         onChange: notifySettingsChanged

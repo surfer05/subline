@@ -420,7 +420,7 @@ export class InstallFlow {
                     step: "tiers",
                     detail: "≈ is Google Translate: instant, free, no account. ✦ is an AI model that reads the "
                         + "conversation around a message, so slang and replies come out right. It needs your Subline "
-                        + "code, which Subline asks for next; skipping is fine, and a code can be added any time.",
+                        + "code, which Subline asks for next.",
                     actions: ["next", "cancel"]
                 }));
 
@@ -861,7 +861,13 @@ export class InstallFlow {
             step: "choose-code",
             // The previous screen already said skipping is fine and a code can
             // be added later; the hint under the field says where. Once each.
-            detail: "Paste your Subline code to turn on ✦ AI translation. Codes start with slp_. "
+            // WHERE THE CODE COMES FROM is the whole question on this screen.
+            // Two sources, named plainly. No format hint: a bought code is the
+            // store's license key and does not start with slp_; telling a paying
+            // customer their code "should start with slp_" is how they conclude
+            // it is wrong.
+            detail: "Your code came with Subline. If you bought it, it is in the email from the Subline store, "
+                + "and on the page right after paying. If a friend set you up, they sent it to you. "
                 + "No code? Choose \"Use free Google only\".",
             error,
             // NO CANCEL ON THIS SCREEN. A real friend, on the first field

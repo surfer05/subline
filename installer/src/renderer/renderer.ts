@@ -197,7 +197,7 @@ function renderExtra(state: FlowState): void {
         const input = document.createElement("input");
         input.className = "txt";
         input.type = "text";
-        input.placeholder = "slp_…";
+        input.placeholder = "Paste your code here";
         // Not type="password": this is pasted once, and a masked field makes a
         // mis-paste impossible to spot — which is exactly the failure that had
         // a valid key reported as rejected.
