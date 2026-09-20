@@ -4,7 +4,7 @@ import { translateWithClaude, TRUNCATED_ERROR } from "./engines/claude";
 import { translateWithGemini } from "./engines/gemini";
 import { translateWithGoogle } from "./engines/google";
 import { translateWithGroq } from "./engines/groq";
-import { translateWithRelay } from "./engines/relay";
+import { translateWithRelayDetailed } from "./engines/relay";
 import type { ProviderRateLimit } from "./rateHint";
 import { withRetry } from "./retry";
 import { readStagedBuildIdSync } from "./stagedBuild";
@@ -30,6 +30,15 @@ export type NativeResponse =
          * remaining count instead of only ever the plugin's internal guess.
          */
         providerRateLimit?: ProviderRateLimit;
+        /**
+         * The per-minute CEILING the provider states for this credential, on
+         * a success — today the relay alone (`rpmLimit`: 20 on a free code,
+         * 60 on a paid one). Same name as the 429 field below because it is
+         * the same fact and feeds the same retune (tuneRateGateToObservedLimit);
+         * arriving on a success is what lets the gate reach the relay's real
+         * rate without ever having to hit a 429 to learn it.
+         */
+        quotaLimitPerMinute?: number;
     }
     | {
         ok: false;
@@ -57,6 +66,8 @@ export type NativeResponse =
 interface EngineOutcome {
     results: Result[];
     rateLimit?: ProviderRateLimit;
+    /** The per-minute ceiling the provider stated on this success (the relay's `rpmLimit`). */
+    statedLimitPerMinute?: number;
 }
 
 /**
@@ -131,9 +142,12 @@ async function runEngine(
     model: string | undefined,
     debug: boolean
 ): Promise<EngineOutcome> {
-    // The only engine that reports a rate limit of its own, so the only one
-    // whose outcome is used as-is rather than wrapped.
-    if (engine === "relay") return { results: await translateWithRelay(req, apiKey, fetch) };
+    // The relay states the ceiling for this code on every success; Groq is
+    // the only engine that reports a remaining count of its own.
+    if (engine === "relay") {
+        const out = await translateWithRelayDetailed(req, apiKey, fetch);
+        return { results: out.results, statedLimitPerMinute: out.rpmLimit };
+    }
     if (engine === "groq") return translateWithGroq(req, apiKey, fetch, model, debug);
     if (engine === "claude") return { results: await translateWithClaude(req, apiKey, fetch, debug) };
     if (engine === "gemini") {
@@ -179,7 +193,12 @@ export async function translateBatch(
         // `providerRateLimit` is undefined for every engine that reports
         // nothing, which is what keeps this response byte-identical to the one
         // Gemini/Claude/Google produced before this field existed.
-        return { ok: true, results: outcome.results, providerRateLimit: outcome.rateLimit };
+        return {
+            ok: true,
+            results: outcome.results,
+            providerRateLimit: outcome.rateLimit,
+            quotaLimitPerMinute: outcome.statedLimitPerMinute
+        };
     } catch (err) {
         const raw = err instanceof Error ? err.message : "unknown error";
         // Surface rate limiting so the renderer can pause the queue. Extracted

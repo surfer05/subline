@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { translateWithRelay } from "../engines/relay";
+import { translateWithRelay, translateWithRelayDetailed } from "../engines/relay";
 import type { BatchRequest } from "../types";
 
 const req = (texts: string[]): BatchRequest => ({
@@ -31,6 +31,31 @@ describe("translateWithRelay", () => {
         });
         await expect(translateWithRelay(req(["hola"]), "slp_abc", fetchImpl as any))
             .rejects.toMatchObject({ message: expect.stringContaining("HTTP 429"), retryAfterMs: 42000 });
+    });
+
+    it("carries the ceiling the relay states on a success, so the gate can tune to it", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: true, status: 200,
+            json: async () => ({ ok: true, results: [{ id: "0", skip: true }], used: 1, cap: 2000, rpmLimit: 60 })
+        });
+        const out = await translateWithRelayDetailed(req(["hola"]), "slp_abc", fetchImpl as any);
+        expect(out).toEqual({ results: [{ id: "0", skip: true }], rpmLimit: 60 });
+    });
+
+    it("leaves the ceiling undefined when an older relay states none", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: true, status: 200, json: async () => ({ ok: true, results: [] })
+        });
+        expect(await translateWithRelayDetailed(req(["hola"]), "slp_abc", fetchImpl as any)).toEqual({ results: [], rpmLimit: undefined });
+    });
+
+    it("carries the ceiling a rate-limit 429 states, on the error the renderer retunes from", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: false, status: 429,
+            json: async () => ({ ok: false, error: "slow down", retryAfterMs: 12000, quotaLimitPerMinute: 20 })
+        });
+        await expect(translateWithRelay(req(["hola"]), "slp_abc", fetchImpl as any))
+            .rejects.toMatchObject({ retryAfterMs: 12000, quotaLimitPerMinute: 20 });
     });
 
     it("throws when the relay returns ok:false even on a 200", async () => {

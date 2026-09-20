@@ -15,11 +15,31 @@ import type { BatchRequest, Result } from "../types";
  */
 export const RELAY_URL = "https://subline-relay.rahul05alok.workers.dev/v1/translate";
 
+/**
+ * One relay round trip: the translations, plus the ceiling the relay states
+ * for this code (`rpmLimit`, requests per minute). The ceiling is what lets
+ * the renderer's rate gate run at the relay's real rate instead of its
+ * untaught guess — see rateGate.ts. Absent on an older relay, and then the
+ * gate simply keeps whatever it has.
+ */
+export interface RelayOutcome {
+    results: Result[];
+    rpmLimit?: number;
+}
+
 export async function translateWithRelay(
     req: BatchRequest,
     code: string,
     fetchImpl: typeof fetch = fetch
 ): Promise<Result[]> {
+    return (await translateWithRelayDetailed(req, code, fetchImpl)).results;
+}
+
+export async function translateWithRelayDetailed(
+    req: BatchRequest,
+    code: string,
+    fetchImpl: typeof fetch = fetch
+): Promise<RelayOutcome> {
     const res = await fetchImpl(RELAY_URL, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${code}` },
@@ -38,7 +58,12 @@ export async function translateWithRelay(
         throw new HttpError(
             `relay: HTTP ${res.status}${detail}`,
             res.status,
-            body && typeof body.retryAfterMs === "number" ? body.retryAfterMs : undefined
+            body && typeof body.retryAfterMs === "number" ? body.retryAfterMs : undefined,
+            // A rate-limit 429 states the ceiling it enforced; native.ts hands
+            // it to the renderer, which retunes its gate to it (enterCooldown).
+            body && typeof body.quotaLimitPerMinute === "number" && body.quotaLimitPerMinute > 0
+                ? body.quotaLimitPerMinute
+                : undefined
         );
     }
     // Validate rather than blind-cast: the relay is our own server, but a
@@ -47,11 +72,13 @@ export async function translateWithRelay(
     // dropped, and native.ts treats a short/empty array as it treats any
     // partial engine result.
     if (!Array.isArray(body.results)) throw new HttpError("relay: malformed response", 502);
-    return (body.results as unknown[]).filter((r): r is Result => {
+    const results = (body.results as unknown[]).filter((r): r is Result => {
         if (!r || typeof r !== "object" || typeof (r as any).id !== "string") return false;
         const o = r as any;
         if (o.failed === true) return true;
         if (o.skip === true) return true;
         return o.skip === false && typeof o.lang === "string" && typeof o.text === "string";
     });
+    const rpmLimit = typeof body.rpmLimit === "number" && body.rpmLimit > 0 ? body.rpmLimit : undefined;
+    return { results, rpmLimit };
 }

@@ -264,10 +264,10 @@ describe("markers — who writes them, and which ones catch-up picks back up", (
         expect(getTranslation(makeKey("1", "en"))).toMatchObject({ text: "very well", via: "groq" });
     });
 
-    it("does not flush the quality tier early when the fast tier delivered", async () => {
+    it("keeps the quality tier on its grouping window when the fast tier delivered", async () => {
         // The counterpart: a healthy Google line on screen is exactly the
-        // state the 20s window is FOR. An early flush there re-creates the
-        // request rate the window exists to prevent.
+        // state the window is FOR — it groups a burst of live lines into one
+        // request. Inside the window nothing has left yet; at the window it has.
         settings.store.engine = "groq";
         settings.store.groqApiKey = "gsk-test";
         native.translateBatch.mockImplementation(async (engine: string) =>
@@ -276,10 +276,13 @@ describe("markers — who writes them, and which ones catch-up picks back up", (
                 : { ok: true, results: [{ id: "1", lang: "es", text: "very well indeed", skip: false }] });
 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "muy bien") });
-        await vi.advanceTimersByTimeAsync(2_000);
+        await vi.advanceTimersByTimeAsync(QUALITY_DEBOUNCE_MS - 500);
         for (let i = 0; i < 20; i++) await Promise.resolve();
-
         expect(native.translateBatch.mock.calls.map(c => c[0])).not.toContain("groq");
+
+        await vi.advanceTimersByTimeAsync(500);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        expect(native.translateBatch.mock.calls.map(c => c[0])).toContain("groq");
     });
 
     // The fast tier has NO debounce window. Google is per-message under the
@@ -1008,7 +1011,10 @@ describe("the rate gate — smooths a catch-up storm, never slows live chat", ()
         // every open channel at once; focus gating makes that impossible now,
         // but the thing under test is unchanged: many independent batches
         // becoming due at the same moment.)
-        const channels = Array.from({ length: 8 }, (_, i) => `burst-${i}`);
+        // More channels than the burst allows, derived from the constant so a
+        // retune of the gate keeps testing "the burst is capped and the rest
+        // drain" instead of a number that happened to be true once.
+        const channels = Array.from({ length: BURST_CAPACITY + 4 }, (_, i) => `burst-${i}`);
         for (const c of channels) {
             __stubSetSelectedChannel(c);
             FluxDispatcher.dispatch("MESSAGE_CREATE", {
@@ -1016,19 +1022,19 @@ describe("the rate gate — smooths a catch-up storm, never slows live chat", ()
             });
         }
 
-        // Let every channel's debounce timer fire, but nothing beyond that.
-        await vi.advanceTimersByTimeAsync(20_000);
+        // Let every channel's debounce timer fire, but nothing beyond that —
+        // in particular, not a single refill of the gate.
+        await vi.advanceTimersByTimeAsync(QUALITY_DEBOUNCE_MS);
         for (let i = 0; i < 20; i++) await Promise.resolve();
 
         // Only the burst capacity's worth of requests actually leave the
         // client immediately — this is the whole point of the gate. If this
-        // is 8, nothing is throttling the storm at all. Counted on gemini
+        // is every channel, nothing is throttling the storm at all. Counted on gemini
         // specifically: the fast (Google) tier also independently fires once
         // per channel now (dual dispatch), but Google isn't rate-gated, so it
         // would otherwise mask whether the gemini throttling is working.
         const geminiAfterBurst = native.translateBatch.mock.calls.filter(c => c[0] === "gemini").length;
-        expect(geminiAfterBurst).toBeGreaterThan(0);
-        expect(geminiAfterBurst).toBeLessThan(8);
+        expect(geminiAfterBurst).toBe(BURST_CAPACITY);
 
         // The remainder drains steadily rather than being dropped or stuck
         // forever: enough refill time gets every one of them through. Derived
@@ -1038,7 +1044,7 @@ describe("the rate gate — smooths a catch-up storm, never slows live chat", ()
         await vi.advanceTimersByTimeAsync(REFILL_MS * 8);
         for (let i = 0; i < 20; i++) await Promise.resolve();
 
-        expect(native.translateBatch.mock.calls.filter(c => c[0] === "gemini")).toHaveLength(8);
+        expect(native.translateBatch.mock.calls.filter(c => c[0] === "gemini")).toHaveLength(channels.length);
     });
 
     it("never makes a single live-chat batch wait", async () => {
@@ -2499,15 +2505,16 @@ describe("marker writes never clobber a real translation from the other tier", (
     });
 });
 
-describe("scrolling back through history does not spend the quality tier's quota", () => {
+describe("scrolling back through history gets the quality tier too, without re-spending on a message", () => {
     /**
-     * THE DEFECT: catch-up's budget (catchUpCount, 20) is per INVOCATION, and
-     * Discord re-fires LOAD_MESSAGES_SUCCESS for every chunk of history a
-     * scroll loads. Every scroll therefore got a fresh 20-message allowance
-     * and produced another quality-tier batch — of legitimately NEW messages,
-     * so the qualityAttempted ledger (which bounds re-attempts of the same
-     * message) never applied. Measured ceiling: 20 Gemini requests per ROLLING
-     * minute, so a few hundred messages of scroll-back empties it in seconds.
+     * CHANGED 2026-09-20. Scroll-back used to be fast-tier only: against a
+     * personal Gemini free-tier key (20 requests per rolling minute) every
+     * scroll's fresh batch of never-seen messages emptied the quota in seconds.
+     * The relay enforces its limits server-side, so what the reader scrolls to
+     * read is translated like anything else they read. What these tests pin
+     * now: each scroll's NEW messages are requested once, a message already
+     * asked is never asked again (the qualityAttempted ledger), the ≈ line is
+     * never lost, and scrolled history stays out of the live context ring.
      */
     const foreign = (id: string) =>
         discordMessage(id, "je vais m'en aller incessamment sous peu");
@@ -2550,50 +2557,61 @@ describe("scrolling back through history does not spend the quality tier's quota
         return older.map(m => m.id);
     }
 
-    it("sends no quality request per scroll, however much new history is loaded", async () => {
+    it("requests each scroll's new messages from the quality tier once, and keeps the ≈ line", async () => {
         stubMessages.set(CHANNEL, [foreign("open-0")]);
 
         FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
         await settle();
-        // The channel open itself IS worth a quality request — that is the case
-        // this fix deliberately preserves.
-        const spentOnOpen = geminiCalls();
-        expect(spentOnOpen).toBeGreaterThan(0);
+        expect(geminiCalls()).toBeGreaterThan(0);
 
-        // The first history load after the open is still that open's own
-        // backlog (CHANNEL_SELECT can fire before Discord has fetched it).
+        // The first history load after the open is that open's own backlog.
         FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
         await settle();
         const spentOnOpenAndItsBacklog = geminiCalls();
 
-        // Now the user scrolls: three more loads, 10 new messages each. Before
-        // the fix each of these produced its own Gemini batch.
+        // Now the user scrolls: three more loads, 10 new messages each. Each
+        // load's never-seen messages are worth a request of their own.
         const scrolled: string[] = [];
         for (const tag of ["s1", "s2", "s3"]) {
             scrolled.push(...await scrollBackLoading(10, tag));
         }
 
-        expect(geminiCalls()).toBe(spentOnOpenAndItsBacklog);
-        for (const id of scrolled) expect(geminiIds()).not.toContain(id);
+        expect(geminiCalls()).toBeGreaterThan(spentOnOpenAndItsBacklog);
+        const asked = geminiIds();
+        for (const id of scrolled) expect(asked).toContain(id);
+        // ONCE each: the ledger still bounds re-attempts of the same message.
+        for (const id of scrolled) expect(asked.filter(x => x === id)).toHaveLength(1);
 
-        // ...and the reader loses NOTHING visible: every scrolled-past message
-        // still went to the fast tier and has its ≈ Google subtitle.
+        // And the reader loses nothing on the way: every scrolled-past message
+        // also went to the fast tier and has its ≈ Google subtitle.
         const fastIds = googleIds();
         for (const id of scrolled) expect(fastIds).toContain(id);
         expect(getTranslation(key("s3-9"))).toMatchObject({ via: "google", text: "rough" });
     });
 
-    it("does not spend the scroll-back budget on upgrades it is not going to request", async () => {
-        // catchUpCount is a budget of REQUESTS, and on a scroll-back pass a
-        // message whose only outstanding work is a ✦ upgrade is not going to
-        // produce one. Counting it anyway would let a screenful of
-        // already-Google-translated history exhaust the budget before the walk
-        // reaches the genuinely untranslated message further up — i.e. the fix
-        // would cost the reader a ≈ line, which is exactly what it promises
-        // not to do.
+    it("scrolling the same history again spends nothing more", async () => {
+        stubMessages.set(CHANNEL, [foreign("open-0")]);
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await settle();
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
+        await settle();
+        await scrollBackLoading(10, "s1");
+        const spent = geminiCalls();
+
+        // The same loaded history re-fires the event (Discord does this for
+        // background fetches too): every message in it was already asked.
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
+        await settle();
+        expect(geminiCalls()).toBe(spent);
+    });
+
+    it("still reaches a deep untranslated message for its ≈ line, by the next pass at the latest", async () => {
+        // catchUpCount is a budget of REQUESTS. A scroll that loads 20
+        // upgradable (Google-only) messages above one with nothing at all
+        // spends the pass on the upgrades; the ledger then closes those, so the
+        // very next pass reaches the deep message. It is never lost.
         settings.store.catchUpCount = 20;
 
-        // Get past the channel-open load, so the next one is scrolling.
         stubMessages.set(CHANNEL, [foreign("open-0")]);
         FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
         await settle();
@@ -2601,9 +2619,6 @@ describe("scrolling back through history does not spend the quality tier's quota
         await settle();
         native.translateBatch.mockClear();
 
-        // The scroll loads 20 messages that already have a Google line (still
-        // upgradable, so needsQuality says yes) and, older than all of them,
-        // one that has nothing at all.
         const upgradable = Array.from({ length: 20 }, (_, i) => foreign(`up-${i}`));
         for (const m of upgradable) {
             setTranslation(key(m.id), { lang: "fr", text: "rough", via: "google" });
@@ -2613,9 +2628,12 @@ describe("scrolling back through history does not spend the quality tier's quota
         ]);
         FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
         await settle();
+        // The upgrades were asked for.
+        for (const m of upgradable) expect(geminiIds()).toContain(m.id);
 
+        FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
+        await settle();
         expect(googleIds()).toContain("deep");
-        expect(geminiCalls()).toBe(0);
     });
 
     it("keeps scrolled-past history out of the quality tier's context window", async () => {
@@ -2885,7 +2903,7 @@ describe("the force-quality popover action (⚡)", () => {
         expect(getTranslation(key("1"))).toEqual({ lang: "de", text: "good", via: "gemini" });
     });
 
-    it("works for a message the scroll-back rule would otherwise exclude", async () => {
+    it("works for a scrolled-back message whose automatic attempt produced nothing", async () => {
         useGemini();
         const foreign = (id: string) => discordMessage(id, "je vais m'en aller incessamment sous peu");
         native.translateBatch.mockImplementation(
@@ -2902,9 +2920,10 @@ describe("the force-quality popover action (⚡)", () => {
         FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
         await settle();
 
-        // A never-before-seen message, loaded by a scroll — demoted to the
-        // fast tier only by the scroll-back rule (initialHistoryPending was
-        // already consumed by the load above).
+        // A never-before-seen message, loaded by a scroll. Scroll-back gets
+        // the quality tier too now; here the model answers nothing for it, so
+        // the automatic attempt is spent (ledger) and the reader has only the
+        // Google line.
         const scrolled = foreign("scrolled-1");
         stubMessages.set(CHANNEL, [scrolled, ...(stubMessages.get(CHANNEL) as any[])]);
         FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
@@ -2915,7 +2934,7 @@ describe("the force-quality popover action (⚡)", () => {
             native.translateBatch.mock.calls.some(c =>
                 c[0] === "gemini"
                 && JSON.parse(c[2] as string).messages.some((m: any) => m.id === "scrolled-1"))
-        ).toBe(false);
+        ).toBe(true);
 
         // Now the user asks by hand.
         native.translateBatch.mockImplementation(async (engine: string) =>
@@ -3032,17 +3051,17 @@ describe("the force-quality popover action (⚡)", () => {
 
         useGemini();
         native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) => {
-            if (engine === "gemini") {
-                return { ok: true, results: [{ id: "target", lang: "fr", text: "good", skip: false }] };
-            }
+            // The AUTOMATIC quality attempt answers nothing: the attempt is
+            // spent, no verdict is written, and the ⚡ button stays on offer.
+            if (engine === "gemini") return { ok: true, results: [] };
             // Deliberately slow, so it lands AFTER the forced quality write below.
             await new Promise<void>(resolve => setTimeout(resolve, 30_000));
             return googleAnswers(payload, "rough", "fr");
         });
 
-        // A scroll-back load: fast tier only (allowQuality is false), so the
-        // quality tier never marks "target" in-flight and the forced click
-        // below is not racing an automatic quality request for it.
+        // A scroll-back load: both tiers are asked (scroll-back gets ✦ too
+        // now). The automatic quality request resolves at once with nothing,
+        // so the forced click below is not racing it.
         const target = foreign("target");
         stubMessages.set(CHANNEL, [target, ...(stubMessages.get(CHANNEL) as any[])]);
         FluxDispatcher.dispatch("LOAD_MESSAGES_SUCCESS", { channelId: CHANNEL });
@@ -3051,6 +3070,14 @@ describe("the force-quality popover action (⚡)", () => {
         // fired yet).
         await vi.advanceTimersByTimeAsync(FAST_DEBOUNCE_MS);
         await flush();
+
+        // From here the model has an answer for the forced request. The slow
+        // Google call already in flight keeps the earlier implementation's
+        // 30s timer and lands later regardless.
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "gemini"
+                ? { ok: true, results: [{ id: "target", lang: "fr", text: "good", skip: false }] }
+                : { ok: true, results: [] });
 
         const btn = forceButton(target);
         expect(btn).not.toBeNull();
@@ -3436,7 +3463,7 @@ describe("the debugLogging setting", () => {
             FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
             await settle();
 
-            expect(flatten()).toMatch(new RegExp(`\\[catchUp\\] ${CHANNEL}: allowQuality=true candidates=1 budgetSpent=1/`));
+            expect(flatten()).toMatch(new RegExp(`\\[catchUp\\] ${CHANNEL}: scrollBack=false candidates=1 budgetSpent=1/`));
         });
 
         it("reports a flush blocked by an engine cooldown", async () => {
@@ -3903,13 +3930,15 @@ describe("the Groq engine, end to end through the renderer", () => {
                 : { ok: false, error: "groq: HTTP 429", retryAfterMs: 45_000 }
         );
 
+        const sentAt = Date.now() + QUALITY_DEBOUNCE_MS; // the batch leaves at the window
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
 
         // The Retry-After header said 45s, and that is what the engine is
-        // parked for — not the 30s default and not the 60s fallback.
-        expect(cooldownUntil("groq")).toBeGreaterThan(Date.now() + 40_000);
-        expect(cooldownUntil("groq")).toBeLessThanOrEqual(Date.now() + 45_000);
+        // parked for from the moment of the 429 — not the 30s default and not
+        // the 60s fallback.
+        expect(cooldownUntil("groq")).toBeGreaterThan(sentAt + 40_000);
+        expect(cooldownUntil("groq")).toBeLessThanOrEqual(sentAt + 45_000);
     });
 
     it("marks a groq translation as ✦, not ≈", async () => {

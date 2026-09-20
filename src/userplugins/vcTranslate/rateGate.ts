@@ -58,8 +58,16 @@ import * as DataStore from "@api/DataStore";
  * wrong for someone — and being wrong in the generous direction is what
  * produced the 429 storm in the first place.
  */
-export const BURST_CAPACITY = 3;
-export const REFILL_MS = 15_000;
+// UNTAUGHT defaults: what the gate does before any provider has stated a
+// limit. Worst rolling minute = 60s/REFILL + BURST = 6 + 4 = 10, half the
+// lowest ceiling ever measured (20/min), which is the property the tests pin.
+// These are deliberately not the relay's numbers: the relay STATES its limit
+// (rpmLimit on every response, quotaLimitPerMinute on a 429), and the gate
+// retunes to it at SAFETY_FACTOR — 10/min sustained on a free code, 30/min on
+// a paid one — so an install that has spoken to the relay once runs at the
+// relay's rate, and one that never has stays on the conservative guess.
+export const BURST_CAPACITY = 4;
+export const REFILL_MS = 10_000;
 
 /**
  * How much of the observed ceiling to actually aim at.

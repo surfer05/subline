@@ -277,18 +277,21 @@ export const GOOGLE_COOLDOWN_MS = 10_000;
 export const FAST_MAX_BATCH = 10;
 
 /**
- * The quality tier: the configured LLM, on a long window.
+ * The quality tier: the configured LLM, on a short grouping window.
  *
- * 20s is chosen against a MEASURED limit of 20 requests per rolling minute.
- * The batcher flushes on a fixed window from the first queued message, so the
- * window alone caps a single channel at 3 requests/minute; in a busy channel
- * the 25-message batch cap flushes sooner, at roughly 2-3 requests/minute for
- * 60 messages/minute of chat. Either way it sits an order of magnitude under
- * the ceiling, which is the entire point — the previous 3s window produced up
- * to 20 requests/minute and sat exactly ON the ceiling.
+ * 1.5s (was 20s until 2026-09-20). The long window was sized against a
+ * personal Gemini free-tier key's 20 requests per rolling minute, and it meant
+ * every ✦ line trailed its ≈ line by twenty seconds, and a channel open by
+ * more than a minute once a second batch queued behind the gate. With the
+ * relay, the request ceiling is enforced server-side (per-code rate limit and
+ * daily message cap) and by the client's rate gate; this window only has to
+ * do what a window is for: group a burst of quick live lines into one batch.
+ * A fixed window from the first message, so a busy channel flushes at most
+ * every 1.5s, sooner at the 25-message batch cap. Catch-up bypasses it
+ * entirely (flushNow) because a backlog is already complete when it is queued.
  *
  * The reader does not wait on this: the fast tier has already put a subtitle
  * on screen. This window only decides how long the line stays Google's.
  */
-export const QUALITY_DEBOUNCE_MS = 20_000;
+export const QUALITY_DEBOUNCE_MS = 1_500;
 export const QUALITY_MAX_BATCH = 25;

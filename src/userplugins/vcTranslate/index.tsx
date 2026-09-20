@@ -292,25 +292,19 @@ const qualityAttempted = new Set<string>();
  * user just opened this channel" (CHANNEL_SELECT, and start() for whatever is
  * already on screen); consumed by the first history load that follows.
  *
- * THE DEFECT THIS EXISTS FOR: `catchUp()`'s budget (`catchUpCount`, 20) is per
- * INVOCATION, and catch-up runs on every `LOAD_MESSAGES_SUCCESS` — which
- * Discord fires again and again as the user scrolls back through history. Each
- * scroll therefore got a fresh 20-message allowance and produced another
- * quality-tier batch of legitimately-new backlog. The `qualityAttempted` ledger
- * cannot help: it bounds re-attempts of the SAME message, and every one of
- * these is a different message. Measured against the live Gemini free tier the
- * ceiling is 20 requests per ROLLING MINUTE (probes returned retry hints of
- * 29.5s, then 56.7s, then 11.2s as the window drained), so a few hundred
- * messages of scroll-back spends the whole minute's quota in seconds — the
- * rate-limit toast reported right after a restart.
+ * WHAT IT DECIDES NOW (changed 2026-09-20): only whether a load's messages are
+ * recorded as quality-tier CONTEXT. Until then it also decided whether they
+ * got ✦ at all — scroll-back was fast-tier only, because against a personal
+ * Gemini free-tier key (20 requests per rolling minute) a long scroll handed
+ * the LLM an unbounded stream of never-seen messages. With the relay the
+ * request ceiling is enforced server-side (per-code rate limit, daily message
+ * cap) and by the client's rate gate, so what the reader scrolls to read gets
+ * the ✦ line like anything else they read.
  *
- * THE RULE: the quality tier serves the LIVE conversation and the CHANNEL-OPEN
- * backlog; deep scroll-back is fast-tier only. That is where the LLM's context
- * advantage is worth quota and where it is not — history being skimmed still
- * gets its Google `≈` subtitle within a second, it simply never flips to `✦`.
- * Bounding it here rather than by lowering `catchUpCount` is deliberate: the
- * budget is what makes opening a channel useful, and that is the case worth
- * spending on.
+ * Context is the part that still matters: the ring is 8 slots and is a window
+ * on the conversation being READ. A load of 20 messages from an hour ago would
+ * evict exactly the recent lines that make the next live batch worth its
+ * request, so scroll-back is translated but not remembered as context.
  *
  * Holds at most one channel: only one channel is ever focused, and catch-up is
  * focus-gated, so a token for anything else could never be redeemed anyway.
@@ -1344,6 +1338,20 @@ async function runTier(
         // fast tier is Google, which is not gated, not keyed and reports none
         // of this.
         if (isQuality && isLlmEngine(engine)) {
+            // The CEILING the provider states for this credential (the relay's
+            // rpmLimit). A real number beats the untaught guess, and learning
+            // it from a success means the gate reaches the relay's rate
+            // without ever buying a 429 first. Same retune as a 429's stated
+            // quota, and persisted the same way.
+            if (typeof res.quotaLimitPerMinute === "number") {
+                const retuned = tuneRateGateToObservedLimit(res.quotaLimitPerMinute);
+                if (debug && retuned) {
+                    logger.debug(
+                        `[flush] ${engine}: rate gate retuned to the stated ceiling `
+                        + `(${res.quotaLimitPerMinute}/min) — now one request every ${rateGateSettings().refillMs}ms`
+                    );
+                }
+            }
             const reported = res.providerRateLimit;
             recordProviderQuota(engine, reported);
             if (reported !== undefined && typeof reported.remainingRequests === "number") {
@@ -1662,17 +1670,17 @@ function readableContent(text: string, channelId: string): string {
  * drifting apart between the three callers — the edited-message path in
  * particular has to do exactly what the created-message path does.
  *
- * `allowQuality` is false for exactly one caller: catch-up driven by a
+ * `recordContext` is false for exactly one caller: catch-up driven by a
  * scroll-back `LOAD_MESSAGES_SUCCESS` (see `initialHistoryPending`). Those
- * messages go to the fast tier only, so the reader still gets a `≈` line
- * within a second while the quality tier's 20-requests-per-rolling-minute
- * budget stays available for the live conversation. They are deliberately not
- * recorded as quality CONTEXT either: the context ring is a window on the
- * conversation being read, and filling it with an hour-old stretch of history
- * the user happened to scroll past would evict exactly the recent messages that
- * make the next live batch worth its request.
+ * messages are translated by both tiers like any other (since 2026-09-20; they
+ * used to be fast-only), but a locally-skipped one is not recorded as quality
+ * CONTEXT: the context ring is a window on the conversation being read, and
+ * filling it with an hour-old stretch of history the user happened to scroll
+ * past would evict exactly the recent messages that make the next live batch
+ * worth its request. `allowQuality` remains for the manual-⚡ and settings
+ * paths that decide per call whether the quality tier is in play at all.
  */
-function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true) {
+function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true, recordContext = true) {
     // Two flavours of local skip, handled identically: the structural one
     // (own message, nothing translatable left after stripping emotes/links)
     // and the linguistic one (we can tell locally that this is already in the
@@ -1715,7 +1723,7 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true) {
         // qualityBatcher may be null (Google-only). Whichever tier(s) end up
         // consuming context see a coherent conversation either way.
         fastBatcher?.recordContext(pending);
-        if (allowQuality) qualityBatcher?.recordContext(pending);
+        if (allowQuality && recordContext) qualityBatcher?.recordContext(pending);
         return;
     }
 
@@ -1993,25 +2001,22 @@ interface CatchUpOptions {
      */
     becomingFocused?: boolean;
     /**
-     * False for scroll-back only: a `LOAD_MESSAGES_SUCCESS` that is not the
-     * initial backlog landing for a channel the user just opened. Those
-     * messages are enqueued for the FAST tier alone.
-     *
-     * WHY, precisely: this catch-up's budget (`catchUpCount`, 20) is per
-     * invocation, and Discord re-fires LOAD_MESSAGES_SUCCESS for every chunk of
-     * history a scroll loads — so scrolling hands the quality tier an unbounded
-     * stream of fresh, never-before-seen messages, each batch legitimately new
-     * and therefore untouched by the `qualityAttempted` ledger. Against the
-     * measured Gemini free-tier ceiling of 20 requests per ROLLING minute that
-     * empties the quota in seconds. Live chat and channel-open backlog are what
-     * the LLM's conversation context is actually worth spending on; history
-     * being skimmed past is not. See `initialHistoryPending`.
+     * True for a `LOAD_MESSAGES_SUCCESS` that is not the initial backlog
+     * landing for a channel the user just opened, i.e. the user scrolling back
+     * through history. Those messages are translated by BOTH tiers like any
+     * other, but are not recorded as quality-tier context — see
+     * `initialHistoryPending` for why the ring must stay a window on the
+     * conversation being read.
      */
-    allowQuality?: boolean;
+    scrollBack?: boolean;
 }
 
 function catchUp(channelId: string, opts: CatchUpOptions = {}) {
-    const { becomingFocused = false, allowQuality = true } = opts;
+    const { becomingFocused = false, scrollBack = false } = opts;
+    // Every catch-up may spend on the quality tier now; the flag only steers
+    // context. Kept as a local so the selection below reads the same as it did
+    // when scroll-back was excluded, and so a future exclusion is one line.
+    const allowQuality = true;
 
     if (!channelActive(channelId)) return;
     if (!becomingFocused && !isFocusedChannel(channelId)) return;
@@ -2096,7 +2101,7 @@ function catchUp(channelId: string, opts: CatchUpOptions = {}) {
 
     if (settings.store.debugLogging) {
         logger.debug(
-            `[catchUp] ${channelId}: allowQuality=${allowQuality} `
+            `[catchUp] ${channelId}: scrollBack=${scrollBack} `
             + `candidates=${candidates.length} budgetSpent=${budget}/${count}`
         );
     }
@@ -2118,8 +2123,27 @@ function catchUp(channelId: string, opts: CatchUpOptions = {}) {
                 replyToId: replyParentId(message)
             },
             message.author?.id === me,
-            allowQuality
+            allowQuality,
+            // Scrolled-past history is translated but not remembered.
+            !scrollBack
         );
+    }
+
+    // SEND NOW. Catch-up hands the batchers a backlog that is already complete;
+    // the debounce window exists to group a burst of LIVE messages, and waiting
+    // it out here only delayed the ✦ line on every channel open by the whole
+    // window (measured: 20s, then a second batch, then a gate token — over a
+    // minute from opening a channel to the upgrade).
+    //
+    // FAST FIRST, on purpose. Google answers in a few hundred milliseconds
+    // and the relay in seconds, so the ≈ line is normally on screen before
+    // the quality verdict lands — and runTier's ledger refund ("only while the
+    // reader is blind") reads the store at that moment. Sending the quality
+    // batch first would make a refused batch look like a blind reader every
+    // time, and re-spend on the same messages at the next channel open.
+    if (candidates.length > 0) {
+        fastBatcher?.flushNow();
+        if (allowQuality) qualityBatcher?.flushNow();
     }
 }
 
@@ -2127,7 +2151,7 @@ function onChannelSelect({ channelId }: { channelId: string; }) {
     if (!channelId) return;
     // The backlog may not be fetched yet for a channel not visited this
     // session, so the history load that follows is still part of THIS open and
-    // is entitled to the quality tier. Armed before catch-up runs, so a
+    // belongs in the quality tier's context. Armed before catch-up runs, so a
     // synchronous LOAD_MESSAGES_SUCCESS could not outrun it.
     armInitialHistory(channelId);
     // This event IS the focus change, so it does not have to ask
@@ -2169,14 +2193,13 @@ function onMessagesLoaded(payload: any) {
     // fan-out this phase closed.
     //
     // The FIRST load after a channel open is that open's own backlog — the
-    // "tab back in after a game" case CHANNEL_SELECT was too early to serve —
-    // so it gets the quality tier. Every load after it is the user scrolling
-    // back through history, and gets the fast tier only: each such load hands
-    // catch-up a fresh budget of never-before-seen messages, so nothing else in
-    // the plugin bounds how much of the 20-requests-per-rolling-minute quota a
-    // long scroll can spend. Those messages still get their Google `≈`
-    // subtitle; they just do not get upgraded to `✦`.
-    catchUp(channelId, { allowQuality: takeInitialHistory(channelId) });
+    // "tab back in after a game" case CHANNEL_SELECT was too early to serve.
+    // Every load after it is the user scrolling back through history. Both get
+    // the quality tier (changed 2026-09-20: scroll-back used to be fast-only,
+    // a bound for a personal Gemini free-tier key that the relay now enforces
+    // server-side); only the context recording differs — see
+    // `initialHistoryPending`.
+    catchUp(channelId, { scrollBack: !takeInitialHistory(channelId) });
 }
 
 const TEXT_COLOUR = "var(--text-default, var(--text-normal, #dbdee1))";

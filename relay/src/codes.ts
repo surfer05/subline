@@ -134,14 +134,25 @@ export type ReserveOutcome =
  * BEFORE Groq is called, so a normal upstream failure (which then refunds)
  * never overspends, and the reserve is the safe direction for the budget.
  */
+/**
+ * Requests per minute a code may make. A request is a BATCH of up to 25
+ * messages, so even 20/min is far above a human reading and scrolling; the
+ * daily message cap is the real spend limit. Any paid tier (legacy "paid" or a
+ * MoR subscription/lifetime plan) gets the higher ceiling; only "free"/unset
+ * stays at 20. STATED TO THE CLIENT on every response (`rpmLimit`) and on a
+ * 429 (`quotaLimitPerMinute`) so the plugin's own rate gate tunes itself to
+ * this number instead of a conservative guess.
+ */
+export function rpmLimitFor(rec: CodeRecord): number {
+    return rec.plan && rec.plan !== "free" ? 60 : 20;
+}
+
 export async function reserve(env: Env, code: string, rec: CodeRecord, cost: number, now: number): Promise<ReserveOutcome> {
     // 1) Per-minute rate limit (KV, soft): one shared paid key must not be
     //    drained by a runaway/scraping client. Well above a real user's rate.
     const rpmKey = `rl:${code}:${Math.floor(now / 60_000)}`;
     const rpm = await readCount(env, rpmKey);
-    // Any paid tier (legacy "paid" or a MoR subscription/lifetime plan) gets the
-    // higher burst ceiling; only "free"/unset stays at the free tier's 20.
-    const rpmLimit = rec.plan && rec.plan !== "free" ? 30 : 20;
+    const rpmLimit = rpmLimitFor(rec);
     if (rpm >= rpmLimit) return { ok: false, reason: "rate_limited", retryAfterMs: 60_000 - (now % 60_000) };
 
     // 2) Daily per-code cap (KV, soft fairness — bounded by the atomic global

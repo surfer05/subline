@@ -17,7 +17,7 @@
  * system prompt, or reach the key — which is what makes a keyless relay safe to
  * expose. A valid code is not a general Groq proxy.
  */
-import { authCode, reserve, refund, usage, mintCode, applyMorEvent, type Env, type CodeRecord } from "./codes";
+import { authCode, reserve, refund, usage, mintCode, applyMorEvent, rpmLimitFor, type Env, type CodeRecord } from "./codes";
 import { translateWithFallback, type BatchRequest, type TranslateError, type Provider } from "./translate";
 import { record, type Outcome } from "./metrics";
 export { Budget } from "./budget";
@@ -163,9 +163,18 @@ export default {
             if (!res.ok) {
                 const status = 429; // cap_exceeded / rate_limited / capacity all park the engine
                 const label = res.reason === "capacity" ? "capacity" : res.reason;
+                if (res.reason === "rate_limited") {
+                    // State the ceiling that was hit, in the field the plugin's
+                    // rate gate already learns from (native.ts →
+                    // enterCooldown → tuneRateGateToObservedLimit), so one
+                    // 429 retunes the client to this code's real limit.
+                    return done(json({
+                        ok: false, error: "slow down", retryAfterMs: res.retryAfterMs,
+                        quotaLimitPerMinute: rpmLimitFor(auth.record)
+                    }, status), label as Outcome, code, 0);
+                }
                 return done(fail(
-                    res.reason === "cap_exceeded" ? "daily limit reached" :
-                    res.reason === "rate_limited" ? "slow down" : "temporarily unavailable",
+                    res.reason === "cap_exceeded" ? "daily limit reached" : "temporarily unavailable",
                     status, res.retryAfterMs
                 ), label as Outcome, code, 0);
             }
@@ -176,7 +185,9 @@ export default {
                 const { primary, fallback } = providers(env);
                 const results = await translateWithFallback(batch, primary, fallback, controller.signal);
                 clearTimeout(timer);
-                return done(json({ ok: true, results, used: res.used, cap: res.cap }), "ok", code, cost);
+                // `rpmLimit` rides every success so the plugin's rate gate can
+                // tune itself to this code's ceiling without ever hitting it.
+                return done(json({ ok: true, results, used: res.used, cap: res.cap, rpmLimit: rpmLimitFor(auth.record) }), "ok", code, cost);
             } catch (e) {
                 clearTimeout(timer);
                 const err = e as TranslateError;

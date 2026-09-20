@@ -59,6 +59,12 @@ describe("reserve — cap, rate, kill-switch, reserve-before-spend", () => {
         for (let i = 0; i < 20; i++) expect(await reserve(env(kv), "c", r, 1, NOW)).toMatchObject({ ok: true });
         expect(await reserve(env(kv), "c", r, 1, NOW)).toMatchObject({ ok: false, reason: "rate_limited" });
     });
+    it("gives a paid code 60 requests a minute (a request is a batch of up to 25 messages)", async () => {
+        const kv = fakeKV();
+        const r = JSON.parse(codeRec({ dailyCap: 100000, plan: "monthly" }));
+        for (let i = 0; i < 60; i++) expect(await reserve(env(kv), "p", r, 1, NOW)).toMatchObject({ ok: true });
+        expect(await reserve(env(kv), "p", r, 1, NOW)).toMatchObject({ ok: false, reason: "rate_limited" });
+    });
     it("freezes the whole relay at the global budget (atomic DO) and refuses further reserves", async () => {
         const b = fakeBudget();
         const bigCap = JSON.parse(codeRec({ dailyCap: 1_000_000 }));
