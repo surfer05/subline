@@ -268,6 +268,8 @@ export interface FlowPorts {
     setLanguage(code: string): Result<SetTargetLanguageReport>;
     /** Writes the quality tier's key. Never returns the key itself. */
     setSublineCode(key: string): Result<SetSublineCodeReport>;
+    /** Whether the saved settings already hold a Subline code. Decides whether an UPDATE offers the code screen. */
+    hasSublineCode(): boolean;
 
     patch(install: DiscordInstall, options: { modBundleDir: string; overwriteForeignMod: boolean }): Result<PatchReport>;
     /**
@@ -692,8 +694,9 @@ export class InstallFlow {
         // until the release feed ships (RELEASE_FEED_ENABLED=false): today
         // THIS installer is the only updater there is. Same id: done.
         // Different id: continue as an update - straight to the quit gate,
-        // skipping the language and key steps, whose answers are the user's
-        // saved settings and must not be asked twice.
+        // skipping the language step, whose answer is the user's saved setting
+        // and must not be asked twice. The code screen is skipped only when a
+        // code is already saved — see afterDiscordClosed.
         const installedId = installState.marker?.pluginBuildId ?? null;
         const shipped = this.ports.inspectShippedBundle();
         if (shipped.ok && installedId !== null && shipped.value.buildId !== installedId) {
@@ -735,7 +738,28 @@ export class InstallFlow {
             }));
         }
 
-        return this.updating ? this.permissionStep() : this.languageStep();
+        return this.afterDiscordClosed();
+    }
+
+    /**
+     * Where the flow goes once Discord is closed.
+     *
+     * A fresh install asks for the language and the code. An UPDATE asks for
+     * neither, because the answers are the user's saved settings — with one
+     * exception, observed on the first update over a real friend's install:
+     * someone who skipped the code the first time has nowhere in the installer
+     * to add one later, so the ✦ tier never arrives for them and the only route
+     * is a settings pane inside Discord they have never seen. An update whose
+     * saved settings hold NO code therefore still offers the code screen (Skip
+     * remains a real answer). The language, which IS saved, is never asked twice.
+     */
+    private afterDiscordClosed(): FlowState | Promise<FlowState> {
+        if (!this.updating) return this.languageStep();
+        if (!this.ports.hasSublineCode()) {
+            this.ports.log.info("flow.update-offers-code", { reason: "no code in saved settings" });
+            return this.codeStep();
+        }
+        return this.permissionStep();
     }
 
     /**
@@ -781,7 +805,7 @@ export class InstallFlow {
         });
         this.ports.log.info("discord.quit", { outcome: report.outcome, clear: report.clear, forced: report.forced });
 
-        if (report.clear) return this.updating ? this.permissionStep() : this.languageStep();
+        if (report.clear) return this.afterDiscordClosed();
 
         // Only reached when the forced close ALSO failed, which means something
         // other than a cooperative Discord is holding those files. Offering the

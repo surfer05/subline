@@ -30,5 +30,11 @@ contextBridge.exposeInMainWorld("subline", {
         const listener = (_event: unknown, state: unknown): void => handler(state);
         ipcRenderer.on("flow:state", listener);
         return () => ipcRenderer.removeListener("flow:state", listener);
+    },
+    /** Progress of a running uninstall: "permission" while macOS is being asked, "removing" once it writes. */
+    onUninstallPhase: (handler: (phase: unknown) => void) => {
+        const listener = (_event: unknown, phase: unknown): void => handler(phase);
+        ipcRenderer.on("uninstall:phase", listener);
+        return () => ipcRenderer.removeListener("uninstall:phase", listener);
     }
 });

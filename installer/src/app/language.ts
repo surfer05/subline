@@ -331,6 +331,24 @@ export function readTargetLanguage(settingsPath: string | null): string | null {
     }
 }
 
+/**
+ * The saved Subline code, or `null` when none is set (never logged, never
+ * displayed — callers want `!== null`, not the value). Same tolerance as
+ * `readTargetLanguage`: a missing or unreadable file is "no code", not a throw.
+ */
+export function readSublineCode(settingsPath: string | null): string | null {
+    if (settingsPath === null || !existsSync(settingsPath)) return null;
+    try {
+        const parsed: unknown = JSON.parse(readFileSync(settingsPath, "utf8"));
+        const plugins = (parsed as { plugins?: Record<string, unknown> } | null)?.plugins;
+        const plugin = plugins?.[PLUGIN_SETTINGS_KEY] as Record<string, unknown> | undefined;
+        const value = plugin?.[SUBLINE_CODE_KEY];
+        return typeof value === "string" && value.trim() !== "" ? value : null;
+    } catch {
+        return null;
+    }
+}
+
 /* ------------------------------------------------------------------------ *
  * The quality tier's API key
  * ------------------------------------------------------------------------ */

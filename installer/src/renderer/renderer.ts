@@ -27,7 +27,14 @@ interface SublineApi {
     uninstall(options: { keepSettings: boolean; closeDiscord?: "ask" | "force" }): Promise<UninstallReport>;
     openUrl(url: string): Promise<boolean>;
     onState(handler: (state: FlowState) => void): () => void;
+    onUninstallPhase(handler: (phase: UninstallPhase) => void): () => void;
 }
+
+/** What the main process is doing during an uninstall (see `uninstall:run`). */
+type UninstallPhase = "permission" | "removing";
+
+/** The App Management pane, verbatim from spec §4 (kept in step with appManagement.ts). */
+const APP_MANAGEMENT_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_AppBundles";
 
 declare global {
     interface Window { subline: SublineApi }
@@ -460,6 +467,21 @@ function showUninstall(report: UninstallReport, mayRetry: boolean): void {
     const first = report.problems[0];
     if (first !== undefined) renderError(first);
 
+    // Permission never arrived. The main process already opened the pane and
+    // waited; the remedy is the same gate again, on a button that says so.
+    // Nothing was changed, so retrying costs nothing and can be offered every time.
+    if (first !== undefined && first.code === "PERMISSION_DENIED") {
+        const button = document.createElement("button");
+        button.className = "btn btn-primary";
+        button.textContent = "Grant permission and remove";
+        button.onclick = () => {
+            button.disabled = true;
+            void runUninstall(lastKeepSettings, null, mayRetry);
+        };
+        actionBar.append(button);
+        return;
+    }
+
     if (first === undefined || !CLOSING_DISCORD_WOULD_HELP.includes(first.code)) return;
     // Offered ONCE. The main process escalates from a polite request to a
     // forced close inside that single press, so a second failure means
@@ -499,9 +521,42 @@ function runUninstall(
     const wait = document.createElement("span");
     wait.className = "spin";
     detail.prepend(wait, document.createTextNode(" "));
+
+    // The same permission step the install shows, for the same write. While
+    // the main process holds the pane open and polls, this screen says so and
+    // moves on by itself the moment the toggle flips.
+    const stopPhases = api.onUninstallPhase(phase => {
+        extra.replaceChildren();
+        actionBar.replaceChildren();
+        if (phase === "permission") {
+            stepName.textContent = "macOS needs your permission";
+            detail.textContent =
+                "macOS needs your permission before Subline can put Discord's original files back. Subline has "
+                + "opened the right settings page: switch Subline on under App Management. This screen moves on "
+                + "by itself. If macOS says Subline cannot \"update or delete other applications\" until it is "
+                + "quit, choose Later. That is Apple's wording for this permission, not something Subline asks for.";
+            const hint = document.createElement("p");
+            hint.className = "note";
+            hint.textContent = "System Settings › Privacy & Security › App Management";
+            extra.append(hint);
+            const open = document.createElement("button");
+            open.className = "btn btn-secondary";
+            open.textContent = "Open System Settings";
+            open.onclick = () => { void api.openUrl(APP_MANAGEMENT_URL); };
+            actionBar.append(open);
+            return;
+        }
+        stepName.textContent = "Removing Subline";
+        detail.textContent = "Putting Discord's original files back…";
+        const spin = document.createElement("span");
+        spin.className = "spin";
+        detail.prepend(spin, document.createTextNode(" "));
+    });
+
     return api
         .uninstall(closeDiscord === null ? { keepSettings } : { keepSettings, closeDiscord })
-        .then(report => showUninstall(report, mayRetry));
+        .then(report => showUninstall(report, mayRetry))
+        .finally(stopPhases);
 }
 
 document.getElementById("uninstall")?.addEventListener("click", () => {

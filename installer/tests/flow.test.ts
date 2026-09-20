@@ -122,6 +122,8 @@ interface Script {
     discordLocale?: string | null;
     setLanguage?: Result<{ path: string; code: string; previous: string | null; created: boolean }>;
     setSublineCode?: Result<{ path: string; created: boolean; codeLength: number }>;
+    /** Whether the saved settings already hold a code (an UPDATE consults this). */
+    hasSublineCode?: boolean;
     platform?: NodeJS.Platform;
 }
 
@@ -199,6 +201,7 @@ function harness(script: Script = {}): Harness {
 
         discordLocale: () => (script.discordLocale === undefined ? "tr" : script.discordLocale),
         systemLocale: () => "en-GB",
+        hasSublineCode: () => script.hasSublineCode ?? false,
         setSublineCode: (code: string) => {
             h.codeWrites.push(code);
             return script.setSublineCode ?? {
@@ -506,7 +509,8 @@ describe("a Discord we already patched", () => {
     it("updates when the installed build differs from the shipped one", async () => {
         const marker = { pluginBuildId: "0000000000000000" } as unknown as InstallState["marker"];
         const st = { ...installState("patched-by-us", "subline"), marker };
-        const h = harness({ inspect: { ok: true, value: st } });
+        // A code is already saved, so this update has nothing to ask.
+        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: true });
 
         // Record every transition, so the skip assertions below are REAL -
         // an assertion over a list nothing populates proves nothing.
@@ -523,6 +527,43 @@ describe("a Discord we already patched", () => {
         expect(seen).not.toContain("already-installed");
         expect(seen).not.toContain("choose-language");
         expect(seen).not.toContain("choose-code");
+        expect(h.patchCalls.length).toBeGreaterThan(0);
+    });
+
+    // OBSERVED 2026-09-20: a friend who skipped the code on first install had
+    // nowhere in the installer to add one on the update, so the ✦ tier never
+    // arrived. The language IS saved and stays skipped; the code screen is
+    // offered when the saved settings hold none.
+    it("an update over an install with NO saved code still offers the code screen, and skips only the language", async () => {
+        const marker = { pluginBuildId: "0000000000000000" } as unknown as InstallState["marker"];
+        const st = { ...installState("patched-by-us", "subline"), marker };
+        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: false });
+        const seen: string[] = [];
+        h.flow.onChange = st => seen.push(st.step);
+
+        const offered = await h.flow.start();
+        expect(offered.step).toBe("choose-code");
+        expect(offered.actions).toEqual(["set-code", "skip-code"]);
+        expect(seen).not.toContain("choose-language");
+        expect(h.languageWrites).toEqual([]);
+
+        // Pasting a code saves it and the update carries on to the patch.
+        const after = await h.flow.send({ type: "set-code", code: "slp_abcdefghijklmnop" });
+        expect(h.codeWrites).toEqual(["slp_abcdefghijklmnop"]);
+        expect(after.step).not.toBe("choose-code");
+        expect(h.patchCalls.length).toBeGreaterThan(0);
+    });
+
+    it("an update with no saved code may still skip the code, exactly like a fresh install", async () => {
+        const marker = { pluginBuildId: "0000000000000000" } as unknown as InstallState["marker"];
+        const st = { ...installState("patched-by-us", "subline"), marker };
+        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: false });
+
+        const offered = await h.flow.start();
+        expect(offered.step).toBe("choose-code");
+        const after = await h.flow.send({ type: "skip-code" });
+        expect(h.codeWrites).toEqual([]);
+        expect(after.step).not.toBe("choose-code");
         expect(h.patchCalls.length).toBeGreaterThan(0);
     });
 

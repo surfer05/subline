@@ -61,6 +61,18 @@ export type AppManagementStatus =
 /** The name of the file the probe writes. Distinctive, so a leftover is identifiable. */
 export const PROBE_FILENAME = ".subline-permission-probe";
 
+/**
+ * One verdict for several installs (uninstall restores EVERY Discord we ever
+ * marked). The pessimistic fold: any `blocked` blocks, any `unknown` is unknown,
+ * and only all-clear is clear. An empty list needs no permission at all.
+ */
+export function worstAppManagementStatus(statuses: readonly AppManagementStatus[]): AppManagementStatus {
+    if (statuses.includes("blocked")) return "blocked";
+    if (statuses.includes("unknown")) return "unknown";
+    if (statuses.includes("granted")) return "granted";
+    return "not-required";
+}
+
 export interface ProbeOptions {
     /** The directory holding `app.asar` — the thing we will actually be writing to. */
     resourcesPath: string;

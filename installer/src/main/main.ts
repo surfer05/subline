@@ -26,6 +26,9 @@ import { dirname, join } from "node:path";
 import { DiagnosticsLog } from "../app/log.js";
 import { InstallFlow } from "../app/flow.js";
 import type { FlowAction, FlowState } from "../app/flow.js";
+import {
+    APP_MANAGEMENT_SETTINGS_URL, awaitAppManagement, probeAppManagement, worstAppManagementStatus
+} from "../app/appManagement.js";
 import { uninstall } from "../app/uninstall.js";
 import type { UninstallReport } from "../app/uninstall.js";
 import {
@@ -354,12 +357,6 @@ ipcMain.handle("uninstall:run", async (
     _event,
     options: { keepSettings: boolean; closeDiscord?: "ask" | "force" }
 ): Promise<UninstallReport> => {
-    // §8 step 3 FIRST. Restoring Discord under a live helper would have the
-    // helper put the patch straight back at its next interval. `removeHelperFor`
-    // returns the precondition `uninstall` requires, so this call site cannot
-    // assemble it wrongly.
-    const helper = await removeHelperFor(helperWiring(), process.platform, app.getPath("home"));
-
     // uninstallTargets, not locateDiscordInstalls: the latter deliberately
     // returns only the NEWEST Windows app dir (right for installing), but a
     // helper patches whichever dir is newest at the time, so after a Discord
@@ -369,6 +366,56 @@ ipcMain.handle("uninstall:run", async (
     // "where did we ever leave a mark?", and this is the function that
     // answers it.
     const installs = uninstallTargets({ platform: process.platform });
+
+    // §4 applies to removal too. Putting Discord's original archive back is a
+    // write inside the app bundle — the very write the INSTALL flow probes for
+    // and, when refused, walks the user through granting. Observed 2026-09-20:
+    // a rebuilt (re-signed) app had lost the grant, and Uninstall answered with
+    // a bare PERMISSION_DENIED where the install would have opened the settings
+    // pane and waited. Same gate, same wait, here — and BEFORE the helper is
+    // removed, so a grant that never comes leaves the install exactly as it was
+    // rather than patched-but-unattended.
+    const phase = (name: "permission" | "removing"): void => {
+        if (window !== null && !window.isDestroyed()) window.webContents.send("uninstall:phase", name);
+    };
+    const probe = () => worstAppManagementStatus(installs.map(install =>
+        probeAppManagement({ resourcesPath: install.resourcesPath, platform: process.platform })));
+    const status = probe();
+    log.info("uninstall.permission.probe", { status, installs: installs.length });
+    if (status !== "granted" && status !== "not-required") {
+        phase("permission");
+        await shell.openExternal(APP_MANAGEMENT_SETTINGS_URL);
+        const report = await awaitAppManagement({
+            probe,
+            onAttempt: (attemptStatus, attempt) => log.info("uninstall.permission.attempt", { status: attemptStatus, attempt })
+        });
+        log.info("uninstall.permission.result", { status: report.status, attempts: report.attempts });
+        if (!report.permitted) {
+            // Nothing has been touched: no helper removed, no file moved. The
+            // renderer offers "Grant permission and remove", which lands back
+            // here and probes again.
+            return {
+                restores: [],
+                helperStopped: false,
+                discordRestored: false,
+                modBundleRemoved: false,
+                modBundleKeptForSafety: false,
+                settingsRemoved: false,
+                productDataRemoved: false,
+                translationCache: "left-in-discord-storage",
+                problems: [{ code: "PERMISSION_DENIED", message: report.summary, path: installs[0]?.resourcesPath }],
+                clean: false,
+                summary: `${report.summary} Nothing has been changed; Discord keeps working exactly as it does now.`
+            };
+        }
+    }
+    phase("removing");
+
+    // §8 step 3 FIRST (among the writes). Restoring Discord under a live helper
+    // would have the helper put the patch straight back at its next interval.
+    // `removeHelperFor` returns the precondition `uninstall` requires, so this
+    // call site cannot assemble it wrongly.
+    const helper = await removeHelperFor(helperWiring(), process.platform, app.getPath("home"));
 
     // Restoring Discord renames _app.asar back over app.asar, and Windows
     // refuses to rename a file a running process holds open. Looked up here
