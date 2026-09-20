@@ -859,9 +859,10 @@ export class InstallFlow {
     private codeStep(error: PatcherError | null = null): FlowState {
         return this.set(state({
             step: "choose-code",
-            detail: "Paste your Subline code to turn on ✦ AI translation, or skip. Subline still "
-                + "translates everything with Google (≈) either way, and you can add a code later. "
-                + "Codes start with slp_.",
+            // The previous screen already said skipping is fine and a code can
+            // be added later; the hint under the field says where. Once each.
+            detail: "Paste your Subline code to turn on ✦ AI translation. Codes start with slp_. "
+                + "No code? Choose \"Use free Google only\".",
             error,
             // NO CANCEL ON THIS SCREEN. A real friend, on the first field
             // install, pressed Cancel here twice meaning "no key for me" and

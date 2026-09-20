@@ -210,8 +210,7 @@ function renderExtra(state: FlowState): void {
 
         const hint = document.createElement("p");
         hint.className = "note";
-        hint.textContent = "No code? Skip below. Subline still translates everything with Google (≈), "
-            + "and you can paste a code anytime from Subline's settings in Discord.";
+        hint.textContent = "A code can be pasted any time later, in Subline's settings inside Discord.";
 
         field.append(label, input, hint);
         extra.append(field);

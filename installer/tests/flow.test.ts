@@ -869,7 +869,9 @@ describe("the optional Subline-code step", () => {
         // step must at least say what goes here and that skipping still works —
         // otherwise it is a text box with no way to fill it.
         expect(state.detail).toMatch(/code/i);
-        expect(state.detail).toMatch(/skip/i);
+        // The decline path is the "Use free Google only" button, and the copy
+        // names it rather than saying "skip" and leaving the user to map the two.
+        expect(state.detail).toMatch(/skip|use free google only/i);
     });
 
     it("saves the key and carries on", async () => {
