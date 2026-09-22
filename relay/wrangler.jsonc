@@ -1,8 +1,8 @@
 {
   // Subline translation relay — Cloudflare Worker.
-  // Deploy: see README.md. Secrets (GROQ_KEY, GEMINI_KEY, ADMIN_TOKEN,
-  // MOR_WEBHOOK_SECRET) are set with `wrangler secret put`, NEVER in this file
-  // or git.
+  // Deploy: see README.md. Secrets (OPENROUTER_KEY, GROQ_KEY, GEMINI_KEY,
+  // ADMIN_TOKEN, MOR_WEBHOOK_SECRET) are set with `wrangler secret put`, NEVER
+  // in this file or git.
   //   GEMINI_KEY is a billing-enabled Google Gemini API key. When it is set AND
   //   MODEL is a `gemini*` id, Gemini is the PRIMARY translation provider and
   //   Groq (FALLBACK_MODEL) is the automatic fallback on any Gemini failure
@@ -20,15 +20,31 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
   "vars": {
-    // Primary model. `gemini*` → Gemini (needs the GEMINI_KEY secret); any other
-    // id → Groq. LAUNCH SETTING: Groq gpt-oss-120b (free tier, proven on real
-    // chat). To move to Gemini later: set this to "gemini-3.8-flash" AND
-    // `wrangler secret put GEMINI_KEY` (a billing-enabled key) — the code
-    // routes by this id and falls back to Groq on any Gemini failure. Without
-    // the key, a gemini id here is ignored and the relay stays Groq-only.
+    // ROUTING (decided by which SECRETS are set, not by this id alone — see
+    // providers() in src/index.ts, which sets an explicit Provider.kind because
+    // OpenRouter and Groq serve the SAME model ids):
+    //   OPENROUTER_KEY set → OpenRouter is PRIMARY on MODEL, pinned to Groq's
+    //     hosting (provider.order groq, cerebras, deepinfra;
+    //     require_parameters so structured output is never silently dropped).
+    //     This is the pay-as-you-go path: Groq's Developer upgrade is closed, so
+    //     the DIRECT Groq key is stuck on the free tier's daily token ceiling.
+    //   GROQ_KEY → the automatic FALLBACK, on FALLBACK_MODEL. Free tier, but it
+    //     keeps the product answering through an OpenRouter outage or a 402.
+    //   GEMINI_KEY + a `gemini*` MODEL → Gemini is primary instead, optional,
+    //     with OpenRouter (else Groq) as its fallback.
+    // No new var is needed for any of this: adding or dropping the
+    // OPENROUTER_KEY secret is the whole switch.
+    //
+    // Primary model. LAUNCH SETTING: openai/gpt-oss-120b, proven on real chat,
+    // and a valid id on BOTH OpenRouter and Groq, so the primary and the
+    // fallback run the same model. To move to Gemini later: set this to
+    // "gemini-3.8-flash" AND `wrangler secret put GEMINI_KEY` (a billing-enabled
+    // key). Without that key, a gemini id here is ignored and the OpenAI-shaped
+    // providers use FALLBACK_MODEL instead.
     "MODEL": "openai/gpt-oss-120b",
-    // Groq model used as the automatic fallback when Gemini is primary and a call
-    // fails. Keeps the product answering through a Gemini rate-limit/outage.
+    // Model for the FALLBACK provider (the direct Groq key), and for any
+    // OpenAI-shaped provider that must not be handed a `gemini*` MODEL. Keeps
+    // the product answering through a primary rate-limit/outage.
     "FALLBACK_MODEL": "openai/gpt-oss-120b",
     // Freeze the whole relay after this many cost-units, ever. A unit is ~1
     // message (cost = messages + ceil(promptChars/1000)). On gpt-oss-120b that

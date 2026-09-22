@@ -1,7 +1,8 @@
 /**
  * The Subline translation relay.
  *
- * Holds the maker's paid Groq key; serves keyless AI translation to Subline
+ * Holds the maker's paid upstream key (OpenRouter, with the direct Groq key as
+ * the fallback); serves keyless AI translation to Subline
  * clients that present an opaque per-user CODE. Zero-retention (no request or
  * response body is ever logged — see metrics.ts, the only observability path)
  * and zero-identity (the code carries no name; the Merchant-of-Record holds the
@@ -30,23 +31,44 @@ const MAX_TARGET_CHARS = 40; // a language name; anything longer is an injection
 const GROQ_TIMEOUT_MS = 20_000;
 const GROQ_FALLBACK_MODEL = "openai/gpt-oss-120b";
 
-/** Resolve which model/key answers this request. If a Gemini key is set, Gemini
- *  (env.MODEL) is primary and Groq (FALLBACK_MODEL) is the automatic fallback on
- *  any Gemini failure. With no Gemini key the relay is Groq-only: primary is
- *  Groq at env.MODEL (or the gpt-oss default) and there is no second provider.
- *  Guards a misconfig where MODEL is a gemini id but no GEMINI_KEY is set —
- *  that would 401 every call, so fall back to Groq-only. */
+/** Resolve which upstream answers this request, as an explicit Provider.kind —
+ *  never a regex on the model id, because OpenRouter and Groq serve the SAME
+ *  "openai/gpt-oss-120b" through different endpoints and keys.
+ *
+ *  The routing, in order:
+ *    1. MODEL is a `gemini*` id AND GEMINI_KEY is set → Gemini primary, with
+ *       OpenRouter (else the direct Groq key) as the fallback.
+ *    2. OPENROUTER_KEY is set → OpenRouter primary on env.MODEL, pinned to
+ *       Groq's hosting inside translate.ts, with the direct Groq key as the
+ *       automatic fallback (only when GROQ_KEY is actually set). This is the
+ *       launch setting: Groq's Developer upgrade is closed, so the direct key is
+ *       capped at the free tier's daily tokens, while OpenRouter is pay as you
+ *       go on the same model.
+ *    3. Neither → Groq-only, exactly as before.
+ *
+ *  A `gemini*` MODEL is never handed to an OpenAI-shaped provider: those get
+ *  FALLBACK_MODEL instead, which also guards the misconfig where MODEL names
+ *  Gemini but GEMINI_KEY was never set (that would 401 every call). */
 export function providers(env: Env): { primary: Provider; fallback: Provider | null } {
-    const groq: Provider = { apiKey: env.GROQ_KEY, model: env.FALLBACK_MODEL || GROQ_FALLBACK_MODEL };
+    const fallbackModel = env.FALLBACK_MODEL || GROQ_FALLBACK_MODEL;
     const wantsGemini = /^gemini/i.test(env.MODEL || "");
+    const openAiModel = wantsGemini ? fallbackModel : (env.MODEL || GROQ_FALLBACK_MODEL);
+
+    const groq: Provider | null = env.GROQ_KEY
+        ? { kind: "groq", apiKey: env.GROQ_KEY, model: fallbackModel }
+        : null;
+    const openrouter: Provider | null = env.OPENROUTER_KEY
+        ? { kind: "openrouter", apiKey: env.OPENROUTER_KEY, model: openAiModel }
+        : null;
+
     if (wantsGemini && env.GEMINI_KEY) {
-        return { primary: { apiKey: env.GEMINI_KEY, model: env.MODEL }, fallback: groq };
+        return { primary: { kind: "gemini", apiKey: env.GEMINI_KEY, model: env.MODEL }, fallback: openrouter ?? groq };
     }
-    // MODEL names Gemini but no GEMINI_KEY is set: handing a Gemini model id to
-    // Groq (or the Groq key to Gemini) fails EVERY call, so run Groq-only on the
-    // Groq fallback model instead. Otherwise MODEL is a Groq id: use it as-is.
+    if (openrouter) return { primary: openrouter, fallback: groq };
+    // Groq-only. Keeps the pre-OpenRouter behaviour byte for byte, including the
+    // gemini-without-a-key misconfig falling back to the Groq fallback model.
     return {
-        primary: wantsGemini ? groq : { apiKey: env.GROQ_KEY, model: env.MODEL || GROQ_FALLBACK_MODEL },
+        primary: { kind: "groq", apiKey: env.GROQ_KEY, model: wantsGemini ? fallbackModel : openAiModel },
         fallback: null
     };
 }
@@ -206,10 +228,18 @@ export default {
                 if (!timedOut && err.status !== 401 && err.status !== 403) {
                     ctx.waitUntil(refund(env, code!, cost, now, tasteIp));
                 }
-                // The relay's OWN key failing (401/403 from Groq) is a SERVER
-                // fault, never surfaced as "your key is bad".
+                // The relay's OWN key failing (401/403 from an upstream) is a
+                // SERVER fault, never surfaced as "your code is bad".
                 if (err.status === 401 || err.status === 403) {
                     return done(fail("translation service unavailable", 503), "relay_key_fail", code, 0, plan);
+                }
+                // 402 = OpenRouter is out of credits. The relay's BILLING
+                // problem, and by now the Groq fallback has already been tried
+                // and failed too (translateWithFallback runs first). Same
+                // user-facing answer as a dead key — never "your code is bad" —
+                // with its own metric label so a billing alarm is countable.
+                if (err.status === 402) {
+                    return done(fail("translation service unavailable", 503), "relay_credit", code, 0, plan);
                 }
                 if (err.status === 429) {
                     return done(fail("translation service busy", 429, err.retryAfterMs ?? 30_000), "upstream_error", code, 0, plan);

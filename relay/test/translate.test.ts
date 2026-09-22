@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { buildPrompt, translate, translateWithFallback, type BatchRequest } from "../src/translate";
+import { buildPrompt, translate, translateWithFallback, type BatchRequest, type Provider } from "../src/translate";
 
 const req = (texts: string[]): BatchRequest => ({
     messages: texts.map((t, i) => ({ id: String(i), author: "a", text: t })),
@@ -10,6 +10,12 @@ const groqBody = (content: string): any => ({ ok: true, status: 200, headers: ne
 const geminiBody = (content: string): any => ({ ok: true, status: 200, headers: new Headers(),
     json: async () => ({ candidates: [{ content: { parts: [{ text: content }] } }] }), clone() { return this; }, text: async () => "" });
 const fixed = (rows: unknown[]) => JSON.stringify({ translations: rows });
+// SIGNATURE CHANGE: translate() now takes the whole Provider, because the route
+// is an explicit `kind` — OpenRouter and Groq share model ids, so the id alone
+// can no longer decide which endpoint and key to use.
+const groq = (model: string): Provider => ({ kind: "groq", apiKey: "k", model });
+const gemini = (apiKey = "gk"): Provider => ({ kind: "gemini", apiKey, model: "gemini-3.8-flash" });
+const groqFallback: Provider = { kind: "groq", apiKey: "grq", model: "openai/gpt-oss-120b" };
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -33,24 +39,24 @@ describe("buildPrompt — drift guard", () => {
 describe("translate — tolerant parse, strict trust", () => {
     it("accepts a plain {translations:[]} object", async () => {
         vi.stubGlobal("fetch", vi.fn(async () => groqBody(JSON.stringify({ translations: [{ id: "0", lang: "es", text: "hi", skip: false }] }))));
-        expect(await translate(req(["hola"]), "k", "m")).toEqual([{ id: "0", lang: "es", text: "hi", skip: false }]);
+        expect(await translate(req(["hola"]), groq("m"))).toEqual([{ id: "0", lang: "es", text: "hi", skip: false }]);
     });
     it("accepts a ```json-fenced BARE ARRAY with numeric ids", async () => {
         vi.stubGlobal("fetch", vi.fn(async () => groqBody("```json\n[{\"id\":0,\"lang\":\"es\",\"text\":\"hi\",\"skip\":false}]\n```")));
-        expect(await translate(req(["hola"]), "k", "m")).toEqual([{ id: "0", lang: "es", text: "hi", skip: false }]);
+        expect(await translate(req(["hola"]), groq("m"))).toEqual([{ id: "0", lang: "es", text: "hi", skip: false }]);
     });
     it("gives a missing id an explicit failed verdict", async () => {
         vi.stubGlobal("fetch", vi.fn(async () => groqBody(JSON.stringify({ translations: [{ id: "0", lang: "es", text: "hi", skip: false }] }))));
-        const r = await translate(req(["a", "b"]), "k", "m");
+        const r = await translate(req(["a", "b"]), groq("m"));
         expect(r[1]).toEqual({ id: "1", failed: true });
     });
     it("honours skip", async () => {
         vi.stubGlobal("fetch", vi.fn(async () => groqBody(JSON.stringify({ translations: [{ id: "0", skip: true }] }))));
-        expect(await translate(req(["hello"]), "k", "m")).toEqual([{ id: "0", skip: true }]);
+        expect(await translate(req(["hello"]), groq("m"))).toEqual([{ id: "0", skip: true }]);
     });
     it("throws a TranslateError carrying the status and retry hint on a non-OK", async () => {
         vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 429, headers: new Headers({ "retry-after": "20" }), clone() { return this; }, text: async () => "" })));
-        await expect(translate(req(["hola"]), "k", "m")).rejects.toMatchObject({ status: 429, retryAfterMs: 20000 });
+        await expect(translate(req(["hola"]), groq("m"))).rejects.toMatchObject({ status: 429, retryAfterMs: 20000 });
     });
     it("retries once without reasoning controls on a 400 that names them", async () => {
         const calls: any[] = [];
@@ -59,20 +65,20 @@ describe("translate — tolerant parse, strict trust", () => {
             if (calls.length === 1) return { ok: false, status: 400, headers: new Headers(), clone() { return this; }, text: async () => "unsupported reasoning_effort" };
             return groqBody(JSON.stringify({ translations: [{ id: "0", lang: "es", text: "hi", skip: false }] }));
         }));
-        await translate(req(["hola"]), "k", "openai/gpt-oss-120b");
+        await translate(req(["hola"]), groq("openai/gpt-oss-120b"));
         expect(calls[0].reasoning_effort).toBe("low");
         expect(calls[1].reasoning_effort).toBeUndefined();
     });
 });
 
-describe("translate — Gemini provider (model id routes)", () => {
+describe("translate: Gemini provider (provider.kind routes)", () => {
     it("calls the Gemini endpoint with a keyed header + schema, and parses parts", async () => {
         const seen: { url: string; init: any }[] = [];
         vi.stubGlobal("fetch", vi.fn(async (url: string, init: any) => {
             seen.push({ url, init });
             return geminiBody(fixed([{ id: "0", lang: "es", text: "hi", skip: false }]));
         }));
-        const out = await translate(req(["hola"]), "gk", "gemini-3.8-flash");
+        const out = await translate(req(["hola"]), gemini("gk"));
         expect(out).toEqual([{ id: "0", lang: "es", text: "hi", skip: false }]);
         const call = seen[0]!;
         expect(call.url).toContain("generativelanguage.googleapis.com");
@@ -87,7 +93,7 @@ describe("translate — Gemini provider (model id routes)", () => {
     });
     it("honours skip and missing-id verdicts through the Gemini parse", async () => {
         vi.stubGlobal("fetch", vi.fn(async () => geminiBody(fixed([{ id: "0", skip: true }]))));
-        const r = await translate(req(["hello", "b"]), "gk", "gemini-3.8-flash");
+        const r = await translate(req(["hello", "b"]), gemini("gk"));
         expect(r[0]).toEqual({ id: "0", skip: true });
         expect(r[1]).toEqual({ id: "1", failed: true });
     });
@@ -98,22 +104,22 @@ describe("translate — Gemini provider (model id routes)", () => {
             if (calls.length === 1) return { ok: false, status: 400, headers: new Headers(), clone() { return this; }, text: async () => "thinkingConfig not supported" };
             return geminiBody(fixed([{ id: "0", lang: "es", text: "hi", skip: false }]));
         }));
-        await translate(req(["hola"]), "gk", "gemini-3.8-flash");
+        await translate(req(["hola"]), gemini("gk"));
         expect(calls[0].generationConfig.thinkingConfig.thinkingBudget).toBe(0);
         expect(calls[1].generationConfig.thinkingConfig).toBeUndefined();
     });
     it("treats an empty candidate (safety block) as a 502 upstream failure", async () => {
         vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, headers: new Headers(),
             json: async () => ({ candidates: [] }), clone() { return this; }, text: async () => "" })));
-        await expect(translate(req(["hola"]), "gk", "gemini-3.8-flash")).rejects.toMatchObject({ status: 502 });
+        await expect(translate(req(["hola"]), gemini("gk"))).rejects.toMatchObject({ status: 502 });
     });
 });
 
-describe("translateWithFallback — Gemini primary, Groq fallback", () => {
+describe("translateWithFallback: a primary, then a second provider", () => {
     it("uses only the primary when it succeeds", async () => {
         const fetchMock = vi.fn(async () => geminiBody(fixed([{ id: "0", lang: "es", text: "hi", skip: false }])));
         vi.stubGlobal("fetch", fetchMock);
-        const out = await translateWithFallback(req(["hola"]), { apiKey: "gk", model: "gemini-3.8-flash" }, { apiKey: "grq", model: "openai/gpt-oss-120b" });
+        const out = await translateWithFallback(req(["hola"]), gemini(), groqFallback);
         expect(out).toEqual([{ id: "0", lang: "es", text: "hi", skip: false }]);
         expect(fetchMock).toHaveBeenCalledTimes(1);
     });
@@ -124,7 +130,7 @@ describe("translateWithFallback — Gemini primary, Groq fallback", () => {
             if (url.includes("generativelanguage")) return { ok: false, status: 429, headers: new Headers(), clone() { return this; }, text: async () => "" };
             return groqBody(fixed([{ id: "0", lang: "es", text: "hola-en", skip: false }]));
         }));
-        const out = await translateWithFallback(req(["hola"]), { apiKey: "gk", model: "gemini-3.8-flash" }, { apiKey: "grq", model: "openai/gpt-oss-120b" });
+        const out = await translateWithFallback(req(["hola"]), gemini(), groqFallback);
         expect(out).toEqual([{ id: "0", lang: "es", text: "hola-en", skip: false }]);
         expect(urls[0]).toContain("generativelanguage");
         expect(urls[1]).toContain("groq.com");
@@ -134,12 +140,12 @@ describe("translateWithFallback — Gemini primary, Groq fallback", () => {
             if (url.includes("generativelanguage")) return { ok: false, status: 401, headers: new Headers(), clone() { return this; }, text: async () => "" };
             return groqBody(fixed([{ id: "0", lang: "es", text: "ok", skip: false }]));
         }));
-        const out = await translateWithFallback(req(["hola"]), { apiKey: "bad", model: "gemini-3.8-flash" }, { apiKey: "grq", model: "openai/gpt-oss-120b" });
+        const out = await translateWithFallback(req(["hola"]), gemini("bad"), groqFallback);
         expect(out[0]).toMatchObject({ text: "ok" });
     });
     it("rethrows the primary error when there is no fallback", async () => {
         vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 429, headers: new Headers({ "retry-after": "12" }), clone() { return this; }, text: async () => "" })));
-        await expect(translateWithFallback(req(["hola"]), { apiKey: "gk", model: "gemini-3.8-flash" }, null))
+        await expect(translateWithFallback(req(["hola"]), gemini(), null))
             .rejects.toMatchObject({ status: 429, retryAfterMs: 12000 });
     });
     it("does NOT start the fallback once the request's time budget is aborted", async () => {
@@ -147,7 +153,7 @@ describe("translateWithFallback — Gemini primary, Groq fallback", () => {
         vi.stubGlobal("fetch", fetchMock);
         const ac = new AbortController();
         ac.abort();
-        await expect(translateWithFallback(req(["hola"]), { apiKey: "gk", model: "gemini-3.8-flash" }, { apiKey: "grq", model: "openai/gpt-oss-120b" }, ac.signal))
+        await expect(translateWithFallback(req(["hola"]), gemini(), groqFallback, ac.signal))
             .rejects.toBeTruthy();
         expect(fetchMock).toHaveBeenCalledTimes(1); // primary only, no fallback
     });

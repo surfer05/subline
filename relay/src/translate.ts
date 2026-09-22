@@ -25,6 +25,11 @@ export type Result =
     | { id: string; failed: true };
 
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
+// OpenRouter resells the SAME openai/gpt-oss-120b on Groq's hardware, pay as you
+// go, on an OpenAI-shaped endpoint. It is the primary path because the direct
+// Groq key is stuck on the free tier's daily token ceiling; the direct key stays
+// on as the automatic fallback.
+const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 
 /** JSON-encode an untrusted field for safe interpolation, neutralising the two
  *  line separators that are legal inside JSON strings yet forge a line. */
@@ -90,17 +95,43 @@ function stripCodeFence(text: string): string {
     return m ? m[1]! : text;
 }
 
+/** Salvage a JSON document that arrived wrapped in prose: keep everything from
+ *  the first "{" or "[" through the last "}" or "]". A model that prefixes
+ *  "Here is the JSON:" or appends a closing sentence would otherwise lose the
+ *  whole batch. Returns null when there is nothing to salvage, or when nothing
+ *  was actually trimmed (so the caller never re-parses the identical string). */
+function sliceJson(text: string): string | null {
+    const starts = [text.indexOf("{"), text.indexOf("[")].filter(i => i >= 0);
+    if (starts.length === 0) return null;
+    const start = Math.min(...starts);
+    const end = Math.max(text.lastIndexOf("}"), text.lastIndexOf("]"));
+    if (end <= start) return null;
+    const sliced = text.slice(start, end + 1);
+    return sliced === text ? null : sliced;
+}
+
 /** Tolerant in packaging, strict in content: accept {translations:[]} or a bare
  *  array, coerce ids to string, drop invented ids, and give every requested id
- *  an explicit verdict (missing → failed). */
+ *  an explicit verdict (missing → failed).
+ *
+ *  Content that is not JSON at all, even after the preamble/trailer salvage, is
+ *  an UPSTREAM failure rather than a batch of silent "failed" verdicts: it
+ *  throws a 502 so index.ts refunds and the fallback provider gets its turn. The
+ *  failure is never logged with the content, which is user message text. */
 function parseRows(content: string, req: BatchRequest): Result[] {
-    let rows: unknown[] = [];
+    const unfenced = stripCodeFence(content);
+    let parsed: unknown;
     try {
-        const parsed = JSON.parse(stripCodeFence(content));
-        rows = Array.isArray(parsed) ? parsed
-            : Array.isArray((parsed as any)?.translations) ? (parsed as any).translations
-            : [];
-    } catch { rows = []; }
+        parsed = JSON.parse(unfenced);
+    } catch {
+        const salvaged = sliceJson(unfenced);
+        if (salvaged === null) throw { status: 502 } as TranslateError;
+        try { parsed = JSON.parse(salvaged); }
+        catch { throw { status: 502 } as TranslateError; }
+    }
+    const rows: unknown[] = Array.isArray(parsed) ? parsed
+        : Array.isArray((parsed as any)?.translations) ? (parsed as any).translations
+        : [];
 
     const byId = new Map<string, any>();
     for (const r of rows) {
@@ -130,17 +161,57 @@ function errFor(res: Response): TranslateError {
     return err;
 }
 
-/** Call Groq (OpenAI-shaped) and return the raw model content string. Throws a
- *  TranslateError on a non-OK status or an empty 200. */
-async function callGroq(prompt: string, apiKey: string, model: string, signal?: AbortSignal): Promise<string> {
-    const send = (withReasoning: boolean) => fetch(GROQ_ENDPOINT, {
+/** OpenRouter's provider-routing block. `order` pins the request to Groq's own
+ *  hosting of this model first (then Cerebras, then DeepInfra) so latency and
+ *  behaviour match the direct-Groq path the prompt was tuned on;
+ *  `require_parameters` makes OpenRouter skip any host that would silently DROP
+ *  our reasoning controls instead of serving a quietly degraded answer; `ignore`
+ *  removes the hosts we do not want this traffic on at all. */
+const OPENROUTER_ROUTING = {
+    order: ["groq", "cerebras", "deepinfra"],
+    allow_fallbacks: true,
+    require_parameters: true,
+    ignore: ["novita", "digitalocean", "sambanova", "amazon-bedrock"]
+} as const;
+
+/** Attribution headers OpenRouter shows on the account's activity page. Public
+ *  values only — the download page and the product name, never a user, a code,
+ *  or a key. */
+const OPENROUTER_HEADERS: Record<string, string> = {
+    "HTTP-Referer": "https://surfer05.github.io/subline/",
+    "X-Title": "Subline"
+};
+
+interface OpenAiCall {
+    endpoint: string;
+    /** Extra request headers (OpenRouter's attribution pair). */
+    headers?: Record<string, string>;
+    /** Extra top-level body fields (OpenRouter's provider-routing block). */
+    body?: Record<string, unknown>;
+    /** A 400 whose body text matches this is retried ONCE without the reasoning
+     *  controls. */
+    retryOn: RegExp;
+}
+
+/** Call an OpenAI-shaped chat-completions endpoint — Groq directly, or
+ *  OpenRouter reselling the same model — and return the raw model content
+ *  string. Throws a TranslateError on a non-OK status or an empty 200. */
+async function callOpenAi(
+    call: OpenAiCall, prompt: string, apiKey: string, model: string, signal?: AbortSignal
+): Promise<string> {
+    const send = (withReasoning: boolean) => fetch(call.endpoint, {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+        headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${apiKey}`,
+            ...call.headers
+        },
         signal,
         body: JSON.stringify({
             model,
             messages: [{ role: "user", content: prompt }],
             temperature: 0.2,
+            ...call.body,
             ...(withReasoning ? REASONING_CONTROLS : {})
         })
     });
@@ -148,7 +219,11 @@ async function callGroq(prompt: string, apiKey: string, model: string, signal?: 
     let res = await send(REASONING_HINT.test(model));
     if (res.status === 400) {
         const t = await res.clone().text().catch(() => "");
-        if (/reasoning_(effort|format)/i.test(t)) res = await send(false);
+        // Groq names the parameter; OpenRouter, under require_parameters, can
+        // instead complain about the PROVIDER block (no listed host offers
+        // those params). Either way retry once WITHOUT the reasoning controls
+        // and KEEP the routing block, so the request stays pinned.
+        if (call.retryOn.test(t)) res = await send(false);
     }
     if (!res.ok) throw errFor(res);
     const body = await res.json() as any;
@@ -161,6 +236,14 @@ async function callGroq(prompt: string, apiKey: string, model: string, signal?: 
     }
     return content;
 }
+
+const GROQ_CALL: OpenAiCall = { endpoint: GROQ_ENDPOINT, retryOn: /reasoning_(effort|format)/i };
+const OPENROUTER_CALL: OpenAiCall = {
+    endpoint: OPENROUTER_ENDPOINT,
+    headers: OPENROUTER_HEADERS,
+    body: { provider: OPENROUTER_ROUTING },
+    retryOn: /provider|reasoning/i
+};
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models/";
 /** Force machine-readable JSON out of Gemini: a strict schema beats the prompt's
@@ -224,23 +307,31 @@ async function callGemini(prompt: string, apiKey: string, model: string, signal?
     return content;
 }
 
-/** Call ONE provider (chosen by model id — `gemini*` → Gemini, else Groq) with
- *  the relay's key and return one verdict per message. Throws a TranslateError
- *  on a non-OK status so the Worker can map it to the client's { ok:false }
- *  shape. Never logs or returns the request text. */
-export async function translate(req: BatchRequest, apiKey: string, model: string, signal?: AbortSignal): Promise<Result[]> {
+/** Which upstream answers. An EXPLICIT kind, never a regex on the model id:
+ *  openrouter and groq serve the SAME id ("openai/gpt-oss-120b") through
+ *  different endpoints with different keys, so the id cannot decide the route. */
+export type ProviderKind = "groq" | "openrouter" | "gemini";
+
+export interface Provider { kind: ProviderKind; apiKey: string; model: string }
+
+/** Call ONE provider (chosen by provider.kind) with the relay's key and return
+ *  one verdict per message. Throws a TranslateError on a non-OK status so the
+ *  Worker can map it to the client's { ok:false } shape. Never logs or returns
+ *  the request text. */
+export async function translate(req: BatchRequest, provider: Provider, signal?: AbortSignal): Promise<Result[]> {
     const prompt = buildPrompt(req);
-    const content = /^gemini/i.test(model)
-        ? await callGemini(prompt, apiKey, model, signal)
-        : await callGroq(prompt, apiKey, model, signal);
+    const { kind, apiKey, model } = provider;
+    const content =
+        kind === "gemini" ? await callGemini(prompt, apiKey, model, signal)
+        : kind === "openrouter" ? await callOpenAi(OPENROUTER_CALL, prompt, apiKey, model, signal)
+        : await callOpenAi(GROQ_CALL, prompt, apiKey, model, signal);
     return parseRows(content, req);
 }
 
-export interface Provider { apiKey: string; model: string }
-
-/** Try the primary provider (Gemini by default); on ANY upstream failure —
- *  rate limit, overload, or even a bad primary key — fall back to a second
- *  provider (Groq) so a paying user still gets a translation. The fallback
+/** Try the primary provider (OpenRouter by default); on ANY upstream failure —
+ *  rate limit, overload, out of credits (402), or even a bad primary key — fall
+ *  back to a second provider (the direct Groq key) so a paying user still gets a
+ *  translation. The fallback
  *  shares the caller's abort signal, so once the request's time budget is spent
  *  (signal already aborted) we surface the primary error instead of starting a
  *  second call that can only abort. With no fallback configured this is just
@@ -249,9 +340,9 @@ export async function translateWithFallback(
     req: BatchRequest, primary: Provider, fallback: Provider | null, signal?: AbortSignal
 ): Promise<Result[]> {
     try {
-        return await translate(req, primary.apiKey, primary.model, signal);
+        return await translate(req, primary, signal);
     } catch (e) {
         if (!fallback || signal?.aborted) throw e;
-        return await translate(req, fallback.apiKey, fallback.model, signal);
+        return await translate(req, fallback, signal);
     }
 }

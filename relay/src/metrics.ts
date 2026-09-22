@@ -9,7 +9,10 @@ import type { Env } from "./codes";
 export type Outcome =
     | "ok" | "cap_exceeded" | "rate_limited" | "capacity"
     | "no_code" | "unknown_code" | "revoked" | "expired"
-    | "too_large" | "bad_payload" | "upstream_error" | "relay_key_fail" | "not_found";
+    | "too_large" | "bad_payload" | "upstream_error" | "relay_key_fail"
+    // The relay's OpenRouter balance ran out (upstream 402) and the Groq
+    // fallback did not save the request. A billing alarm, never a user error.
+    | "relay_credit" | "not_found";
 
 /** A non-reversible short fingerprint of the code, so per-code volume can be
  *  seen in analytics without storing the credential. */

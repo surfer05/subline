@@ -18,6 +18,12 @@ export interface Env {
     /** The atomic global spend guard (see budget.ts) — the real $50 ceiling. */
     BUDGET: DurableObjectNamespace;
     GROQ_KEY: string;
+    /** OpenRouter API key (pay as you go). When set, OpenRouter is the PRIMARY
+     *  translation provider: it resells the SAME openai/gpt-oss-120b, pinned to
+     *  Groq's own hosting, without the direct Groq key's free-tier daily token
+     *  ceiling. GROQ_KEY then becomes the automatic fallback. A secret, never in
+     *  wrangler.jsonc. Drop the key to go back to Groq-only. */
+    OPENROUTER_KEY?: string;
     /** Google Gemini API key (billing-enabled/paid tier). When set, Gemini is
      *  the PRIMARY translation provider and Groq becomes the fallback; when
      *  absent the relay runs Groq-only exactly as before. A secret, never in
@@ -25,10 +31,13 @@ export interface Env {
     GEMINI_KEY?: string;
     ADMIN_TOKEN: string;
     /** Primary model id. `gemini*` routes to Gemini (needs GEMINI_KEY); anything
-     *  else routes to Groq. */
+     *  else is sent to OpenRouter when OPENROUTER_KEY is set, otherwise straight
+     *  to Groq. The id alone never picks the route — providers() sets an
+     *  explicit Provider.kind, because OpenRouter and Groq share model ids. */
     MODEL: string;
-    /** Groq model used as the fallback when Gemini is primary and a call fails
-     *  (rate limit, overload, bad key). Defaults to openai/gpt-oss-120b. */
+    /** Model used by the FALLBACK provider (the direct Groq key), and by any
+     *  provider that cannot be handed a `gemini*` MODEL. Defaults to
+     *  openai/gpt-oss-120b. */
     FALLBACK_MODEL?: string;
     METRICS?: AnalyticsEngineDataset;
     /** Freeze the whole relay once this many messages have been spent, ever.
