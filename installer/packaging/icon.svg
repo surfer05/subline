@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Subline</title>
+  <!-- Subline app mark: a rolled scroll with a four-point star.
+       Palette from installer/src/renderer/design.css (dark theme):
+       ground #17140e / #1e1a13, paper #ece5d6, paper shade #cfc5ae,
+       star #14544f (the accent token). Laid out on the macOS icon grid
+       (824 px rounded square inset 100 px); the .ico is cropped to it. -->
+  <defs>
+    <linearGradient id="ground" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#252017"/>
+      <stop offset="1" stop-color="#17140e"/>
+    </linearGradient>
+    <linearGradient id="roll" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f6f0e2"/>
+      <stop offset="0.55" stop-color="#ece5d6"/>
+      <stop offset="1" stop-color="#c9bea6"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#ground)"/>
+  <rect x="100.5" y="100.5" width="823" height="823" rx="184.5" fill="none" stroke="#453f32" stroke-opacity="0.6"/>
+  <!-- sheet -->
+  <rect x="318" y="300" width="388" height="424" fill="#ece5d6"/>
+  <!-- top roll -->
+  <rect x="268" y="236" width="488" height="112" rx="56" fill="url(#roll)"/>
+  <circle cx="324" cy="292" r="30" fill="#b3a88f"/>
+  <circle cx="324" cy="292" r="12" fill="#6b6355"/>
+  <!-- bottom roll -->
+  <rect x="268" y="676" width="488" height="112" rx="56" fill="url(#roll)"/>
+  <circle cx="700" cy="732" r="30" fill="#b3a88f"/>
+  <circle cx="700" cy="732" r="12" fill="#6b6355"/>
+  <!-- star: four points, concave sides -->
+  <path fill="#14544f" d="M512 372 Q536 488 646 512 Q536 536 512 652 Q488 536 378 512 Q488 488 512 372 Z"/>
+</svg>

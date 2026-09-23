@@ -138,6 +138,15 @@ const config = {
 
     mac: {
         category: "public.app-category.utilities",
+        /**
+         * The Subline mark (a scroll and a four-point star). Source is
+         * `packaging/icon.svg`; `icon.png` is its 1024 px render, and the .icns
+         * and .ico are generated from that PNG. Without this the app, the DMG
+         * and every notification carry the stock Electron icon. It is copied
+         * into the bundle as `Contents/Resources/icon.icns` and named by
+         * `CFBundleIconFile`, which is also what macOS shows on notifications.
+         */
+        icon: "packaging/icon.icns",
         target: [{ target: "dmg", arch: ["arm64", "x64"] }],
 
         /**
@@ -209,6 +218,11 @@ const config = {
          * the mechanism; tests/packaging.test.ts pins that it stays wired.
          */
         sign: "./packaging/fixNsisCrc.cjs",
+        /**
+         * Same mark, cropped to the rounded square (no macOS grid margin), at
+         * 256/128/64/48/32/16. NSIS uses it for the installer and uninstaller too.
+         */
+        icon: "packaging/icon.ico",
         /**
          * UNSIGNED, deliberately — spec §1 and §10: an EV certificate needs a
          * registered business and ~$500/yr, which is not justifiable pre-revenue.
