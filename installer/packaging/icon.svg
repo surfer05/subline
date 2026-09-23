@@ -1,33 +1,120 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <title>Subline</title>
-  <!-- Subline app mark: a rolled scroll with a four-point star.
-       Palette from installer/src/renderer/design.css (dark theme):
-       ground #17140e / #1e1a13, paper #ece5d6, paper shade #cfc5ae,
-       star #14544f (the accent token). Laid out on the macOS icon grid
-       (824 px rounded square inset 100 px); the .ico is cropped to it. -->
+  <!-- Subline app mark, redrawn from icon-reference.png (the design source of truth):
+       one monochrome paper ribbon that curls at the top-right, sweeps down-left and
+       curls again at the bottom-left (a soft S), with faint four-point sparkles, on a
+       dark charcoal rounded square. macOS icon grid: 824 px square inset 100 px (the .ico is cropped to that square).
+       The artwork group is authored in reference-pixel space (square 23..436) and
+       scaled onto the grid; the scroll itself is drawn in a frame rotated -45deg
+       (u = along the roll axis, v = direction the sheet travels). -->
   <defs>
-    <linearGradient id="ground" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#252017"/>
-      <stop offset="1" stop-color="#17140e"/>
+    <linearGradient id="ground" x1="0" y1="100" x2="0" y2="924" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#303030"/>
+      <stop offset="0.55" stop-color="#262626"/>
+      <stop offset="1" stop-color="#1c1c1c"/>
     </linearGradient>
-    <linearGradient id="roll" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#f6f0e2"/>
-      <stop offset="0.55" stop-color="#ece5d6"/>
-      <stop offset="1" stop-color="#c9bea6"/>
+    <linearGradient id="rim" x1="0" y1="100" x2="0" y2="924" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.30"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.18"/>
     </linearGradient>
+    <!-- top roll, across its diameter (v): dark upper edge, bright belly, grey underside -->
+    <linearGradient id="topRoll" x1="0" y1="-101" x2="0" y2="-23" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5c5c5c"/>
+      <stop offset="0.14" stop-color="#9d9d9b"/>
+      <stop offset="0.42" stop-color="#dad9d6"/>
+      <stop offset="0.66" stop-color="#ecebe8"/>
+      <stop offset="0.86" stop-color="#d0cfcc"/>
+      <stop offset="1" stop-color="#8e8d8b"/>
+    </linearGradient>
+    <!-- top roll's open end (spiral face) -->
+    <radialGradient id="topFace" cx="-44" cy="-62" r="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#858481"/>
+      <stop offset="0.6" stop-color="#8f8e8b"/>
+      <stop offset="1" stop-color="#9d9c99"/>
+    </radialGradient>
+    <!-- sheet, along the roll axis (u): grey on the left, lighter to the right -->
+    <linearGradient id="sheet" x1="-78" y1="0" x2="63" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9a9996"/>
+      <stop offset="0.45" stop-color="#b2b0ac"/>
+      <stop offset="1" stop-color="#c6c4c0"/>
+    </linearGradient>
+    <!-- shade the sheet gets just below the top roll -->
+    <linearGradient id="rollShade" x1="0" y1="-26" x2="0" y2="8" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#000" stop-opacity="0.2"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </linearGradient>
+    <!-- bottom roll, across its diameter -->
+    <linearGradient id="botRoll" x1="0" y1="31" x2="0" y2="101" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="0.3" stop-color="#fff" stop-opacity="0.08"/>
+      <stop offset="0.7" stop-color="#000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0.25"/>
+    </linearGradient>
+    <!-- the bottom curl darkens toward its open end (underside showing) -->
+    <linearGradient id="botDark" x1="-100" y1="0" x2="-50" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#000" stop-opacity="0.7"/>
+      <stop offset="0.5" stop-color="#000" stop-opacity="0.3"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="botFace" cx="-96" cy="54" r="50" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6a6967"/>
+      <stop offset="0.7" stop-color="#535250"/>
+      <stop offset="1" stop-color="#3a3a3a"/>
+    </radialGradient>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="9"/>
+    </filter>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="0.9"/>
+    </filter>
+    <clipPath id="squareClip">
+      <rect x="23" y="43" width="413" height="413" rx="92"/>
+    </clipPath>
+    <path id="spark" d="M0 -1 L0.045 -0.045 L1 0 L0.045 0.045 L0 1 L-0.045 0.045 L-1 0 L-0.045 -0.045 Z"/>
   </defs>
-  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#ground)"/>
-  <rect x="100.5" y="100.5" width="823" height="823" rx="184.5" fill="none" stroke="#453f32" stroke-opacity="0.6"/>
-  <!-- sheet -->
-  <rect x="318" y="300" width="388" height="424" fill="#ece5d6"/>
-  <!-- top roll -->
-  <rect x="268" y="236" width="488" height="112" rx="56" fill="url(#roll)"/>
-  <circle cx="324" cy="292" r="30" fill="#b3a88f"/>
-  <circle cx="324" cy="292" r="12" fill="#6b6355"/>
-  <!-- bottom roll -->
-  <rect x="268" y="676" width="488" height="112" rx="56" fill="url(#roll)"/>
-  <circle cx="700" cy="732" r="30" fill="#b3a88f"/>
-  <circle cx="700" cy="732" r="12" fill="#6b6355"/>
-  <!-- star: four points, concave sides -->
-  <path fill="#14544f" d="M512 372 Q536 488 646 512 Q536 536 512 652 Q488 536 378 512 Q488 488 512 372 Z"/>
+
+  <!-- ground -->
+  <rect x="100" y="100" width="824" height="824" rx="184" fill="url(#ground)"/>
+
+  <g transform="translate(100 100) scale(1.99516) translate(-23 -43)">
+    <g clip-path="url(#squareClip)">
+      <!-- soft shadow under the ribbon -->
+      <g transform="translate(3 18)" filter="url(#soft)" opacity="0.55">
+        <g transform="translate(231 246) rotate(-45) scale(1.04)" fill="#000">
+          <path d="M-44 -101 H108 A39 39 0 0 1 108 -23 H63 V66 A35 35 0 0 1 28 101 H-113 A35 35 0 0 1 -113 31 H-78 V-23 A39 39 0 0 1 -44 -101 Z"/>
+        </g>
+      </g>
+
+      <!-- sparkles: thin, low-contrast, four-point -->
+      <g fill="#d8d8d8" filter="url(#glow)">
+        <use href="#spark" transform="translate(95 226) rotate(45) scale(36)" opacity="0.15"/>
+        <use href="#spark" transform="translate(367 273) rotate(45) scale(32)" opacity="0.14"/>
+        <use href="#spark" transform="translate(182 99) rotate(45) scale(18)" opacity="0.1"/>
+        <use href="#spark" transform="translate(300 404) rotate(45) scale(16)" opacity="0.09"/>
+      </g>
+    </g>
+
+    <!-- the scroll -->
+    <g transform="translate(231 246) rotate(-45) scale(1.04)">
+      <!-- sheet -->
+      <rect x="-78" y="-62" width="141" height="100" fill="url(#sheet)"/>
+      <rect x="-78" y="-26" width="141" height="40" fill="url(#rollShade)"/>
+
+      <!-- bottom roll: front face continues the sheet, curls back at the right, open end at left -->
+      <path d="M-113 30 H63 V66 A35 35 0 0 1 28 101 H-113 Z" fill="url(#sheet)"/>
+      <path d="M-113 30 H63 V66 A35 35 0 0 1 28 101 H-113 Z" fill="url(#botRoll)"/>
+      <path d="M-113 30 H-50 V101 H-113 Z" fill="url(#botDark)"/>
+      <ellipse cx="-110" cy="66" rx="34" ry="36" fill="url(#botFace)"/>
+      <path d="M-113 50 A13 16 0 1 0 -100 66" fill="none" stroke="#6a6967" stroke-opacity="0.55" stroke-width="1.6"/>
+
+      <!-- top roll -->
+      <path d="M-44 -101 H108 A39 39 0 0 1 108 -23 H-44 Z" fill="url(#topRoll)"/>
+      <ellipse cx="-44" cy="-62" rx="34" ry="39" fill="url(#topFace)"/>
+      <path d="M-44 -82 A15 20 0 1 1 -58 -62" fill="none" stroke="#7a7976" stroke-opacity="0.35" stroke-width="1.8"/>
+    </g>
+  </g>
+
+  <!-- inner edge highlight -->
+  <rect x="101.5" y="101.5" width="821" height="821" rx="182.5" fill="none" stroke="url(#rim)" stroke-width="3"/>
 </svg>
