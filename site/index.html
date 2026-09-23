@@ -181,10 +181,7 @@ a:hover{color:var(--fg)}
 @media (max-width:700px){.dl{grid-template-columns:1fr}}
 .ver{font-family:var(--font-mono);font-size:11px;color:var(--muted);margin-top:10px}
 .ver[data-state="pending"]{opacity:.6}
-details.which{margin-top:22px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel)}
-details.which summary{cursor:pointer;padding:13px 16px;font-size:13.5px;list-style:none;display:flex;justify-content:space-between}
-details.which summary::-webkit-details-marker{display:none}
-details.which .in{padding:0 16px 16px;font-size:13.5px;color:var(--muted);max-width:64ch}
+.card p.alt{margin-top:10px;font-size:12.5px}
 .tabs{display:flex;gap:6px;margin:26px 0 20px}
 .tab{font-family:inherit;font-size:13px;padding:7px 14px;border-radius:999px;border:1px solid var(--line);
   background:var(--panel);color:var(--muted);cursor:pointer}
@@ -285,19 +282,17 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 <div class="wrap">
 <p class="kicker">Download</p>
 <h2 class="sec">Download</h2>
-<p class="lead">There are two Mac builds, one per chip.</p>
+<p class="lead">The Mac button picks the right build for your chip.</p>
 <div class="dl">
-  <div class="panel card"><h3>Mac · Apple Silicon</h3><p>M1 to M4, any Mac since late 2020.</p>
-    <a data-dl="mac-arm" class="btn btn-primary" href="#">Download .dmg</a><span class="ver" data-state="pending" data-version>latest…</span></div>
-  <div class="panel card"><h3>Mac · Intel</h3><p>Macs before late 2020.</p>
-    <a data-dl="mac-intel" class="btn btn-secondary" href="#">Download .dmg</a><span class="ver" data-state="pending" data-version>latest…</span></div>
+  <div class="panel card"><h3>Mac</h3><p>macOS 11 or later, Apple Silicon or Intel.</p>
+    <a data-dl="mac" class="btn btn-primary" href="#">Download .dmg</a>
+    <p class="alt">Intel Mac? <a data-dl="mac-intel" href="#">Download the Intel version.</a></p>
+    <span class="ver" data-state="pending" data-version>latest…</span></div>
   <div class="panel card"><h3>Windows</h3><p>Windows 10 and 11, 64-bit.</p>
     <a data-dl="win" class="btn btn-secondary" href="#">Download .exe</a><span class="ver" data-state="pending" data-version>latest…</span></div>
   <div class="panel card"><h3>Source</h3><p>Read it, or build it yourself.</p>
     <a class="btn btn-secondary" href="https://github.com/surfer05/subline" rel="noopener">GitHub</a><span class="ver">GPL-3.0</span></div>
 </div>
-<details class="which"><summary><span>Which Mac do I have?</span><span class="mono">▸</span></summary>
-<div class="in"> menu → <b>About This Mac</b>. <span class="mono">Chip: Apple M…</span> means Apple Silicon; <span class="mono">Processor: Intel…</span> means Intel.</div></details>
 </div>
 </section>
 
@@ -370,6 +365,43 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
          .forEach(function (a) { a.href = url; });
   }
 
+  // ONE Mac button. It links the Apple Silicon build unless the browser gives
+  // positive evidence of an Intel Mac. Apple Silicon is the default because
+  // every Mac sold since 2020 has it, and a detection that fails or is blocked
+  // should land on the common case. The "Intel version" line under the button
+  // is the manual override, so a wrong guess costs one click.
+  var mac = { arch: "arm", arm: null, intel: null };
+  function applyMac() {
+    var url = mac.arch === "intel" ? mac.intel : mac.arm;
+    if (url) set("mac", url);
+  }
+  function rendererSaysIntel() {
+    // Chrome and Firefox expose the real GPU: "Apple M1" on Apple Silicon,
+    // "Intel", "AMD Radeon" and so on on an Intel Mac. Safari reports "Apple GPU"
+    // on every Mac, which is not evidence either way, so it stays on the default.
+    try {
+      var gl = document.createElement("canvas").getContext("webgl");
+      if (!gl) return false;
+      var info = gl.getExtension("WEBGL_debug_renderer_info");
+      var r = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
+      return !/Apple (M\d|GPU)/i.test(r) && /Intel|AMD|Radeon|NVIDIA|GeForce/i.test(r);
+    } catch (e) {
+      return false;
+    }
+  }
+  if (/Mac/i.test(navigator.platform || navigator.userAgent)) {
+    var uad = navigator.userAgentData;
+    if (uad && uad.getHighEntropyValues) {
+      // Chromium browsers answer "arm" or "x86" directly.
+      uad.getHighEntropyValues(["architecture"])
+        .then(function (v) { mac.arch = v.architecture === "x86" ? "intel" : v.architecture === "arm" ? "arm" : (rendererSaysIntel() ? "intel" : "arm"); })
+        .catch(function () { mac.arch = rendererSaysIntel() ? "intel" : "arm"; })
+        .then(applyMac);
+    } else if (rendererSaysIntel()) {
+      mac.arch = "intel";
+    }
+  }
+
   // GitHub's /releases/latest/download/<name> shortcut needs the literal asset
   // name, and ours carry the version, so anything hardcoded here would keep
   // serving an old build forever. Resolve at runtime instead.
@@ -389,11 +421,12 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
       var anyDmg = find(function (n) { return /\.dmg$/i.test(n); });
 
       if (exe) set("win", exe.browser_download_url);
-      if (arm) set("mac-arm", arm.browser_download_url);
       if (intel) set("mac-intel", intel.browser_download_url);
-      // A Mac card with no matching asset keeps pointing at the releases page
+      // A build with no matching asset keeps pointing at the releases page
       // rather than at the other architecture, which would not open.
-      if (!arm && anyDmg) set("mac-arm", anyDmg.browser_download_url);
+      mac.arm = arm ? arm.browser_download_url : anyDmg ? anyDmg.browser_download_url : null;
+      mac.intel = intel ? intel.browser_download_url : null;
+      applyMac();
 
       if (release.tag_name) {
         [].forEach.call(document.querySelectorAll("[data-version]"), function (el) {

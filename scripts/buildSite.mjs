@@ -157,6 +157,43 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}">\n<div class="wrap
          .forEach(function (a) { a.href = url; });
   }
 
+  // ONE Mac button. It links the Apple Silicon build unless the browser gives
+  // positive evidence of an Intel Mac. Apple Silicon is the default because
+  // every Mac sold since 2020 has it, and a detection that fails or is blocked
+  // should land on the common case. The "Intel version" line under the button
+  // is the manual override, so a wrong guess costs one click.
+  var mac = { arch: "arm", arm: null, intel: null };
+  function applyMac() {
+    var url = mac.arch === "intel" ? mac.intel : mac.arm;
+    if (url) set("mac", url);
+  }
+  function rendererSaysIntel() {
+    // Chrome and Firefox expose the real GPU: "Apple M1" on Apple Silicon,
+    // "Intel", "AMD Radeon" and so on on an Intel Mac. Safari reports "Apple GPU"
+    // on every Mac, which is not evidence either way, so it stays on the default.
+    try {
+      var gl = document.createElement("canvas").getContext("webgl");
+      if (!gl) return false;
+      var info = gl.getExtension("WEBGL_debug_renderer_info");
+      var r = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
+      return !/Apple (M\\d|GPU)/i.test(r) && /Intel|AMD|Radeon|NVIDIA|GeForce/i.test(r);
+    } catch (e) {
+      return false;
+    }
+  }
+  if (/Mac/i.test(navigator.platform || navigator.userAgent)) {
+    var uad = navigator.userAgentData;
+    if (uad && uad.getHighEntropyValues) {
+      // Chromium browsers answer "arm" or "x86" directly.
+      uad.getHighEntropyValues(["architecture"])
+        .then(function (v) { mac.arch = v.architecture === "x86" ? "intel" : v.architecture === "arm" ? "arm" : (rendererSaysIntel() ? "intel" : "arm"); })
+        .catch(function () { mac.arch = rendererSaysIntel() ? "intel" : "arm"; })
+        .then(applyMac);
+    } else if (rendererSaysIntel()) {
+      mac.arch = "intel";
+    }
+  }
+
   // GitHub's /releases/latest/download/<name> shortcut needs the literal asset
   // name, and ours carry the version, so anything hardcoded here would keep
   // serving an old build forever. Resolve at runtime instead.
@@ -176,11 +213,12 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}">\n<div class="wrap
       var anyDmg = find(function (n) { return /\\.dmg$/i.test(n); });
 
       if (exe) set("win", exe.browser_download_url);
-      if (arm) set("mac-arm", arm.browser_download_url);
       if (intel) set("mac-intel", intel.browser_download_url);
-      // A Mac card with no matching asset keeps pointing at the releases page
+      // A build with no matching asset keeps pointing at the releases page
       // rather than at the other architecture, which would not open.
-      if (!arm && anyDmg) set("mac-arm", anyDmg.browser_download_url);
+      mac.arm = arm ? arm.browser_download_url : anyDmg ? anyDmg.browser_download_url : null;
+      mac.intel = intel ? intel.browser_download_url : null;
+      applyMac();
 
       if (release.tag_name) {
         [].forEach.call(document.querySelectorAll("[data-version]"), function (el) {
