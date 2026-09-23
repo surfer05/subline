@@ -472,3 +472,149 @@ describe("#5 a paid code minted with no join key is refused (never un-revokable)
         expect(await authCode(env(kv), KEY)).toMatchObject({ ok: false });
     });
 });
+
+// ===========================================================================
+//  WEBHOOK RACE: subscription.active and license_key.created delivered as
+//  CONCURRENT invocations (seen in production 0.4s apart). Each can miss the
+//  other's write, orphaning the real next_billing_date in pending:<sub_id> while
+//  the code sits on its 3-day provisional expiry. Three layers close it:
+//  create's post-write re-check, applyLifecycle's post-stage re-check, and the
+//  lazy fold in authCode (the only one that survives KV's eventual consistency).
+// ===========================================================================
+/** A fakeKV whose get() can be intercepted, and which records every key read. */
+function racyKV(seed: Record<string, string> = {}, hook?: (k: string, n: number, kv: any) => Promise<string | null | undefined> | string | null | undefined) {
+    const kv = fakeKV(seed) as any;
+    const base = kv.get;
+    const counts = new Map<string, number>();
+    const reads: string[] = [];
+    kv.get = async (k: string) => {
+        reads.push(k);
+        const n = (counts.get(k) ?? 0) + 1;
+        counts.set(k, n);
+        if (hook) {
+            const r = await hook(k, n, kv);
+            if (r !== undefined) return r;
+        }
+        return base(k);
+    };
+    kv._reads = reads;
+    return kv as ReturnType<typeof fakeKV> & { _reads: string[] };
+}
+
+describe("webhook race — pending state is folded despite concurrent delivery", () => {
+    const realNow = () => Date.now();
+
+    it("lifecycle whose first order: read misses (create not yet visible) still lands: real expiry, no pending row", async () => {
+        const renews = NOW + 30 * DAY;
+        // The lifecycle handler's FIRST order:<sub> read misses; its post-stage re-check sees it.
+        const kv = racyKV({}, (k, n) => (k === `order:${SUB}` && n === 1 ? null : undefined));
+        await applyMorEvent(env(kv), licenseCreated(), NOW);
+        const r = await applyMorEvent(env(kv), subEvent("subscription.active", { status: "active", next_billing_date: iso(renews) }), NOW);
+        expect(r.action).toBe("applied_after_stage");
+        expect(rec(kv)!.expiresAt).toBe(renews);
+        expect(rec(kv)!.status).toBe("active");
+        expect(kv._dump()[`pending:${SUB}`]).toBeUndefined();
+    });
+
+    it("create's post-write re-check folds a row staged after its first pending read", async () => {
+        const renews = NOW + 30 * DAY;
+        const kv = racyKV({}, async (k, n, self) => {
+            if (k === `pending:${SUB}` && n === 1) {
+                // The concurrent lifecycle event stages RIGHT AFTER create's first read.
+                await self.put(`pending:${SUB}`, JSON.stringify({ expiresAt: renews, mor_subscription_id: SUB }));
+                return null;
+            }
+            return undefined;
+        });
+        await applyMorEvent(env(kv), licenseCreated(), NOW);
+        expect(rec(kv)!.expiresAt).toBe(renews);
+        expect(kv._dump()[`pending:${SUB}`]).toBeUndefined();
+    });
+
+    it("lifecycle staged first, then create: folded and consumed (order-independence kept)", async () => {
+        const renews = NOW + 30 * DAY;
+        const kv = fakeKV();
+        expect((await applyMorEvent(env(kv), subEvent("subscription.active", { status: "active", next_billing_date: iso(renews) }), NOW)).action).toBe("staged");
+        await applyMorEvent(env(kv), licenseCreated(), NOW);
+        expect(rec(kv)!.expiresAt).toBe(renews);
+        expect(kv._dump()[`pending:${SUB}`]).toBeUndefined();
+    });
+
+    it("the production shape (both handlers miss): authCode lazily folds the orphan pending row", async () => {
+        const now = realNow();
+        const provisional = now + 3 * DAY;
+        const renews = now + 30 * DAY;
+        const kv = racyKV({
+            [`code:${KEY}`]: JSON.stringify({ status: "active", dailyCap: 2000, plan: "monthly", mor_order_id: PAY, orderRef: SUB, mor_subscription_id: SUB, expiresAt: provisional }),
+            [`order:${SUB}`]: KEY, [`order:${PAY}`]: KEY,
+            [`pending:${SUB}`]: JSON.stringify({ expiresAt: renews, mor_subscription_id: SUB }),
+        });
+        const a = await authCode(env(kv), KEY);
+        expect(a).toMatchObject({ ok: true, record: { expiresAt: renews } });
+        expect(rec(kv)!.expiresAt).toBe(renews);
+        expect(kv._dump()[`pending:${SUB}`]).toBeUndefined();
+    });
+
+    it("an already-lapsed provisional code is revived by a pending real renewal", async () => {
+        const now = realNow();
+        const renews = now + 27 * DAY;
+        const kv = fakeKV({
+            [`code:${KEY}`]: JSON.stringify({ status: "active", dailyCap: 1500, plan: "monthly", mor_order_id: PAY, orderRef: SUB, mor_subscription_id: SUB, expiresAt: now - 1000 }),
+            [`pending:${SUB}`]: JSON.stringify({ expiresAt: renews, mor_subscription_id: SUB }),
+        });
+        expect(await authCode(env(kv), KEY)).toMatchObject({ ok: true });
+        expect(rec(kv)!.expiresAt).toBe(renews);
+    });
+
+    it("a pending refund (revoked+terminal) folded at auth time DENIES and revokes the record", async () => {
+        const now = realNow();
+        const kv = fakeKV({
+            [`code:${KEY}`]: JSON.stringify({ status: "active", dailyCap: 1500, plan: "monthly", mor_order_id: PAY, orderRef: SUB, mor_subscription_id: SUB, expiresAt: now + 3 * DAY }),
+            [`pending:${PAY}`]: JSON.stringify({ revoked: true, terminal: true, expiresAt: now, revokedAt: now }),
+        });
+        expect(await authCode(env(kv), KEY)).toMatchObject({ ok: false, reason: "revoked" });
+        expect(rec(kv)!.status).toBe("revoked");
+        expect(rec(kv)!.terminal).toBe(true);
+        expect(kv._dump()[`pending:${PAY}`]).toBeUndefined();
+    });
+
+    it("a healthy record (expiry far out) never reads pending: (zero extra hot-path cost)", async () => {
+        const now = realNow();
+        const kv = racyKV({
+            [`code:${KEY}`]: JSON.stringify({ status: "active", dailyCap: 1500, plan: "monthly", mor_order_id: PAY, orderRef: SUB, mor_subscription_id: SUB, expiresAt: now + 25 * DAY }),
+            [`pending:${SUB}`]: JSON.stringify({ expiresAt: now + 60 * DAY }),
+        });
+        expect(await authCode(env(kv), KEY)).toMatchObject({ ok: true });
+        expect(kv._reads.filter((k) => k.startsWith("pending:"))).toEqual([]);
+        // lifetime / admin codes (no expiry) likewise
+        const kv2 = racyKV({ [`code:${KEY}`]: JSON.stringify({ status: "active", dailyCap: 3000, plan: "lifetime", mor_order_id: PAY, orderRef: PAY }) });
+        expect(await authCode(env(kv2), KEY)).toMatchObject({ ok: true });
+        expect(kv2._reads.filter((k) => k.startsWith("pending:"))).toEqual([]);
+    });
+
+    it("a terminal record is never resurrected by a lazy fold", async () => {
+        const now = realNow();
+        const kv = fakeKV({
+            [`code:${KEY}`]: JSON.stringify({ status: "revoked", terminal: true, revokedAt: now - DAY, dailyCap: 1500, plan: "monthly", mor_order_id: PAY, orderRef: SUB, mor_subscription_id: SUB, expiresAt: now - DAY }),
+            [`pending:${SUB}`]: JSON.stringify({ expiresAt: now + 30 * DAY, mor_subscription_id: SUB }),
+        });
+        expect(await authCode(env(kv), KEY)).toMatchObject({ ok: false, reason: "revoked" });
+        expect(rec(kv)!.status).toBe("revoked");
+        expect(rec(kv)!.terminal).toBe(true);
+        // Even if a bug left status "active" on a terminal record, the fold must not extend it.
+        const kv2 = fakeKV({
+            [`code:${KEY}`]: JSON.stringify({ status: "active", terminal: true, dailyCap: 1500, plan: "monthly", orderRef: SUB, mor_subscription_id: SUB, expiresAt: now - DAY }),
+            [`pending:${SUB}`]: JSON.stringify({ expiresAt: now + 30 * DAY }),
+        });
+        expect(await authCode(env(kv2), KEY)).toMatchObject({ ok: false, reason: "revoked" });
+        expect(rec(kv2)!.expiresAt).toBe(now - DAY);
+    });
+
+    it("a KV failure during the lazy fold falls back to the unmodified record (never throws into auth)", async () => {
+        const now = realNow();
+        const kv = racyKV({
+            [`code:${KEY}`]: JSON.stringify({ status: "active", dailyCap: 1500, plan: "monthly", orderRef: SUB, mor_subscription_id: SUB, expiresAt: now + 2 * DAY }),
+        }, (k) => { if (k.startsWith("pending:")) throw new Error("kv down"); return undefined; });
+        expect(await authCode(env(kv), KEY)).toMatchObject({ ok: true, record: { expiresAt: now + 2 * DAY } });
+    });
+});

@@ -164,6 +164,13 @@ export async function authCode(env: Env, code: string | null): Promise<AuthOutco
     let rec: CodeRecord;
     try { rec = JSON.parse(raw) as CodeRecord; } catch { return { ok: false, reason: "unknown_code" }; }
     if (rec.status === "revoked") return { ok: false, reason: "revoked" };
+    // A non-terminal record whose expiry still looks provisional (or is near its
+    // end) may have an ORPHANED pending:<join_id> row: a lifecycle webhook that
+    // raced license_key.created and staged instead of applying (KV is eventually
+    // consistent, so no in-handler re-check can fully close that). Fold it in
+    // here, lazily. Gated so a healthy record costs zero extra reads.
+    if (!rec.terminal) rec = await lazyFoldPending(env, code, rec, Date.now());
+    if (rec.status === "revoked") return { ok: false, reason: "revoked" };
     // TERMINAL is permanent death (refund/expire). Denied here too as
     // defense-in-depth: even if a bug ever left status !== "revoked" on a
     // terminal record, a refunded/expired code can never authenticate.
@@ -388,6 +395,96 @@ const SUBSCRIPTION_PLANS = new Set(["monthly", "annual"]);
 // a never-completed order can't leave latent state in KV forever.
 const PENDING_TTL_S = 3 * 86_400;
 
+/** A staged lifecycle change waiting for its code (see applyLifecycle). */
+interface PendingRow {
+    revoked?: boolean;
+    terminal?: boolean;
+    revokedAt?: number;
+    expiresAt?: number;
+    mor_subscription_id?: string;
+}
+
+/**
+ * Fold one staged pending row into a code record (mutates `rec`). The ONE place
+ * this merge lives, used by license_key.created (before and after its write),
+ * by applyLifecycle's post-stage re-check, and by the lazy fold in authCode.
+ *   • A TERMINAL record is never resurrected: only the sub id link is taken.
+ *   • revoked/terminal are sticky and, when set, PULL expiry to the staged
+ *     (revoke-instant) value so the local expiry net denies too.
+ *   • Otherwise expiry moves FORWARD only (max), so a stale staged value can
+ *     never shorten a live record.
+ */
+function foldPending(rec: CodeRecord, pend: PendingRow): void {
+    if (rec.terminal) {
+        if (pend.mor_subscription_id) rec.mor_subscription_id = pend.mor_subscription_id;
+        return;
+    }
+    if (pend.revoked) rec.status = "revoked";
+    if (pend.terminal) { rec.terminal = true; if (typeof pend.revokedAt === "number") rec.revokedAt = pend.revokedAt; }
+    if (typeof pend.expiresAt === "number") {
+        rec.expiresAt = pend.revoked || pend.terminal
+            ? pend.expiresAt
+            : Math.max(rec.expiresAt ?? 0, pend.expiresAt);
+    }
+    if (pend.mor_subscription_id) rec.mor_subscription_id = pend.mor_subscription_id;
+}
+
+function parsePending(raw: string | null): PendingRow | undefined {
+    if (raw === null) return undefined;
+    try {
+        const v = JSON.parse(raw);
+        return v && typeof v === "object" ? v as PendingRow : undefined;
+    } catch { return undefined; }
+}
+
+/** Read, fold and delete pending:<id> for each id. Returns true if any folded. */
+async function drainPending(env: Env, rec: CodeRecord, ids: string[]): Promise<boolean> {
+    let folded = false;
+    for (const id of ids) {
+        const pend = parsePending(await env.CODES.get(`pending:${id}`));
+        if (!pend) continue;
+        foldPending(rec, pend);
+        await env.CODES.delete(`pending:${id}`);
+        folded = true;
+    }
+    return folded;
+}
+
+/**
+ * AUTH-TIME LAZY FOLD. Closes the webhook race that no in-handler re-check can:
+ * subscription.active and license_key.created delivered concurrently, each
+ * missing the other's write (KV reads can lag writes by up to ~60s), leaving the
+ * real next_billing_date orphaned in pending:<sub_id> and the code on its 3-day
+ * provisional expiry. Only runs when the record has a join id AND a finite expiry
+ * within SUBSCRIPTION_GRACE_MS of now (provisional, near its end, or past), so a
+ * healthy record pays no extra read. NEVER throws: any KV failure falls back to
+ * the unmodified record, so the auth decision is exactly what it was before.
+ */
+async function lazyFoldPending(env: Env, code: string, rec: CodeRecord, now: number): Promise<CodeRecord> {
+    if (rec.terminal) return rec;
+    if (!rec.mor_subscription_id && !rec.orderRef) return rec;
+    if (typeof rec.expiresAt !== "number" || rec.expiresAt - now > SUBSCRIPTION_GRACE_MS) return rec;
+    const ids = [...new Set([rec.mor_subscription_id, rec.orderRef, rec.mor_order_id].filter((x): x is string => !!x))];
+    try {
+        const next: CodeRecord = { ...rec };
+        let folded = false;
+        for (const id of ids) {
+            const pend = parsePending(await env.CODES.get(`pending:${id}`));
+            if (!pend) continue;
+            foldPending(next, pend);
+            folded = true;
+        }
+        if (!folded) return rec;
+        // Persist the record BEFORE deleting the rows, so a failure between the
+        // two leaves a harmless re-foldable row rather than lost state.
+        await env.CODES.put(`code:${code}`, JSON.stringify(next));
+        for (const id of ids) await env.CODES.delete(`pending:${id}`);
+        return next;
+    } catch {
+        return rec;
+    }
+}
+
 function safeParse(raw: string | null): CodeRecord | undefined {
     if (raw === null) return undefined;
     try { return JSON.parse(raw) as CodeRecord; } catch { return undefined; }
@@ -446,7 +543,17 @@ async function applyLifecycle(env: Env, orderId: string, d: Lifecycle): Promise<
         if (d.mor_subscription_id) prev.mor_subscription_id = d.mor_subscription_id;
         // #4: TTL so a staged-but-never-completed order self-purges (no KV bloat).
         await env.CODES.put(`pending:${orderId}`, JSON.stringify(prev), { expirationTtl: PENDING_TTL_S });
-        return "staged";
+        // Symmetric double-check: license_key.created may have written the index
+        // while we were staging. If it is visible now, fold the staged row into
+        // the code directly. (KV lag can still hide it; authCode's lazy fold is
+        // the backstop for that.)
+        const lateKey = await env.CODES.get(`order:${orderId}`);
+        if (!lateKey) return "staged";
+        const lateRec = safeParse(await env.CODES.get(`code:${lateKey}`));
+        if (!lateRec) return "staged";
+        await drainPending(env, lateRec, [orderId]);
+        await env.CODES.put(`code:${lateKey}`, JSON.stringify(lateRec));
+        return "applied_after_stage";
     }
     const rec = safeParse(await env.CODES.get(`code:${key}`));
     if (!rec) return "code_missing";
@@ -552,17 +659,14 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
         // pending row for EACH join id (see ORDER-INDEPENDENCE). A refund that
         // raced ahead staged under pending:<payment_id>; a subscription event
         // under pending:<subscription_id> — fold both so the record converges.
-        for (const id of joinIds) {
-            const pend = safeParse(await env.CODES.get(`pending:${id}`)) as any;
-            if (!pend) continue;
-            if (pend.revoked) rec.status = "revoked";
-            if (pend.terminal) { rec.terminal = true; if (typeof pend.revokedAt === "number") rec.revokedAt = pend.revokedAt; }
-            if (typeof pend.expiresAt === "number") rec.expiresAt = pend.expiresAt;
-            if (pend.mor_subscription_id) rec.mor_subscription_id = pend.mor_subscription_id;
-            await env.CODES.delete(`pending:${id}`);
-        }
+        await drainPending(env, rec, joinIds);
         await env.CODES.put(`code:${key}`, JSON.stringify(rec));
         for (const id of joinIds) await env.CODES.put(`order:${id}`, key); // reverse index (both join ids)
+        // POST-WRITE RE-CHECK: a lifecycle event running concurrently may have
+        // missed our order: index and staged AFTER the drain above. Look once
+        // more now that the index is written. (KV lag can still hide the row;
+        // authCode's lazy fold is the backstop.)
+        if (await drainPending(env, rec, joinIds)) await env.CODES.put(`code:${key}`, JSON.stringify(rec));
         return { action: cfg.mapped ? "created" : "created_unmapped_variant" };
     }
 
