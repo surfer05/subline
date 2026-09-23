@@ -900,8 +900,13 @@ export class InstallFlow {
             // store's license key and does not start with slp_; telling a paying
             // customer their code "should start with slp_" is how they conclude
             // it is wrong.
-            detail: "Your code came with Subline. If you bought it, it is in the email from the Subline store, "
-                + "and on the page right after paying. If a friend set you up, they sent it to you. "
+            // The key arrives ONLY by email: Dodo's post-checkout page does not
+            // show it. That email is sent as "Dodo Payments" (not "Subline"),
+            // subject "Your License Key is Ready - ...", and a real purchase
+            // (2026-09-23) landed in Gmail spam. So name the sender and the
+            // subject exactly, and say "check spam" in bold.
+            detail: "Your code came with Subline. If you bought it, it is in the email from **Dodo Payments**, "
+                + "subject \"Your License Key is Ready\". **Check spam.** If a friend set you up, they sent it to you. "
                 + "No code? Choose \"Use free Google only\".",
             error,
             // NO CANCEL ON THIS SCREEN. A real friend, on the first field
