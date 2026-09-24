@@ -571,6 +571,27 @@ describe("macOS signing configuration", () => {
         expect(process.env.CSC_IDENTITY_AUTO_DISCOVERY).toBe("false");
     });
 
+    it("signs an unsigned macOS pack ad hoc, so the arm64 app is not 'damaged'", async () => {
+        // v0.1.3's arm64 app carried only the linker's ad hoc signature, which
+        // claims sealed resources the bundle did not have: `codesign --verify`
+        // failed and macOS called the download damaged.
+        const hooks = await import(join(INSTALLER_DIR, "packaging", "hooks.mjs"));
+        expect(hooks.shouldAdHocSign("darwin", {})).toBe(true);
+        expect(hooks.shouldAdHocSign("darwin", { SUBLINE_SIGN: "1" })).toBe(false);
+        expect(hooks.shouldAdHocSign("darwin", { SUBLINE_SIGN: "true" })).toBe(false);
+        expect(hooks.shouldAdHocSign("win32", {})).toBe(false);
+        // `-` is codesign's ad hoc identity: no certificate, no keychain.
+        expect(hooks.adHocSignArgs("/x/Subline.app")).toEqual(["--force", "--deep", "--sign", "-", "/x/Subline.app"]);
+
+        const calls: string[][] = [];
+        await hooks.adHocSign("/x/Subline.app", async (file: string, args: string[]) => { calls.push([file, ...args]); });
+        // Signs, then verifies the same way a user's Mac will.
+        expect(calls).toEqual([
+            ["/usr/bin/codesign", "--force", "--deep", "--sign", "-", "/x/Subline.app"],
+            ["/usr/bin/codesign", "--verify", "--deep", "--strict", "/x/Subline.app"]
+        ]);
+    });
+
     it("makes signing opt-in from exactly one place", () => {
         const source = readFileSync(join(INSTALLER_DIR, "electron-builder.js"), "utf8");
         expect(source).toContain("SUBLINE_SIGN");

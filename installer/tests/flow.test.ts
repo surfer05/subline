@@ -1003,7 +1003,7 @@ describe("the optional Subline-code step", () => {
         expect(state.step).toBe("choose-code");
         // Cancel is deliberately absent: a real friend pressed it here twice
         // meaning "no key", aborting the install both times (field log,
-        // 2026-09-03). The decline path is "Use Google only".
+        // 2026-09-03). The decline path is "Continue without a code".
         expect(state.actions).toEqual(["set-code", "skip-code"]);
         // Nothing has been written to Discord yet.
         expect(h.patchCalls).toHaveLength(0);
@@ -1016,9 +1016,10 @@ describe("the optional Subline-code step", () => {
         // step must at least say what goes here and that skipping still works —
         // otherwise it is a text box with no way to fill it.
         expect(state.detail).toMatch(/code/i);
-        // The decline path is the "Use free Google only" button, and the copy
+        // The decline path is the "Continue without a code" button, and the copy
         // names it rather than saying "skip" and leaving the user to map the two.
-        expect(state.detail).toMatch(/skip|use free google only/i);
+        expect(state.detail).toContain("No code? Choose **Continue without a code**.");
+        expect(state.detail).not.toMatch(/google only/i);
     });
 
     it("saves the key and carries on", async () => {

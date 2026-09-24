@@ -158,6 +158,13 @@ const config = {
          *
          * No identity is ever pinned by NAME here: that would put a Team ID in
          * the repository and break every other machine.
+         *
+         * "Do not sign" is electron-builder's side only. `packaging/hooks.mjs`'s
+         * afterPack then signs the unsigned app AD HOC (`codesign -s -`), because
+         * an arm64 app left with only the linker's signature fails
+         * `codesign --verify` and macOS calls it "damaged" (v0.1.3 shipped that
+         * way). electron-builder 25 has no ad hoc identity of its own: a string
+         * here is looked up in the keychain as a certificate name.
          */
         ...(SIGNING_REQUESTED ? {} : { identity: null }),
 

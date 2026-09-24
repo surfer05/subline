@@ -17,7 +17,8 @@
  *
  * So:
  *   beforePack  the bundle we are about to ship is the build this checkout produces
- *   afterPack   it actually arrived inside the app, and still says the same thing
+ *   afterPack   it actually arrived inside the app, and still says the same thing;
+ *               an unsigned macOS build is then signed ad hoc (see adHocSign)
  *   afterSign   the signed app is notarized and carries a stapled ticket
  *
  * ## Raw Node, no compiler
@@ -79,7 +80,42 @@ export function beforePack() {
  * `files` pattern that excluded it, or an arch-specific pack that skipped it —
  * none of which fail the build on their own.
  */
-export function afterPack(context) {
+/**
+ * Should this pack be signed ad hoc? Only a macOS app that electron-builder is
+ * NOT signing: with `SUBLINE_SIGN` set, the Developer ID signature replaces it.
+ */
+export function shouldAdHocSign(platform, env) {
+    const signing = env.SUBLINE_SIGN === "1" || env.SUBLINE_SIGN === "true";
+    return platform === "darwin" && !signing;
+}
+
+/**
+ * `codesign` arguments for an ad hoc signature (`-s -`) over the whole bundle.
+ *
+ * WHY. With `identity: null` electron-builder signs nothing, but on Apple
+ * silicon the linker still stamps the main executable with its own ad hoc
+ * signature. That signature says the bundle has sealed resources, and there
+ * are none, so `codesign --verify` fails with "code has no resources but
+ * signature indicates they must be present". A downloaded copy of v0.1.3's
+ * arm64 app was exactly that, and macOS calls such an app "damaged". An ad
+ * hoc signature over the whole bundle is valid: macOS then shows the ordinary
+ * "unidentified developer" prompt instead.
+ *
+ * `--deep` signs the nested frameworks and helper apps first. No hardened
+ * runtime: it exists for notarization, which an ad hoc build cannot have, and
+ * it would turn on library validation for nothing.
+ */
+export function adHocSignArgs(appPath) {
+    return ["--force", "--deep", "--sign", "-", appPath];
+}
+
+export async function adHocSign(appPath, exec = (file, args) => run(file, args)) {
+    await exec("/usr/bin/codesign", adHocSignArgs(appPath));
+    await exec("/usr/bin/codesign", ["--verify", "--deep", "--strict", appPath]);
+    say(`signed ad hoc and verified ${appPath}`);
+}
+
+export async function afterPack(context) {
     const stamp = computeStamp();
     const modDir = packagedModDir({
         electronPlatformName: context.electronPlatformName,
@@ -93,6 +129,11 @@ export function afterPack(context) {
         inspect: inspectBundleDir
     });
     say(`packaged mod bundle at ${modDir} is ${report.buildId}`);
+
+    // After the check, so the signature seals the bundle that was checked.
+    if (shouldAdHocSign(context.electronPlatformName, process.env)) {
+        await adHocSign(join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`));
+    }
 }
 
 /**

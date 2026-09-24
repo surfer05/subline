@@ -28,9 +28,9 @@ export const ACTION_LABELS: Record<FlowActionType, string> = {
     recheck: "Check again",
     "set-language": "Continue",
     "set-code": "Save code",
-    // Named for what it costs. "Continue" here would let somebody give up the
-    // ✦ AI tier without noticing there was one.
-    "skip-code": "Use free Google only",
+    // Says what is being declined: a code, not ✦. A free install still gets
+    // 3 ✦ a day by pressing ⚡, so "Use free Google only" was false.
+    "skip-code": "Continue without a code",
     "open-permission-settings": "Open System Settings",
     retry: "Try again",
     // Named for what it costs, not for what it skips. "Continue" here would let

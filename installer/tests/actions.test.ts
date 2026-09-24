@@ -30,11 +30,10 @@ describe("the action vocabulary", () => {
         // give up self-repair, or force-close Discord, without noticing.
         expect(ACTION_LABELS["skip-helper"]).toMatch(/without background updates/i);
         expect(ACTION_LABELS["force-quit-discord"]).toMatch(/anyway/i);
-        // "Use Google only" names the consequence more precisely than "skip"
-        // did: it says what you end up WITH, not just that you declined. The
-        // label shrank because three footer actions have to fit a 720px
-        // window with the Cancel button intact, which they did not.
-        expect(ACTION_LABELS["skip-code"]).toMatch(/google only/i);
+        // Names what is declined: a code. "Use free Google only" was false,
+        // because a free install still gets 3 ✦ a day by pressing ⚡.
+        expect(ACTION_LABELS["skip-code"]).toBe("Continue without a code");
+        expect(ACTION_LABELS["skip-code"]).not.toMatch(/google only/i);
     });
 
     it("marks no more than one action per screen as primary", () => {

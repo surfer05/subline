@@ -420,9 +420,9 @@ export class InstallFlow {
             case "welcome":
                 return this.set(state({
                     step: "tiers",
-                    detail: "≈ is Google Translate: instant, free, no account. ✦ is an AI model that reads the "
-                        + "conversation around a message, so slang and replies come out right. It needs your Subline "
-                        + "code, which Subline asks for next.",
+                    detail: "≈ is Google Translate: instant and free. ✦ is an AI that reads the conversation around "
+                        + "a message, so slang and replies come out right. You get 3 free ✦ a day. A Subline code "
+                        + "makes ✦ automatic.",
                     actions: ["next", "cancel"]
                 }));
 
@@ -907,7 +907,7 @@ export class InstallFlow {
             // subject exactly, and say "check spam" in bold.
             detail: "Your code came with Subline. If you bought it, it is in the email from **Dodo Payments**, "
                 + "subject \"Your License Key is Ready\". **Check spam.** If a friend set you up, they sent it to you. "
-                + "No code? Choose \"Use free Google only\".",
+                + "No code? Choose **Continue without a code**.",
             error,
             // NO CANCEL ON THIS SCREEN. A real friend, on the first field
             // install, pressed Cancel here twice meaning "no key for me" and

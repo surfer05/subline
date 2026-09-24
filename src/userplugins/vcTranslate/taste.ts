@@ -29,7 +29,7 @@ export const INSTALL_ID_KEY = "VcTranslate_installId";
 export const TASTE_CAP = 3;
 
 /** Where the nudge sends somebody who wants more than three. */
-export const TASTE_UPGRADE_URL = "https://surfer05.github.io/subline/";
+export const TASTE_UPGRADE_URL = "https://surfer05.github.io/subline/#pricing";
 
 /* ------------------------------------------------------------ install id -- */
 
@@ -197,7 +197,8 @@ export function tasteUsedUpMessage(): string {
  * reader has just been shown what ✦ reads like.
  */
 export function tasteLimitMessage(): string {
-    return `Today's free ✦ limit is used. Upgrade for unlimited. ${TASTE_UPGRADE_URL}`;
+    // Never "unlimited": a paid code has a daily fair-use cap too.
+    return `Today's ${cap} free ✦ are used. Upgrade for more. ${TASTE_UPGRADE_URL}`;
 }
 
 /** Test-only, same shape as cooldownStore's __resetCooldowns. */

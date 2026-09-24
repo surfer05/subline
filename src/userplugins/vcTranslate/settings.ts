@@ -25,6 +25,36 @@ function defaultTargetLang(): string {
     return locale.split("-")[0].toLowerCase();
 }
 
+/** The engine value a Subline code turns on. Same string the installer seeds (RELAY_ENGINE). */
+export const RELAY_ENGINE = "relay";
+/** The engine a blank code falls back to: free ≈, plus the 3-a-day ✦ taste. */
+export const FREE_ENGINE = "google";
+
+/**
+ * Pasting a code is all it takes to turn ✦ on, and clearing it turns it off.
+ *
+ * The installer writes `engine: "relay"` alongside the code it saves, but a
+ * code pasted here used to leave Engine on Google, so ✦ stayed off until the
+ * user also found the Engine dropdown. Clearing the code switches back to
+ * Google rather than leaving the relay selected with nothing to send: that
+ * state is treated as free anyway (effectiveEngine falls back to Google), but
+ * it also shows a red "no Subline code set" toast.
+ *
+ * Reads the store rather than the argument: Vencord writes the value before
+ * it calls onChange, and the store is what every other reader sees.
+ */
+function syncEngineToCode(): void {
+    const raw = settings.store.sublineCode;
+    const code = typeof raw === "string" ? raw.trim() : "";
+    const engine = settings.store.engine;
+    if (code !== "" && engine !== RELAY_ENGINE) {
+        settings.store.engine = RELAY_ENGINE;
+    } else if (code === "" && engine === RELAY_ENGINE) {
+        settings.store.engine = FREE_ENGINE;
+    }
+    notifySettingsChanged();
+}
+
 export const settings = definePluginSettings({
     engine: {
         type: OptionType.SELECT,
@@ -40,7 +70,7 @@ export const settings = definePluginSettings({
         // engine code still exists, unreachable, for the test suite; there is no
         // way into it from a shipped build. See tests/settings.test.ts.
         options: [
-            { label: "Google only (free, no ✦ upgrade)", value: "google", default: true },
+            { label: "Google (free, 3 ✦ a day with ⚡)", value: "google", default: true },
             { label: "Subline (keyless AI, just paste your code)", value: "relay" }
         ],
         // engine is captured by value when the batcher is built, so a change
@@ -54,9 +84,9 @@ export const settings = definePluginSettings({
         description: "Subline code. It arrived by email when you bought Subline, or from the friend who set you up. Turns on ✦ AI translation. Without one, Subline translates everything with Google (≈).",
         default: "",
         placeholder: "Paste your code",
-        // Same immediacy requirement as the API keys — effectiveEngine() must
+        // Same immediacy requirement as the API keys: effectiveEngine() must
         // see a pasted/cleared code right away, not on next reload.
-        onChange: notifySettingsChanged
+        onChange: syncEngineToCode
     },
     anthropicApiKey: {
         type: OptionType.STRING,

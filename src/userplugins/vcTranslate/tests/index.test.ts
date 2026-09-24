@@ -2063,6 +2063,127 @@ describe("globalAuto does not reach private conversations", () => {
     });
 });
 
+
+/**
+ * The 🌐 popover item, in both modes. With globalAuto on, "Disable
+ * auto-translate here" used to add the channel to the opt-in list, which
+ * changed nothing: the channel stayed on and the label never moved.
+ */
+describe("the per-channel 🌐 toggle", () => {
+    const toggle = (channelId = CHANNEL) =>
+        plugin.messagePopoverButton!.render({ ...discordMessage("t", "hola"), channel_id: channelId } as any)!;
+
+    async function click(channelId = CHANNEL) {
+        await toggle(channelId).onClick!(undefined as any);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+    }
+
+    const sentIds = () => native.translateBatch.mock.calls
+        .flatMap(c => JSON.parse(c[2] as string).messages.map((m: any) => m.id));
+
+    async function restart() {
+        plugin.stop!();
+        await plugin.start!();
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+    }
+
+    describe("with globalAuto on", () => {
+        beforeEach(() => { settings.store.globalAuto = true; });
+
+        it("offers to disable a server channel, and disabling really stops translation", async () => {
+            expect(toggle().label).toBe("Disable auto-translate here");
+
+            await click();
+            expect(toggle().label).toBe("Enable auto-translate here");
+
+            native.translateBatch.mockClear();
+            FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("off1", "hola") });
+            await settle();
+            expect(sentIds()).not.toContain("off1");
+        });
+
+        it("turns the channel back on from the same item", async () => {
+            await click();
+            await click();
+            expect(toggle().label).toBe("Disable auto-translate here");
+
+            native.translateBatch.mockClear();
+            FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("on1", "hola") });
+            await settle();
+            expect(sentIds()).toContain("on1");
+        });
+
+        it("keeps a disabled channel off after a restart", async () => {
+            await click();
+            await restart();
+            expect(toggle().label).toBe("Enable auto-translate here");
+
+            native.translateBatch.mockClear();
+            FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("off2", "hola") });
+            await settle();
+            expect(sentIds()).not.toContain("off2");
+        });
+
+        it("disables one channel and leaves the others on", async () => {
+            await click();
+            expect(toggle("c2").label).toBe("Disable auto-translate here");
+        });
+
+        it("still treats a DM as opt-in", async () => {
+            __stubMarkAsDm("dm1");
+            expect(toggle("dm1").label).toBe("Enable auto-translate here");
+            await click("dm1");
+            expect(toggle("dm1").label).toBe("Disable auto-translate here");
+            await click("dm1");
+            expect(toggle("dm1").label).toBe("Enable auto-translate here");
+        });
+    });
+
+    describe("with globalAuto off", () => {
+        beforeEach(() => { settings.store.globalAuto = false; });
+
+        it("keeps today's opt-in: off until enabled, then on", async () => {
+            expect(toggle().label).toBe("Enable auto-translate here");
+
+            native.translateBatch.mockClear();
+            FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("pre", "hola") });
+            await settle();
+            expect(sentIds()).not.toContain("pre");
+
+            await click();
+            expect(toggle().label).toBe("Disable auto-translate here");
+            native.translateBatch.mockClear();
+            FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("post", "hola") });
+            await settle();
+            expect(sentIds()).toContain("post");
+
+            await click();
+            expect(toggle().label).toBe("Enable auto-translate here");
+        });
+
+        it("a channel disabled under globalAuto can still be opted in, and stays on if globalAuto returns", async () => {
+            settings.store.globalAuto = true;
+            await click();                              // opted out
+            settings.store.globalAuto = false;
+            expect(toggle().label).toBe("Enable auto-translate here");
+            await click();                              // opted in, clears the opt-out
+            settings.store.globalAuto = true;
+            expect(toggle().label).toBe("Disable auto-translate here");
+        });
+    });
+
+    it("rolls back and says so when the toggle cannot be saved", async () => {
+        settings.store.globalAuto = true;
+        const spy = vi.spyOn(DataStore, "set").mockRejectedValueOnce(new Error("disk full"));
+        try {
+            await click();
+        } finally {
+            spy.mockRestore();
+        }
+        expect(toggle().label).toBe("Disable auto-translate here");
+        expect(shownToasts.some(t => /couldn't save that toggle/.test(t.message))).toBe(true);
+    });
+});
 describe("a fresh install works without touching any setting", () => {
     // The regression this guards: globalAuto used to default to false, so a
     // brand-new install translated nothing until the user discovered the
@@ -3382,8 +3503,8 @@ describe("the taste tier (three free ✦ a day)", () => {
         expect(relayCalls()).toHaveLength(spent);
         expect(shownToasts).toHaveLength(1);
         expect(shownToasts[0].message)
-            .toBe(`Today's free ✦ limit is used. Upgrade for unlimited. ${TASTE_UPGRADE_URL}`);
-        expect(shownToasts[0].message).toContain("https://surfer05.github.io/subline/");
+            .toBe(`Today's 3 free ✦ are used. Upgrade for more. ${TASTE_UPGRADE_URL}`);
+        expect(shownToasts[0].message).toContain("https://surfer05.github.io/subline/#pricing");
         // Neutral, never red: nothing is broken and ≈ keeps translating.
         expect(shownToasts[0].type).toBe("MESSAGE");
         expect(shownToasts[0].type).not.toBe("FAILURE");
@@ -3405,7 +3526,7 @@ describe("the taste tier (three free ✦ a day)", () => {
 
         expect(shownToasts).toHaveLength(1);
         expect(shownToasts[0].message)
-            .toBe(`Today's free ✦ limit is used. Upgrade for unlimited. ${TASTE_UPGRADE_URL}`);
+            .toBe(`Today's 3 free ✦ are used. Upgrade for more. ${TASTE_UPGRADE_URL}`);
         expect(shownToasts[0].type).not.toBe("FAILURE");
         // Never the PAID wording, which names an allowance this user has not
         // bought and offers a tomorrow instead of an upgrade.
@@ -3449,7 +3570,7 @@ describe("the taste tier (three free ✦ a day)", () => {
         native.translateBatch.mockClear();
         await press("1");
         expect(relayCalls()).toHaveLength(0);
-        expect(shownToasts.some(t => /Upgrade for unlimited/.test(t.message))).toBe(true);
+        expect(shownToasts.some(t => /Upgrade for more/.test(t.message))).toBe(true);
     });
 
     it("never turns the automatic ✦ batcher on — a live message gets Google alone", async () => {
@@ -3506,6 +3627,98 @@ describe("the taste tier (three free ✦ a day)", () => {
 
         expect(relayCalls().length).toBe(spent + 1);
         expect(getTranslation(key("2"))).toMatchObject({ via: "relay" });
+    });
+});
+
+/**
+ * The Subline code, end to end. Pasting it is all it takes (settings.ts moves
+ * Engine to the relay), clearing it is a free install again, and nothing the
+ * user reads calls it an "API key": a buyer never saw one.
+ */
+describe("the Subline code in the plugin", () => {
+    function forceButton(message: any) {
+        const registered = __getPopoverButton(FORCE_QUALITY_POPOVER_ID);
+        return registered ? registered.render(message) : null;
+    }
+    function indicator(): any {
+        return plugin.chatBarButton!.render({ isMainChat: true, isAnyChat: true } as any);
+    }
+    function text(node: any): string {
+        if (node === null || node === undefined || node === false) return "";
+        if (typeof node === "string" || typeof node === "number") return String(node);
+        if (Array.isArray(node)) return node.map(text).join("");
+        return text(node.children);
+    }
+    async function flush() {
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+    }
+
+    it("turns on ✦ from the code alone, with no Engine change", async () => {
+        settings.store.sublineCode = "SUBLINE-TEST-CODE";
+        expect(settings.store.engine).toBe("relay");
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        const relay = native.translateBatch.mock.calls.filter(c => c[0] === "relay");
+        expect(relay.length).toBeGreaterThan(0);
+        expect(relay[0][1]).toBe("SUBLINE-TEST-CODE");
+    });
+
+    it("is a free install again once the code is cleared: taste ⚡, no red toast", async () => {
+        settings.store.sublineCode = "SUBLINE-TEST-CODE";
+        settings.store.sublineCode = "";
+        expect(settings.store.engine).toBe("google");
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        expect(shownToasts.some(t => /no Subline code set/.test(t.message))).toBe(false);
+        expect(shownToasts.some(t => t.type === "FAILURE")).toBe(false);
+
+        // The ⚡ button is the taste tier's, and a press sends a free_ bearer.
+        const btn = forceButton(discordMessage("2", "hola que tal"));
+        expect(btn!.label).toContain("left today");
+        native.translateBatch.mockClear();
+        btn!.onClick!(undefined as any);
+        await flush();
+        const relay = native.translateBatch.mock.calls.filter(c => c[0] === "relay");
+        expect(relay).toHaveLength(1);
+        expect(relay[0][1]).toMatch(/^free_[0-9a-f]{32}$/);
+    });
+
+    it("says \"Subline code\", never \"API key\", when the relay rejects the code", async () => {
+        settings.store.sublineCode = "SUBLINE-TEST-CODE";
+        native.translateBatch.mockImplementation(async (engine: string) =>
+            engine === "relay"
+                ? { ok: false, error: "relay: HTTP 401 unauthorized" }
+                : { ok: true, results: [] });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        const rejected = shownToasts.filter(t => /Subline code/.test(t.message));
+        expect(rejected).toHaveLength(1);
+        expect(rejected[0].message).toBe(
+            "VcTranslate: Subline rejected your Subline code. Using Google for this session."
+        );
+        expect(shownToasts.some(t => /API key/.test(t.message))).toBe(false);
+
+        const node = indicator();
+        expect(text(node)).toBe("✦ code rejected");
+        expect(node.props.title).toContain("Subline code");
+        expect(node.props.title).not.toContain("API key");
+        expect(node.props.title).not.toContain("—");
+    });
+
+    it("says \"no Subline code set\" if the relay is selected with no code", async () => {
+        // Only reachable by editing settings.json by hand now, but the wording
+        // must still be right.
+        settings.store.engine = "relay";
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        expect(shownToasts.some(t =>
+            t.message === "VcTranslate: no Subline code set. Using Google until you add one.")).toBe(true);
+        expect(shownToasts.some(t => /API key/.test(t.message))).toBe(false);
     });
 });
 

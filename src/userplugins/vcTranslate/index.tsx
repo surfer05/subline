@@ -10,7 +10,7 @@ import type { Message } from "@vencord/discord-types";
 
 import { createBatcher, type Batcher } from "./batcher";
 import { renderDiscordMarkup, type MarkupResolvers } from "./discordMarkup";
-import { isChannelEnabled, loadEnabledChannels, toggleChannel } from "./channels";
+import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel, toggleChannelOptOut } from "./channels";
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
 import { isConfidentlyTargetLanguage } from "./detectLang";
 import {
@@ -388,18 +388,34 @@ let batcherGeneration = 0;
  * and the settings fields it names were the whole of it.
  */
 const LLM_ENGINES = {
-    claude: { keySetting: "anthropicApiKey", label: "Anthropic" },
-    gemini: { keySetting: "geminiApiKey", label: "Gemini" },
-    groq: { keySetting: "groqApiKey", label: "Groq" },
+    claude: { keySetting: "anthropicApiKey", label: "Anthropic", credential: "Anthropic API key" },
+    gemini: { keySetting: "geminiApiKey", label: "Gemini", credential: "Gemini API key" },
+    groq: { keySetting: "groqApiKey", label: "Groq", credential: "Groq API key" },
     // The relay's "key" is the Subline code. Everything key-gated (isLlmEngine,
     // apiKeyFor, effectiveEngine's fallback-to-Google when the code is blank,
     // the cooldown/rate-gate machinery) then treats the relay exactly like a
     // keyed engine, because it reads THIS table rather than a hand-written list.
-    relay: { keySetting: "sublineCode", label: "Subline" }
+    // `credential` is what the user calls the thing they pasted: a buyer never
+    // saw an "API key", so no message may ask them for one.
+    relay: { keySetting: "sublineCode", label: "Subline", credential: "Subline code" }
 } as const satisfies Record<
     string,
-    { keySetting: "anthropicApiKey" | "geminiApiKey" | "groqApiKey" | "sublineCode"; label: string }
+    {
+        keySetting: "anthropicApiKey" | "geminiApiKey" | "groqApiKey" | "sublineCode";
+        label: string;
+        credential: string;
+    }
 >;
+
+/**
+ * "Gemini rejected the API key" / "Subline rejected your Subline code". The
+ * bring-your-own-key wording is unchanged; the relay names the code.
+ */
+function rejectedCredentialText(engine: LlmEngineId): string {
+    return engine === "relay"
+        ? "Subline rejected your Subline code"
+        : `${LLM_ENGINES[engine].label} rejected the API key`;
+}
 
 type LlmEngineId = keyof typeof LLM_ENGINES;
 
@@ -916,18 +932,26 @@ function isFocusedChannel(channelId: string): boolean {
     return SelectedChannelStore.getChannelId() === channelId;
 }
 
-function channelActive(channelId: string): boolean {
-    // An explicit per-channel opt-in always wins, including for DMs.
-    if (isChannelEnabled(channelId)) return true;
+/**
+ * Does globalAuto cover this channel, so that it is on unless opted out?
+ *
+ * globalAuto means "every server channel I read", not "every private
+ * conversation I have". Translating a public channel is a decision the user
+ * makes for a room where everyone can already read everything; shipping a DM
+ * to a third-party endpoint is a materially different one, and the spec puts
+ * DMs out of scope. DMs and group DMs have no guild_id.
+ */
+function coveredByGlobalAuto(channelId: string): boolean {
     if (!settings.store.globalAuto) return false;
-
-    // globalAuto means "every server channel I read", not "every private
-    // conversation I have". Translating a public channel is a decision the
-    // user makes for a room where everyone can already read everything;
-    // shipping a DM to a third-party endpoint is a materially different one,
-    // and the spec puts DMs out of scope. DMs and group DMs have no guild_id.
     const channel = ChannelStore.getChannel(channelId);
     return Boolean(channel?.guild_id);
+}
+
+function channelActive(channelId: string): boolean {
+    // A covered server channel is on unless the user switched it off here.
+    if (coveredByGlobalAuto(channelId)) return !isChannelDisabled(channelId);
+    // Anything else (globalAuto off, or a DM) is on only by explicit opt-in.
+    return isChannelEnabled(channelId);
 }
 
 /** Identifies the credential a pin applies to. Never logged, never displayed. */
@@ -1008,11 +1032,11 @@ function announceMissingKeyOnce() {
     if (!isLlmEngine(configured)) return;
     if (apiKeyFor(configured).trim() !== "") return;
     announcedMissingKey = true;
-    const { label } = LLM_ENGINES[configured];
+    const { credential } = LLM_ENGINES[configured];
     Toasts.show({
         id: Toasts.genId(),
         type: Toasts.Type.FAILURE,
-        message: `VcTranslate: no ${label} API key set. Using Google until you add one.`
+        message: `VcTranslate: no ${credential} set. Using Google until you add one.`
     });
 }
 
@@ -1453,7 +1477,7 @@ async function runTier(
                         "blocked"
                     );
                 } else if (isLlmEngine(engine) && /\b401\b/.test(res.error)) {
-                    fallBackToGoogle(`${LLM_ENGINES[engine].label} rejected the API key`, "key");
+                    fallBackToGoogle(rejectedCredentialText(engine), "key");
                 }
             }
 
@@ -2738,10 +2762,10 @@ function TranslationAccessory({ message }: { message: Message; }) {
         ? `Translated by ${provenance.label} · ${langName}`
         : romanized
             ? `Translated by ${provenance.label}. This looks like ${langName} `
-              + "written in Latin letters, which Google translates badly — "
+              + "written in Latin letters, which Google translates badly, "
               + "often confidently and wrongly. Wait for the ✦ line."
             : `Translated by ${provenance.label}. ${langName} detected, but only `
-              + `${Math.round(entry.conf! * 100)}% confidently — short messages are `
+              + `${Math.round(entry.conf! * 100)}% confidently. Short messages are `
               + "often misread, so this may be wrong.";
 
     // SPEC §7 STEP 4, and the only thing this project accepts as proof the
@@ -2964,14 +2988,18 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
                 style={indicatorStyle}
                 title={
                     fallbackKind === "blocked"
-                        ? `Subline could not reach ${LLM_ENGINES[configured].label} from this network — a VPN, `
-                          + "region or ISP is refusing the connection, and the API key is not the problem. "
+                        ? `Subline could not reach ${LLM_ENGINES[configured].label} from this network. A VPN, `
+                          + "region or ISP is refusing the connection. "
+                          + `Your ${configured === "relay" ? "Subline code" : "API key"} is not the problem. `
                           + "Google is being used meanwhile."
-                        : `${LLM_ENGINES[configured].label} rejected the API key, so Subline is using Google. `
-                          + "Correct the key in settings and the better translations resume — no restart needed."
+                        : `${rejectedCredentialText(configured)}, so Subline is using Google. `
+                          + `Correct the ${configured === "relay" ? "code" : "key"} in settings and the `
+                          + "better translations resume. No restart needed."
                 }
             >
-                {fallbackKind === "blocked" ? "✦ blocked" : "✦ key rejected"}
+                {fallbackKind === "blocked"
+                    ? "✦ blocked"
+                    : configured === "relay" ? "✦ code rejected" : "✦ key rejected"}
             </div>
         );
     }
@@ -2987,7 +3015,7 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
             <div
                 style={indicatorStyle}
                 title={
-                    `VcTranslate: ${label} is cooling down after a rate limit — the ⚡ `
+                    `VcTranslate: ${label} is cooling down after a rate limit. The ⚡ `
                     + `force-translate action will not send anything for another ${countdown}.`
                 }
             >
@@ -3001,7 +3029,7 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
             <div
                 style={indicatorStyle}
                 title={
-                    `VcTranslate: ${label} is ready — the ⚡ force-translate action will send `
+                    `VcTranslate: ${label} is ready. The ⚡ force-translate action will send `
                     + "immediately."
                 }
             >
@@ -3027,7 +3055,7 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
     return (
         <div
             style={indicatorStyle}
-            title={`VcTranslate: ${why} — the ⚡ force-translate action will not send anything `
+            title={`VcTranslate: ${why}. The ⚡ force-translate action will not send anything `
                 + `for another ${countdown}.`}
         >
             ✦ {countdown}
@@ -3071,7 +3099,13 @@ export default definePlugin({
                 channel,
                 onClick: async () => {
                     try {
-                        const nowOn = await toggleChannel(message.channel_id);
+                        // Two lists, because "off here" means opposite things
+                        // in the two modes: with globalAuto covering this
+                        // channel it is an opt-out, otherwise it withdraws an
+                        // opt-in (see channels.ts).
+                        const nowOn = coveredByGlobalAuto(message.channel_id)
+                            ? await toggleChannelOptOut(message.channel_id)
+                            : await toggleChannel(message.channel_id);
                         // `becomingFocused: true` — the user just clicked a
                         // button on a message in this channel and explicitly
                         // asked for it to be translated. That click is a
