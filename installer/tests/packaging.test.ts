@@ -633,6 +633,19 @@ describe("macOS signing configuration", () => {
 });
 
 describe("the entitlements", () => {
+    it("are well-formed XML: no double hyphen inside a comment", () => {
+        // plutil accepts one; electron-builder's strict XML parser does not,
+        // and the first signed build (0.1.5) died on "comment is not
+        // well-formed". Unsigned builds never parse these files, so nothing
+        // caught it before.
+        for (const name of ["entitlements.mac.plist", "entitlements.mac.inherit.plist"]) {
+            const text = readFileSync(join(INSTALLER_DIR, "packaging", name), "utf8");
+            for (const comment of text.match(/<!--([\s\S]*?)-->/g) ?? []) {
+                expect(comment.slice(4, -3), name).not.toContain("--");
+            }
+        }
+    });
+
     it("are EXACTLY the three the app needs, and nothing else", () => {
         // Listed exhaustively rather than checked one at a time. Every entitlement
         // is a hole in the hardened runtime and Apple's notary reads the list, so

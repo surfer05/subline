@@ -11,9 +11,9 @@
       the app does stops working without it. Nothing is here "because Electron
       apps usually have it".
 
-      ---------------------------------------------------------------------
+      =====================================================================
       WHAT IS *NOT* HERE, AND THE ONE THAT MATTERS MOST
-      ---------------------------------------------------------------------
+      =====================================================================
 
       There is NO entitlement that lets an application modify another
       application's bundle. Subline's entire purpose — writing
@@ -33,7 +33,7 @@
            spec §4 requires Developer ID rather than ad-hoc signing: a stable
            Team ID is what makes the permission persist across Subline's own
            updates, and what lets the LaunchAgent helper (the same bundle, run
-           with `--helper`) write to Discord under the permission the user
+           with the helper flag) write to Discord under the permission the user
            already granted.
 
       Also absent, and each for a reason:
