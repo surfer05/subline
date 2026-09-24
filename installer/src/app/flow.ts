@@ -37,7 +37,7 @@
 
 import type { InstalledModBundle } from "./modInstall.js";
 import type { AppManagementReport, AppManagementStatus } from "./appManagement.js";
-import { awaitAppManagement } from "./appManagement.js";
+import { awaitAppManagement, isLoggedAttempt } from "./appManagement.js";
 import type { QuitReport, RunningProcess } from "./discordProcess.js";
 import { findDiscordProcesses, quitDiscord } from "./discordProcess.js";
 import { defaultLanguage, endonymOf, languageOptions } from "./language.js";
@@ -123,8 +123,13 @@ export type FlowStep =
     | "choose-code"
     /* §3 step 7 / §4. */
     | "permission-explain"
+    /** One waiting screen, no timeout: it lasts until the grant or a Cancel. */
     | "permission-waiting"
-    | "permission-blocked"
+    /**
+     * The permission CHECK itself kept failing (not "macOS is still blocking
+     * us", which is just waiting). The only error the permission step has.
+     */
+    | "permission-failed"
     /* §3 step 8. */
     | "patching"
     | "patch-failed"
@@ -229,6 +234,18 @@ export interface HelperInstallOutcome {
     path: string | null;
 }
 
+/** What `ensureHelper` found and did. */
+export interface HelperEnsureReport {
+    /** `unchanged`: already runs this app. `repaired`: re-registered. `skipped`: nothing to check here. */
+    action: "unchanged" | "repaired" | "skipped";
+    /** Why it was re-registered or skipped: `missing`, `points-elsewhere`, `not-loaded`, ... */
+    reason: string | null;
+    /** The executable the registration named before, when it could be read. */
+    registered: string | null;
+    /** The executable it should name: the one running now. */
+    expected: string | null;
+}
+
 /* ------------------------------------------------------------------------ *
  * Ports — every piece of I/O, injected
  * ------------------------------------------------------------------------ */
@@ -260,6 +277,8 @@ export interface FlowPorts {
     forceQuit(branch: DiscordBranch): Promise<void>;
 
     probePermission(install: DiscordInstall): AppManagementStatus;
+    /** Why the last probe came back `unknown` (errno and message), for the error screen. */
+    lastPermissionProbeError?(): string | null;
     openPermissionSettings(): Promise<void>;
     permissionSettingsUrl: string;
 
@@ -281,12 +300,21 @@ export interface FlowPorts {
      * calls is the difference between "the feature exists" and "the feature runs".
      */
     installHelper(): Promise<Result<HelperInstallOutcome>>;
+    /**
+     * Make sure the registered helper runs THIS app, and re-register it if not.
+     *
+     * Field evidence: a LaunchAgent pointing at an app path that no longer
+     * existed, and "Subline is already set up" leaving it that way, so the
+     * helper could never run. Called on every launch that reaches that screen.
+     */
+    ensureHelper(): Promise<Result<HelperEnsureReport>>;
     launchDiscord(install: DiscordInstall): Promise<Result<true>>;
     verify(options: AwaitVerifyOptions): Promise<VerificationReport>;
 
     /** Timings, injected so tests do not wait. */
     permissionPollIntervalMs?: number;
-    permissionTimeoutMs?: number;
+    permissionSlowPollIntervalMs?: number;
+    permissionSlowAfterMs?: number;
     quitGracePeriodMs?: number;
     verifyTimeoutMs?: number;
     verifyPollIntervalMs?: number;
@@ -497,11 +525,7 @@ export class InstallFlow {
             case "permission-explain":
                 return this.waitForPermission();
 
-            case "permission-blocked":
-                if (action.type === "open-permission-settings") {
-                    await this.ports.openPermissionSettings();
-                    return this.current;
-                }
+            case "permission-failed":
                 return this.waitForPermission();
 
             case "permission-waiting":
@@ -707,16 +731,42 @@ export class InstallFlow {
             return this.checkRunning();
         }
 
-        return this.set(state({
+        // "Already set up" must include the thing that KEEPS it set up. Field
+        // evidence: the LaunchAgent named an app path that no longer existed,
+        // this screen said all was well, and the helper could never run.
+        return this.ensureHelper().then(helperOk => this.set(state({
             step: "already-installed",
             detail:
                 "Subline is installed and Discord is set up to use it. There is nothing left to do. Open Discord "
-                + "and messages in other languages will have a translation underneath them. Updates are handled in "
-                + "the background.",
+                + "and messages in other languages will have a translation underneath them. "
+                + (helperOk
+                    ? "Updates are handled in the background."
+                    : "Background updates could not be turned on. Open Subline again later to retry."),
             install,
             installState,
             actions: ["finish"]
-        }));
+        })));
+    }
+
+    /** Re-point the helper at this app if it points anywhere else. True when it is in place. */
+    private async ensureHelper(): Promise<boolean> {
+        try {
+            const result = await this.ports.ensureHelper();
+            if (!result.ok) {
+                this.ports.log.error("helper.ensure-failed", errorFields(result.error));
+                return false;
+            }
+            this.ports.log.info("helper.ensure", {
+                action: result.value.action,
+                reason: result.value.reason,
+                registered: result.value.registered,
+                expected: result.value.expected
+            });
+            return true;
+        } catch (cause) {
+            this.ports.log.error("helper.ensure-failed", { cause: String(cause) });
+            return false;
+        }
     }
 
     /* -------------------------------------------------------------------- *
@@ -999,14 +1049,15 @@ export class InstallFlow {
         const install = this.chosenInstall;
         if (install === null) return this.detect();
 
-        this.set(state({
+        const waiting = this.set(state({
             step: "permission-waiting",
-            // The pane path is already on screen, as the note under this line
-            // (renderer.ts renders it whenever `permissionSettingsUrl` is set),
-            // so repeating "Privacy & Security ›" here only buried the toggle
-            // name. One sentence, the toggle in bold, and the promise that
-            // waiting is all that is being asked.
-            detail: "Waiting for you to turn **Subline** on under **App Management**. This screen moves on by itself.",
+            // ONE waiting screen, and it waits for as long as it takes. The
+            // pane path is already on screen as the note under this line
+            // (renderer.ts renders it whenever `permissionSettingsUrl` is set).
+            // "Later" is measured: field log 2026-09-24, the user chose Later
+            // and the very next probe returned granted.
+            detail: "In the window that just opened, turn on **Subline**. If macOS asks to quit, choose **Later**. "
+                + "Subline carries on by itself.",
             busy: true,
             permissionSettingsUrl: this.ports.permissionSettingsUrl,
             actions: ["open-permission-settings", "cancel"]
@@ -1019,33 +1070,45 @@ export class InstallFlow {
             probe: () => this.ports.probePermission(install),
             sleep: ms => this.ports.sleep(ms),
             clock: () => this.ports.now(),
-            onAttempt: (status, attempt) => this.ports.log.info("permission.attempt", { status, attempt }),
+            // Cancel moves the flow off this screen; the poll stops at its next
+            // tick and never patches after a Cancel.
+            isCancelled: () => this.current !== waiting,
+            onAttempt: (status, attempt) => {
+                if (isLoggedAttempt(attempt)) this.ports.log.info("permission.attempt", { status, attempt });
+            },
             ...(this.ports.permissionPollIntervalMs === undefined ? {} : { pollIntervalMs: this.ports.permissionPollIntervalMs }),
-            ...(this.ports.permissionTimeoutMs === undefined ? {} : { timeoutMs: this.ports.permissionTimeoutMs })
+            ...(this.ports.permissionSlowPollIntervalMs === undefined ? {} : { slowPollIntervalMs: this.ports.permissionSlowPollIntervalMs }),
+            ...(this.ports.permissionSlowAfterMs === undefined ? {} : { slowAfterMs: this.ports.permissionSlowAfterMs })
         });
-        this.ports.log.info("permission.result", { status: report.status, attempts: report.attempts });
+        this.ports.log.info("permission.result", {
+            status: report.status,
+            attempts: report.attempts,
+            cancelled: report.cancelled,
+            failed: report.failed
+        });
 
+        // Also when the screen changed under a probe that said granted: a
+        // Cancel pressed during the last probe must still mean no patch.
+        if (report.cancelled || this.current !== waiting) return this.current;
         if (report.permitted) return this.patchStep();
 
-        // NOT a dead end: retry is right there, and nothing has to be redone.
+        // The only way here: the CHECK kept failing for a reason that is not
+        // a permission refusal. That is a real failure with a real cause, so
+        // it gets an error screen and keeps its diagnostics.
+        const cause = this.ports.lastPermissionProbeError?.() ?? undefined;
+        this.ports.log.error("permission.check-failed", { attempts: report.attempts, cause: cause ?? null });
         return this.set(state({
-            step: "permission-blocked",
-            // The summary is computed (appManagement.ts) and says what macOS is
-            // doing, so it leads. What follows is the two things the user needs:
-            // the exact toggle and the exact button, both bold, and the fact
-            // that retrying costs them nothing they already chose.
-            detail:
-                `${report.summary} Turn **Subline** on under **App Management**, then press **Try again**. `
-                + "Nothing you chose is lost.",
+            step: "permission-failed",
+            detail: `${report.summary} Press **Try again**. Nothing you chose is lost.`,
             permission: report,
             permissionStatus: report.status,
-            permissionSettingsUrl: this.ports.permissionSettingsUrl,
             error: {
-                code: "PERMISSION_DENIED",
+                code: "IO_ERROR",
                 message: report.summary,
-                path: install.resourcesPath
+                path: install.resourcesPath,
+                ...(cause === undefined ? {} : { cause })
             },
-            actions: ["open-permission-settings", "retry", "cancel"]
+            actions: ["retry", "cancel"]
         }));
     }
 

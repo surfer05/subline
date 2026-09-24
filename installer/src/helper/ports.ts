@@ -34,6 +34,7 @@ import type { Alert } from "./alerts.js";
 import type { HelperPorts } from "./helper.js";
 import type { LaunchctlPort } from "./launchAgent.js";
 import type { SchtasksPort } from "./scheduledTask.js";
+import { taskCommandFromXml } from "./scheduledTask.js";
 import { helperStatePathFor, readHelperState, writeHelperState } from "./state.js";
 import type { HelperState } from "./state.js";
 
@@ -268,6 +269,14 @@ export function createSchtasks(exec: Exec = (file, args) => run(file, args)): Sc
                 return true;
             } catch {
                 return false;
+            }
+        },
+        async queryCommand(name: string): Promise<string | null> {
+            try {
+                const { stdout } = await exec("schtasks", ["/Query", "/TN", name, "/XML"]);
+                return taskCommandFromXml(stdout);
+            } catch {
+                return null;
             }
         }
     };

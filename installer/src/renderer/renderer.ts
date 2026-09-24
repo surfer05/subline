@@ -26,6 +26,7 @@ interface SublineApi {
     copyDiagnostics(): Promise<number>;
     readDiagnostics(): Promise<string>;
     uninstall(options: { keepSettings: boolean; closeDiscord?: "ask" | "force" }): Promise<UninstallReport>;
+    cancelUninstall(): Promise<void>;
     openUrl(url: string): Promise<boolean>;
     onState(handler: (state: FlowState) => void): () => void;
     onUninstallPhase(handler: (phase: UninstallPhase) => void): () => void;
@@ -73,8 +74,8 @@ const STEP_TITLES: Record<FlowState["step"], string> = {
     "choose-language": "Your reading language",
     "choose-code": "Your Subline code",
     "permission-explain": "macOS needs your permission",
-    "permission-waiting": "Waiting for permission",
-    "permission-blocked": "Permission not granted",
+    "permission-waiting": "Turn on Subline",
+    "permission-failed": "Could not check permission",
     patching: "Installing",
     "patch-failed": "Could not install",
     "installing-helper": "Setting up background updates",
@@ -123,7 +124,7 @@ function headingFor(state: FlowState): string {
  *
  * `**like this**` becomes a <strong>, `\n` becomes a <br>, everything else is a
  * text node. Built as NODES, never as a string of HTML: the copy is ours today,
- * but `permission-blocked` interpolates a computed summary into it and an
+ * but `permission-failed` interpolates a computed summary into it and an
  * uninstall report can carry a filesystem path, and innerHTML would make either
  * of those an injection point for the sake of two bold words.
  */
@@ -383,7 +384,7 @@ function verdictBlock(spec: {
 function renderActions(state: FlowState): void {
     actionBar.replaceChildren();
     // One primary per screen, enforced HERE rather than hoped for: the visual
-    // sweep caught permission-blocked offering two teal buttons because two
+    // sweep caught the old permission-blocked screen offering two teal buttons because two
     // actions are each primary somewhere. The first primary in the array wins;
     // any later one renders secondary. Order in the actions array is already
     // meaningful (it is the on-screen order), so this adds no new convention.
@@ -500,10 +501,16 @@ function showUninstall(report: UninstallReport, mayRetry: boolean): void {
     const first = report.problems[0];
     if (first !== undefined) renderError(first);
 
-    // Permission never arrived. The main process already opened the pane and
-    // waited; the remedy is the same gate again, on a button that says so.
-    // Nothing was changed, so retrying costs nothing and can be offered every time.
-    if (first !== undefined && first.code === "PERMISSION_DENIED") {
+    // Cancel on the permission screen. Nothing was changed, so this is not a
+    // failure and gets no error and no button: the footer Uninstall is still there.
+    if (report.cancelled === true) {
+        stepName.textContent = "Cancelled";
+        return;
+    }
+
+    // Permission never arrived, or the check itself failed. Nothing was
+    // changed, so the remedy is the same gate again, on a button that says so.
+    if (first !== undefined && (first.code === "PERMISSION_DENIED" || report.permissionCheckFailed === true)) {
         const button = document.createElement("button");
         button.className = "btn btn-primary";
         button.textContent = "Grant permission and remove";
@@ -571,18 +578,13 @@ function runUninstall(
         extra.replaceChildren();
         actionBar.replaceChildren();
         if (phase === "permission") {
-            stepName.textContent = "macOS needs your permission";
-            // Same shape as the install's permission screen, for the same gate:
-            // what is being asked, the one toggle to flip in bold, and the fact
-            // that nothing else is wanted. The settings page is already open and
-            // its path is in the note below, so neither needs a sentence. The
-            // old copy spent half its length quoting Apple's "update or delete
-            // other applications" warning before reaching the toggle.
+            stepName.textContent = "Turn on Subline";
+            // The install's waiting screen, word for word: same gate, same
+            // wait with no timeout, same two buttons.
             setDetail(
                 detail,
-                "Discord can only be changed with your permission.\n\n"
-                + "Turn **Subline** on under **App Management**. If macOS asks to quit Subline, choose **Later**.\n\n"
-                + "This continues by itself."
+                "In the window that just opened, turn on **Subline**. If macOS asks to quit, choose **Later**. "
+                + "Subline carries on by itself."
             );
             const hint = document.createElement("p");
             hint.className = "note";
@@ -590,9 +592,16 @@ function runUninstall(
             extra.append(hint);
             const open = document.createElement("button");
             open.className = "btn btn-secondary";
-            open.textContent = "Open System Settings";
+            open.textContent = "Open it again";
             open.onclick = () => { void api.openUrl(APP_MANAGEMENT_URL); };
-            actionBar.append(open);
+            const cancel = document.createElement("button");
+            cancel.className = "btn btn-secondary";
+            cancel.textContent = "Cancel";
+            cancel.onclick = () => {
+                cancel.disabled = true;
+                void api.cancelUninstall();
+            };
+            actionBar.append(open, cancel);
             return;
         }
         stepName.textContent = "Removing Subline";

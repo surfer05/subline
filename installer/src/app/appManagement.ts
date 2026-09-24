@@ -24,19 +24,16 @@
  *  3. **Poll and continue automatically.** `awaitAppManagement` re-probes on an
  *     interval. Never "quit Subline and run it again": that is the step that
  *     turns into a dead end.
- *  4. **A denial is not a death.** Timing out returns a report, not an error,
- *     and the caller offers a retry.
+ *  4. **Waiting is not failing.** There is no timeout. `blocked` is polled
+ *     until the grant or a Cancel; only a probe that keeps failing for some
+ *     other reason (`unknown`) ends the wait with an error.
  *
  * ## The honest part
  *
- * macOS sometimes wants an app restarted before a newly-granted App Management
- * right takes effect ("Quit & Reopen"). Polling picks the grant up without a
- * restart in the common case, but we cannot promise it always will — so after
- * `RELAUNCH_ADVICE_AFTER_ATTEMPTS` fruitless probes the report's `advice`
- * switches to `"relaunch"` and the UI says so. Telling the user to restart after
- * we have watched thirty seconds of nothing is not the dead end §4 forbids; it
- * is the only remaining true thing to say, and saying it beats polling forever
- * behind a spinner.
+ * macOS offers "Quit & Reopen" after the toggle is flipped. It is not needed:
+ * field evidence (2026-09-24) is a user who chose Later and whose very next
+ * probe returned granted. So the copy says to choose Later, and the poll does
+ * the rest.
  */
 
 import { rmSync, writeFileSync } from "node:fs";
@@ -79,6 +76,12 @@ export interface ProbeOptions {
     platform?: NodeJS.Platform;
     /** Injected by tests; production uses a real write-and-delete. */
     attemptWrite?: (path: string) => void;
+    /**
+     * Told why a probe came back `unknown`: the errno and message. The status
+     * alone says only "not a permission refusal", and a log that cannot say
+     * what DID happen turns debugging into guessing.
+     */
+    onUnknown?: (cause: string) => void;
 }
 
 /**
@@ -103,6 +106,7 @@ export function probeAppManagement(options: ProbeOptions): AppManagementStatus {
     } catch (cause) {
         const errno = errnoOf(cause);
         if (errno === "EPERM" || errno === "EACCES") return "blocked";
+        options.onUnknown?.(`${errno ?? "no errno"}: ${cause instanceof Error ? cause.message : String(cause)}`);
         return "unknown";
     } finally {
         try {
@@ -120,96 +124,132 @@ function defaultAttemptWrite(path: string): void {
     writeFileSync(path, "subline permission probe\n", "utf8");
 }
 
-export type PermissionAdvice =
-    /** Go to System Settings and turn the toggle on. */
-    | "grant"
-    /** It has been long enough that macOS probably wants us restarted. */
-    | "relaunch";
-
 export interface AppManagementReport {
     status: AppManagementStatus;
     /** `granted` or `not-required` — i.e. it is safe to patch. */
     permitted: boolean;
     /** How many probes were made. */
     attempts: number;
-    advice: PermissionAdvice;
-    /** True when we stopped because the window closed rather than because we learned something. */
-    timedOut: boolean;
+    /** True when the caller stopped the wait (the user pressed Cancel). */
+    cancelled: boolean;
+    /**
+     * True when the probe kept failing for a reason that is NOT "macOS is
+     * blocking us" (`unknown`). The only way a wait ends without a grant or a
+     * cancel, and the only one that earns an error screen.
+     */
+    failed: boolean;
     summary: string;
 }
 
 export const DEFAULT_PERMISSION_POLL_INTERVAL_MS = 1_000;
-export const DEFAULT_PERMISSION_TIMEOUT_MS = 120_000;
-/** After this many fruitless probes, stop implying that waiting alone will fix it. */
-export const RELAUNCH_ADVICE_AFTER_ATTEMPTS = 30;
+/** The slower pace once the user has clearly stepped away. */
+export const DEFAULT_PERMISSION_SLOW_POLL_INTERVAL_MS = 3_000;
+/** How long to poll at the fast pace before backing off. */
+export const DEFAULT_PERMISSION_SLOW_AFTER_MS = 120_000;
+/**
+ * How many `unknown` probes IN A ROW end the wait with an error.
+ *
+ * `blocked` never ends it: that is macOS waiting for the toggle, and the
+ * toggle is the user's to flip in their own time. `unknown` is an errno that
+ * is not a permission refusal (the folder vanished, the disk went read-only),
+ * and polling that forever would hide a real failure behind a spinner.
+ */
+export const MAX_CONSECUTIVE_UNKNOWN = 30;
+
+/**
+ * Which attempts get a log line: the first, then every 30th.
+ *
+ * The wait has no timeout, so one line per probe would be one line per second
+ * for as long as someone leaves the window open. The result is logged
+ * separately by the caller, so the count is never lost.
+ */
+export function isLoggedAttempt(attempt: number): boolean {
+    return attempt === 1 || attempt % 30 === 0;
+}
 
 export interface AwaitAppManagementOptions {
     probe: () => AppManagementStatus;
     pollIntervalMs?: number;
-    timeoutMs?: number;
+    slowPollIntervalMs?: number;
+    slowAfterMs?: number;
+    maxConsecutiveUnknown?: number;
     sleep?: (ms: number) => Promise<void>;
     clock?: () => number;
-    /** Called after every probe, for the log and for a live attempt counter in the UI. */
+    /**
+     * Checked before every probe. True ends the wait with `cancelled`, and no
+     * further probe is made, so a grant that lands after Cancel never starts
+     * a patch nobody asked for any more.
+     */
+    isCancelled?: () => boolean;
+    /** Called after every probe. Callers log through `isLoggedAttempt`. */
     onAttempt?: (status: AppManagementStatus, attempt: number) => void;
 }
 
-function describe(status: AppManagementStatus, advice: PermissionAdvice, timedOut: boolean): string {
+function describe(status: AppManagementStatus): string {
     if (status === "granted") return "macOS is allowing Subline to update Discord.";
     if (status === "not-required") return "This platform does not require permission to update Discord.";
     if (status === "unknown") {
-        return "Subline could not tell whether macOS will allow it to update Discord. Try again, or pick Discord's location by hand.";
+        return "Subline could not check whether macOS allows it to update Discord.";
     }
-    if (advice === "relaunch") {
-        return "macOS is still blocking Subline from updating Discord. If you have already turned Subline on under Privacy & Security › App Management, quit Subline and open it again. macOS sometimes only applies the change to a fresh launch.";
-    }
-    return timedOut
-        ? "macOS is blocking Subline from updating Discord. Open System Settings › Privacy & Security › App Management, turn Subline on, then try again."
-        : "Waiting for permission to update Discord.";
+    return "Waiting for permission to update Discord.";
 }
 
-function toReport(status: AppManagementStatus, attempts: number, timedOut: boolean): AppManagementReport {
-    const permitted = status === "granted" || status === "not-required";
-    const advice: PermissionAdvice =
-        !permitted && attempts >= RELAUNCH_ADVICE_AFTER_ATTEMPTS ? "relaunch" : "grant";
+function toReport(
+    status: AppManagementStatus,
+    attempts: number,
+    flags: { cancelled?: boolean; failed?: boolean } = {}
+): AppManagementReport {
     return {
         status,
-        permitted,
+        permitted: status === "granted" || status === "not-required",
         attempts,
-        advice,
-        timedOut,
-        summary: describe(status, advice, timedOut)
+        cancelled: flags.cancelled ?? false,
+        failed: flags.failed ?? false,
+        summary: describe(status)
     };
 }
 
 /**
  * Poll until permission arrives, spec §4's "continue automatically".
  *
+ * NO TIMEOUT. Field log, 2026-09-24: the old two-minute limit expired while
+ * the user was still in System Settings, and put a "Permission not granted"
+ * error in front of them with a button to open the window they already had
+ * open. They flipped the toggle, chose Later, pressed Try again, and the very
+ * first probe said granted. Nothing about the grant needs a relaunch or a
+ * deadline, so the wait simply lasts until the grant, a Cancel, or a probe
+ * that keeps failing for some other reason.
+ *
  * Returns a report in every case — there is no throw here, because every
- * outcome is a screen. A timeout leaves `permitted` false and the caller offers
- * retry; nothing about this makes the user start over.
+ * outcome is a screen.
  */
 export async function awaitAppManagement(options: AwaitAppManagementOptions): Promise<AppManagementReport> {
-    const interval = options.pollIntervalMs ?? DEFAULT_PERMISSION_POLL_INTERVAL_MS;
-    const timeoutMs = options.timeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS;
+    const fast = options.pollIntervalMs ?? DEFAULT_PERMISSION_POLL_INTERVAL_MS;
+    const slow = options.slowPollIntervalMs ?? DEFAULT_PERMISSION_SLOW_POLL_INTERVAL_MS;
+    const slowAfter = options.slowAfterMs ?? DEFAULT_PERMISSION_SLOW_AFTER_MS;
+    const maxUnknown = options.maxConsecutiveUnknown ?? MAX_CONSECUTIVE_UNKNOWN;
     const clock = options.clock ?? Date.now;
     const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
+    const cancelled = options.isCancelled ?? (() => false);
     const startedAt = clock();
 
     let attempts = 0;
-    let status = options.probe();
-    attempts += 1;
-    options.onAttempt?.(status, attempts);
+    let unknownRun = 0;
+    let status: AppManagementStatus = "blocked";
 
-    // `unknown` is polled too: the commonest cause is a transient filesystem
-    // state, and giving up on the first one would strand a user whose next
-    // probe would have succeeded.
-    while (status !== "granted" && status !== "not-required") {
-        if (clock() - startedAt >= timeoutMs) return toReport(status, attempts, true);
-        await sleep(interval);
+    for (;;) {
+        if (cancelled()) return toReport(status, attempts, { cancelled: true });
         status = options.probe();
         attempts += 1;
         options.onAttempt?.(status, attempts);
-    }
 
-    return toReport(status, attempts, false);
+        if (status === "granted" || status === "not-required") return toReport(status, attempts);
+
+        // `unknown` is polled too, for a while: the commonest cause is a
+        // transient filesystem state. A long unbroken run of it is not.
+        unknownRun = status === "unknown" ? unknownRun + 1 : 0;
+        if (unknownRun >= maxUnknown) return toReport(status, attempts, { failed: true });
+
+        await sleep(clock() - startedAt >= slowAfter ? slow : fast);
+    }
 }

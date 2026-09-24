@@ -232,3 +232,22 @@ describe("removing", () => {
         expect(schtasks.calls).toEqual([]);
     });
 });
+
+describe("taskCommandFromXml", () => {
+    it("reads the Command back out of a definition we rendered", async () => {
+        const { renderScheduledTaskXml, helperScheduledTaskSpec, taskCommandFromXml } = await import("../src/helper/scheduledTask.js");
+        const exe = "C:\\Users\\A & B\\Subline\\Subline.exe";
+        expect(taskCommandFromXml(renderScheduledTaskXml(helperScheduledTaskSpec(exe)))).toBe(exe);
+    });
+
+    it("tolerates UTF-16 output decoded as UTF-8 (a NUL after every character)", async () => {
+        const { taskCommandFromXml } = await import("../src/helper/scheduledTask.js");
+        const doubled = [..."<Command>C:\\S\\Subline.exe</Command>"].map(ch => `${ch}\u0000`).join("");
+        expect(taskCommandFromXml(doubled)).toBe("C:\\S\\Subline.exe");
+    });
+
+    it("is null when there is no Command", async () => {
+        const { taskCommandFromXml } = await import("../src/helper/scheduledTask.js");
+        expect(taskCommandFromXml("ERROR: The system cannot find the file specified.")).toBeNull();
+    });
+});

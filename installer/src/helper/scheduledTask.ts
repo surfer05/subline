@@ -163,6 +163,28 @@ export interface SchtasksPort {
     remove(name: string): Promise<Result<true>>;
     /** `schtasks /Query /TN <name>` — is it registered right now? */
     exists(name: string): Promise<boolean>;
+    /**
+     * The executable the registered task runs (its `<Command>`), or null when
+     * there is no such task or its definition cannot be read.
+     */
+    queryCommand(name: string): Promise<string | null>;
+}
+
+/** The `<Command>` of a task definition from `schtasks /Query /XML`, unescaped. */
+export function taskCommandFromXml(document: string): string | null {
+    // NULs stripped first: if schtasks hands back UTF-16 that was decoded as
+    // UTF-8, every ASCII character arrives followed by a NUL. Not verified on a
+    // real Windows either way, so the parse tolerates both. A miss only costs a
+    // re-registration, which is idempotent.
+    const match = /<Command>([^<]*)<\/Command>/.exec(document.replace(/\u0000/g, ""));
+    if (match === null) return null;
+    return (match[1] ?? "")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, "\"")
+        .replace(/&apos;/g, "'")
+        .replace(/&amp;/g, "&")
+        .trim();
 }
 
 export interface InstallScheduledTaskOptions {

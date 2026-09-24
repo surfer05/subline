@@ -27,7 +27,7 @@ import { DiagnosticsLog } from "../app/log.js";
 import { InstallFlow } from "../app/flow.js";
 import type { FlowAction, FlowState } from "../app/flow.js";
 import {
-    APP_MANAGEMENT_SETTINGS_URL, awaitAppManagement, probeAppManagement, worstAppManagementStatus
+    APP_MANAGEMENT_SETTINGS_URL, awaitAppManagement, isLoggedAttempt, probeAppManagement, worstAppManagementStatus
 } from "../app/appManagement.js";
 import { uninstall } from "../app/uninstall.js";
 import type { UninstallReport } from "../app/uninstall.js";
@@ -236,7 +236,9 @@ function createFlow(): InstallFlow {
         appResourcesPath: appResourcesPath(),
         productVersion: app.getVersion(),
         log,
-        helper: helperWiring()
+        helper: helperWiring(),
+        // An unpackaged dev run's "app" is the Electron binary in node_modules.
+        repairHelper: app.isPackaged
     });
     const created = new InstallFlow(ports);
     created.onChange = (state: FlowState) => send("flow:state", state);
@@ -417,6 +419,16 @@ ipcMain.handle("helper:status", async () => ({
 /** What the helper had to say while the app was closed (see `alerts.ts`). */
 ipcMain.handle("helper:alerts", () => readPendingAlerts(productDirFor()));
 
+/**
+ * Set by the Cancel button on the uninstall permission screen. The wait has no
+ * timeout, so Cancel is the only way out of it short of a grant.
+ */
+let uninstallPermissionCancelled = false;
+ipcMain.handle("uninstall:cancel", () => {
+    uninstallPermissionCancelled = true;
+    log.info("uninstall.permission.cancel");
+});
+
 ipcMain.handle("uninstall:run", async (
     _event,
     options: { keepSettings: boolean; closeDiscord?: "ask" | "force" }
@@ -448,16 +460,26 @@ ipcMain.handle("uninstall:run", async (
     log.info("uninstall.permission.probe", { status, installs: installs.length });
     if (status !== "granted" && status !== "not-required") {
         phase("permission");
+        uninstallPermissionCancelled = false;
         await shell.openExternal(APP_MANAGEMENT_SETTINGS_URL);
+        // The same wait as the install: no timeout, until the grant or Cancel.
         const report = await awaitAppManagement({
             probe,
-            onAttempt: (attemptStatus, attempt) => log.info("uninstall.permission.attempt", { status: attemptStatus, attempt })
+            isCancelled: () => uninstallPermissionCancelled,
+            onAttempt: (attemptStatus, attempt) => {
+                if (isLoggedAttempt(attempt)) log.info("uninstall.permission.attempt", { status: attemptStatus, attempt });
+            }
         });
-        log.info("uninstall.permission.result", { status: report.status, attempts: report.attempts });
+        log.info("uninstall.permission.result", {
+            status: report.status,
+            attempts: report.attempts,
+            cancelled: report.cancelled,
+            failed: report.failed
+        });
         if (!report.permitted) {
-            // Nothing has been touched: no helper removed, no file moved. The
-            // renderer offers "Grant permission and remove", which lands back
-            // here and probes again.
+            // Nothing has been touched: no helper removed, no file moved.
+            // Cancelled: the renderer says so and nothing more. Failed: the
+            // probe itself kept erroring, and the renderer offers to try again.
             return {
                 restores: [],
                 helperStopped: false,
@@ -467,9 +489,15 @@ ipcMain.handle("uninstall:run", async (
                 settingsRemoved: false,
                 productDataRemoved: false,
                 translationCache: "left-in-discord-storage",
-                problems: [{ code: "PERMISSION_DENIED", message: report.summary, path: installs[0]?.resourcesPath }],
+                problems: report.cancelled
+                    ? []
+                    : [{ code: "IO_ERROR", message: report.summary, path: installs[0]?.resourcesPath }],
                 clean: false,
-                summary: `${report.summary} Nothing has been changed; Discord keeps working exactly as it does now.`
+                cancelled: report.cancelled,
+                permissionCheckFailed: report.failed,
+                summary: report.cancelled
+                    ? "Nothing was changed. Discord is exactly as it was."
+                    : `${report.summary} Nothing has been changed. Discord keeps working exactly as it does now.`
             };
         }
     }

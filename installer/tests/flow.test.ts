@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 import type { AppManagementStatus } from "../src/app/appManagement.js";
 import { ACTION_LABELS, IS_PRIMARY } from "../src/app/actions.js";
 import { InstallFlow, isConfirmedSuccess } from "../src/app/flow.js";
-import type { FlowPorts, FlowState, FlowStep, HelperInstallOutcome } from "../src/app/flow.js";
+import type { FlowPorts, FlowState, FlowStep, HelperEnsureReport, HelperInstallOutcome } from "../src/app/flow.js";
 import type { InstalledModBundle } from "../src/app/modInstall.js";
 import type { ModBundle } from "../src/bundle/bundle.js";
 import type { DiscordInstall } from "../src/patcher/locate.js";
@@ -117,6 +117,8 @@ interface Script {
     installBundle?: Result<InstalledModBundle>;
     patch?: Result<PatchReport> | (() => Result<PatchReport>);
     installHelper?: Array<Result<HelperInstallOutcome>>;
+    ensureHelper?: Result<HelperEnsureReport>;
+    permissionProbeError?: string | null;
     launch?: Result<true>;
     verify?: VerificationReport;
     discordLocale?: string | null;
@@ -139,6 +141,7 @@ interface Harness {
     /** How many times the mod bundle was copied to its runtime location. */
     bundleInstalls: number;
     helperInstalls: number;
+    helperEnsures: number;
     launched: number;
     /** The step names, in order, every transition passed through. */
     steps: FlowStep[];
@@ -161,6 +164,7 @@ function harness(script: Script = {}): Harness {
         verifyCalls: [],
         bundleInstalls: 0,
         helperInstalls: 0,
+        helperEnsures: 0,
         launched: 0,
         steps: []
     } as unknown as Harness;
@@ -201,6 +205,7 @@ function harness(script: Script = {}): Harness {
             const index = Math.min(permissionCall++, statuses.length - 1);
             return statuses[index] as AppManagementStatus;
         },
+        lastPermissionProbeError: () => script.permissionProbeError ?? null,
         openPermissionSettings: async () => { h.settingsOpened += 1; },
         permissionSettingsUrl: "x-apple.systempreferences:com.apple.preference.security?Privacy_AppBundles",
 
@@ -237,6 +242,13 @@ function harness(script: Script = {}): Harness {
             const index = Math.min(helperCall++, scripted.length - 1);
             return scripted[index] as Result<HelperInstallOutcome>;
         },
+        ensureHelper: async () => {
+            h.helperEnsures += 1;
+            return script.ensureHelper ?? {
+                ok: true,
+                value: { action: "unchanged", reason: null, registered: "/Applications/Subline.app/Contents/MacOS/Subline", expected: "/Applications/Subline.app/Contents/MacOS/Subline" }
+            };
+        },
         launchDiscord: async () => {
             h.launched += 1;
             t += 500;
@@ -252,7 +264,8 @@ function harness(script: Script = {}): Harness {
         },
 
         permissionPollIntervalMs: 10,
-        permissionTimeoutMs: 100,
+        permissionSlowPollIntervalMs: 30,
+        permissionSlowAfterMs: 1_200,
         quitGracePeriodMs: 100,
         verifyTimeoutMs: 100,
         verifyPollIntervalMs: 10
@@ -617,6 +630,50 @@ describe("a Discord we already patched", () => {
         expect(state.step).toBe("already-installed");
         expect(h.patchCalls).toHaveLength(0);
         expect(state.actions).toEqual(["finish"]);
+    });
+
+    it("checks the helper registration on the way to already-set-up, and logs it", async () => {
+        const h = harness({ inspect: { ok: true, value: installState("patched-by-us", "subline") } });
+        const state = await h.flow.start();
+
+        expect(state.step).toBe("already-installed");
+        expect(h.helperEnsures).toBe(1);
+        expect(state.detail).toContain("Updates are handled in the background.");
+        expect(h.logged.find(line => line.event === "helper.ensure")?.fields).toMatchObject({ action: "unchanged" });
+    });
+
+    it("logs a repair, with where the helper pointed and where it points now", async () => {
+        const h = harness({
+            inspect: { ok: true, value: installState("patched-by-us", "subline") },
+            ensureHelper: {
+                ok: true,
+                value: {
+                    action: "repaired",
+                    reason: "points-elsewhere",
+                    registered: "/Users/x/Downloads/Subline.app/Contents/MacOS/Subline",
+                    expected: "/Applications/Subline.app/Contents/MacOS/Subline"
+                }
+            }
+        });
+        await h.flow.start();
+        expect(h.logged.find(line => line.event === "helper.ensure")?.fields).toEqual({
+            action: "repaired",
+            reason: "points-elsewhere",
+            registered: "/Users/x/Downloads/Subline.app/Contents/MacOS/Subline",
+            expected: "/Applications/Subline.app/Contents/MacOS/Subline"
+        });
+    });
+
+    it("says so, and still shows the screen, when the helper cannot be repaired", async () => {
+        const h = harness({
+            inspect: { ok: true, value: installState("patched-by-us", "subline") },
+            ensureHelper: { ok: false, error: fail("HELPER_REGISTRATION_FAILED", "launchctl refused.") }
+        });
+        const state = await h.flow.start();
+        expect(state.step).toBe("already-installed");
+        expect(state.detail).toContain("Background updates could not be turned on.");
+        expect(state.detail).not.toContain("—");
+        expect(h.logged.some(line => line.event === "helper.ensure-failed" && line.level === "error")).toBe(true);
     });
 
     it("never re-patches a working install", async () => {
@@ -1144,50 +1201,139 @@ describe("macOS App Management", () => {
         expect(h.launched).toBe(1);
     });
 
-    it("does not die when the grant never arrives — it offers retry", async () => {
-        const h = harness({ permission: ["blocked"] });
+    it("shows ONE waiting screen: Turn on Subline, Later, carries on by itself", async () => {
+        const h = harness({ permission: ["blocked", "blocked", "granted"] });
+        const seen: FlowState[] = [];
+        h.flow.onChange = next => { h.steps.push(next.step); seen.push(next); };
+        await toDetection(h);
+        await setLanguage(h.flow, "tr");
+        await h.flow.send({ type: "next" });
+
+        const waiting = seen.filter(state => state.step === "permission-waiting");
+        expect(waiting).toHaveLength(1);
+        expect(waiting[0]?.detail).toBe(
+            "In the window that just opened, turn on **Subline**. If macOS asks to quit, choose **Later**. "
+            + "Subline carries on by itself."
+        );
+        // "Open it again" and Cancel. No Try again, no primary Open System Settings.
+        expect(waiting[0]?.actions).toEqual(["open-permission-settings", "cancel"]);
+        expect(waiting.flatMap(state => state.actions).some(action => IS_PRIMARY[action])).toBe(false);
+        expect(ACTION_LABELS["open-permission-settings"]).toBe("Open it again");
+    });
+
+    it("waits with no timeout: ten minutes of blocked, then the grant, and it carries on", async () => {
+        // Field log 2026-09-24: the old 2-minute limit showed an error while
+        // the user was still in System Settings.
+        let calls = 0;
+        const h = harness();
+        h.ports.probePermission = () => (++calls > 601 ? "granted" : "blocked");
+        await toDetection(h);
+        await setLanguage(h.flow, "tr");
+        const state = await h.flow.send({ type: "next" });
+        const settled = state.step === "done" && h.flow.settled ? await h.flow.settled() : state;
+
+        expect(settled.step).toBe("done");
+        expect(h.steps).not.toContain("permission-failed");
+        expect(h.settingsOpened).toBe(1);
+        expect(h.patchCalls).toHaveLength(1);
+    });
+
+    it("logs the first attempt and every 30th, plus the result, not one line per probe", async () => {
+        let calls = 0;
+        const h = harness();
+        h.ports.probePermission = () => (++calls > 95 ? "granted" : "blocked");
+        await toDetection(h);
+        await setLanguage(h.flow, "tr");
+        await h.flow.send({ type: "next" });
+
+        const attempts = h.logged.filter(line => line.event === "permission.attempt").map(line => line.fields.attempt);
+        // Probe 1 is the explain screen's own check; the wait's attempts count from its first probe.
+        expect(attempts).toEqual([1, 30, 60, 90]);
+        const result = h.logged.find(line => line.event === "permission.result");
+        expect(result?.fields).toMatchObject({ status: "granted", attempts: 95, cancelled: false, failed: false });
+    });
+
+    it("Cancel stops the wait and nothing is patched, even if the grant lands right after", async () => {
+        let calls = 0;
+        const h = harness();
+        h.ports.probePermission = () => {
+            calls += 1;
+            // Pressed while the 5th probe is running; the 6th would say granted.
+            if (calls === 5) void h.flow.send({ type: "cancel" });
+            return calls >= 6 ? "granted" : "blocked";
+        };
         await toDetection(h);
         await setLanguage(h.flow, "tr");
         const state = await h.flow.send({ type: "next" });
 
-        expect(state.step).toBe("permission-blocked");
-        expect(state.error?.code).toBe("PERMISSION_DENIED");
-        expect(state.actions).toContain("retry");
-        expect(state.actions).toContain("open-permission-settings");
-        // UPDATED with the copy. Same two promises as before, said shorter: the
-        // way out is bold (the toggle and the button), and nothing already
-        // chosen is lost. Was "Everything else you have chosen is saved".
-        expect(state.detail).toContain("**App Management**");
-        expect(state.detail).toContain("**Try again**");
-        expect(state.detail).toContain("Nothing you chose is lost");
-        // The computed summary still leads, so the screen says what macOS did.
-        expect(state.detail.startsWith(state.error?.message ?? "")).toBe(true);
+        expect(state.step).toBe("cancelled");
+        expect(h.patchCalls).toHaveLength(0);
+        expect(calls).toBe(5);
     });
 
-    it("retries from where it left off, without redoing the language step", async () => {
+    it("Cancel pressed during the very probe that says granted still means no patch", async () => {
         let calls = 0;
         const h = harness();
-        h.ports.probePermission = () => (++calls > 12 ? "granted" : "blocked");
+        h.ports.probePermission = () => {
+            calls += 1;
+            if (calls === 4) { void h.flow.send({ type: "cancel" }); return "granted"; }
+            return "blocked";
+        };
         await toDetection(h);
         await setLanguage(h.flow, "tr");
-        const blocked = await h.flow.send({ type: "next" });
-        expect(blocked.step).toBe("permission-blocked");
+        const state = await h.flow.send({ type: "next" });
 
-        const state = await h.flow.send({ type: "retry" });
-        expect(state.step).toBe("done");
-        // The language was written once, at the language step. Retrying permission
-        // does not re-ask for anything.
-        expect(h.languageWrites).toEqual(["tr"]);
+        expect(state.step).toBe("cancelled");
+        expect(h.patchCalls).toHaveLength(0);
     });
 
-    it("can re-open System Settings without leaving the waiting screen", async () => {
-        const h = harness({ permission: ["blocked"] });
+    it("Open it again re-opens the pane without leaving the waiting screen", async () => {
+        let calls = 0;
+        const h = harness();
+        const during: FlowState[] = [];
+        h.ports.probePermission = () => {
+            calls += 1;
+            if (calls === 3) void h.flow.send({ type: "open-permission-settings" }).then(state => during.push(state));
+            return calls >= 6 ? "granted" : "blocked";
+        };
         await toDetection(h);
         await setLanguage(h.flow, "tr");
         await h.flow.send({ type: "next" });
-        const state = await h.flow.send({ type: "open-permission-settings" });
-        expect(state.step).toBe("permission-blocked");
+
+        expect(during[0]?.step).toBe("permission-waiting");
         expect(h.settingsOpened).toBe(2);
+        expect(h.patchCalls).toHaveLength(1);
+    });
+
+    it("a check that keeps failing for another reason is a real error, with its cause and Try again", async () => {
+        const h = harness({ permission: ["unknown"], permissionProbeError: "ENOENT: no such file or directory" });
+        await toDetection(h);
+        await setLanguage(h.flow, "tr");
+        const state = await h.flow.send({ type: "next" });
+
+        expect(state.step).toBe("permission-failed");
+        expect(state.error?.code).toBe("IO_ERROR");
+        expect(state.error?.cause).toBe("ENOENT: no such file or directory");
+        expect(state.error?.path).toBe(INSTALL.resourcesPath);
+        expect(state.actions).toEqual(["retry", "cancel"]);
+        expect(state.detail).toContain("**Try again**");
+        expect(h.logged.some(line => line.event === "permission.check-failed")).toBe(true);
+    });
+
+    it("Try again after a failed check waits again and carries on once it works", async () => {
+        let calls = 0;
+        const h = harness({ permissionProbeError: "EIO: i/o error" });
+        h.ports.probePermission = () => (++calls > 40 ? "granted" : "unknown");
+        await toDetection(h);
+        await setLanguage(h.flow, "tr");
+        const failed = await h.flow.send({ type: "next" });
+        expect(failed.step).toBe("permission-failed");
+
+        const state = await h.flow.send({ type: "retry" });
+        const settled = state.step === "done" && h.flow.settled ? await h.flow.settled() : state;
+        expect(settled.step).toBe("done");
+        // The language was written once. Retrying does not re-ask for anything.
+        expect(h.languageWrites).toEqual(["tr"]);
     });
 
     it("goes back to the permission screen if a patch is refused despite the probe", async () => {
@@ -1471,7 +1617,12 @@ describe("every screen the flow can reach", () => {
                           await toDetection(h); seen.push(await setLanguage(h.flow, "tr")); },
             async () => { const h = harness(); await toDetection(h);
                           seen.push(await setLanguage(h.flow, "tr")); },
-            async () => { const h = harness(); seen.push(await h.flow.send({ type: "cancel" })); }
+            async () => { const h = harness(); seen.push(await h.flow.send({ type: "cancel" })); },
+            async () => { const h = harness({ permission: ["unknown"] }); await toDetection(h);
+                          await setLanguage(h.flow, "tr"); seen.push(await h.flow.send({ type: "next" })); },
+            async () => { const h = harness({ permission: ["blocked", "blocked", "granted"] });
+                          h.flow.onChange = state => { if (state.step === "permission-waiting") seen.push(state); };
+                          await toDetection(h); await setLanguage(h.flow, "tr"); await h.flow.send({ type: "next" }); }
         ];
         for (const run of runs) await run();
         void record;

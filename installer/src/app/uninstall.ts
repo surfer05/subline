@@ -134,6 +134,10 @@ export interface UninstallReport {
     problems: PatcherError[];
     /** True when nothing is left of Subline and Discord is untouched. */
     clean: boolean;
+    /** True when the user pressed Cancel before anything was changed. */
+    cancelled?: boolean;
+    /** True when the App Management check itself kept failing, before anything was changed. */
+    permissionCheckFailed?: boolean;
     summary: string;
 }
 

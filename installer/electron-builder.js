@@ -210,11 +210,18 @@ const config = {
 
     dmg: {
         /**
-         * The DMG is not signed here: the app inside it is signed, notarized and
-         * stapled, which is what Gatekeeper checks when the app is launched.
-         * `scripts/release.mjs` notarizes and staples the DMG itself afterwards,
-         * because the DMG is the file that carries the quarantine flag.
+         * The app inside is signed, notarized and stapled, which is what
+         * Gatekeeper checks when the app is launched. `scripts/release.mjs`
+         * notarizes and staples the DMG itself afterwards, because the DMG is
+         * the file that carries the quarantine flag.
+         *
+         * A SIGNED build also signs the DMG (0.1.5, the first signed release).
+         * `spctl --assess --type open --context context:primary-signature`
+         * assesses the image's OWN signature, which an unsigned image does not
+         * have. Unsigned builds leave it alone, so a local build still never
+         * reaches the keychain.
          */
+        ...(SIGNING_REQUESTED ? { sign: true } : {}),
         writeUpdateInfo: false
     },
 

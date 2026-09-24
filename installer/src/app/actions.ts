@@ -31,7 +31,9 @@ export const ACTION_LABELS: Record<FlowActionType, string> = {
     // Says what is being declined: a code, not ✦. A free install still gets
     // 3 ✦ a day by pressing ⚡, so "Use free Google only" was false.
     "skip-code": "Continue without a code",
-    "open-permission-settings": "Open System Settings",
+    // Secondary: Subline already opened the pane itself. This is for someone
+    // who closed it or lost it behind another window.
+    "open-permission-settings": "Open it again",
     retry: "Try again",
     // Named for what it costs, not for what it skips. "Continue" here would let
     // someone give up the thing that keeps their install alive without ever
@@ -63,7 +65,7 @@ const IS_PRIMARY: Record<FlowActionType, boolean> = {
     "set-language": true,
     "set-code": true,
     "skip-code": false,
-    "open-permission-settings": true,
+    "open-permission-settings": false,
     retry: true,
     "skip-helper": false,
     "skip-launch": false,

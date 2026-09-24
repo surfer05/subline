@@ -21,6 +21,7 @@ import {
 import { HELPER_LABEL } from "../src/helper/launchAgent.js";
 import type { LaunchctlPort } from "../src/helper/launchAgent.js";
 import type { SchtasksPort } from "../src/helper/scheduledTask.js";
+import { taskCommandFromXml } from "../src/helper/scheduledTask.js";
 import { buildAsar } from "../src/patcher/asar.js";
 import type { DiscordInstall } from "../src/patcher/locate.js";
 import { stableIdFor } from "../src/patcher/locate.js";
@@ -344,6 +345,8 @@ export interface FakeSchtasks extends SchtasksPort {
     lastSimpleCommand: string | null;
     /** Report the task as absent even after a successful create. */
     lieAboutRegistered: boolean;
+    /** What each registered task runs, as `queryCommand` reports it. Tests may seed it. */
+    commands: Map<string, string>;
 }
 
 /**
@@ -366,6 +369,7 @@ export function makeFakeSchtasks(overrides: Partial<FakeSchtasks> = {}): FakeSch
         lastSimpleCommand: null,
         failRemove: false,
         lieAboutRegistered: false,
+        commands: new Map<string, string>(),
         async create(name: string, xmlPath: string) {
             fake.calls.push(`create ${name}`);
             try {
@@ -382,7 +386,11 @@ export function makeFakeSchtasks(overrides: Partial<FakeSchtasks> = {}): FakeSch
                     error: { code: "HELPER_REGISTRATION_FAILED" as const, message: "schtasks said no" }
                 };
             }
-            if (!fake.lieAboutRegistered) fake.registered.add(name);
+            if (!fake.lieAboutRegistered) {
+                fake.registered.add(name);
+                const command = fake.lastXml === null ? null : taskCommandFromXml(fake.lastXml);
+                if (command !== null) fake.commands.set(name, command);
+            }
             return { ok: true as const, value: true as const };
         },
         async createSimple(name: string, command: string) {
@@ -406,11 +414,16 @@ export function makeFakeSchtasks(overrides: Partial<FakeSchtasks> = {}): FakeSch
                 };
             }
             fake.registered.delete(name);
+            fake.commands.delete(name);
             return { ok: true as const, value: true as const };
         },
         async exists(name: string) {
             fake.calls.push(`query ${name}`);
             return fake.registered.has(name);
+        },
+        async queryCommand(name: string) {
+            fake.calls.push(`query-command ${name}`);
+            return fake.registered.has(name) ? fake.commands.get(name) ?? null : null;
         },
         ...overrides
     };

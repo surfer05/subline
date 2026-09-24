@@ -21,7 +21,7 @@
  * real `~/Library/LaunchAgents` has no Subline agent in it.
  */
 
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -31,7 +31,7 @@ import type { FlowState } from "../src/app/flow.js";
 import { uninstall } from "../src/app/uninstall.js";
 import { HELPER_FLAG, HELPER_LABEL, launchAgentPlistPath, readLaunchAgentPlist } from "../src/helper/launchAgent.js";
 import { HELPER_TASK_NAME } from "../src/helper/scheduledTask.js";
-import { installHelperFor, removeHelperFor } from "../src/main/ports.js";
+import { ensureHelperFor, firstProgramArgument, installHelperFor, removeHelperFor } from "../src/main/ports.js";
 import type { UnpatchReport } from "../src/patcher/patch.js";
 import type { Result } from "../src/patcher/result.js";
 import { makeFakeLaunchctl, makeFakeSchtasks } from "./fixture.js";
@@ -481,6 +481,116 @@ function realAgentFingerprint(): string | null {
     return `${s.size}:${s.mtimeMs}`;
 }
 const REAL_AGENT_BEFORE = realAgentFingerprint();
+
+/* ------------------------------------------------------------------------ *
+ * ensureHelperFor: "already set up" repairs a helper that points elsewhere
+ * ------------------------------------------------------------------------ */
+
+describe("ensureHelperFor", () => {
+    const EXE = `${APP_PATH}/Contents/MacOS/Subline`;
+    const DELETED_APP = "/Users/x/Downloads/Subline 2.app";
+
+    it("re-registers a LaunchAgent that points at an app that is gone (the field bug)", async () => {
+        // What the field machine had: a plist naming a deleted app path.
+        await installHelperFor({ ...wiring(), appPath: DELETED_APP }, "darwin", home);
+        expect(firstProgramArgument(readLaunchAgentPlist(launchAgentPlistPath(home)) ?? "")).toBe(`${DELETED_APP}/Contents/MacOS/Subline`);
+        launchctl.calls.length = 0;
+
+        const result = await ensureHelperFor(wiring(), "darwin", home);
+        expect(result.ok).toBe(true);
+        if (!result.ok) throw new Error(result.error.message);
+        expect(result.value).toEqual({
+            action: "repaired",
+            reason: "points-elsewhere",
+            registered: `${DELETED_APP}/Contents/MacOS/Subline`,
+            expected: EXE
+        });
+        expect(firstProgramArgument(readLaunchAgentPlist(launchAgentPlistPath(home)) ?? "")).toBe(EXE);
+        // Booted out and bootstrapped again, so launchd holds the new path now,
+        // not at the next login.
+        expect(launchctl.calls).toContain(`bootout gui/${UID}/${HELPER_LABEL}`);
+        expect(launchctl.calls).toContain(`bootstrap gui/${UID} ${launchAgentPlistPath(home)}`);
+        expect(launchctl.loaded.has(HELPER_LABEL)).toBe(true);
+    });
+
+    it("leaves a correct, loaded LaunchAgent untouched", async () => {
+        await installHelperFor(wiring(), "darwin", home);
+        const before = readLaunchAgentPlist(launchAgentPlistPath(home));
+        const mtime = statSync(launchAgentPlistPath(home)).mtimeMs;
+        launchctl.calls.length = 0;
+
+        const result = await ensureHelperFor(wiring(), "darwin", home);
+        expect(result.ok && result.value).toEqual({ action: "unchanged", reason: null, registered: EXE, expected: EXE });
+        expect(readLaunchAgentPlist(launchAgentPlistPath(home))).toBe(before);
+        expect(statSync(launchAgentPlistPath(home)).mtimeMs).toBe(mtime);
+        // Looked, touched nothing.
+        expect(launchctl.calls.filter(call => call.startsWith("bootstrap") || call.startsWith("bootout"))).toEqual([]);
+    });
+
+    it("registers it when the plist is missing", async () => {
+        const result = await ensureHelperFor(wiring(), "darwin", home);
+        expect(result.ok && result.value.action).toBe("repaired");
+        expect(result.ok && result.value.reason).toBe("missing");
+        expect(existsSync(launchAgentPlistPath(home))).toBe(true);
+    });
+
+    it("re-registers a correct plist that launchd is not running", async () => {
+        await installHelperFor(wiring(), "darwin", home);
+        launchctl.loaded.clear();
+        const result = await ensureHelperFor(wiring(), "darwin", home);
+        expect(result.ok && result.value.reason).toBe("not-loaded");
+        expect(launchctl.loaded.has(HELPER_LABEL)).toBe(true);
+    });
+
+    it("never re-points the helper at a copy running off the .dmg", async () => {
+        await installHelperFor(wiring(), "darwin", home);
+        const before = readLaunchAgentPlist(launchAgentPlistPath(home));
+        const result = await ensureHelperFor({ ...wiring(), appPath: "/Volumes/Subline/Subline.app" }, "darwin", home);
+        expect(result.ok && result.value.action).toBe("skipped");
+        expect(readLaunchAgentPlist(launchAgentPlistPath(home))).toBe(before);
+    });
+
+    it("reports a registration failure rather than claiming a repair", async () => {
+        mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
+        writeFileSync(launchAgentPlistPath(home), "<plist><dict><key>ProgramArguments</key><array><string>/gone/Subline</string></array></dict></plist>");
+        launchctl.failBootstrap = true;
+        const result = await ensureHelperFor(wiring(), "darwin", home);
+        expect(result.ok).toBe(false);
+        if (result.ok) throw new Error("expected a refusal");
+        expect(result.error.code).toBe("HELPER_REGISTRATION_FAILED");
+    });
+
+    it("Windows: re-registers a Scheduled Task that runs a different Subline.exe", async () => {
+        const OLD_EXE = "C:\\Users\\x\\Downloads\\Subline\\Subline.exe";
+        await installHelperFor({ ...windowsWiring(), executablePath: OLD_EXE }, "win32", home);
+        expect(schtasks.commands.get(HELPER_TASK_NAME)).toBe(OLD_EXE);
+
+        const result = await ensureHelperFor(windowsWiring(), "win32", home);
+        expect(result.ok && result.value).toEqual({
+            action: "repaired",
+            reason: "points-elsewhere",
+            registered: OLD_EXE,
+            expected: WINDOWS_EXE
+        });
+        expect(schtasks.commands.get(HELPER_TASK_NAME)).toBe(WINDOWS_EXE);
+    });
+
+    it("Windows: leaves a task that already runs this Subline.exe untouched (case-insensitive)", async () => {
+        await installHelperFor(windowsWiring(), "win32", home);
+        schtasks.commands.set(HELPER_TASK_NAME, WINDOWS_EXE.toUpperCase());
+        schtasks.calls.length = 0;
+
+        const result = await ensureHelperFor(windowsWiring(), "win32", home);
+        expect(result.ok && result.value.action).toBe("unchanged");
+        expect(schtasks.calls.filter(call => call.startsWith("create"))).toEqual([]);
+    });
+
+    it("Windows: registers the task when there is none", async () => {
+        const result = await ensureHelperFor(windowsWiring(), "win32", home);
+        expect(result.ok && result.value.reason).toBe("missing");
+        expect(schtasks.registered.has(HELPER_TASK_NAME)).toBe(true);
+    });
+});
 
 describe("this suite does not install anything", () => {
     it("leaves the real ~/Library/LaunchAgents exactly as it found it", () => {

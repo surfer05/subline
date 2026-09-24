@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld("subline", {
     readDiagnostics: () => ipcRenderer.invoke("diagnostics:read"),
     uninstall: (options: { keepSettings: boolean; closeDiscord?: "ask" | "force" }) =>
         ipcRenderer.invoke("uninstall:run", options),
+    /** Stop waiting for App Management during an uninstall. */
+    cancelUninstall: () => ipcRenderer.invoke("uninstall:cancel"),
     openUrl: (url: string) => ipcRenderer.invoke("shell:open", url),
     onState: (handler: (state: unknown) => void) => {
         const listener = (_event: unknown, state: unknown): void => handler(state);

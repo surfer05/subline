@@ -7,8 +7,9 @@ import {
     APP_MANAGEMENT_SETTINGS_URL,
     awaitAppManagement,
     probeAppManagement,
-    PROBE_FILENAME,
-    RELAUNCH_ADVICE_AFTER_ATTEMPTS
+    isLoggedAttempt,
+    MAX_CONSECUTIVE_UNKNOWN,
+    PROBE_FILENAME
 } from "../src/app/appManagement.js";
 import type { AppManagementStatus } from "../src/app/appManagement.js";
 
@@ -68,6 +69,29 @@ describe("probeAppManagement", () => {
         expect(status).toBe("unknown");
     });
 
+    it("hands the errno of an unknown to onUnknown, so the log can say what happened", () => {
+        const causes: string[] = [];
+        probeAppManagement({
+            resourcesPath: dir,
+            platform: "darwin",
+            attemptWrite: () => { throw errnoError("ENOENT"); },
+            onUnknown: cause => causes.push(cause)
+        });
+        expect(causes).toHaveLength(1);
+        expect(causes[0]).toMatch(/^ENOENT: /);
+    });
+
+    it("does not call onUnknown for a plain block", () => {
+        const causes: string[] = [];
+        probeAppManagement({
+            resourcesPath: dir,
+            platform: "darwin",
+            attemptWrite: () => { throw errnoError("EPERM"); },
+            onUnknown: cause => causes.push(cause)
+        });
+        expect(causes).toEqual([]);
+    });
+
     it("writes its probe inside the resources directory it was given", () => {
         let seen: string | null = null;
         probeAppManagement({
@@ -92,7 +116,8 @@ describe("awaitAppManagement", () => {
         const report = await awaitAppManagement({ probe: () => "granted", ...fakeClockPorts() });
         expect(report.permitted).toBe(true);
         expect(report.attempts).toBe(1);
-        expect(report.timedOut).toBe(false);
+        expect(report.cancelled).toBe(false);
+        expect(report.failed).toBe(false);
     });
 
     function fakeClockPorts() {
@@ -110,7 +135,7 @@ describe("awaitAppManagement", () => {
         expect(report.permitted).toBe(true);
         expect(report.attempts).toBe(4);
         // The whole point: no relaunch, no re-run, no user action beyond the toggle.
-        expect(report.timedOut).toBe(false);
+        expect(report.failed).toBe(false);
     });
 
     it("keeps polling through an unknown, rather than giving up on the first one", async () => {
@@ -124,60 +149,70 @@ describe("awaitAppManagement", () => {
         expect(report.attempts).toBe(3);
     });
 
-    it("reports rather than throws when the window closes, so the caller can offer retry", async () => {
-        const report = await awaitAppManagement({
-            probe: () => "blocked",
-            timeoutMs: 5_000,
-            pollIntervalMs: 1_000,
-            ...fakeClockPorts()
-        });
-        expect(report.permitted).toBe(false);
-        expect(report.timedOut).toBe(true);
-        expect(report.status).toBe("blocked");
-        expect(report.summary).toContain("App Management");
-    });
-
-    it("does not poll forever", async () => {
-        const report = await awaitAppManagement({
-            probe: () => "blocked",
-            timeoutMs: 10_000,
-            pollIntervalMs: 1_000,
-            ...fakeClockPorts()
-        });
-        expect(report.attempts).toBeLessThanOrEqual(12);
-    });
-
-    it("advises granting first, and only escalates to relaunch after long enough", async () => {
-        const short = await awaitAppManagement({
-            probe: () => "blocked",
-            timeoutMs: 3_000,
-            pollIntervalMs: 1_000,
-            ...fakeClockPorts()
-        });
-        expect(short.advice).toBe("grant");
-        expect(short.summary).not.toContain("quit Subline");
-
-        const long = await awaitAppManagement({
-            probe: () => "blocked",
-            timeoutMs: RELAUNCH_ADVICE_AFTER_ATTEMPTS * 1_000 + 5_000,
-            pollIntervalMs: 1_000,
-            ...fakeClockPorts()
-        });
-        expect(long.attempts).toBeGreaterThanOrEqual(RELAUNCH_ADVICE_AFTER_ATTEMPTS);
-        expect(long.advice).toBe("relaunch");
-        expect(long.summary).toContain("quit Subline");
-    });
-
-    it("never advises relaunching once permission arrives, however long it took", async () => {
+    it("never times out on a block: field log 2026-09-24 had the grant arrive after the old 2-minute limit", async () => {
         let calls = 0;
         const report = await awaitAppManagement({
-            probe: () => (++calls > RELAUNCH_ADVICE_AFTER_ATTEMPTS + 5 ? "granted" : "blocked"),
-            timeoutMs: 600_000,
-            pollIntervalMs: 1_000,
+            // Ten minutes of "blocked" at one probe a second, then the toggle.
+            probe: () => (++calls > 600 ? "granted" : "blocked"),
             ...fakeClockPorts()
         });
         expect(report.permitted).toBe(true);
-        expect(report.advice).toBe("grant");
+        expect(report.failed).toBe(false);
+        expect(report.cancelled).toBe(false);
+        expect(report.attempts).toBe(601);
+    });
+
+    it("polls every second for two minutes, then every three", async () => {
+        let t = 0;
+        const sleeps: number[] = [];
+        let calls = 0;
+        await awaitAppManagement({
+            probe: () => (++calls > 200 ? "granted" : "blocked"),
+            clock: () => t,
+            sleep: async ms => { sleeps.push(ms); t += ms; }
+        });
+        // 120 one-second sleeps take the clock to 120s; every later sleep is 3s.
+        expect(sleeps.slice(0, 120).every(ms => ms === 1_000)).toBe(true);
+        expect(sleeps.slice(120).every(ms => ms === 3_000)).toBe(true);
+        expect(sleeps.length).toBe(200);
+    });
+
+    it("stops when cancelled, and makes no further probe", async () => {
+        let calls = 0;
+        let cancelled = false;
+        const report = await awaitAppManagement({
+            probe: () => {
+                calls += 1;
+                if (calls === 3) cancelled = true;
+                return "blocked";
+            },
+            isCancelled: () => cancelled,
+            ...fakeClockPorts()
+        });
+        expect(report.cancelled).toBe(true);
+        expect(report.permitted).toBe(false);
+        expect(report.failed).toBe(false);
+        expect(calls).toBe(3);
+    });
+
+    it("ends with failed only after a long unbroken run of unknown", async () => {
+        const report = await awaitAppManagement({ probe: () => "unknown", ...fakeClockPorts() });
+        expect(report.failed).toBe(true);
+        expect(report.permitted).toBe(false);
+        expect(report.status).toBe("unknown");
+        expect(report.attempts).toBe(MAX_CONSECUTIVE_UNKNOWN);
+        expect(report.summary).toContain("could not check");
+    });
+
+    it("a block in between resets the unknown count, so a wait on the toggle is never cut short", async () => {
+        let calls = 0;
+        const report = await awaitAppManagement({
+            // unknown, blocked, unknown, blocked ... for a long time, then granted.
+            probe: () => (++calls > 500 ? "granted" : calls % 2 === 0 ? "blocked" : "unknown"),
+            ...fakeClockPorts()
+        });
+        expect(report.permitted).toBe(true);
+        expect(report.failed).toBe(false);
     });
 
     it("reports every attempt, for the log and the live counter", async () => {
@@ -196,5 +231,14 @@ describe("awaitAppManagement", () => {
         const report = await awaitAppManagement({ probe: () => "not-required", ...fakeClockPorts() });
         expect(report.permitted).toBe(true);
         expect(report.attempts).toBe(1);
+    });
+});
+
+describe("isLoggedAttempt", () => {
+    it("logs the first attempt and every 30th, not one line a second forever", () => {
+        expect([1, 30, 60, 90].every(isLoggedAttempt)).toBe(true);
+        expect([2, 29, 31, 59, 61].some(isLoggedAttempt)).toBe(false);
+        const logged = Array.from({ length: 600 }, (_, i) => i + 1).filter(isLoggedAttempt);
+        expect(logged).toHaveLength(21);
     });
 });

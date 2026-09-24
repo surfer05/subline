@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { APP_MANAGEMENT_SETTINGS_URL, probeAppManagement } from "../app/appManagement.js";
-import type { FlowLogger, FlowPorts, HelperInstallOutcome } from "../app/flow.js";
+import type { FlowLogger, FlowPorts, HelperEnsureReport, HelperInstallOutcome } from "../app/flow.js";
 import type { HelperRemoval } from "../app/uninstall.js";
 import {
     discordSettingsPathFor,
@@ -34,10 +34,13 @@ import type { RunningProcess } from "../app/discordProcess.js";
 import { installModBundle, shippedModDirFor } from "../app/modInstall.js";
 import { inspectModBundle } from "../bundle/bundle.js";
 import {
-    HELPER_LABEL, helperLaunchAgentSpec, installLaunchAgent, launchAgentPlistPath, removeLaunchAgent
+    HELPER_LABEL, helperLaunchAgentSpec, installLaunchAgent, launchAgentPlistPath, readLaunchAgentPlist,
+    removeLaunchAgent, renderLaunchAgentPlist
 } from "../helper/launchAgent.js";
 import type { LaunchctlPort } from "../helper/launchAgent.js";
-import { helperScheduledTaskSpec, installScheduledTask, removeScheduledTask } from "../helper/scheduledTask.js";
+import {
+    HELPER_TASK_NAME, helperScheduledTaskSpec, installScheduledTask, removeScheduledTask
+} from "../helper/scheduledTask.js";
 import type { SchtasksPort } from "../helper/scheduledTask.js";
 import { modBundleDirFor, productDirFor } from "../bundle/layout.js";
 import { locateDiscordInstalls } from "../patcher/locate.js";
@@ -77,6 +80,12 @@ export interface RealPortsOptions {
      * test would pass, and the shipped installer would register nothing.
      */
     helper: HelperWiring;
+    /**
+     * False in an unpackaged dev run, whose "running app" is the Electron
+     * binary in node_modules: re-pointing the real helper at that would break
+     * it. Defaults to true.
+     */
+    repairHelper?: boolean;
 }
 
 export interface HelperWiring {
@@ -179,6 +188,85 @@ async function installWindowsHelper(wiring: HelperWiring): Promise<Result<Helper
         label: registered.value.name,
         path: registered.value.name
     });
+}
+
+/**
+ * Make sure the registered helper runs THIS app; re-register it when it does not.
+ *
+ * Field evidence: ~/Library/LaunchAgents/com.subline.helper.plist named an app
+ * path that had since been deleted. The user opened /Applications/Subline.app,
+ * saw "Subline is already set up", and the helper still could not run, because
+ * nothing on that path ever looked at the registration.
+ *
+ * macOS: the plist on disk must be exactly what `installHelperFor` would write
+ * for the running app, and launchd must have it loaded. Windows: the Scheduled
+ * Task's command must be the running Subline.exe. Anything else is repaired
+ * with the same code the install path uses, so there is one definition of what
+ * a correct registration is.
+ */
+export async function ensureHelperFor(
+    wiring: HelperWiring,
+    platform: NodeJS.Platform = process.platform,
+    home: string = homedir()
+): Promise<Result<HelperEnsureReport>> {
+    if (platform === "win32") {
+        const expected = wiring.executablePath ?? null;
+        if (wiring.schtasks === undefined || expected === null) {
+            return ok({ action: "skipped", reason: "no-scheduler", registered: null, expected });
+        }
+        const registered = await wiring.schtasks.queryCommand(HELPER_TASK_NAME);
+        // Windows paths are case-insensitive, and Task Scheduler may hand the
+        // command back with the quotes `createSimple` put round it.
+        const normalise = (path: string): string => path.trim().replace(/^"(.*)"$/, "$1").toLowerCase();
+        if (registered !== null && normalise(registered) === normalise(expected)) {
+            return ok({ action: "unchanged", reason: null, registered, expected });
+        }
+        const repaired = await installHelperFor(wiring, platform, home);
+        if (!repaired.ok) return repaired as Result<HelperEnsureReport>;
+        return ok({
+            action: "repaired",
+            reason: registered === null ? "missing" : "points-elsewhere",
+            registered,
+            expected
+        });
+    }
+    if (platform !== "darwin") return ok({ action: "skipped", reason: "no-helper-on-platform", registered: null, expected: null });
+
+    // Never re-point the helper at a copy that is about to vanish: the app run
+    // straight off the mounted .dmg, or a Gatekeeper-translocated copy.
+    if (wiring.appPath.startsWith("/Volumes/") || wiring.appPath.includes("/AppTranslocation/")) {
+        return ok({ action: "skipped", reason: "running-from-temporary-location", registered: null, expected: wiring.appPath });
+    }
+
+    const plistPath = launchAgentPlistPath(home);
+    const spec = helperLaunchAgentSpec(wiring.appPath, wiring.intervalSeconds, wiring.executableName);
+    const expected = spec.programArguments[0] ?? null;
+    const current = readLaunchAgentPlist(plistPath);
+    const registered = current === null ? null : firstProgramArgument(current);
+
+    let reason: string | null = null;
+    if (current === null) reason = "missing";
+    else if (registered !== expected) reason = "points-elsewhere";
+    else if (current !== renderLaunchAgentPlist(spec)) reason = "definition-changed";
+    else if (!await wiring.launchctl.isLoaded(HELPER_LABEL, wiring.uid)) reason = "not-loaded";
+
+    if (reason === null) return ok({ action: "unchanged", reason: null, registered, expected });
+
+    const repaired = await installHelperFor(wiring, platform, home);
+    if (!repaired.ok) return repaired as Result<HelperEnsureReport>;
+    return ok({ action: "repaired", reason, registered, expected });
+}
+
+/** The executable a LaunchAgent plist runs: the first ProgramArguments string, unescaped. */
+export function firstProgramArgument(plist: string): string | null {
+    const match = /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]*)<\/string>/.exec(plist);
+    if (match === null) return null;
+    return (match[1] ?? "")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, "\"")
+        .replace(/&apos;/g, "'")
+        .replace(/&amp;/g, "&");
 }
 
 /**
@@ -384,6 +472,7 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
     const shippedDir = shippedModDirFor(options.appResourcesPath);
     const runtimeDir = modBundleDirFor(platform, env, home);
     const vencordSettings = vencordSettingsPathFor(platform, env, home);
+    let lastProbeError: string | null = null;
 
     return {
         platform,
@@ -414,7 +503,17 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
         requestQuit: branch => requestQuit(branch, platform, exec),
         forceQuit: branch => forceQuit(branch, platform, exec),
 
-        probePermission: install => probeAppManagement({ resourcesPath: install.resourcesPath, platform }),
+        probePermission: install => probeAppManagement({
+            resourcesPath: install.resourcesPath,
+            platform,
+            onUnknown: cause => {
+                // Logged when it changes, not on every probe: the wait has no
+                // timeout, and the same errno once a second is noise.
+                if (cause !== lastProbeError) options.log.warn("permission.probe-unknown", { cause });
+                lastProbeError = cause;
+            }
+        }),
+        lastPermissionProbeError: () => lastProbeError,
         openPermissionSettings: () => openUrl(APP_MANAGEMENT_SETTINGS_URL, platform, exec),
         permissionSettingsUrl: APP_MANAGEMENT_SETTINGS_URL,
 
@@ -431,6 +530,9 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
                 overwriteForeignMod: patchOptions.overwriteForeignMod
             }),
         installHelper: () => installHelperFor(options.helper, platform, home),
+        ensureHelper: () => options.repairHelper === false
+            ? Promise.resolve(ok({ action: "skipped" as const, reason: "development-build", registered: null, expected: null }))
+            : ensureHelperFor(options.helper, platform, home),
         launchDiscord: install => launchDiscord(install, platform, exec),
         // The same platform/env/home the mod bundle was installed with. Without
         // these, `readBeacon` falls back to the process defaults and looks for
