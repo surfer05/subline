@@ -31,6 +31,7 @@ a:hover{color:var(--fg)}
 @media (max-width:640px){.wrap{padding:44px 20px}h2.sec{font-size:25px}}
 
 .tabs{display:flex;gap:6px;margin:26px 0 20px}
+.tabs[hidden]{display:none}
 .tab{font-family:inherit;font-size:13px;padding:7px 14px;border-radius:999px;border:1px solid var(--line);
   background:var(--panel);color:var(--muted);cursor:pointer}
 .tab[aria-selected="true"]{background:var(--accent-weak);border-color:color-mix(in oklab,var(--accent) 40%,var(--line));color:var(--fg)}
@@ -46,6 +47,9 @@ blockquote.os{margin:10px 0 0;padding:12px 14px;background:var(--panel);border:1
   border-radius:var(--radius-sm);font-size:13.5px;max-width:60ch}
 blockquote.os .src{display:block;font-family:var(--font-mono);font-size:10.5px;letter-spacing:.08em;
   text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+.os-label{margin:26px 0 8px;font-family:var(--font-serif);font-size:17px;font-weight:400}
+.js .os-label{display:none}
+ol.steps code{font-family:var(--font-mono);font-size:12.5px;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:1px 5px;overflow-wrap:anywhere}
 .why{border-left:3px solid var(--accent);background:var(--accent-weak);padding:16px 18px;
   border-radius:var(--radius-sm);margin-top:30px;max-width:64ch}
 .why h3{margin:0 0 6px;font-family:var(--font-serif);font-size:17px;font-weight:400}
@@ -56,22 +60,47 @@ blockquote.os .src{display:block;font-family:var(--font-mono);font-size:10.5px;l
 <p class="kicker">Installing</p>
 <h2 class="sec">The security warning</h2>
 <p class="lead">The builds aren't code-signed. I haven't paid for a certificate, so your computer shows a warning the first time you open the app. It's the unknown-developer warning, not a malware detection. Here are the steps.</p>
-<div class="tabs" role="tablist"><button class="tab" role="tab" data-tab="macos" aria-selected="true">macOS</button><button class="tab" role="tab" data-tab="windows" aria-selected="false">Windows</button></div>
-<ol class="steps" data-panel="macos">
+<div class="tabs" role="tablist" hidden><button class="tab" role="tab" data-tab="macos" aria-selected="true">macOS</button><button class="tab" role="tab" data-tab="windows" aria-selected="false">Windows</button></div>
+<div data-panel="macos">
+<h3 class="os-label">On a Mac</h3>
+<ol class="steps">
   <li><div><h3>Drag Subline to Applications.</h3>
     <p>From the .dmg you downloaded.</p></div></li>
-  <li><div><h3>Right-click Subline → Open.</h3>
+  <li><div><h3>Open Subline from Applications.</h3>
     <blockquote class="os"><span class="src">macOS says</span>Apple could not verify "Subline" is free of malware…</blockquote>
-    <p>Use right-click, not double-click. Right-click gives you an <b>Open</b> button.</p></div></li>
-  <li><div><h3>If that doesn't work: Settings → Privacy &amp; Security → Open Anyway.</h3>
-    <p>Confirm with your password. You only do this once.</p></div></li>
+    <p>Click <b>Done</b>. Do not move it to the Trash.</p></div></li>
+  <li><div><h3>Go to System Settings, then Privacy &amp; Security.</h3>
+    <p>Scroll down to Security. Click <b>Open Anyway</b>, then Open Anyway again, and enter your Mac password. The button shows for about an hour after step 2. You only do this once.</p>
+    <p>On macOS 14 or older, you can right-click Subline and choose Open instead.</p></div></li>
+  <li><div><h3>If it still won't open.</h3>
+    <p>If macOS says Subline is <b>damaged</b>, open Terminal and run <code>xattr -cr /Applications/Subline.app</code>. Then open Subline again.</p>
+    <p>If macOS says Subline is not supported on this Mac, you have an Intel Mac. Download the Intel version instead.</p></div></li>
+  <li><div><h3>Follow Subline's screens.</h3>
+    <p>Click Continue. If Discord is open, click <b>Quit Discord for me</b>. Pick the language you read.</p></div></li>
+  <li><div><h3>Paste your code, or skip it.</h3>
+    <p>Bought a plan? Paste the code from the Dodo Payments email and click <b>Save code</b>. Check spam. No code? Click <b>Use free Google only</b>. You still get 3 free ✦ a day.</p></div></li>
+  <li><div><h3>If asked, allow App Management.</h3>
+    <p>Click Continue. System Settings opens. Turn <b>Subline</b> on under App Management. If macOS asks to quit Subline, choose Later. Subline goes on by itself.</p></div></li>
+  <li><div><h3>Discord opens with Subline.</h3>
+    <p>Messages in other languages get a translation under them.</p></div></li>
 </ol>
-<ol class="steps" data-panel="windows" hidden>
-  <li><div><h3>Run Subline-Setup.exe.</h3>
+</div>
+<div data-panel="windows">
+<h3 class="os-label">On Windows</h3>
+<ol class="steps">
+  <li><div><h3>Keep the download.</h3>
+    <blockquote class="os"><span class="src">Your browser may say</span>Subline-Setup isn't commonly downloaded.</blockquote>
+    <p>In Edge, click <b>...</b> next to the file, then Keep. Then click Show more, then Keep anyway. In Chrome, click Keep.</p></div></li>
+  <li><div><h3>Open the Subline-Setup file you downloaded.</h3>
     <blockquote class="os"><span class="src">Windows says</span>Windows protected your PC.</blockquote>
     <p>Click <b>More info</b>, then <b>Run anyway</b>.</p></div></li>
-  <li><div><h3>Click Install.</h3>
-    <p>It closes Discord, patches it, and reopens it.</p></div></li>
+  <li><div><h3>Click Install, then Finish.</h3>
+    <p>Leave <b>Run Subline</b> ticked. Subline opens.</p></div></li>
+  <li><div><h3>Follow Subline's screens.</h3>
+    <p>Click Continue. If Discord is open, click <b>Quit Discord for me</b>. Pick the language you read.</p></div></li>
+  <li><div><h3>Paste your code, or skip it.</h3>
+    <p>Bought a plan? Paste the code from the Dodo Payments email and click <b>Save code</b>. Check spam. No code? Click <b>Use free Google only</b>. You still get 3 free ✦ a day. Subline then opens Discord.</p></div></li>
 </ol>
+</div>
 </body>
 </html>

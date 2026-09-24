@@ -144,11 +144,57 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}">\n<div class="wrap
 
   var REPO = ${JSON.stringify(REPO)};
   var RELEASES = "https://github.com/" + REPO + "/releases/latest";
+  document.documentElement.classList.add("js");
 
-  // Every download link starts pointed at the releases page and is only ever
-  // REPLACED with something more specific. A blocked request, a rate-limited
-  // API or an offline visitor therefore still lands somewhere that works,
-  // rather than on a dead href.
+  // ONE place decides the visitor's OS. The hero button, the download card
+  // order, the Mac chip pick and the install tab all read it, so they cannot
+  // disagree. An iPad in desktop mode reports "MacIntel", so a touch screen on
+  // a "Mac" is treated as unknown: it must never be handed a .dmg.
+  function detectOS() {
+    var ua = navigator.userAgent || "";
+    if (/iPhone|iPad|iPod|Android/i.test(ua)) return "unknown";
+    var uad = navigator.userAgentData;
+    var p = (uad && uad.platform) || navigator.platform || ua;
+    if (/Win/i.test(p)) return "windows";
+    if (/Mac/i.test(p) && !(navigator.maxTouchPoints > 1)) return "mac";
+    return "unknown";
+  }
+  var os = detectOS();
+
+  // Hero. Without JS (or on an unknown OS) both buttons go to #downloads.
+  // Windows: the primary button downloads the .exe and Mac becomes the
+  // secondary link. Mac: the primary button downloads the .dmg, with an Intel
+  // link under it. The data-dl hook lets the release lookup below fill in the
+  // exact file; until it does, the button still goes to #downloads.
+  var heroPrimary = document.querySelector('[data-hero="primary"]');
+  var heroSecondary = document.querySelector('[data-hero="secondary"]');
+  if (heroPrimary && heroSecondary && os === "windows") {
+    heroPrimary.textContent = "Download for Windows";
+    heroPrimary.setAttribute("data-dl", "win");
+    heroSecondary.textContent = "Mac";
+  } else if (heroPrimary && os === "mac") {
+    heroPrimary.setAttribute("data-dl", "mac");
+    var heroIntel = document.querySelector('[data-hero="intel"]');
+    if (heroIntel) heroIntel.hidden = false;
+  }
+
+  // Download cards: the visitor's OS comes first and gets the filled button.
+  if (os === "windows") {
+    var winCard = document.querySelector('[data-os="win"]');
+    var macCard = document.querySelector('[data-os="mac"]');
+    if (winCard && macCard) {
+      macCard.parentNode.insertBefore(winCard, macCard);
+      var winBtn = winCard.querySelector('[data-dl="win"]');
+      var macBtn = macCard.querySelector('[data-dl="mac"]');
+      if (winBtn) winBtn.classList.replace("btn-secondary", "btn-primary");
+      if (macBtn) macBtn.classList.replace("btn-primary", "btn-secondary");
+    }
+  }
+
+  // Every download link starts pointed at the releases page (in the HTML, so
+  // it works with JS off) and is only ever REPLACED with something more
+  // specific. A blocked request, a rate-limited API or an offline visitor
+  // therefore still lands somewhere that works.
   var links = [].slice.call(document.querySelectorAll("[data-dl]"));
   links.forEach(function (a) { if (!a.getAttribute("href") || a.getAttribute("href") === "#") a.href = RELEASES; });
 
@@ -181,7 +227,7 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}">\n<div class="wrap
       return false;
     }
   }
-  if (/Mac/i.test(navigator.platform || navigator.userAgent)) {
+  if (os === "mac") {
     var uad = navigator.userAgentData;
     if (uad && uad.getHighEntropyValues) {
       // Chromium browsers answer "arm" or "x86" directly.
@@ -197,10 +243,29 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}">\n<div class="wrap
   // GitHub's /releases/latest/download/<name> shortcut needs the literal asset
   // name, and ours carry the version, so anything hardcoded here would keep
   // serving an old build forever. Resolve at runtime instead.
-  fetch("https://api.github.com/repos/" + REPO + "/releases/latest", {
-    headers: { Accept: "application/vnd.github+json" }
-  })
-    .then(function (res) { return res.ok ? res.json() : Promise.reject(res.status); })
+  // The unauthenticated API allows 60 calls an hour per IP, so a shared
+  // network can run out. Keep the answer for 10 minutes per tab.
+  var CACHE_KEY = "subline-release";
+  function getRelease() {
+    try {
+      var cached = JSON.parse(sessionStorage.getItem(CACHE_KEY) || "null");
+      if (cached && cached.r && Date.now() - cached.t < 600000) return Promise.resolve(cached.r);
+    } catch (e) { /* storage blocked: just fetch */ }
+    return fetch("https://api.github.com/repos/" + REPO + "/releases/latest", {
+      headers: { Accept: "application/vnd.github+json" }
+    })
+      .then(function (res) { return res.ok ? res.json() : Promise.reject(res.status); })
+      .then(function (release) {
+        var slim = {
+          tag_name: release.tag_name,
+          assets: (release.assets || []).map(function (a) { return { name: a.name, browser_download_url: a.browser_download_url }; })
+        };
+        try { sessionStorage.setItem(CACHE_KEY, JSON.stringify({ t: Date.now(), r: slim })); } catch (e) { /* fine */ }
+        return slim;
+      });
+  }
+
+  getRelease()
     .then(function (release) {
       var assets = release.assets || [];
       function find(test) {
@@ -228,7 +293,10 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}">\n<div class="wrap
       }
     })
     .catch(function () {
-      // Links already point at the releases page. Nothing to do.
+      // Links already point at the releases page. That page lists several
+      // files, so show the line that says which one to pick.
+      [].forEach.call(document.querySelectorAll("[data-fallback]"), function (el) { el.hidden = false; });
+      [].forEach.call(document.querySelectorAll("[data-version]"), function (el) { el.setAttribute("data-state", "failed"); });
     });
 
   // Install tabs: swap the macOS / Windows step panels, and preselect the
@@ -240,7 +308,15 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}">\n<div class="wrap
     panels.forEach(function (pnl) { pnl.hidden = pnl.getAttribute("data-panel") !== name; });
   }
   tabs.forEach(function (t) { t.addEventListener("click", function () { showTab(t.getAttribute("data-tab")); }); });
-  if (/Win/i.test(navigator.platform || navigator.userAgent)) showTab("windows");
+  // The tabs ship hidden: with JS off both step lists show, each with its own
+  // label, and there are no buttons that do nothing.
+  var tablist = document.querySelector('[role="tablist"]');
+  if (tablist) {
+    tablist.hidden = false;
+    var winTab = tablist.querySelector('[data-tab="windows"]');
+    if (os === "windows" && winTab) tablist.insertBefore(winTab, tablist.firstChild);
+  }
+  showTab(os === "windows" ? "windows" : "macos");
 })();
 </script>
 

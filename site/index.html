@@ -159,6 +159,7 @@ a:hover{color:var(--fg)}
 .sl{margin-top:3px;font-size:13.5px;line-height:1.35;color:var(--muted);display:flex;gap:7px;flex-wrap:wrap;min-width:0;
   align-items:baseline;padding-left:9px;border-left:2px solid var(--line-strong)}
 .gl{font-family:var(--font-mono);font-size:11px;color:var(--accent);flex:none}
+.gl-inline{font-family:var(--font-mono);font-size:1em;color:var(--accent)}
 .lc{font-family:var(--font-mono);font-size:11px;letter-spacing:.03em;flex:none;opacity:.85}
 .cap{font-size:12.5px;color:var(--muted);margin:12px 0 0}
 @media (max-width:640px){.hero h1{font-size:34px}}
@@ -180,9 +181,9 @@ a:hover{color:var(--fg)}
 .dl{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:26px}
 @media (max-width:700px){.dl{grid-template-columns:1fr}}
 .ver{font-family:var(--font-mono);font-size:11px;color:var(--muted);margin-top:10px}
-.ver[data-state="pending"]{opacity:.6}
 .card p.alt{margin-top:10px;font-size:12.5px}
 .tabs{display:flex;gap:6px;margin:26px 0 20px}
+.tabs[hidden]{display:none}
 .tab{font-family:inherit;font-size:13px;padding:7px 14px;border-radius:999px;border:1px solid var(--line);
   background:var(--panel);color:var(--muted);cursor:pointer}
 .tab[aria-selected="true"]{background:var(--accent-weak);border-color:color-mix(in oklab,var(--accent) 40%,var(--line));color:var(--fg)}
@@ -198,6 +199,9 @@ blockquote.os{margin:10px 0 0;padding:12px 14px;background:var(--panel);border:1
   border-radius:var(--radius-sm);font-size:13.5px;max-width:60ch}
 blockquote.os .src{display:block;font-family:var(--font-mono);font-size:10.5px;letter-spacing:.08em;
   text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+.os-label{margin:26px 0 8px;font-family:var(--font-serif);font-size:17px;font-weight:400}
+.js .os-label{display:none}
+ol.steps code{font-family:var(--font-mono);font-size:12.5px;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:1px 5px;overflow-wrap:anywhere}
 .why{border-left:3px solid var(--accent);background:var(--accent-weak);padding:16px 18px;
   border-radius:var(--radius-sm);margin-top:30px;max-width:64ch}
 .why h3{margin:0 0 6px;font-family:var(--font-serif);font-size:17px;font-weight:400}
@@ -235,11 +239,12 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 <h1>Read Discord in your language.</h1>
 <p class="lead">It shows a translation under any message written in a language you don't read. Same Discord, same account. Nothing to sign up for.</p>
 <div class="cta">
-  <a class="btn btn-primary" href="#downloads">Download for Mac</a>
-  <a class="btn btn-secondary" href="#downloads">Windows</a>
-  <span class="fine">Free · open source</span>
+  <a class="btn btn-primary" data-hero="primary" href="#downloads">Download for Mac</a>
+  <a class="btn btn-secondary" data-hero="secondary" href="#downloads">Windows</a>
+  <span class="fine">Free</span>
 </div>
-<div class="chat" aria-label="Example of a translated conversation">
+<p class="fine" data-hero="intel" style="margin:10px 0 0" hidden>Intel Mac? <a data-dl="mac-intel" href="https://github.com/surfer05/subline/releases/latest">Get the Intel version.</a></p>
+<div class="chat" role="group" aria-label="Example of a translated conversation">
   <div class="m"><div class="av"></div><div><div class="nm">rafa<span class="tm">20:14</span></div>
     <div class="tx">bora marcar? tô livre depois das 8</div>
     <div class="sl"><span class="gl">≈</span><span class="lc">pt</span><span>shall we make a plan? I'm free after 8</span></div></div></div>
@@ -247,8 +252,8 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
     <div class="tx" dir="rtl">لما نبدأ نكتب، بنعمل خليط من العربي والفرنسي</div>
     <div class="sl"><span class="gl">✦</span><span class="lc">ar</span><span>when we start writing, we end up mixing Arabic and French</span></div></div></div>
 </div>
-<p class="cap"><span class="gl" style="font-family:var(--font-mono);color:var(--accent)">≈</span> Instant, from Google (free). <span class="gl" style="font-family:var(--font-mono);color:var(--accent);margin-left:10px">✦</span> Sharper, from an AI (paid).</p>
-<p class="fine" style="margin-top:26px">An independent project. Not affiliated with Discord.</p>
+<p class="cap"><span class="gl-inline">≈</span> Instant, from Google. Free. <span class="gl-inline" style="margin-left:10px">✦</span> Sharper, from an AI. 3 free a day, then paid.</p>
+<p class="fine" style="margin-top:26px">Needs the Discord desktop app. It does not work with Discord in a browser. An independent project. Not affiliated with Discord.</p>
 </div>
 </section>
 
@@ -257,7 +262,9 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 <div class="wrap">
 <p class="kicker">Upgrade</p>
 <h2 class="sec">Turn on AI translation</h2>
-<p class="lead">The free tier is instant Google translation, the <span class="gl">≈</span> line under every message. It stays free. The paid tier is an AI, the <span class="gl">✦</span> line. It reads the surrounding conversation, so slang and replies come out right. After you pay, your code arrives by email from Dodo Payments. Check spam. Paste it into the Subline installer, or any time later in Subline's settings inside Discord. No API key, no setup.</p>
+<p class="lead">The free tier is instant Google translation, the <span class="gl-inline">≈</span> line under each message in another language. It stays free. The <span class="gl-inline">✦</span> line is an AI. It reads the surrounding conversation, so slang and replies come out right. Free installs get 3 <span class="gl-inline">✦</span> a day: hover a message and press ⚡. Paying makes <span class="gl-inline">✦</span> run on its own.</p>
+<p class="lead">The checkout page does not show your code. Dodo Payments emails it to you, with the subject "Your License Key is Ready". That license key is your Subline code. <b>Check spam.</b></p>
+<p class="lead">New install: paste it in the installer. Already installed: in Discord, open User Settings, then Plugins (under Vencord). Open the settings of VcTranslate. Set Engine to Subline, then paste the key in Subline Code.</p>
 <div class="plans">
   <div class="panel card">
     <h3>Monthly</h3>
@@ -273,7 +280,8 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
     <a class="btn btn-primary" href="https://checkout.dodopayments.com/buy/pdt_0No1yAve1ozdxryVGZvf6?quantity=1">Buy</a>
   </div>
 </div>
-<p class="fine">Free <span class="gl">≈</span> Google translation never expires. Paying unlocks the <span class="gl">✦</span> AI. Prices in USD; tax added at checkout.</p>
+<p class="fine">Free <span class="gl-inline">≈</span> Google translation never expires. Paid plans have a fair-use limit of up to 2,000 <span class="gl-inline">✦</span> a day. It resets at midnight UTC. Prices are in US dollars. Checkout may show your local currency and adds local tax.</p>
+<p class="fine">Code not in your inbox or spam? Want to cancel? <a href="https://github.com/surfer05/subline/issues" rel="noopener">Open an issue on GitHub.</a> Issues are public, so never post your code, email, or card details.</p>
 </div>
 </section>
 
@@ -282,16 +290,19 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 <div class="wrap">
 <p class="kicker">Download</p>
 <h2 class="sec">Download</h2>
-<p class="lead">The Mac button picks the right build for your chip.</p>
+<p class="lead">Pick your computer below. On an Intel Mac, use the Intel link under the Mac button. Subline needs the Discord desktop app. It does not work with Discord in a browser.</p>
 <div class="dl">
-  <div class="panel card"><h3>Mac</h3><p>macOS 11 or later, Apple Silicon or Intel.</p>
-    <a data-dl="mac" class="btn btn-primary" href="#">Download .dmg</a>
-    <p class="alt">Intel Mac? <a data-dl="mac-intel" href="#">Download the Intel version.</a></p>
-    <span class="ver" data-state="pending" data-version>latest…</span></div>
-  <div class="panel card"><h3>Windows</h3><p>Windows 10 and 11, 64-bit.</p>
-    <a data-dl="win" class="btn btn-secondary" href="#">Download .exe</a><span class="ver" data-state="pending" data-version>latest…</span></div>
+  <div class="panel card" data-os="mac"><h3>Mac</h3><p>macOS 11 or later, Apple Silicon or Intel.</p>
+    <a data-dl="mac" class="btn btn-primary" href="https://github.com/surfer05/subline/releases/latest">Download .dmg</a>
+    <p class="alt">Intel Mac? <a data-dl="mac-intel" href="https://github.com/surfer05/subline/releases/latest">Download the Intel version.</a></p>
+    <p class="alt" data-fallback hidden>On the releases page, pick the file ending in arm64.dmg. On an Intel Mac, pick the one ending in x64.dmg.</p>
+    <span class="ver" data-state="pending" data-version>Latest release</span></div>
+  <div class="panel card" data-os="win"><h3>Windows</h3><p>Windows 10 and 11, 64-bit.</p>
+    <a data-dl="win" class="btn btn-secondary" href="https://github.com/surfer05/subline/releases/latest">Download .exe</a>
+    <p class="alt" data-fallback hidden>On the releases page, pick the file ending in .exe.</p>
+    <span class="ver" data-state="pending" data-version>Latest release</span></div>
   <div class="panel card"><h3>Source</h3><p>Read it, or build it yourself.</p>
-    <a class="btn btn-secondary" href="https://github.com/surfer05/subline" rel="noopener">GitHub</a><span class="ver">GPL-3.0</span></div>
+    <a class="btn btn-secondary" href="https://github.com/surfer05/subline" rel="noopener">GitHub</a></div>
 </div>
 </div>
 </section>
@@ -302,23 +313,48 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 <p class="kicker">Installing</p>
 <h2 class="sec">The security warning</h2>
 <p class="lead">The builds aren't code-signed. I haven't paid for a certificate, so your computer shows a warning the first time you open the app. It's the unknown-developer warning, not a malware detection. Here are the steps.</p>
-<div class="tabs" role="tablist"><button class="tab" role="tab" data-tab="macos" aria-selected="true">macOS</button><button class="tab" role="tab" data-tab="windows" aria-selected="false">Windows</button></div>
-<ol class="steps" data-panel="macos">
+<div class="tabs" role="tablist" hidden><button class="tab" role="tab" data-tab="macos" aria-selected="true">macOS</button><button class="tab" role="tab" data-tab="windows" aria-selected="false">Windows</button></div>
+<div data-panel="macos">
+<h3 class="os-label">On a Mac</h3>
+<ol class="steps">
   <li><div><h3>Drag Subline to Applications.</h3>
     <p>From the .dmg you downloaded.</p></div></li>
-  <li><div><h3>Right-click Subline → Open.</h3>
+  <li><div><h3>Open Subline from Applications.</h3>
     <blockquote class="os"><span class="src">macOS says</span>Apple could not verify "Subline" is free of malware…</blockquote>
-    <p>Use right-click, not double-click. Right-click gives you an <b>Open</b> button.</p></div></li>
-  <li><div><h3>If that doesn't work: Settings → Privacy &amp; Security → Open Anyway.</h3>
-    <p>Confirm with your password. You only do this once.</p></div></li>
+    <p>Click <b>Done</b>. Do not move it to the Trash.</p></div></li>
+  <li><div><h3>Go to System Settings, then Privacy &amp; Security.</h3>
+    <p>Scroll down to Security. Click <b>Open Anyway</b>, then Open Anyway again, and enter your Mac password. The button shows for about an hour after step 2. You only do this once.</p>
+    <p>On macOS 14 or older, you can right-click Subline and choose Open instead.</p></div></li>
+  <li><div><h3>If it still won't open.</h3>
+    <p>If macOS says Subline is <b>damaged</b>, open Terminal and run <code>xattr -cr /Applications/Subline.app</code>. Then open Subline again.</p>
+    <p>If macOS says Subline is not supported on this Mac, you have an Intel Mac. Download the Intel version instead.</p></div></li>
+  <li><div><h3>Follow Subline's screens.</h3>
+    <p>Click Continue. If Discord is open, click <b>Quit Discord for me</b>. Pick the language you read.</p></div></li>
+  <li><div><h3>Paste your code, or skip it.</h3>
+    <p>Bought a plan? Paste the code from the Dodo Payments email and click <b>Save code</b>. Check spam. No code? Click <b>Use free Google only</b>. You still get 3 free ✦ a day.</p></div></li>
+  <li><div><h3>If asked, allow App Management.</h3>
+    <p>Click Continue. System Settings opens. Turn <b>Subline</b> on under App Management. If macOS asks to quit Subline, choose Later. Subline goes on by itself.</p></div></li>
+  <li><div><h3>Discord opens with Subline.</h3>
+    <p>Messages in other languages get a translation under them.</p></div></li>
 </ol>
-<ol class="steps" data-panel="windows" hidden>
-  <li><div><h3>Run Subline-Setup.exe.</h3>
+</div>
+<div data-panel="windows">
+<h3 class="os-label">On Windows</h3>
+<ol class="steps">
+  <li><div><h3>Keep the download.</h3>
+    <blockquote class="os"><span class="src">Your browser may say</span>Subline-Setup isn't commonly downloaded.</blockquote>
+    <p>In Edge, click <b>...</b> next to the file, then Keep. Then click Show more, then Keep anyway. In Chrome, click Keep.</p></div></li>
+  <li><div><h3>Open the Subline-Setup file you downloaded.</h3>
     <blockquote class="os"><span class="src">Windows says</span>Windows protected your PC.</blockquote>
     <p>Click <b>More info</b>, then <b>Run anyway</b>.</p></div></li>
-  <li><div><h3>Click Install.</h3>
-    <p>It closes Discord, patches it, and reopens it.</p></div></li>
+  <li><div><h3>Click Install, then Finish.</h3>
+    <p>Leave <b>Run Subline</b> ticked. Subline opens.</p></div></li>
+  <li><div><h3>Follow Subline's screens.</h3>
+    <p>Click Continue. If Discord is open, click <b>Quit Discord for me</b>. Pick the language you read.</p></div></li>
+  <li><div><h3>Paste your code, or skip it.</h3>
+    <p>Bought a plan? Paste the code from the Dodo Payments email and click <b>Save code</b>. Check spam. No code? Click <b>Use free Google only</b>. You still get 3 free ✦ a day. Subline then opens Discord.</p></div></li>
 </ol>
+</div>
 </div>
 </section>
 
@@ -331,18 +367,18 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 <table class="pv">
 <thead><tr><th>What</th><th>Goes where</th><th>Stored?</th></tr></thead>
 <tbody>
-<tr><td>Message text</td><td><b>Google</b> for the instant ≈ line. For the ✦ line, <b>Subline's own relay</b>, which forwards it to Groq and returns the translation.</td><td>No. The relay stores no message text. It counts usage only.</td></tr>
-<tr><td>Who sent it</td><td>Nowhere. Names, avatars, and servers are never sent.</td><td>No.</td></tr>
+<tr><td>Message text</td><td><b>Google</b> for the instant ≈ line. For the ✦ line, <b>Subline's own relay</b> gets the message and a few messages before it. It sends them to OpenRouter, which runs the AI on Groq or a similar host, and returns the translation. If OpenRouter fails, the relay sends them straight to Groq.</td><td>No. The relay stores no message text. It keeps counts only.</td></tr>
+<tr><td>Who sent it</td><td>For the ✦ line, the sender's Discord username goes to the relay with the text, so the AI can tell who said what. If a message mentions a person, channel, or role, that name goes as part of the text, to Google and the relay. Avatars and server names are never sent.</td><td>No.</td></tr>
 <tr><td>Your Subline code</td><td>An access token that unlocks the ✦ AI. No name, email, or personal info is attached. It goes to the relay only when you translate.</td><td>A usage count, nothing more.</td></tr>
-<tr><td>Free install id</td><td>Free installs send a random id with each ✦ taste so the three daily tastes can be counted. It identifies nothing.</td><td>A usage count, nothing more.</td></tr>
-<tr><td>Usage data</td><td>None. No analytics, no tracking, nothing.</td><td>No.</td></tr>
+<tr><td>Free install id</td><td>Free installs send a random id when Discord starts and with each free ✦. It counts your 3 a day. It is not tied to your name or account. Each free ✦ also counts your IP address, to limit abuse.</td><td>A usage count per id and per IP address. The IP address count is deleted after 2 days.</td></tr>
+<tr><td>Usage data</td><td>The Discord app sends none. The relay keeps a count per code or free install id: how many translations, and whether they worked. No message text, no names.</td><td>Counts only.</td></tr>
 </tbody></table>
 <ul class="off">
-  <li><span class="t">off</span><div><b>DMs stay private.</b> Never translated unless you turn one on, per conversation.</div></li>
-  <li><span class="t">off</span><div><b>Your own language never leaves.</b> Subline checks on your machine first and skips it.</div></li>
-  <li><span class="t">you</span><div><b>Turn it off per channel.</b> Nothing leaves a channel you've switched off.</div></li>
+  <li><span class="t">off</span><div><b>DMs are off.</b> A DM is never translated on its own. You can turn one on per conversation. Or press ⚡ on one message to translate it. That sends it and the few messages before it.</div></li>
+  <li><span class="t">off</span><div><b>Your own messages are never translated.</b> If you read English, Subline skips text it is sure is English before sending anything. Everything else goes to Google, which skips what is already in your language. With ✦ on, a few recent messages, yours included, go to the relay as context.</div></li>
+  <li><span class="t">you</span><div><b>Turn it off.</b> In the VcTranslate plugin settings, switch off <b>Global Auto</b> (auto-translate every server channel). After that, only channels you turn on with the globe button translate. Turning off one server channel while that switch is on does not work yet.</div></li>
 </ul>
-<p class="fine" style="margin-top:30px;max-width:64ch">Subline is an independent, open-source project (GPL-3.0). It is not affiliated with, endorsed by, or connected to Discord. It's a client modification you install yourself. Use it at your own discretion.</p>
+<p class="fine" style="margin-top:30px;max-width:64ch">Subline is an independent project. The source is on GitHub. It is not affiliated with, endorsed by, or connected to Discord. It's a client modification you install yourself. Use it at your own discretion.</p>
 </div>
 </section>
 
@@ -352,11 +388,57 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 
   var REPO = "surfer05/subline";
   var RELEASES = "https://github.com/" + REPO + "/releases/latest";
+  document.documentElement.classList.add("js");
 
-  // Every download link starts pointed at the releases page and is only ever
-  // REPLACED with something more specific. A blocked request, a rate-limited
-  // API or an offline visitor therefore still lands somewhere that works,
-  // rather than on a dead href.
+  // ONE place decides the visitor's OS. The hero button, the download card
+  // order, the Mac chip pick and the install tab all read it, so they cannot
+  // disagree. An iPad in desktop mode reports "MacIntel", so a touch screen on
+  // a "Mac" is treated as unknown: it must never be handed a .dmg.
+  function detectOS() {
+    var ua = navigator.userAgent || "";
+    if (/iPhone|iPad|iPod|Android/i.test(ua)) return "unknown";
+    var uad = navigator.userAgentData;
+    var p = (uad && uad.platform) || navigator.platform || ua;
+    if (/Win/i.test(p)) return "windows";
+    if (/Mac/i.test(p) && !(navigator.maxTouchPoints > 1)) return "mac";
+    return "unknown";
+  }
+  var os = detectOS();
+
+  // Hero. Without JS (or on an unknown OS) both buttons go to #downloads.
+  // Windows: the primary button downloads the .exe and Mac becomes the
+  // secondary link. Mac: the primary button downloads the .dmg, with an Intel
+  // link under it. The data-dl hook lets the release lookup below fill in the
+  // exact file; until it does, the button still goes to #downloads.
+  var heroPrimary = document.querySelector('[data-hero="primary"]');
+  var heroSecondary = document.querySelector('[data-hero="secondary"]');
+  if (heroPrimary && heroSecondary && os === "windows") {
+    heroPrimary.textContent = "Download for Windows";
+    heroPrimary.setAttribute("data-dl", "win");
+    heroSecondary.textContent = "Mac";
+  } else if (heroPrimary && os === "mac") {
+    heroPrimary.setAttribute("data-dl", "mac");
+    var heroIntel = document.querySelector('[data-hero="intel"]');
+    if (heroIntel) heroIntel.hidden = false;
+  }
+
+  // Download cards: the visitor's OS comes first and gets the filled button.
+  if (os === "windows") {
+    var winCard = document.querySelector('[data-os="win"]');
+    var macCard = document.querySelector('[data-os="mac"]');
+    if (winCard && macCard) {
+      macCard.parentNode.insertBefore(winCard, macCard);
+      var winBtn = winCard.querySelector('[data-dl="win"]');
+      var macBtn = macCard.querySelector('[data-dl="mac"]');
+      if (winBtn) winBtn.classList.replace("btn-secondary", "btn-primary");
+      if (macBtn) macBtn.classList.replace("btn-primary", "btn-secondary");
+    }
+  }
+
+  // Every download link starts pointed at the releases page (in the HTML, so
+  // it works with JS off) and is only ever REPLACED with something more
+  // specific. A blocked request, a rate-limited API or an offline visitor
+  // therefore still lands somewhere that works.
   var links = [].slice.call(document.querySelectorAll("[data-dl]"));
   links.forEach(function (a) { if (!a.getAttribute("href") || a.getAttribute("href") === "#") a.href = RELEASES; });
 
@@ -389,7 +471,7 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
       return false;
     }
   }
-  if (/Mac/i.test(navigator.platform || navigator.userAgent)) {
+  if (os === "mac") {
     var uad = navigator.userAgentData;
     if (uad && uad.getHighEntropyValues) {
       // Chromium browsers answer "arm" or "x86" directly.
@@ -405,10 +487,29 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
   // GitHub's /releases/latest/download/<name> shortcut needs the literal asset
   // name, and ours carry the version, so anything hardcoded here would keep
   // serving an old build forever. Resolve at runtime instead.
-  fetch("https://api.github.com/repos/" + REPO + "/releases/latest", {
-    headers: { Accept: "application/vnd.github+json" }
-  })
-    .then(function (res) { return res.ok ? res.json() : Promise.reject(res.status); })
+  // The unauthenticated API allows 60 calls an hour per IP, so a shared
+  // network can run out. Keep the answer for 10 minutes per tab.
+  var CACHE_KEY = "subline-release";
+  function getRelease() {
+    try {
+      var cached = JSON.parse(sessionStorage.getItem(CACHE_KEY) || "null");
+      if (cached && cached.r && Date.now() - cached.t < 600000) return Promise.resolve(cached.r);
+    } catch (e) { /* storage blocked: just fetch */ }
+    return fetch("https://api.github.com/repos/" + REPO + "/releases/latest", {
+      headers: { Accept: "application/vnd.github+json" }
+    })
+      .then(function (res) { return res.ok ? res.json() : Promise.reject(res.status); })
+      .then(function (release) {
+        var slim = {
+          tag_name: release.tag_name,
+          assets: (release.assets || []).map(function (a) { return { name: a.name, browser_download_url: a.browser_download_url }; })
+        };
+        try { sessionStorage.setItem(CACHE_KEY, JSON.stringify({ t: Date.now(), r: slim })); } catch (e) { /* fine */ }
+        return slim;
+      });
+  }
+
+  getRelease()
     .then(function (release) {
       var assets = release.assets || [];
       function find(test) {
@@ -436,7 +537,10 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
       }
     })
     .catch(function () {
-      // Links already point at the releases page. Nothing to do.
+      // Links already point at the releases page. That page lists several
+      // files, so show the line that says which one to pick.
+      [].forEach.call(document.querySelectorAll("[data-fallback]"), function (el) { el.hidden = false; });
+      [].forEach.call(document.querySelectorAll("[data-version]"), function (el) { el.setAttribute("data-state", "failed"); });
     });
 
   // Install tabs: swap the macOS / Windows step panels, and preselect the
@@ -448,7 +552,15 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
     panels.forEach(function (pnl) { pnl.hidden = pnl.getAttribute("data-panel") !== name; });
   }
   tabs.forEach(function (t) { t.addEventListener("click", function () { showTab(t.getAttribute("data-tab")); }); });
-  if (/Win/i.test(navigator.platform || navigator.userAgent)) showTab("windows");
+  // The tabs ship hidden: with JS off both step lists show, each with its own
+  // label, and there are no buttons that do nothing.
+  var tablist = document.querySelector('[role="tablist"]');
+  if (tablist) {
+    tablist.hidden = false;
+    var winTab = tablist.querySelector('[data-tab="windows"]');
+    if (os === "windows" && winTab) tablist.insertBefore(winTab, tablist.firstChild);
+  }
+  showTab(os === "windows" ? "windows" : "macos");
 })();
 </script>
 

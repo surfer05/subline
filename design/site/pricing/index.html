@@ -31,6 +31,7 @@ a:hover{color:var(--fg)}
 @media (max-width:640px){.wrap{padding:44px 20px}h2.sec{font-size:25px}}
 
 .gl{font-family:var(--font-mono);font-size:11px;color:var(--accent);flex:none}
+.gl-inline{font-family:var(--font-mono);font-size:1em;color:var(--accent)}
 .card{padding:20px;display:flex;flex-direction:column;gap:4px}
 .card h3{margin:0;font-family:var(--font-serif);font-size:18px;font-weight:400}
 .card p{margin:0;font-size:13px;color:var(--muted)}
@@ -51,7 +52,9 @@ a:hover{color:var(--fg)}
 <body>
 <p class="kicker">Upgrade</p>
 <h2 class="sec">Turn on AI translation</h2>
-<p class="lead">The free tier is instant Google translation, the <span class="gl">≈</span> line under every message. It stays free. The paid tier is an AI, the <span class="gl">✦</span> line. It reads the surrounding conversation, so slang and replies come out right. After you pay, your code arrives by email from Dodo Payments. Check spam. Paste it into the Subline installer, or any time later in Subline's settings inside Discord. No API key, no setup.</p>
+<p class="lead">The free tier is instant Google translation, the <span class="gl-inline">≈</span> line under each message in another language. It stays free. The <span class="gl-inline">✦</span> line is an AI. It reads the surrounding conversation, so slang and replies come out right. Free installs get 3 <span class="gl-inline">✦</span> a day: hover a message and press ⚡. Paying makes <span class="gl-inline">✦</span> run on its own.</p>
+<p class="lead">The checkout page does not show your code. Dodo Payments emails it to you, with the subject "Your License Key is Ready". That license key is your Subline code. <b>Check spam.</b></p>
+<p class="lead">New install: paste it in the installer. Already installed: in Discord, open User Settings, then Plugins (under Vencord). Open the settings of VcTranslate. Set Engine to Subline, then paste the key in Subline Code.</p>
 <div class="plans">
   <div class="panel card">
     <h3>Monthly</h3>
@@ -67,6 +70,7 @@ a:hover{color:var(--fg)}
     <a class="btn btn-primary" href="https://checkout.dodopayments.com/buy/pdt_0No1yAve1ozdxryVGZvf6?quantity=1">Buy</a>
   </div>
 </div>
-<p class="fine">Free <span class="gl">≈</span> Google translation never expires. Paying unlocks the <span class="gl">✦</span> AI. Prices in USD; tax added at checkout.</p>
+<p class="fine">Free <span class="gl-inline">≈</span> Google translation never expires. Paid plans have a fair-use limit of up to 2,000 <span class="gl-inline">✦</span> a day. It resets at midnight UTC. Prices are in US dollars. Checkout may show your local currency and adds local tax.</p>
+<p class="fine">Code not in your inbox or spam? Want to cancel? <a href="https://github.com/surfer05/subline/issues" rel="noopener">Open an issue on GitHub.</a> Issues are public, so never post your code, email, or card details.</p>
 </body>
 </html>
