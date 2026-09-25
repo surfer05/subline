@@ -88,7 +88,13 @@ export const GuildRoleStore = {
 /** channelId -> the messages `MessageStore.getMessages(id).toArray()` returns. */
 export const stubMessages = new Map<string, unknown[]>();
 
+/** `${channelId}:${messageId}` -> message, for `MessageStore.getMessage` (reply previews). */
+export const stubMessageById = new Map<string, unknown>();
+
 export const MessageStore = {
+    getMessage(channelId: string, messageId: string) {
+        return stubMessageById.get(`${channelId}:${messageId}`);
+    },
     getMessages(channelId: string) {
         const arr = stubMessages.get(channelId);
         return arr ? { toArray: () => arr } : undefined;
@@ -162,9 +168,35 @@ export const FluxDispatcher = {
 /** Mutable so a test can check the target-language default follows it. */
 export const LocaleStore = { locale: "en-US" };
 
+/* ------------------------------------------ Presence / profile / events -- */
+
+/** userId -> activities, for custom statuses. */
+export const stubActivities = new Map<string, unknown[]>();
+/** userId -> profile (bio). */
+export const stubProfiles = new Map<string, { bio?: string }>();
+/** guildId -> scheduled events. */
+export const stubEvents = new Map<string, unknown[]>();
+
+export const PresenceStore = {
+    getActivities: (userId: string) => stubActivities.get(userId) ?? []
+};
+
+export const UserProfileStore = {
+    getUserProfile: (userId: string) => stubProfiles.get(userId),
+    getGuildMemberProfile: (_userId: string, _guildId?: string) => null
+};
+
+export const GuildScheduledEventStore = {
+    getGuildScheduledEventsForGuild: (guildId: string) => stubEvents.get(guildId) ?? []
+};
+
 /* ------------------------------------------------------------------------- */
 
 export function __resetWebpackCommon(): void {
+    stubMessageById.clear();
+    stubActivities.clear();
+    stubProfiles.clear();
+    stubEvents.clear();
     dmChannels.clear();
     channelNames.clear();
     stubUsers.clear();

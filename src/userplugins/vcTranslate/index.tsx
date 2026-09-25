@@ -1,10 +1,15 @@
-import type { ChatBarProps } from "@api/ChatButtons";
+import { addChatBarButton, type ChatBarProps, removeChatBarButton } from "@api/ChatButtons";
+import * as DataStore from "@api/DataStore";
+import { addMessageAccessory, removeMessageAccessory } from "@api/MessageAccessories";
 import { addMessagePopoverButton, removeMessagePopoverButton } from "@api/MessagePopover";
 import { showNotice } from "@api/Notices";
 import { Logger } from "@utils/Logger";
 import definePlugin, { PluginNative } from "@utils/types";
 import { relaunch } from "@utils/native";
-import { ChannelStore, FluxDispatcher, GuildMemberStore, GuildRoleStore, LocaleStore, MessageStore, React, SelectedChannelStore, Toasts, UserStore } from "@webpack/common";
+import {
+    ChannelStore, FluxDispatcher, GuildMemberStore, GuildRoleStore, GuildScheduledEventStore, LocaleStore, MessageStore,
+    PresenceStore, React, SelectedChannelStore, Toasts, UserProfileStore, UserStore
+} from "@webpack/common";
 import type { Message } from "@vencord/discord-types";
 
 import { createBatcher, type Batcher } from "./batcher";
@@ -43,6 +48,12 @@ import {
 } from "./types";
 import { ENGINE_RANK, isRealTranslation, mayReplace } from "./upgrade";
 import { createUpdateWatch, UPDATE_CHECK_INTERVAL_MS, type UpdateWatch } from "./updateNotice";
+import { SurfaceCache } from "./surfaces/cache";
+import {
+    channelTexts, customStatusText, messageSurfaceTexts, replyReference, type SurfaceText
+} from "./surfaces/extract";
+import { SurfaceService, type SurfaceOutcome, type SurfaceTier } from "./surfaces/service";
+import { safe, setSurfaceService, SurfaceHint, SurfaceLines } from "./surfaces/ui";
 import { __resetWeeklyStats, closeWeekIfDue, countShown, loadWeeklyStats } from "./weeklyNote";
 
 const Native = VencordNative.pluginHelpers.VcTranslate as PluginNative<typeof import("./native")>;
@@ -3622,6 +3633,219 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
     );
 }
 
+
+/* ------------------------------------------------------------ surfaces -- */
+
+/*
+ * TEXT OUTSIDE MESSAGES, FOR PAID INSTALLS. Custom statuses, bios, embeds,
+ * polls, reply and forward previews, and the open channel's topic, thread
+ * title, tags and live event. See surfaces/ for the cache, the batching
+ * service and the components; this section is the wiring into the plugin's
+ * engines, plan and Discord.
+ *
+ * Every hook here is one Discord already renders through a Vencord API this
+ * plugin already relies on (message accessories, member list decorators, the
+ * chat bar), plus one webpack patch reused from Vencord's own UserVoiceShow
+ * (the profile's name row). A slot that is not there after a Discord update
+ * renders nothing; nothing else changes.
+ */
+
+let surfaceCache: SurfaceCache | null = null;
+let surfaceService: SurfaceService | null = null;
+
+/** The one chat-bar button id and message-accessory id the surfaces register. */
+export const SURFACE_CHANNEL_BUTTON_ID = "VcTranslateChannelText";
+export const SURFACE_ACCESSORY_ID = "VcTranslateSurfaces";
+
+/**
+ * A PAID install, and nothing else: a Subline code, the relay selected and in
+ * use (not fallen back to Google this session), and the setting on. A free
+ * install in its trial runs the relay on the install bearer, not a code, so
+ * it is not paid here and sees no change at all.
+ */
+function isPaidSurfaceUser(): boolean {
+    if (surfaceService === null) return false;
+    if (settings.store.translateSurfaces === false) return false;
+    const code = typeof settings.store.sublineCode === "string" ? settings.store.sublineCode.trim() : "";
+    return settings.store.engine === "relay" && code !== "" && baseEngine() === "relay";
+}
+
+function surfaceDebug(message: string): void {
+    if (settings.store.debugLogging) logger.debug(message);
+}
+
+/**
+ * One surface batch through the same engines, credential, cooldowns and rate
+ * gate as messages, with NO conversation context. Surface requests count
+ * against the same paid daily allowance on the relay (they are ordinary relay
+ * requests). Any refusal is quiet: `null` ("not now") and the cooldown the
+ * message pipeline would also have recorded. Never a toast.
+ */
+async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promise<SurfaceOutcome> {
+    const engine: EngineId = tier === "fast" ? "google" : "relay";
+    if (!isPaidSurfaceUser() || isCoolingDown(engine)) return null;
+    if (engine === "relay") {
+        await acquireSlot();
+        if (!isPaidSurfaceUser()) return null;
+    }
+    const req: BatchRequest = {
+        messages: texts.map((text, i) => ({ id: `s${i}`, author: "", text })),
+        context: [],
+        targetLang: settings.store.targetLang
+    };
+    let res: Awaited<ReturnType<typeof Native.translateBatch>>;
+    try {
+        res = await Native.translateBatch(
+            engine,
+            engine === "relay" ? apiKeyFor("relay") : "",
+            JSON.stringify(req),
+            modelFor(engine),
+            settings.store.debugLogging
+        );
+    } catch {
+        return null;
+    }
+    if (!res.ok) {
+        surfaceDebug(`[surface] ${engine}: not ok (${beaconErrorCode(res)})`);
+        if (engine === "relay") {
+            if (res.retryAfterMs) {
+                enterCooldown("relay", res.retryAfterMs, res.quotaLimitPerMinute, res.quotaModel, res.error);
+            } else if (/\b403\b/.test(res.error)) {
+                fallBackToGoogle(`cannot reach ${LLM_ENGINES.relay.label} from this network`, "blocked");
+            } else if (/\b401\b/.test(res.error)) {
+                fallBackToGoogle(rejectedCredentialText("relay"), "key");
+            }
+        } else if (/\b429\b/.test(res.error)) {
+            setCooldown("google", Date.now() + (res.retryAfterMs ?? GOOGLE_COOLDOWN_MS));
+        }
+        return null;
+    }
+    const byId = new Map(res.results.map(r => [r.id, r]));
+    return texts.map((_, i) => {
+        const r = byId.get(`s${i}`);
+        if (r === undefined || "failed" in r) return "fail";
+        if (r.skip) return "skip";
+        if (r.truncated) return "fail";
+        return r.conf === undefined ? { lang: r.lang, text: r.text } : { lang: r.lang, text: r.text, conf: r.conf };
+    });
+}
+
+function startSurfaces(): SurfaceService {
+    surfaceCache = new SurfaceCache({
+        storage: { get: key => DataStore.get(key), set: (key, value) => DataStore.set(key, value) },
+        now: () => Date.now(),
+        schedule: (fn, ms) => setTimeout(fn, ms),
+        cancel: handle => clearTimeout(handle as ReturnType<typeof setTimeout>)
+    });
+    surfaceService = new SurfaceService({
+        isPaid: isPaidSurfaceUser,
+        targetLang: () => settings.store.targetLang,
+        locallySkipped: text => shouldSkip(text, false) || isConfidentlyTargetLanguage(text, settings.store.targetLang),
+        translate: translateSurfaceBatch,
+        cache: surfaceCache,
+        now: () => Date.now(),
+        schedule: (fn, ms) => setTimeout(fn, ms),
+        cancel: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
+        debug: surfaceDebug
+    });
+    setSurfaceService(surfaceService);
+    return surfaceService;
+}
+
+/** For tests: the running surface service, or null. */
+export function __surfaceService(): SurfaceService | null {
+    return surfaceService;
+}
+
+/**
+ * Embeds, polls, forwards and the reply preview of one message, as small
+ * lines under it. A reply whose quoted message already has a translation in
+ * the message store reuses it: the same text is never bought twice.
+ */
+function SurfaceAccessoryImpl({ message }: { message: Message; }) {
+    if (!isPaidSurfaceUser() || message == null) return null;
+    const channelId = (message as any).channel_id as string;
+    const texts: SurfaceText[] = messageSurfaceTexts(message)
+        .map(t => ({ ...t, text: readableContent(t.text, channelId) }));
+
+    let storedReply: any = null;
+    const ref = replyReference(message);
+    if (ref !== null) {
+        const quoted = (MessageStore as any).getMessage?.(ref.channelId, ref.messageId);
+        const content = typeof quoted?.content === "string" ? quoted.content : "";
+        if (content.trim() !== "") {
+            const existing = getTranslation(makeKey(ref.messageId, settings.store.targetLang));
+            if (isRealTranslation(existing) && ENGINE_RANK[existing.via] > 0) {
+                storedReply = (
+                    <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic", whiteSpace: "pre-wrap" }}
+                        data-subline-surface="reply">
+                        <span>Reply · {ENGINE_PROVENANCE[existing.via].glyph} {existing.lang} · </span>
+                        <span>{existing.text.trim()}</span>
+                    </div>
+                );
+            } else {
+                texts.unshift({ kind: "reply", label: "Reply", text: readableContent(content, ref.channelId) });
+            }
+        }
+    }
+    if (storedReply === null && texts.length === 0) return null;
+    return (
+        <div>
+            {storedReply}
+            {texts.length > 0 && <SurfaceLines texts={texts} />}
+        </div>
+    );
+}
+const SurfaceAccessory = safe("message accessory", SurfaceAccessoryImpl, surfaceDebug);
+
+/** A user's custom status, as a tight ✦ in a member-list or DM-list row. */
+function StatusHintImpl({ userId }: { userId?: string; }) {
+    if (!isPaidSurfaceUser() || typeof userId !== "string") return null;
+    const status = customStatusText(PresenceStore?.getActivities?.(userId));
+    if (status === "") return null;
+    return <SurfaceHint texts={[{ kind: "status", label: "Status", text: status }]} />;
+}
+const StatusHint = safe("status hint", StatusHintImpl, surfaceDebug);
+
+/**
+ * A user's custom status and bio, as a tight ✦ in the profile's name row
+ * (popout, full profile, and the DM side profile). The bio is read from the
+ * profile store, which Discord fills when the profile opens.
+ */
+function ProfileHintImpl(props: any) {
+    if (!isPaidSurfaceUser()) return null;
+    const userId = props?.user?.id;
+    if (typeof userId !== "string") return null;
+    const guildId = typeof props?.guildId === "string" ? props.guildId : undefined;
+    const texts: SurfaceText[] = [];
+    const status = customStatusText(PresenceStore?.getActivities?.(userId));
+    if (status !== "") texts.push({ kind: "status", label: "Status", text: status });
+    const bio = (guildId ? UserProfileStore?.getGuildMemberProfile?.(userId, guildId)?.bio : undefined)
+        || UserProfileStore?.getUserProfile?.(userId)?.bio;
+    if (typeof bio === "string" && bio.trim() !== "") texts.push({ kind: "bio", label: "About me", text: bio });
+    if (texts.length === 0) return null;
+    return <SurfaceHint texts={texts} />;
+}
+const ProfileHint = safe("profile hint", ProfileHintImpl, surfaceDebug);
+
+/**
+ * The open channel's own text (topic, thread title and tags, a live event),
+ * as a tight ✦ in the chat bar with the translations in its tooltip.
+ */
+function ChannelTextHintImpl(props: ChatBarProps & { isMainChat?: boolean; }) {
+    if (!isPaidSurfaceUser()) return null;
+    const channel: any = (props as any)?.channel;
+    if (!channel) return null;
+    const parent = channel.parent_id ? ChannelStore.getChannel(channel.parent_id) : null;
+    const events = channel.guild_id
+        ? (GuildScheduledEventStore as any)?.getGuildScheduledEventsForGuild?.(channel.guild_id)
+        : undefined;
+    const texts = channelTexts(channel, parent, events);
+    if (texts.length === 0) return null;
+    return <SurfaceHint texts={texts} />;
+}
+const ChannelTextHint = safe("channel text hint", ChannelTextHintImpl, surfaceDebug);
+
 export default definePlugin({
     name: "VcTranslate",
     description: "Automatically translates incoming messages and shows them as subtitles.",
@@ -3633,6 +3857,29 @@ export default definePlugin({
     renderMessageAccessory: props => (
         <TranslationAccessory message={props.message} />
     ),
+
+    // Custom status in the member list and the DM list: a tight ✦ with a
+    // tooltip, next to the name. Vencord's MemberListDecorators API (one
+    // ErrorBoundary per decorator); a missing slot shows nothing.
+    renderMemberListDecorator: props => <StatusHint userId={props?.user?.id} />,
+
+    /*
+     * The profile's name row (popout, full profile, DM side profile). The
+     * find and match are Vencord UserVoiceShow's, unchanged, at the pinned
+     * Vencord commit. If Discord moves this code, Vencord logs one warning
+     * that the patch had no effect and the profile renders as it always did.
+     */
+    patches: [
+        {
+            find: "#{intl::USER_PROFILE_PRONOUNS}",
+            replacement: {
+                match: /(?<=children:\[\i," ",\i)(?=\])/,
+                replace: ",$self.renderProfileSurface(arguments[0])"
+            }
+        }
+    ],
+
+    renderProfileSurface: (props: any) => <ProfileHint {...(props ?? {})} />,
 
     // Declarative — unlike the force-quality popover above, this is the ONLY
     // chat-bar button this plugin registers, so it needs no second, manual
@@ -3690,6 +3937,13 @@ export default definePlugin({
     },
 
     async start() {
+        // Text outside messages (paid only). Registered first so a slow read
+        // below delays nothing; the service sends nothing for a free install.
+        startSurfaces();
+        addMessageAccessory(SURFACE_ACCESSORY_ID, props => <SurfaceAccessory message={props.message} />);
+        addChatBarButton(SURFACE_CHANNEL_BUTTON_ID, props => <ChannelTextHint {...props} />, () => <span>✦</span>);
+        void surfaceCache?.load();
+
         // Registered here (and removed in stop()) rather than left as a
         // static side effect of the module loading: the plugin can be
         // disabled and re-enabled without a Discord restart, and a button
@@ -3824,6 +4078,15 @@ export default definePlugin({
     },
 
     stop() {
+        removeMessageAccessory(SURFACE_ACCESSORY_ID);
+        removeChatBarButton(SURFACE_CHANNEL_BUTTON_ID);
+        // Nothing queued is sent after this, and the cache is saved as it is.
+        surfaceService?.stop();
+        void surfaceCache?.persistNow();
+        surfaceCache?.clear();
+        surfaceService = null;
+        surfaceCache = null;
+        setSurfaceService(null);
         removeMessagePopoverButton(FORCE_QUALITY_POPOVER_ID);
         // Stop the update watch so a stopped plugin leaves no interval armed to
         // fire into a torn-down module (same reasoning as the timers below).

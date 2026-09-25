@@ -29,7 +29,9 @@ export default defineConfig({
         // surface the plugin actually touches. Everything else in tests/ is
         // pure-logic and unaffected.
         alias: {
+            "@api/ChatButtons": stub("api-chatbuttons.ts"),
             "@api/DataStore": stub("api-datastore.ts"),
+            "@api/MessageAccessories": stub("api-messageaccessories.ts"),
             "@api/MessagePopover": stub("api-messagepopover.ts"),
             "@api/Notices": stub("api-notices.ts"),
             "@api/Settings": stub("api-settings.ts"),

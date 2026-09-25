@@ -97,7 +97,10 @@ describe.skipIf(!built)("the built bundle's settings section", () => {
         // Raised 235,000 -> 240,000 for v0.1.6: the free-plan plugin code
         // (trial, click-to-translate, previews) measured 235,362 bytes. The
         // panes coming back (~23 KB) would still land far above this.
-        expect(statSync(RENDERER).size).toBeLessThan(240_000);
+        // Raised 240,000 -> 255,000 for v0.1.7: translating profiles, embeds
+        // and more (the surfaces/ module) measured 247,895 bytes. The panes
+        // coming back (~23 KB) would still land above this.
+        expect(statSync(RENDERER).size).toBeLessThan(255_000);
     });
 });
 

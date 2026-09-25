@@ -232,6 +232,14 @@ export const settings = definePluginSettings({
         description: "Auto-translate every server channel you read. Turn off to require the per-channel globe button instead. DMs always stay opt-in, whatever this is set to.",
         default: true
     },
+    translateSurfaces: {
+        type: OptionType.BOOLEAN,
+        // Paid only (hidden without a code, and the plugin checks the plan
+        // itself too). Statuses, bios, embeds, polls, reply and forward
+        // previews, and the open channel's topic, title, tags and live event.
+        description: "Translate profiles, embeds and more",
+        default: true
+    },
     debugLogging: {
         type: OptionType.BOOLEAN,
         // Says plainly what this does and where it goes: message TEXT is
@@ -253,6 +261,9 @@ export const settings = definePluginSettings({
 }, {
     freePlanStatus: {
         hidden: () => !isFreeBySettings()
+    },
+    translateSurfaces: {
+        hidden: () => isFreeBySettings()
     },
     anthropicApiKey: {
         // Permanently hidden: bring-your-own-key is not an offered path (see the
