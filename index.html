@@ -312,28 +312,22 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 <div class="wrap">
 <p class="kicker">Installing</p>
 <h2 class="sec">The security warning</h2>
-<p class="lead">The builds aren't code-signed. I haven't paid for a certificate, so your computer shows a warning the first time you open the app. It's the unknown-developer warning, not a malware detection. Here are the steps.</p>
+<p class="lead">On a Mac, Subline is signed and checked by Apple, so macOS only asks once if you want to open it. The Windows build isn't code-signed yet. I haven't paid for a certificate, so Windows shows a warning the first time. It's the unknown-developer warning, not a malware detection. Here are the steps.</p>
 <div class="tabs" role="tablist" hidden><button class="tab" role="tab" data-tab="macos" aria-selected="true">macOS</button><button class="tab" role="tab" data-tab="windows" aria-selected="false">Windows</button></div>
 <div data-panel="macos">
 <h3 class="os-label">On a Mac</h3>
 <ol class="steps">
-  <li><div><h3>Drag Subline to Applications.</h3>
-    <p>From the .dmg you downloaded.</p></div></li>
+  <li><div><h3>Open the .dmg and drag Subline to Applications.</h3>
+    <p>If macOS later says Subline is not supported on this Mac, you have an Intel Mac. Download the Intel version instead.</p></div></li>
   <li><div><h3>Open Subline from Applications.</h3>
-    <blockquote class="os"><span class="src">macOS says</span>Apple could not verify "Subline" is free of malware…</blockquote>
-    <p>Click <b>Done</b>. Do not move it to the Trash.</p></div></li>
-  <li><div><h3>Go to System Settings, then Privacy &amp; Security.</h3>
-    <p>Scroll down to Security. Click <b>Open Anyway</b>, then Open Anyway again, and enter your Mac password. The button shows for about an hour after step 2. You only do this once.</p>
-    <p>On macOS 14 or older, you can right-click Subline and choose Open instead.</p></div></li>
-  <li><div><h3>If it still won't open.</h3>
-    <p>If macOS says Subline is <b>damaged</b>, open Terminal and run <code>xattr -cr /Applications/Subline.app</code>. Then open Subline again.</p>
-    <p>If macOS says Subline is not supported on this Mac, you have an Intel Mac. Download the Intel version instead.</p></div></li>
+    <blockquote class="os"><span class="src">macOS asks once</span>"Subline" is an app downloaded from the internet. Are you sure you want to open it?</blockquote>
+    <p>Click <b>Open</b>.</p></div></li>
   <li><div><h3>Follow Subline's screens.</h3>
     <p>Click Continue. If Discord is open, click <b>Quit Discord for me</b>. Pick the language you read.</p></div></li>
   <li><div><h3>Paste your code, or skip it.</h3>
     <p>Bought a plan? Paste the code from the Dodo Payments email and click <b>Save code</b>. Check spam. No code? Click <b>Continue without a code</b>. You still get 3 free ✦ a day.</p></div></li>
-  <li><div><h3>If asked, allow App Management.</h3>
-    <p>Click Continue. System Settings opens. Turn <b>Subline</b> on under App Management. If macOS asks to quit Subline, choose Later. Subline goes on by itself.</p></div></li>
+  <li><div><h3>Turn on Subline.</h3>
+    <p>Click Continue. System Settings opens. Turn <b>Subline</b> on under App Management. If macOS asks to quit Subline, choose <b>Later</b>. Subline waits for you and carries on by itself. Closed that window? Click <b>Open it again</b>.</p></div></li>
   <li><div><h3>Discord opens with Subline.</h3>
     <p>Messages in other languages get a translation under them.</p></div></li>
 </ol>
