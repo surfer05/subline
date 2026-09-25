@@ -79,7 +79,7 @@ const LINE_STYLE = { fontSize: "0.85rem", color: "var(--text-muted)", fontStyle:
 const MARK_STYLE = { fontSize: "0.75rem", color: "var(--text-muted)", marginLeft: "4px", cursor: "default", lineHeight: 1 } as const;
 
 /** Lines that sit away from what they translate say what they are. */
-const LABELLED_KINDS = new Set(["reply", "forward"]);
+const LABELLED_KINDS = new Set(["reply", "forward", "status", "onboarding"]);
 
 /**
  * Roomy: one small line per foreign text, under the original. A reply or
@@ -88,22 +88,26 @@ const LABELLED_KINDS = new Set(["reply", "forward"]);
  */
 export function SurfaceLines({ texts }: { texts: SurfaceText[]; }) {
     useSurfaceUpdates();
-    if (service === null || texts.length === 0) return null;
-    const lines: any[] = [];
-    const seen = new Set<string>();
-    for (const t of texts) {
-        if (seen.has(t.text)) continue;
-        seen.add(t.text);
-        const shown = displayFor(service.want(t.text), t.text);
-        if (shown === null) continue;
-        lines.push(
-            <div key={`${t.kind}:${t.text}`} style={LINE_STYLE} data-subline-surface={t.kind}>
-                <span>{LABELLED_KINDS.has(t.kind) ? `${t.label} · ` : ""}{shown.glyph} {shown.lang} · </span>
-                <span>{shown.text}</span>
-            </div>
-        );
+    try {
+        if (service === null || !Array.isArray(texts) || texts.length === 0) return null;
+        const lines: any[] = [];
+        const seen = new Set<string>();
+        for (const t of texts) {
+            if (seen.has(t.text)) continue;
+            seen.add(t.text);
+            const shown = displayFor(service.want(t.text), t.text);
+            if (shown === null) continue;
+            lines.push(
+                <div key={`${t.kind}:${t.text}`} style={LINE_STYLE} data-subline-surface={t.kind}>
+                    <span>{LABELLED_KINDS.has(t.kind) ? `${t.label} · ` : ""}{shown.glyph} {shown.lang} · </span>
+                    <span>{shown.text}</span>
+                </div>
+            );
+        }
+        return lines.length === 0 ? null : <div>{lines}</div>;
+    } catch {
+        return null;
     }
-    return lines.length === 0 ? null : <div>{lines}</div>;
 }
 
 /** The tooltip text for a tight marker: "Label: translation" per foreign text. */
@@ -121,14 +125,19 @@ export function hintTitle(texts: SurfaceText[]): string | null {
  * Tight: a tiny ✦ (or ≈ until ✦ arrives) with the translation in its hover
  * tooltip. Inline, one character, so a list row keeps its height.
  */
-export function SurfaceHint({ texts }: { texts: SurfaceText[]; }) {
+export function SurfaceHint({ texts, before }: { texts: SurfaceText[]; before?: boolean; }) {
     useSurfaceUpdates();
-    const title = hintTitle(texts);
-    if (title === null) return null;
-    const glyph = title.includes("(✦") ? "✦" : "≈";
-    return (
-        <span style={MARK_STYLE} title={title} aria-label={title} data-subline-surface="hint">
-            {glyph}
-        </span>
-    );
+    try {
+        const title = Array.isArray(texts) ? hintTitle(texts) : null;
+        if (title === null) return null;
+        const glyph = title.includes("(✦") ? "✦" : "≈";
+        const style = before ? { ...MARK_STYLE, marginLeft: 0, marginRight: "4px" } : MARK_STYLE;
+        return (
+            <span style={style} title={title} aria-label={title} data-subline-surface="hint">
+                {glyph}
+            </span>
+        );
+    } catch {
+        return null;
+    }
 }

@@ -11,18 +11,17 @@ const native = vi.hoisted(() => {
     return { translateBatch, readStagedBuildId, relayStatus };
 });
 
-import plugin, { __surfaceService, SURFACE_ACCESSORY_ID, SURFACE_CHANNEL_BUTTON_ID } from "../index";
+import plugin, { __surfaceService, SURFACE_ACCESSORY_ID } from "../index";
 import settings from "../settings";
 import { clearStore, makeKey, setTranslation } from "../store";
 import { SURFACE_CACHE_KEY } from "../surfaces/cache";
 import { __resetTaste } from "../taste";
 import * as DataStore from "./stubs/api-datastore";
-import { ChatBarButtonMap } from "./stubs/api-chatbuttons";
 import { accessories } from "./stubs/api-messageaccessories";
 import { __reset as __resetMessagePopover } from "./stubs/api-messagepopover";
 import { __resetSettings } from "./stubs/api-settings";
 import {
-    __resetWebpackCommon, __stubSetSelectedChannel, PresenceStore, shownToasts, stubActivities, stubEvents, stubMessageById, stubProfiles
+    __resetWebpackCommon, __stubSetChannel, __stubSetSelectedChannel, PresenceStore, shownToasts, stubActivities, stubMessageById, stubProfiles
 } from "./stubs/webpack-common";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -41,6 +40,8 @@ function text(node: any): string {
     if (Array.isArray(node)) return node.map(text).join("");
     return text(node.children);
 }
+
+const text2 = (node: any) => text(node);
 
 function findTitle(node: any): string | undefined {
     if (node === null || typeof node !== "object") return undefined;
@@ -88,7 +89,13 @@ function paid() {
 const accessory = (message: any) => deep(accessories.get(SURFACE_ACCESSORY_ID)!.render({ message }));
 const decorator = (userId: string) => deep((plugin as any).renderMemberListDecorator({ user: { id: userId }, type: "guild" }));
 const profile = (props: any) => deep((plugin as any).renderProfileSurface(props));
-const chatHint = (channel: any) => deep(ChatBarButtonMap.get(SURFACE_CHANNEL_BUTTON_ID)!.render({ channel }));
+const P = plugin as any;
+const bioLine = (props: any) => deep(P.renderBioLine(props));
+const mark = (kind: string, text: unknown) => deep(P.renderSurfaceMark(kind, text));
+const tagsMark = (channel: any) => deep(P.renderForumTagsMark(channel));
+const onboarding = (prompt: any) => deep(P.renderOnboardingPrompt(prompt));
+/** One of Discord's parser functions, wrapped as the patch wraps it. */
+const parsed = (parser: string, text: string) => deep(P.wrapParser(parser, (t: string) => [`<${t}>`])(text, true, {}));
 
 const embedMessage = (id = "m1") => ({
     id, channel_id: "c1", type: 0, content: "",
@@ -122,19 +129,17 @@ afterEach(() => {
 });
 
 describe("surface hooks", () => {
-    it("registers the message accessory, the chat-bar hint, the member-list decorator and the profile patch", () => {
+    it("registers the message accessory, the member-list decorator and the profile patch", () => {
         expect(accessories.has(SURFACE_ACCESSORY_ID)).toBe(true);
-        expect(ChatBarButtonMap.has(SURFACE_CHANNEL_BUTTON_ID)).toBe(true);
         expect(typeof (plugin as any).renderMemberListDecorator).toBe("function");
         const patch = (plugin as any).patches[0];
         expect(patch.find).toBe("#{intl::USER_PROFILE_PRONOUNS}");
-        expect(patch.replacement.replace).toContain("$self.renderProfileSurface(arguments[0])");
+        expect(patch.replacement[0].replace).toContain("$self.renderProfileSurface(arguments[0])");
     });
 
-    it("removes its accessory and chat-bar hint on stop", () => {
+    it("removes its accessory on stop", () => {
         plugin.stop!();
         expect(accessories.has(SURFACE_ACCESSORY_ID)).toBe(false);
-        expect(ChatBarButtonMap.has(SURFACE_CHANNEL_BUTTON_ID)).toBe(false);
         expect(__surfaceService()).toBeNull();
     });
 
@@ -156,12 +161,24 @@ describe("free and trial installs see no change", () => {
             accessory(embedMessage()),
             decorator("u1"),
             profile({ user: { id: "u1" } }),
-            chatHint({ id: "c1", topic: "Hier wird geplaudert", isThread: () => false })
+            bioLine({ userId: "u1", userBio: "Ich liebe Pizza" }),
+            mark("thread-title", "Wie repariere ich mein Fahrrad?"),
+            mark("stage-topic", "Wir reden über Bücher"),
+            tagsMark({ parent_id: "f1", appliedTags: ["t1"] }),
+            onboarding({ title: "Was spielst du gern?", options: [] })
         ];
     }
 
+    /** Discord's own parser output, which must come back untouched. */
+    function parsersUntouched() {
+        for (const p of ["topic", "topic-truncated", "voice-status", "rule", "guidelines", "event"]) {
+            expect(parsed(p, "Hier wird geplaudert")).toEqual(["<Hier wird geplaudert>"]);
+        }
+    }
+
     it("a free install renders nothing extra and sends zero surface requests", async () => {
-        expect(renderEverything()).toEqual([null, null, null, null]);
+        expect(renderEverything()).toEqual([null, null, null, null, null, null, null, null]);
+        parsersUntouched();
         await settle();
         expect(surfaceCalls()).toEqual([]);
     });
@@ -170,7 +187,8 @@ describe("free and trial installs see no change", () => {
         native.relayStatus.mockResolvedValue({ ok: true, plan: "trial", used: 0, cap: 300, trialEndsAt: Date.now() + 5 * DAY_MS });
         await restart();
         await settle(100);
-        expect(renderEverything()).toEqual([null, null, null, null]);
+        expect(renderEverything()).toEqual([null, null, null, null, null, null, null, null]);
+        parsersUntouched();
         await settle();
         expect(surfaceCalls()).toEqual([]);
     });
@@ -178,7 +196,8 @@ describe("free and trial installs see no change", () => {
     it("a paid install with the setting off sends zero surface requests", async () => {
         paid();
         settings.store.translateSurfaces = false;
-        expect(renderEverything()).toEqual([null, null, null, null]);
+        expect(renderEverything()).toEqual([null, null, null, null, null, null, null, null]);
+        parsersUntouched();
         await settle();
         expect(surfaceCalls()).toEqual([]);
     });
@@ -244,27 +263,71 @@ describe("a paid install", () => {
         expect(findTitle(mark)).toBe("Status (✦ de): sharp: Heute bin ich müde, Nummer 7");
     });
 
-    it("the profile row gets one mark covering status and bio", async () => {
+    it("the profile name row marks the status when there is no bio", async () => {
         stubActivities.set("u1", [{ type: 4, state: "Bin gleich zurück" }]);
-        stubProfiles.set("u1", { bio: "Ich liebe Pizza und lange Spaziergänge" });
         profile({ user: { id: "u1" } });
         await settle();
-        const title = findTitle(profile({ user: { id: "u1" } }));
-        expect(title).toContain("Status (✦ de): sharp: Bin gleich zurück");
-        expect(title).toContain("About me (✦ de): sharp: Ich liebe Pizza und lange Spaziergänge");
+        expect(findTitle(profile({ user: { id: "u1" } }))).toBe("Status (✦ de): sharp: Bin gleich zurück");
     });
 
-    it("the chat bar marks the open channel's topic, thread title, tags and live event", async () => {
-        stubEvents.set("g1", [{ channel_id: "t1", status: 2, name: "Spieleabend mit allen" }]);
-        const channel = {
-            id: "t1", guild_id: "g1", parent_id: "f1", name: "Wie repariere ich mein Fahrrad?",
-            topic: "", appliedTags: [], isThread: () => true
-        };
-        chatHint(channel);
+    it("the header topic and voice channel status get a ✦ before them; the topic popout, rules, guidelines and events a line after", async () => {
+        const topic = "Hier plaudern wir über alles Mögliche";
+        parsed("topic-truncated", topic);
         await settle();
-        const title = findTitle(chatHint(channel));
-        expect(title).toContain("Title (✦ de): sharp: Wie repariere ich mein Fahrrad?");
-        expect(title).toContain("Event (✦ de): sharp: Spieleabend mit allen");
+        const tight = parsed("topic-truncated", topic);
+        expect(tight[1]).toEqual([`<${topic}>`]);
+        expect(tight[0].type).toBe("span");
+        expect(findTitle(tight[0])).toBe(`Topic (✦ de): sharp: ${topic}`);
+
+        const voice = parsed("voice-status", "Wir spielen gerade Minecraft");
+        await settle();
+        expect(findTitle(parsed("voice-status", "Wir spielen gerade Minecraft"))).toContain("Voice status (✦ de): sharp: Wir spielen gerade Minecraft");
+        void voice;
+
+        for (const p of ["topic", "rule", "guidelines", "event"]) {
+            const text = `Bitte seid nett zueinander, Regel ${p}`;
+            parsed(p, text);
+            await settle();
+            const out = parsed(p, text);
+            expect(out[0]).toEqual([`<${text}>`]);
+            expect(text2(out[1])).toContain(`✦ de · sharp: ${text}`);
+        }
+    });
+
+    it("thread titles, stage topics and forum tags get a tight ✦ with the translation in its tooltip", async () => {
+        mark("thread-title", "Wie repariere ich mein Fahrrad?");
+        mark("stage-topic", "Wir reden über Bücher");
+        await settle();
+        expect(findTitle(mark("thread-title", "Wie repariere ich mein Fahrrad?"))).toBe("Title (✦ de): sharp: Wie repariere ich mein Fahrrad?");
+        expect(findTitle(mark("stage-topic", "Wir reden über Bücher"))).toBe("Stage topic (✦ de): sharp: Wir reden über Bücher");
+
+        __stubSetChannel("f1", { id: "f1", availableTags: [{ id: "t1", name: "Hilfe gesucht" }, { id: "t2", name: "Gelöst" }] });
+        tagsMark({ parent_id: "f1", appliedTags: ["t1", "t2"] });
+        await settle();
+        const tags = findTitle(tagsMark({ parent_id: "f1", appliedTags: ["t1", "t2"] }));
+        expect(tags).toContain("Tag (✦ de): sharp: Hilfe gesucht");
+        expect(tags).toContain("Tag (✦ de): sharp: Gelöst");
+    });
+
+    it("the bio gets a line under it with the status; the name row then stays quiet", async () => {
+        stubActivities.set("u1", [{ type: 4, state: "Bin gleich zurück" }]);
+        stubProfiles.set("u1", { bio: "Ich liebe Pizza und lange Spaziergänge" });
+        bioLine({ userId: "u1", userBio: "Ich liebe Pizza und lange Spaziergänge" });
+        await settle();
+        const out = text(bioLine({ userId: "u1", userBio: "Ich liebe Pizza und lange Spaziergänge" }));
+        expect(out).toContain("✦ de · sharp: Ich liebe Pizza und lange Spaziergänge");
+        expect(out).toContain("Status · ✦ de · sharp: Bin gleich zurück");
+        expect(profile({ user: { id: "u1" } })).toBeNull();
+    });
+
+    it("an onboarding question gets lines for itself and its options", async () => {
+        const prompt = { title: "Was spielst du gern?", options: [{ title: "Rollenspiele", description: "Lange Abende mit Freunden" }] };
+        onboarding(prompt);
+        await settle();
+        const out = text(onboarding(prompt));
+        expect(out).toContain("Question · ✦ de · sharp: Was spielst du gern?");
+        expect(out).toContain("Option · ✦ de · sharp: Rollenspiele");
+        expect(out).toContain("Option · ✦ de · sharp: Lange Abende mit Freunden");
     });
 
     it("text already in the reader's language costs nothing", async () => {
@@ -300,7 +363,11 @@ describe("a paid install", () => {
         expect(profile(undefined)).toBeNull();
         expect(profile({ user: null })).toBeNull();
         expect(accessory(null)).toBeNull();
-        expect(chatHint(undefined)).toBeNull();
+        expect(mark("thread-title", undefined)).toBeNull();
+        expect(tagsMark(undefined)).toBeNull();
+        expect(bioLine(undefined)).toBeNull();
+        expect(onboarding(42)).toBeNull();
+        expect(parsed("topic", 42 as any)).toEqual(["<42>"]);
     });
 
     it("a refusal is quiet: nothing shown, nothing red, retried after a minute", async () => {

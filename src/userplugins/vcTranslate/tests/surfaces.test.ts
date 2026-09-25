@@ -4,7 +4,8 @@ import {
     normalizeSurfaceText, SURFACE_CACHE_KEY, SurfaceCache, surfaceKey, type SurfaceStorage
 } from "../surfaces/cache";
 import {
-    channelTexts, customStatusText, embedTexts, forwardTexts, messageSurfaceTexts, pollTexts, replyReference
+    appliedTagNames, customStatusText, embedTexts, forwardTexts, messageSurfaceTexts, onboardingPromptTexts, pollTexts,
+    replyReference
 } from "../surfaces/extract";
 import { SurfaceService, type SurfaceOutcome, type SurfaceTier } from "../surfaces/service";
 import { displayFor, hintTitle, safe, setSurfaceService, SurfaceHint, SurfaceLines } from "../surfaces/ui";
@@ -275,20 +276,16 @@ describe("what each surface offers for translation", () => {
         expect(customStatusText(undefined)).toBe("");
     });
 
-    it("channel: topic always; title and tags only for a thread; a live event in this channel", () => {
+    it("forum tags: the applied tags' names, looked up on the parent forum", () => {
         const parent = { availableTags: [{ id: "t1", name: "Hilfe" }, { id: "t2", name: "Fehler" }] };
-        const thread = { id: "c", name: "Wie installiere ich das?", topic: "", appliedTags: ["t2"], isThread: () => true };
-        const events = [
-            { channel_id: "c", status: 2, name: "Spieleabend", description: "Alle willkommen" },
-            { channel_id: "c", status: 1, name: "Später" },
-            { channel_id: "other", status: 2, name: "Woanders" }
-        ];
-        expect(channelTexts(thread, parent, events).map(t => [t.kind, t.text])).toEqual([
-            ["thread-title", "Wie installiere ich das?"], ["forum-tag", "Fehler"], ["event", "Spieleabend"], ["event", "Alle willkommen"]
-        ]);
-        // A plain channel's NAME is never offered, only its topic.
-        expect(channelTexts({ id: "x", name: "allgemein", topic: "Hier wird geplaudert", isThread: () => false }, null, [])
-            .map(t => t.text)).toEqual(["Hier wird geplaudert"]);
+        expect(appliedTagNames({ appliedTags: ["t2", "gone"] }, parent)).toEqual(["Fehler"]);
+        expect(appliedTagNames({ appliedTags: ["t1"] }, null)).toEqual([]);
+    });
+
+    it("onboarding: the question, then each option's title and description", () => {
+        expect(onboardingPromptTexts({ title: "Was spielst du?", options: [{ title: "Rollenspiele", description: "Lange Abende" }, { title: "Shooter", description: "" }] })
+            .map(t => t.text)).toEqual(["Was spielst du?", "Rollenspiele", "Lange Abende", "Shooter"]);
+        expect(onboardingPromptTexts(null)).toEqual([]);
     });
 });
 

@@ -1,4 +1,4 @@
-import { addChatBarButton, type ChatBarProps, removeChatBarButton } from "@api/ChatButtons";
+import type { ChatBarProps } from "@api/ChatButtons";
 import * as DataStore from "@api/DataStore";
 import { addMessageAccessory, removeMessageAccessory } from "@api/MessageAccessories";
 import { addMessagePopoverButton, removeMessagePopoverButton } from "@api/MessagePopover";
@@ -7,7 +7,7 @@ import { Logger } from "@utils/Logger";
 import definePlugin, { PluginNative } from "@utils/types";
 import { relaunch } from "@utils/native";
 import {
-    ChannelStore, FluxDispatcher, GuildMemberStore, GuildRoleStore, GuildScheduledEventStore, LocaleStore, MessageStore,
+    ChannelStore, FluxDispatcher, GuildMemberStore, GuildRoleStore, LocaleStore, MessageStore,
     PresenceStore, React, SelectedChannelStore, Toasts, UserProfileStore, UserStore
 } from "@webpack/common";
 import type { Message } from "@vencord/discord-types";
@@ -50,8 +50,10 @@ import { ENGINE_RANK, isRealTranslation, mayReplace } from "./upgrade";
 import { createUpdateWatch, UPDATE_CHECK_INTERVAL_MS, type UpdateWatch } from "./updateNotice";
 import { SurfaceCache } from "./surfaces/cache";
 import {
-    channelTexts, customStatusText, messageSurfaceTexts, replyReference, type SurfaceText
+    appliedTagNames, customStatusText, messageSurfaceTexts, onboardingPromptTexts, replyReference,
+    type SurfaceKind, type SurfaceText
 } from "./surfaces/extract";
+import { SURFACE_PATCHES } from "./surfaces/patches";
 import { SurfaceService, type SurfaceOutcome, type SurfaceTier } from "./surfaces/service";
 import { safe, setSurfaceService, SurfaceHint, SurfaceLines } from "./surfaces/ui";
 import { __resetWeeklyStats, closeWeekIfDue, countShown, loadWeeklyStats } from "./weeklyNote";
@@ -3653,8 +3655,7 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
 let surfaceCache: SurfaceCache | null = null;
 let surfaceService: SurfaceService | null = null;
 
-/** The one chat-bar button id and message-accessory id the surfaces register. */
-export const SURFACE_CHANNEL_BUTTON_ID = "VcTranslateChannelText";
+/** The message-accessory id the surfaces register. */
 export const SURFACE_ACCESSORY_ID = "VcTranslateSurfaces";
 
 /**
@@ -3807,44 +3808,111 @@ function StatusHintImpl({ userId }: { userId?: string; }) {
 }
 const StatusHint = safe("status hint", StatusHintImpl, surfaceDebug);
 
+/** A user's bio, from the guild profile when there is one, else the user profile. */
+function bioOf(userId: string, guildId: string | undefined): string {
+    const bio = (guildId ? UserProfileStore?.getGuildMemberProfile?.(userId, guildId)?.bio : undefined)
+        || UserProfileStore?.getUserProfile?.(userId)?.bio;
+    return typeof bio === "string" ? bio : "";
+}
+
 /**
- * A user's custom status and bio, as a tight ✦ in the profile's name row
- * (popout, full profile, and the DM side profile). The bio is read from the
- * profile store, which Discord fills when the profile opens.
+ * A user's custom status as a tight ✦ in the profile's name row (popout,
+ * full profile, DM side profile), but only when they have no bio: with a
+ * bio, the status is translated in the line under the bio instead.
  */
 function ProfileHintImpl(props: any) {
     if (!isPaidSurfaceUser()) return null;
     const userId = props?.user?.id;
     if (typeof userId !== "string") return null;
     const guildId = typeof props?.guildId === "string" ? props.guildId : undefined;
-    const texts: SurfaceText[] = [];
+    if (bioOf(userId, guildId).trim() !== "") return null;
     const status = customStatusText(PresenceStore?.getActivities?.(userId));
-    if (status !== "") texts.push({ kind: "status", label: "Status", text: status });
-    const bio = (guildId ? UserProfileStore?.getGuildMemberProfile?.(userId, guildId)?.bio : undefined)
-        || UserProfileStore?.getUserProfile?.(userId)?.bio;
-    if (typeof bio === "string" && bio.trim() !== "") texts.push({ kind: "bio", label: "About me", text: bio });
-    if (texts.length === 0) return null;
-    return <SurfaceHint texts={texts} />;
+    if (status === "") return null;
+    return <SurfaceHint texts={[{ kind: "status", label: "Status", text: status }]} />;
 }
 const ProfileHint = safe("profile hint", ProfileHintImpl, surfaceDebug);
 
-/**
- * The open channel's own text (topic, thread title and tags, a live event),
- * as a tight ✦ in the chat bar with the translations in its tooltip.
- */
-function ChannelTextHintImpl(props: ChatBarProps & { isMainChat?: boolean; }) {
+/** The line under a profile's About Me: the bio, then the custom status. */
+function BioLineImpl(props: any) {
     if (!isPaidSurfaceUser()) return null;
-    const channel: any = (props as any)?.channel;
-    if (!channel) return null;
-    const parent = channel.parent_id ? ChannelStore.getChannel(channel.parent_id) : null;
-    const events = channel.guild_id
-        ? (GuildScheduledEventStore as any)?.getGuildScheduledEventsForGuild?.(channel.guild_id)
-        : undefined;
-    const texts = channelTexts(channel, parent, events);
-    if (texts.length === 0) return null;
-    return <SurfaceHint texts={texts} />;
+    const userId = props?.userId;
+    const bio = props?.userBio;
+    if (typeof bio !== "string" || bio.trim() === "") return null;
+    const texts: SurfaceText[] = [{ kind: "bio", label: "About me", text: bio }];
+    if (typeof userId === "string") {
+        const status = customStatusText(PresenceStore?.getActivities?.(userId));
+        if (status !== "") texts.push({ kind: "status", label: "Status", text: status });
+    }
+    return <SurfaceLines texts={texts} />;
 }
-const ChannelTextHint = safe("channel text hint", ChannelTextHintImpl, surfaceDebug);
+const BioLine = safe("bio line", BioLineImpl, surfaceDebug);
+
+/** What each wrapped Discord parser translates, and whether it has room for a line. */
+const PARSER_SURFACES: Record<string, { kind: SurfaceKind; label: string; tight: boolean; }> = {
+    "topic": { kind: "topic", label: "Topic", tight: false },
+    "topic-truncated": { kind: "topic", label: "Topic", tight: true },
+    "voice-status": { kind: "voice-status", label: "Voice status", tight: true },
+    "rule": { kind: "rule", label: "Rule", tight: false },
+    "guidelines": { kind: "guidelines", label: "Guidelines", tight: false },
+    "event": { kind: "event", label: "Event", tight: false }
+};
+
+/**
+ * What a wrapped Discord parser returns: its own output untouched, plus, for
+ * a paid install and a foreign text, a small line after it or a tight ✦
+ * before it. Anything unexpected returns the output exactly as Discord made it.
+ */
+export function decorateParsed(parser: string, source: unknown, out: unknown): unknown {
+    try {
+        if (!isPaidSurfaceUser() || typeof source !== "string" || source.trim() === "") return out;
+        const spec = PARSER_SURFACES[parser];
+        if (spec === undefined) return out;
+        const texts: SurfaceText[] = [{ kind: spec.kind, label: spec.label, text: source }];
+        return spec.tight
+            ? [<SurfaceHint key="subline-surface" texts={texts} before />, out]
+            : [out, <SurfaceLines key="subline-surface" texts={texts} />];
+    } catch {
+        return out;
+    }
+}
+
+/**
+ * Wrap one of Discord's parser functions. Runs when Discord loads the parser
+ * module, so it must never throw: anything but a function is returned as is.
+ */
+function wrapParser(parser: string, fn: unknown): unknown {
+    if (typeof fn !== "function") return fn;
+    const original = fn as (...args: unknown[]) => unknown;
+    return function (this: unknown, ...args: unknown[]) {
+        return decorateParsed(parser, args[0], original.apply(this, args));
+    };
+}
+
+/** A tight ✦ for one text (a thread title, a stage topic), placed before it. */
+function SurfaceMarkImpl({ kind, text }: { kind: SurfaceKind; text: unknown; }) {
+    if (!isPaidSurfaceUser() || typeof text !== "string" || text.trim() === "") return null;
+    const label = kind === "stage-topic" ? "Stage topic" : kind === "thread-title" ? "Title" : "Text";
+    return <SurfaceHint texts={[{ kind, label, text }]} before />;
+}
+const SurfaceMark = safe("surface mark", SurfaceMarkImpl, surfaceDebug);
+
+/** A tight ✦ at the end of a forum post's tag row, for its tags' names. */
+function ForumTagsMarkImpl({ channel }: { channel: any; }) {
+    if (!isPaidSurfaceUser() || channel == null) return null;
+    const parent = channel.parent_id ? ChannelStore.getChannel(channel.parent_id) : null;
+    const names = appliedTagNames(channel, parent);
+    if (names.length === 0) return null;
+    return <SurfaceHint texts={names.map(name => ({ kind: "forum-tag" as const, label: "Tag", text: name }))} />;
+}
+const ForumTagsMark = safe("forum tags mark", ForumTagsMarkImpl, surfaceDebug);
+
+/** Lines under an onboarding question: the question and its options. */
+function OnboardingLinesImpl({ prompt }: { prompt: unknown; }) {
+    if (!isPaidSurfaceUser()) return null;
+    const texts = onboardingPromptTexts(prompt);
+    return texts.length === 0 ? null : <SurfaceLines texts={texts} />;
+}
+const OnboardingLines = safe("onboarding lines", OnboardingLinesImpl, surfaceDebug);
 
 export default definePlugin({
     name: "VcTranslate",
@@ -3864,22 +3932,18 @@ export default definePlugin({
     renderMemberListDecorator: props => <StatusHint userId={props?.user?.id} />,
 
     /*
-     * The profile's name row (popout, full profile, DM side profile). The
-     * find and match are Vencord UserVoiceShow's, unchanged, at the pinned
-     * Vencord commit. If Discord moves this code, Vencord logs one warning
-     * that the patch had no effect and the profile renders as it always did.
+     * Where Discord shows text outside messages. See surfaces/patches.ts:
+     * every find and match there was checked against Discord's current
+     * public web bundle, and each replacement fails on its own.
      */
-    patches: [
-        {
-            find: "#{intl::USER_PROFILE_PRONOUNS}",
-            replacement: {
-                match: /(?<=children:\[\i," ",\i)(?=\])/,
-                replace: ",$self.renderProfileSurface(arguments[0])"
-            }
-        }
-    ],
+    patches: SURFACE_PATCHES.map(({ find, replacement }) => ({ find, replacement })),
 
     renderProfileSurface: (props: any) => <ProfileHint {...(props ?? {})} />,
+    renderBioLine: (props: any) => <BioLine {...(props ?? {})} />,
+    renderSurfaceMark: (kind: SurfaceKind, text: unknown) => <SurfaceMark kind={kind} text={text} />,
+    renderForumTagsMark: (channel: unknown) => <ForumTagsMark channel={channel} />,
+    renderOnboardingPrompt: (prompt: unknown) => <OnboardingLines prompt={prompt} />,
+    wrapParser,
 
     // Declarative — unlike the force-quality popover above, this is the ONLY
     // chat-bar button this plugin registers, so it needs no second, manual
@@ -3941,7 +4005,6 @@ export default definePlugin({
         // below delays nothing; the service sends nothing for a free install.
         startSurfaces();
         addMessageAccessory(SURFACE_ACCESSORY_ID, props => <SurfaceAccessory message={props.message} />);
-        addChatBarButton(SURFACE_CHANNEL_BUTTON_ID, props => <ChannelTextHint {...props} />, () => <span>✦</span>);
         void surfaceCache?.load();
 
         // Registered here (and removed in stop()) rather than left as a
@@ -4079,7 +4142,6 @@ export default definePlugin({
 
     stop() {
         removeMessageAccessory(SURFACE_ACCESSORY_ID);
-        removeChatBarButton(SURFACE_CHANNEL_BUTTON_ID);
         // Nothing queued is sent after this, and the cache is saved as it is.
         surfaceService?.stop();
         void surfaceCache?.persistNow();

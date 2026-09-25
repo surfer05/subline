@@ -119,8 +119,15 @@ export function __stubSetChannelName(channelId: string, name: string): void {
     channelNames.set(channelId, name);
 }
 
+/** Full channel records a test sets, returned as-is by getChannel. */
+const stubChannels = new Map<string, unknown>();
+
+export function __stubSetChannel(id: string, channel: unknown): void {
+    stubChannels.set(id, channel);
+}
+
 export const ChannelStore = {
-    getChannel: (id: string) =>
+    getChannel: (id: string) => stubChannels.has(id) ? stubChannels.get(id) as any :
         dmChannels.has(id)
             ? { id, name: channelNames.get(id) }
             : { id, guild_id: "stub-guild", name: channelNames.get(id) }
@@ -193,6 +200,7 @@ export const GuildScheduledEventStore = {
 /* ------------------------------------------------------------------------- */
 
 export function __resetWebpackCommon(): void {
+    stubChannels.clear();
     stubMessageById.clear();
     stubActivities.clear();
     stubProfiles.clear();

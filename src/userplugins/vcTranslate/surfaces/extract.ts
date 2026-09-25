@@ -14,7 +14,8 @@ export type SurfaceKind =
     | "poll-question" | "poll-answer"
     | "reply" | "forward"
     | "status" | "bio"
-    | "topic" | "thread-title" | "forum-tag" | "event";
+    | "topic" | "thread-title" | "forum-tag" | "event"
+    | "voice-status" | "stage-topic" | "rule" | "guidelines" | "onboarding";
 
 export interface SurfaceText {
     kind: SurfaceKind;
@@ -107,34 +108,29 @@ export function customStatusText(activities: unknown): string {
     return str(status?.state).trim();
 }
 
-/** Discord's ACTIVE scheduled-event status. */
-export const EVENT_ACTIVE = 2;
-
-/**
- * The open channel's own texts: its topic, a thread's title and applied tags,
- * and the name and description of an event running in it right now.
- */
-export function channelTexts(channel: any, parent: any, events: unknown): SurfaceText[] {
+/** An onboarding prompt's own text: its question, and each option's title and description. */
+export function onboardingPromptTexts(prompt: unknown): SurfaceText[] {
     const out: SurfaceText[] = [];
-    if (channel === null || typeof channel !== "object") return out;
-    let isThread = false;
-    try { isThread = typeof channel.isThread === "function" && channel.isThread() === true; } catch { /* not a thread */ }
-    push(out, "topic", "Topic", channel.topic);
-    if (isThread) {
-        push(out, "thread-title", "Title", channel.name);
-        const tags: unknown[] = Array.isArray(parent?.availableTags) ? parent.availableTags : [];
-        const applied: unknown[] = Array.isArray(channel.appliedTags) ? channel.appliedTags : [];
-        for (const id of applied) {
-            const tag = tags.find(t => (t as any)?.id === id) as any;
-            push(out, "forum-tag", "Tag", tag?.name);
-        }
-    }
-    if (Array.isArray(events)) {
-        for (const e of events) {
-            if (e?.channel_id !== channel.id || e?.status !== EVENT_ACTIVE) continue;
-            push(out, "event", "Event", e.name);
-            push(out, "event", "Event", e.description);
+    if (prompt === null || typeof prompt !== "object") return out;
+    const p = prompt as Record<string, any>;
+    push(out, "onboarding", "Question", p.title);
+    if (Array.isArray(p.options)) {
+        for (const o of p.options) {
+            push(out, "onboarding", "Option", o?.title);
+            push(out, "onboarding", "Option", o?.description);
         }
     }
     return out;
+}
+
+/** The names of the tags applied to a forum post, looked up on its parent forum. */
+export function appliedTagNames(channel: any, parent: any): string[] {
+    const tags: unknown[] = Array.isArray(parent?.availableTags) ? parent.availableTags : [];
+    const applied: unknown[] = Array.isArray(channel?.appliedTags) ? channel.appliedTags : [];
+    const names: string[] = [];
+    for (const id of applied) {
+        const name = str((tags.find(t => (t as any)?.id === id) as any)?.name).trim();
+        if (name !== "") names.push(name);
+    }
+    return names;
 }
