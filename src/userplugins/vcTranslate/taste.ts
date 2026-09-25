@@ -3,12 +3,12 @@ import * as DataStore from "@api/DataStore";
 /**
  * THE TASTE TIER — three ✦ a day for an install with no code.
  *
- * Once a free install's 7-day trial is over (see freePlan.ts), ✦ is no longer
- * automatic. Three a day remain: spent on a deliberate ⚡ press (the full ✦
- * line) or on a ✦ preview under a rough ≈ line the reader clicked (the first
- * few words, cut by the relay). Never automatic, never a batch, only a message
- * the reader chose. This module owns the two
- * pieces of state that makes possible: WHO is asking (an install id the relay
+ * During a free install's 7-day trial a ⚡ press spends one on the full ✦
+ * line (while the relay has not confirmed the trial). Once the trial is over
+ * (see freePlan.ts), the three pay for ✦ PREVIEWS only, from ⚡ or from a click
+ * on a rough ≈ line: the first few words, cut by the relay and again by the
+ * client. Never automatic, never a batch, only a message the reader chose.
+ * This module owns the two pieces of state that makes possible: WHO is asking (an install id the relay
  * counts against) and HOW MANY are left today.
  *
  * Everything here is deliberately free of Discord, of settings and of the

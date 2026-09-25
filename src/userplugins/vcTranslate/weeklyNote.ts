@@ -81,7 +81,9 @@ export function closeWeekIfDue(now: number = Date.now()): string | null {
     if (stats === null) return null;
     if (now - stats.weekStart < WEEK_MS) return null;
     const { count, langs, lastNoteAt } = stats;
-    const due = count > 0 && (lastNoteAt === 0 || now - lastNoteAt >= WEEK_MS);
+    // Never "in 0 languages": a week whose translations carried no language
+    // at all says nothing rather than something odd.
+    const due = count > 0 && langs.length > 0 && (lastNoteAt === 0 || now - lastNoteAt >= WEEK_MS);
     stats = { weekStart: now, count: 0, langs: [], lastNoteAt: due ? now : lastNoteAt };
     persist();
     return due ? weeklyNoteText(count, langs.length) : null;

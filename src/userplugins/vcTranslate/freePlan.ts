@@ -36,10 +36,36 @@ export type FreeMode = "trial" | "click";
  */
 let serverTrialEndsAt: number | null = null;
 
-/** Record the relay's `trialEndsAt`. Ignores anything that is not a sane epoch. */
-export function noteServerTrialEnd(endsAt: unknown): void {
-    if (typeof endsAt !== "number" || !Number.isFinite(endsAt) || endsAt <= 0) return;
-    serverTrialEndsAt = endsAt;
+/**
+ * THE CLOCK SKEW. The relay's `trialEndsAt` is on the relay's clock, and a
+ * reader's computer can be hours or days off. The relay states its own `now`
+ * on every response to a v0.1.6 client; the difference is kept here and the
+ * relay's end time is converted onto the LOCAL clock the moment it arrives,
+ * so every comparison below is local-vs-local. Zero until the relay says.
+ */
+let clockOffsetMs = 0;
+
+const sane = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+
+/** Record the relay's clock (`now` on its responses). Ignores anything malformed. */
+export function noteServerNow(serverNow: unknown, localNow: number = Date.now()): void {
+    if (!sane(serverNow)) return;
+    clockOffsetMs = serverNow - localNow;
+}
+
+/**
+ * Record the relay's `trialEndsAt` (relay clock). Pass the relay's `now` from
+ * the same response when there is one, so the offset is current.
+ */
+export function noteServerTrialEnd(endsAt: unknown, serverNow?: unknown, localNow: number = Date.now()): void {
+    noteServerNow(serverNow, localNow);
+    if (!sane(endsAt)) return;
+    serverTrialEndsAt = endsAt - clockOffsetMs;
+}
+
+/** Has the relay said anything about this trial this session? */
+export function relayHasSpoken(): boolean {
+    return serverTrialEndsAt !== null;
 }
 
 /** The relay refused an automatic request with "trial ended": it is over now. */
@@ -47,7 +73,7 @@ export function markServerTrialEnded(now: number = Date.now()): void {
     serverTrialEndsAt = Math.min(serverTrialEndsAt ?? now, now);
 }
 
-/** The end of the trial: the relay's word when it has given one, else the local clock's. */
+/** The end of the trial on the LOCAL clock: the relay's word when it has given one, else the local start's. */
 export function trialEndsAt(localStartedAt: number): number {
     if (serverTrialEndsAt !== null) return serverTrialEndsAt;
     return localStartedAt + TRIAL_MS;
@@ -56,6 +82,31 @@ export function trialEndsAt(localStartedAt: number): number {
 /** Automatic (trial) or click-to-translate, for a FREE install. */
 export function freeMode(localStartedAt: number, now: number = Date.now()): FreeMode {
     return now < trialEndsAt(localStartedAt) ? "trial" : "click";
+}
+
+/** How long past its local end the trial must be before the local clock alone may say it ended. */
+export const LOCAL_END_GRACE_MS = DAY_MS;
+
+/**
+ * The end of the trial that is safe to ANNOUNCE, or null. Only an ending the
+ * relay stated (its `trialEndsAt` is past, or it refused a batch as "trial
+ * ended"). If the relay has never answered this session, the local clock may
+ * stand in, but only a full day after its own end: a wrong "your trial
+ * ended" is worse than a late one.
+ */
+export function announceableTrialEnd(localStartedAt: number, now: number = Date.now()): number | null {
+    if (serverTrialEndsAt !== null) return now >= serverTrialEndsAt ? serverTrialEndsAt : null;
+    const localEnd = localStartedAt + TRIAL_MS;
+    return now >= localEnd + LOCAL_END_GRACE_MS ? localEnd : null;
+}
+
+/**
+ * Is `end` a different ending from the one already announced? Endings are
+ * compared loosely (the relay's and the local clock's end of the SAME trial
+ * differ by minutes or days); only a new trial ending counts again.
+ */
+export function isNewEnding(end: number, announced: number): boolean {
+    return announced <= 0 || end > announced + TRIAL_MS;
 }
 
 /**
@@ -79,7 +130,8 @@ export function trialDaysLeft(localStartedAt: number, now: number = Date.now()):
 
 /**
  * The read-only line under the Subline Code setting. `null` for a paid
- * install, which is told nothing new.
+ * install, which is told nothing new. After the trial, settings.ts adds an
+ * "Upgrade" link after this text (a toast cannot carry one; this can).
  */
 export function freePlanLine(isFree: boolean, localStartedAt: number, now: number = Date.now()): string | null {
     if (!isFree) return null;
@@ -90,10 +142,12 @@ export function freePlanLine(isFree: boolean, localStartedAt: number, now: numbe
     return "Free plan: messages translate when you click.";
 }
 
-/** Shown once, the first time a message is shown after the trial ends. */
+/**
+ * Shown once per ending. No URL: toast text is not clickable. The settings
+ * line carries the link instead.
+ */
 export function trialEndedMessage(): string {
-    return "Your 7-day free trial ended. Messages now translate when you click. "
-        + `Upgrade to keep it automatic. ${PRICING_URL}`;
+    return "Your 7-day free trial ended. Messages now translate when you click. Upgrade to keep it automatic.";
 }
 
 /* ------------------------------------------------------------ preview -- */
@@ -105,11 +159,16 @@ export const PREVIEW_MAX_CHARS = 32;
 /**
  * The first few words of a translation, exactly as the relay cuts a ✦ preview.
  *
- * A MIRROR of the relay's own truncation, and used for one thing only: to cut
- * the ≈ line the same way before comparing it with the preview. If the two cut
- * the same, the preview would show the reader nothing they cannot already
- * read, so it is not shown. The relay is what actually truncates ✦: the full
- * text never reaches a free client.
+ * A MIRROR of the relay's own truncation, used twice. (1) On whatever the relay
+ * returns in preview mode: a v0.1.6 relay has already cut it, but an older one
+ * ignores `mode` and sends the full ✦ line, so the client cuts again and a
+ * preview can never show more than this. (2) On the ≈ line, before comparing:
+ * if the two cut the same, the preview would show nothing new, so it is not
+ * shown.
+ *
+ * WHAT THIS DOES NOT PROMISE: the relay cuts only v0.1.6 preview requests. A
+ * header-less legacy (v0.1.5) ⚡ press still gets the full ✦ line within the
+ * 3-a-day taste allowance, as it always did.
  */
 export function previewText(text: string): { text: string; truncated: boolean } {
     const words = text.trim().split(/\s+/).filter(Boolean);
@@ -137,4 +196,5 @@ export function previewDiffers(preview: string, googleText: string): boolean {
 /** Test-only: forget what the relay said. */
 export function __resetFreePlan(): void {
     serverTrialEndsAt = null;
+    clockOffsetMs = 0;
 }

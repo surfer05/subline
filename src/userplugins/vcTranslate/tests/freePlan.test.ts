@@ -2,7 +2,7 @@ import { __resetSettings } from "@api/Settings";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
-    __resetFreePlan, DAY_MS, freeMode, freePlanLine, markServerTrialEnded, noteServerTrialEnd,
+    __resetFreePlan, announceableTrialEnd, DAY_MS, isNewEnding, freeMode, freePlanLine, markServerTrialEnded, noteServerTrialEnd,
     previewDiffers, previewText, PRICING_URL, TRIAL_MS, trialConfirmed, trialDaysLeft, trialEndedMessage
 } from "../freePlan";
 import settings from "../settings";
@@ -87,7 +87,13 @@ describe("the settings line under the Subline code", () => {
         expect(el.children.join("")).toBe("Free trial: 7 days left.");
 
         settings.store.freeTrialStartedAt = Date.now() - TRIAL_MS - 1;
-        expect((def.component() as any).children.join("")).toBe("Free plan: messages translate when you click.");
+        const after: any = def.component();
+        // "Free plan: messages translate when you click. Upgrade", with Upgrade a link.
+        expect(after.children[0]).toBe("Free plan: messages translate when you click.");
+        const link = after.children[2];
+        expect(link.type).toBe("a");
+        expect(link.props.href).toBe(PRICING_URL);
+        expect(link.children).toEqual(["Upgrade"]);
 
         settings.store.sublineCode = "SUBLINE-PAID";
         expect(def.hidden()).toBe(true);
@@ -104,15 +110,14 @@ describe("the settings line under the Subline code", () => {
         const def: any = (settings as any).def;
         // CUSTOM settings are never rendered by Vencord.
         expect(def.freeTrialStartedAt.type).toBe(7);
-        expect(def.freeTrialEndNoticeShown.type).toBe(7);
+        expect(def.freeTrialEndNoticeFor.type).toBe(7);
     });
 });
 
 describe("the copy", () => {
     it("uses the agreed sentences, with no em dash", () => {
         expect(trialEndedMessage()).toBe(
-            "Your 7-day free trial ended. Messages now translate when you click. "
-            + `Upgrade to keep it automatic. ${PRICING_URL}`
+            "Your 7-day free trial ended. Messages now translate when you click. Upgrade to keep it automatic."
         );
         expect(PRICING_URL).toBe("https://surfer05.github.io/subline/#pricing");
         for (const s of [
@@ -189,5 +194,45 @@ describe("the weekly note", () => {
         await Promise.resolve();
         expect(Object.keys((await DataStore.get<object>(WEEKLY_KEY))!).sort())
             .toEqual(["count", "langs", "lastNoteAt", "weekStart"]);
+    });
+});
+
+describe("review fixes (pure)", () => {
+    it("never says 'in 0 languages': a week of translations with no language shows nothing", async () => {
+        DataStore.__reset();
+        __resetWeeklyStats();
+        await loadWeeklyStats(T0);
+        countShown(undefined); countShown("");
+        expect(closeWeekIfDue(T0 + WEEK_MS)).toBeNull();
+    });
+
+    it("counts a lang-less item as a message but not as a language", async () => {
+        DataStore.__reset();
+        __resetWeeklyStats();
+        await loadWeeklyStats(T0);
+        countShown(undefined); countShown("es");
+        expect(closeWeekIfDue(T0 + WEEK_MS)).toBe("This week: 2 messages in 1 language.");
+    });
+
+    it("converts the relay's end onto the local clock using the relay's now", () => {
+        // Client clock 3 days fast.
+        const local = T0 + 3 * DAY_MS;
+        noteServerTrialEnd(T0 + DAY_MS, T0, local);
+        expect(freeMode(0, local)).toBe("trial");
+        expect(freeMode(0, local + DAY_MS)).toBe("click");
+    });
+
+    it("announces a local-only ending only a day after it, and a relay ending at once", () => {
+        expect(announceableTrialEnd(T0, T0 + TRIAL_MS + 1)).toBeNull();
+        expect(announceableTrialEnd(T0, T0 + TRIAL_MS + DAY_MS)).toBe(T0 + TRIAL_MS);
+        noteServerTrialEnd(T0 + 1000, T0, T0);
+        expect(announceableTrialEnd(T0, T0 + 999)).toBeNull();
+        expect(announceableTrialEnd(T0, T0 + 1000)).toBe(T0 + 1000);
+    });
+
+    it("treats the relay's and the local clock's end of one trial as the same ending", () => {
+        expect(isNewEnding(T0 + TRIAL_MS, 0)).toBe(true);
+        expect(isNewEnding(T0 + TRIAL_MS + 3 * DAY_MS, T0 + TRIAL_MS)).toBe(false);
+        expect(isNewEnding(T0 + 3 * TRIAL_MS, T0 + TRIAL_MS)).toBe(true);
     });
 });

@@ -132,9 +132,10 @@ export interface BatchRequest {
      * Relay only, and only ever set for a FREE install (see freePlan.ts):
      * "auto" marks an automatic trial batch, so a relay whose record says the
      * trial is over refuses it instead of spending the day's three previews on
-     * it; "preview" asks for a ✦ preview, which the relay cuts to its first few
-     * words before it leaves the server. Absent everywhere else, which is what
-     * every earlier client sent: the relay reads absence as the old behaviour.
+     * it; "preview" asks for a ✦ preview, which a v0.1.6 relay cuts to its first
+     * few words (the client cuts again, for an older relay). Absent everywhere
+     * else, which is what every earlier client sent: the relay reads absence
+     * as the old behaviour.
      */
     mode?: "auto" | "preview";
 }

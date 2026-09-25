@@ -2,7 +2,7 @@ import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
 import { LocaleStore, React } from "@webpack/common";
 
-import { freePlanLine } from "./freePlan";
+import { freeMode, freePlanLine, PRICING_URL } from "./freePlan";
 import { notifySettingsChanged } from "./settingsBridge";
 import { DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_MODEL } from "./types";
 
@@ -107,10 +107,22 @@ export const settings = definePluginSettings({
     freePlanStatus: {
         type: OptionType.COMPONENT,
         component: () => {
-            const line = freePlanLine(isFreeBySettings(), trialStartedAt());
-            return line === null
-                ? null
-                : React.createElement("div", { style: { color: "var(--text-muted)", fontSize: "0.9rem" } }, line);
+            const start = trialStartedAt();
+            const line = freePlanLine(isFreeBySettings(), start);
+            if (line === null) return null;
+            const style = { color: "var(--text-muted)", fontSize: "0.9rem" };
+            if (freeMode(start) !== "click") return React.createElement("div", { style }, line);
+            // After the trial the line carries the one clickable upgrade link
+            // (the trial-ended toast cannot).
+            return React.createElement("div", { style }, line, " ", React.createElement("a", {
+                href: PRICING_URL,
+                target: "_blank",
+                rel: "noreferrer",
+                onClick: (e: any) => {
+                    e?.preventDefault?.();
+                    (globalThis as any).VencordNative?.native?.openExternal?.(PRICING_URL);
+                }
+            }, "Upgrade"));
         }
     },
     // When this install's free trial began (epoch ms), 0 until the first
@@ -121,10 +133,11 @@ export const settings = definePluginSettings({
         type: OptionType.CUSTOM,
         default: 0
     },
-    // Whether the once-ever "your trial ended" toast has been shown.
-    freeTrialEndNoticeShown: {
+    // The trial end (epoch ms) the "your trial ended" toast was shown for, 0
+    // for none: the toast fires once per actual ending (freePlan.ts).
+    freeTrialEndNoticeFor: {
         type: OptionType.CUSTOM,
-        default: false
+        default: 0
     },
     anthropicApiKey: {
         type: OptionType.STRING,

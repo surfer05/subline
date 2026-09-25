@@ -59,6 +59,8 @@ export interface RelayOutcome {
     rpmLimit?: number;
     used?: number;
     cap?: number;
+    /** The relay's own clock (epoch ms), stated to v0.1.6 clients. */
+    serverNow?: number;
 }
 
 /** What /v1/status says about this credential. See RELAY_STATUS_URL. */
@@ -75,6 +77,8 @@ export interface RelayStatus {
      * for a free install id; absent otherwise.
      */
     trialEndsAt?: number;
+    /** The relay's own clock (epoch ms), for the skew correction in freePlan.ts. */
+    serverNow?: number;
 }
 
 /** A non-negative, finite integer the relay stated, or undefined. */
@@ -123,7 +127,8 @@ export async function fetchRelayStatus(
     const trialEndsAt = typeof body.trialEndsAt === "number" && Number.isFinite(body.trialEndsAt) && body.trialEndsAt > 0
         ? body.trialEndsAt
         : undefined;
-    return { plan: typeof body.plan === "string" ? body.plan : "", used, cap, trialEndsAt };
+    const serverNow = typeof body.now === "number" && Number.isFinite(body.now) && body.now > 0 ? body.now : undefined;
+    return { plan: typeof body.plan === "string" ? body.plan : "", used, cap, trialEndsAt, serverNow };
 }
 
 export async function translateWithRelay(
@@ -195,6 +200,7 @@ export async function translateWithRelayDetailed(
         results,
         rpmLimit,
         used: countFrom(body.used),
-        cap: cap === 0 ? undefined : cap
+        cap: cap === 0 ? undefined : cap,
+        serverNow: typeof body.now === "number" && Number.isFinite(body.now) && body.now > 0 ? body.now : undefined
     };
 }

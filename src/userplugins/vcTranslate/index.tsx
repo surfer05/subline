@@ -13,8 +13,8 @@ import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
 import { isConfidentlyTargetLanguage } from "./detectLang";
 import {
-    __resetFreePlan, freeMode, markServerTrialEnded, noteServerTrialEnd, previewDiffers, PRICING_URL,
-    trialConfirmed, trialEndedMessage
+    __resetFreePlan, announceableTrialEnd, freeMode, isNewEnding, markServerTrialEnded, noteServerNow,
+    noteServerTrialEnd, previewDiffers, previewText, PRICING_URL, trialConfirmed, trialEndedMessage
 } from "./freePlan";
 import {
     acquireSlot, loadRateGateTuning, rateGateAvailable, rateGateSettings, rateGateWaitMs,
@@ -25,7 +25,7 @@ import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
 import {
-    installIdOnce, markTasteExhausted, recordTasteQuota, rolloverTasteIfNewUtcDay, tasteBearer,
+    installIdOnce, markTasteExhausted, recordTasteQuota, rolloverTasteIfNewUtcDay, TASTE_CAP, tasteBearer,
     tasteCap, tasteExhausted, tasteLabel, tasteUsed
 } from "./taste";
 import {
@@ -574,15 +574,25 @@ function trialAutoActive(): boolean {
 function onFreePlanChanged(): void {
     if (fastBatcher === null) return;   // stopped
     rebuildBatcher();
-    if (isClickMode()) return;
+    // In click mode this sends nothing: it only lets the trial-ended note
+    // appear now, if a foreign message is already on screen.
     const open = SelectedChannelStore.getChannelId();
     if (open) catchUp(open);
 }
 
-/** "Your 7-day free trial ended..." once, ever, the first time it becomes true on screen. */
+/**
+ * "Your 7-day free trial ended..." once per actual ending, the first time a
+ * message is on screen after it. ONLY for an ending the relay stated (or, if
+ * the relay has never answered, a full day past the local clock's end): see
+ * announceableTrialEnd.
+ */
 function maybeAnnounceTrialEnded(): void {
-    if (settings.store.freeTrialEndNoticeShown === true) return;
-    settings.store.freeTrialEndNoticeShown = true;
+    if (!isClickMode()) return;
+    const end = announceableTrialEnd(localTrialStart());
+    if (end === null) return;
+    const announced = settings.store.freeTrialEndNoticeFor;
+    if (!isNewEnding(end, typeof announced === "number" ? announced : 0)) return;
+    settings.store.freeTrialEndNoticeFor = end;
     Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message: trialEndedMessage() });
 }
 
@@ -645,8 +655,38 @@ function tasteLog(message: string): void {
  * briefly unreachable must not take a free user's three away. Never awaited by
  * anything the user is waiting on.
  */
+/**
+ * The startup status call is retried until the relay answers: 5s, 15s, 60s,
+ * then every 5 minutes. Without it, one failed call at startup left the
+ * session on the local clock (no ✦ in the trial) until Discord restarted.
+ */
+const STATUS_RETRY_MS = [5_000, 15_000, 60_000];
+const STATUS_RETRY_EVERY_MS = 5 * 60_000;
+let statusRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let statusAttempts = 0;
+/** Bumped by stop(), so a status reply from a stopped session schedules nothing. */
+let statusSession = 0;
+
+function scheduleStatusRetry(): void {
+    if (statusRetryTimer !== null) return;
+    const delay = STATUS_RETRY_MS[statusAttempts] ?? STATUS_RETRY_EVERY_MS;
+    statusAttempts++;
+    statusRetryTimer = setTimeout(() => {
+        statusRetryTimer = null;
+        if (isTasteInstall()) void refreshTasteQuota();
+    }, delay);
+}
+
+function clearStatusRetry(): void {
+    if (statusRetryTimer !== null) clearTimeout(statusRetryTimer);
+    statusRetryTimer = null;
+    statusAttempts = 0;
+}
+
 async function refreshTasteQuota(): Promise<void> {
     freeStatusAsked = true;
+    const session = statusSession;
+    let answered = false;
     try {
         const id = await installIdOnce();
         const bearer = tasteBearer(id);
@@ -655,9 +695,11 @@ async function refreshTasteQuota(): Promise<void> {
             // THE FREE PLAN, as the relay records it. `trialEndsAt` is only
             // stated by a relay that knows about trials; an older one leaves
             // the local clock in charge (and ✦ off: see trialAutoActive).
+            answered = true;
+            clearStatusRetry();
             const wasAuto = trialAutoActive();
             const wasClick = isClickMode();
-            noteServerTrialEnd(res.trialEndsAt);
+            noteServerTrialEnd(res.trialEndsAt, res.serverNow);
             if (res.plan === "trial") {
                 trialBearer = bearer;
                 tasteLog("the relay confirms the free trial: ✦ is automatic");
@@ -675,6 +717,7 @@ async function refreshTasteQuota(): Promise<void> {
     } catch {
         tasteLog("today's count is unknown: the status call did not complete");
     }
+    if (!answered && session === statusSession) scheduleStatusRetry();
 }
 
 /* ------------------------------------------------- LLM cooldown / fallback -- */
@@ -1597,7 +1640,7 @@ async function runTier(
                         // is the authority, so the session follows it now.
                         tasteLog("the relay says the free trial has ended");
                         markServerTrialEnded();
-                        rebuildBatcher();
+                        onFreePlanChanged();
                     } else if (isDailyLimit(res.error) || res.retryAfterMs) {
                         tasteLog("the relay paused the trial's ✦ for now; ≈ keeps working");
                         taste.onDailyLimit(res.retryAfterMs);
@@ -1734,7 +1777,12 @@ async function runTier(
         // throw in the write loop must not lose the one number the ⚡ button
         // has to show, and a press whose count was lost would be a press the
         // user is never told about.
-        if (taste?.kind === "press") {
+        // The relay's clock, for the trial's skew correction (freePlan.ts).
+        if (taste !== undefined) noteServerNow(res.serverNow);
+        // A trial-sized cap (a ⚡ press the relay counted against a running
+        // trial) is not the taste allowance, and must never reach the "n of 3
+        // left today" label as "299 of 300".
+        if (taste?.kind === "press" && !(typeof res.quotaCap === "number" && res.quotaCap > TASTE_CAP)) {
             recordTasteQuota(res.quotaUsed, res.quotaCap);
             tasteLog(`press accepted — ${tasteUsed()} of ${tasteCap()} used today`);
         }
@@ -1841,6 +1889,14 @@ async function forceQualityTranslate(message: Message): Promise<void> {
         // the engine, so a paid install pinned to Google by a rejected code
         // still takes the branch below and gets its own error.
         if (isTasteInstall()) {
+            // After the trial a v0.1.6 client never shows a free reader the
+            // full ✦ line: ⚡ asks for the same preview a click on a rough ≈
+            // line does, from the same three a day. During the trial ⚡ is
+            // the taste press it always was.
+            if (isClickMode()) {
+                await previewPress(message);
+                return;
+            }
             await tasteTranslate(message);
             return;
         }
@@ -2043,8 +2099,28 @@ function googleUnsure(entry: { via: EngineId; lang: string; conf?: number }, con
  * would. Then, and only if that line is one the confidence logic rates rough,
  * and only while today's previews last, the relay is asked what ✦ reads it as.
  */
+/**
+ * Messages whose click landed while Google was cooling down, so the line says
+ * so for a moment instead of silently going back to "≈ Translate".
+ */
+const clickBusy = new Map<string, ReturnType<typeof setTimeout>>();
+
+function setClickBusy(messageId: string): void {
+    const t = clickBusy.get(messageId);
+    if (t !== undefined) clearTimeout(t);
+    clickBusy.set(messageId, setTimeout(() => {
+        clickBusy.delete(messageId);
+        notifyForcedInFlight();
+    }, FORCED_HINT_TTL_MS));
+    notifyForcedInFlight();
+}
+
 async function clickTranslate(message: Message): Promise<void> {
     if (clickInFlight.has(message.id) || inFlightFast.has(message.id)) return;
+    if (isCoolingDown("google")) {
+        setClickBusy(message.id);
+        return;
+    }
     const channelId = message.channel_id;
     const pending: PendingMessage = {
         id: message.id,
@@ -2068,18 +2144,40 @@ async function clickTranslate(message: Message): Promise<void> {
     }
 
     const entry = getTranslation(makeKey(message.id, settings.store.targetLang));
-    if (!isRealTranslation(entry) || entry.via !== "google") return;
+    if (!isRealTranslation(entry)) {
+        // Google refused and is now parked: say so, briefly.
+        if (isCoolingDown("google")) setClickBusy(message.id);
+        return;
+    }
+    if (entry.via !== "google") return;
     if (!googleUnsure(entry, message.content ?? "").unsure) return;
     await requestPreview(message, pending.text, entry.text);
 }
 
 /**
- * Ask the relay what ✦ reads this message as, in PREVIEW mode: the relay
- * translates it for real and returns only the first few words, so the full
- * text never reaches a free install. Three a day, the same allowance as the ⚡
- * taste. When the three are gone nothing is sent and nothing is said.
+ * Ask the relay what ✦ reads this message as, in PREVIEW mode: a v0.1.6 relay
+ * translates it for real and returns only the first few words, and this
+ * client cuts whatever comes back by the same rule (an older relay ignores
+ * the mode), so this client never shows a free reader the full ✦ line after
+ * the trial. Three a day, the same allowance as the ⚡ taste. When the three
+ * are gone nothing is sent and nothing is said.
  */
-async function requestPreview(message: Message, text: string, googleText: string): Promise<void> {
+/** ⚡ on the free plan after its trial: a ✦ preview of this message. */
+async function previewPress(message: Message): Promise<void> {
+    if (forcedInFlight.has(message.id)) return;
+    const entry = getTranslation(makeKey(message.id, settings.store.targetLang));
+    const googleText = isRealTranslation(entry) && entry.via === "google" ? entry.text : null;
+    forcedInFlight.add(message.id);
+    notifyForcedInFlight();
+    try {
+        await requestPreview(message, readableContent(message.content ?? "", message.channel_id), googleText);
+    } finally {
+        forcedInFlight.delete(message.id);
+        notifyForcedInFlight();
+    }
+}
+
+async function requestPreview(message: Message, text: string, googleText: string | null): Promise<void> {
     if (previewAsked.has(message.id)) return;
     if (rolloverTasteIfNewUtcDay()) void refreshTasteQuota();
     if (tasteExhausted()) {
@@ -2105,12 +2203,19 @@ async function requestPreview(message: Message, text: string, googleText: string
         tasteLog(`${message.id}: no preview (${res === null ? "IPC call rejected" : "the relay refused"})`);
         return;
     }
-    recordTasteQuota(res.quotaUsed, res.quotaCap);
+    noteServerNow(res.serverNow);
+    if (!(typeof res.quotaCap === "number" && res.quotaCap > TASTE_CAP)) recordTasteQuota(res.quotaUsed, res.quotaCap);
     const r = res.results.find(x => x.id === message.id);
     if (r === undefined || "failed" in r || r.skip) return;
+    // CUT HERE TOO. A v0.1.6 relay cuts a preview itself, but an older relay
+    // ignores `mode` and answers with the full ✦ line. The same 5-word /
+    // 32-character rule is applied again, so a full ✦ line can never appear
+    // in a preview whatever the relay did.
+    const cut = previewText(r.text);
+    const preview = { text: cut.text, truncated: cut.truncated || r.truncated === true };
     // ✦ reads it the same way ≈ does: a preview would show the reader nothing
     // they cannot already read, so it is not shown.
-    if (!previewDiffers(r.text, googleText)) {
+    if (googleText !== null && !previewDiffers(preview.text, googleText)) {
         tasteLog(`${message.id}: ✦ agrees with ≈, no preview shown`);
         return;
     }
@@ -2118,7 +2223,7 @@ async function requestPreview(message: Message, text: string, googleText: string
         const oldest = previews.keys().next();
         if (!oldest.done) previews.delete(oldest.value);
     }
-    previews.set(message.id, { text: r.text, truncated: r.truncated === true });
+    previews.set(message.id, preview);
     notifyForcedInFlight();
 }
 
@@ -2627,7 +2732,7 @@ function catchUp(channelId: string, opts: CatchUpOptions = {}) {
     // costs nothing. It can still be the first time a "≈ Translate" line is
     // on screen, which is the moment the once-ever trial-ended note is for.
     if (isClickMode()) {
-        if (settings.store.freeTrialEndNoticeShown !== true) {
+        if (announceableTrialEnd(localTrialStart()) !== null) {
             const me = UserStore.getCurrentUser()?.id;
             const loaded = MessageStore.getMessages(channelId);
             const messages: any[] = loaded && typeof loaded.toArray === "function" ? loaded.toArray() : [];
@@ -2909,6 +3014,13 @@ function clickToTranslateLine(message: Message) {
     }
     const isOwn = message.author?.id === UserStore.getCurrentUser()?.id;
     if (isLocallySkipped(message.content ?? "", isOwn)) return null;
+    if (clickBusy.has(message.id)) {
+        return (
+            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
+                Google is busy. Try again in a moment.
+            </div>
+        );
+    }
     return (
         <div
             role="button"
@@ -2916,6 +3028,11 @@ function clickToTranslateLine(message: Message) {
             style={{ fontSize: "0.85rem", color: "var(--text-muted)", cursor: "pointer" }}
             title="Translate this message with Google (≈)"
             onClick={() => { void clickTranslate(message); }}
+            onKeyDown={(e: any) => {
+                if (e?.key !== "Enter" && e?.key !== " ") return;
+                e.preventDefault?.();
+                void clickTranslate(message);
+            }}
         >
             ≈ Translate
         </div>
@@ -2942,6 +3059,14 @@ function previewLine(messageId: string) {
             </a>
         </div>
     );
+}
+
+/** A line, with the message's ✦ preview (if any) under it. */
+function withPreview(line: any, messageId: string) {
+    const preview = previewLine(messageId);
+    if (preview === null) return line;
+    if (line === null) return preview;
+    return <div>{line}{preview}</div>;
 }
 
 function TranslationAccessory({ message }: { message: Message; }) {
@@ -3009,7 +3134,7 @@ function TranslationAccessory({ message }: { message: Message; }) {
                 </div>
             );
         }
-        if (clickMode) return clickToTranslateLine(message);
+        if (clickMode) return withPreview(clickToTranslateLine(message), message.id);
         return null;
     }
 
@@ -3022,6 +3147,8 @@ function TranslationAccessory({ message }: { message: Message; }) {
     // offers ⚡ on a Google-only skip (see forceQualityPopoverRender), so this
     // is a real, reachable state, not a dead one.
     if ("skipped" in entry) {
+        // A ⚡ preview of a message Google skipped still has something to say.
+        if (!forcing && !hint && previews.has(message.id)) return previewLine(message.id);
         if (forcing) {
             return (
                 <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
@@ -3057,7 +3184,7 @@ function TranslationAccessory({ message }: { message: Message; }) {
     // so a click that did not land offers the click again rather than a
     // "waiting" or "failed" line that would never change.
     if (clickMode && !forcing && !hint && ("failed" in entry || "deferred" in entry)) {
-        return clickToTranslateLine(message);
+        return withPreview(clickToTranslateLine(message), message.id);
     }
 
     if ("failed" in entry) {
@@ -3233,6 +3360,21 @@ function forceQualityPopoverRender(message: Message) {
 
     const key = makeKey(message.id, settings.store.targetLang);
     if (hasQualityVerdict(key)) return null;
+
+    if (taste && isClickMode()) {
+        // After the trial ⚡ is a ✦ PREVIEW, from the same three a day as the
+        // preview under a rough ≈ line. Nothing to offer once one is shown.
+        if (previews.has(message.id)) return null;
+        return {
+            label: `Preview Subline ✦ (${tasteLabel()})`,
+            icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
+            message,
+            channel,
+            onClick: () => {
+                void forceQualityTranslate(message);
+            }
+        };
+    }
 
     if (taste) {
         // The count is the whole label, because it is the only thing about
@@ -3721,8 +3863,14 @@ export default definePlugin({
         trialPausedUntil = 0;
         trialRefused = false;
         freeStatusAsked = false;
+        statusSession++;
+        if (statusRetryTimer !== null) clearTimeout(statusRetryTimer);
+        statusRetryTimer = null;
+        statusAttempts = 0;
         __resetFreePlan();
         clickInFlight.clear();
+        for (const t of clickBusy.values()) clearTimeout(t);
+        clickBusy.clear();
         previews.clear();
         previewAsked.clear();
         __resetWeeklyStats();

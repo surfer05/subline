@@ -11,7 +11,8 @@ const native = vi.hoisted(() => {
     return { translateBatch, readStagedBuildId, relayStatus };
 });
 
-import plugin, { FORCE_QUALITY_POPOVER_ID } from "../index";
+import plugin, { FORCE_QUALITY_POPOVER_ID, FORCED_HINT_TTL_MS } from "../index";
+import { setCooldown } from "../cooldownStore";
 import { DAY_MS, TRIAL_MS } from "../freePlan";
 import type { NativeResponse } from "../native";
 import settings from "../settings";
@@ -301,16 +302,18 @@ describe("after the trial: translate on click", () => {
     });
 
     it("tells the reader the trial ended, once, the first time a message is shown", async () => {
+        // (The relay never answered here: the local clock may stand in, since
+        // the local end is a full day past. See the announce suite below.)
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("2", "que pasa amigo") });
         const ended = shownToasts.filter(t => /trial ended/.test(t.message));
         expect(ended).toHaveLength(1);
         expect(ended[0].message).toBe(
-            "Your 7-day free trial ended. Messages now translate when you click. "
-            + "Upgrade to keep it automatic. https://surfer05.github.io/subline/#pricing"
+            "Your 7-day free trial ended. Messages now translate when you click. Upgrade to keep it automatic."
         );
+        expect(ended[0].message).not.toContain("http");
         expect(ended[0].type).toBe("MESSAGE");
-        expect(settings.store.freeTrialEndNoticeShown).toBe(true);
+        expect(settings.store.freeTrialEndNoticeFor).toBeGreaterThan(0);
 
         // Never again, not even after a restart.
         const shown = settings.store.freeTrialStartedAt;
@@ -344,16 +347,73 @@ describe("after the trial: translate on click", () => {
         expect(clickable(render(msg("1", "hola que tal")))?.label).toBe("≈ Translate");
     });
 
-    it("keeps the ⚡ taste press: the full ✦ line, three a day", async () => {
-        answer({ relayQuota: { used: 1, cap: 3 } });
+    it("turns ⚡ into a ✦ preview: mode preview, three a day, never the full line", async () => {
+        answer({
+            relay: m => ({ id: m.id, lang: "es", text: "hi how are you doing this fine evening", skip: false, truncated: false }),
+            relayQuota: { used: 1, cap: 3 }
+        });
         const btn = __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("1", "hola que tal"));
-        expect(btn!.label).toContain("of 3 left today");
+        expect(btn!.label).toBe("Preview Subline ✦ (3 of 3 left today)");
         btn!.onClick!(undefined as any);
         await flush();
         const relay = calls("relay");
         expect(relay).toHaveLength(1);
-        expect(payloadOf(relay[0]).mode).toBeUndefined();
-        expect(getTranslation(key("1"))).toMatchObject({ via: "relay", text: "sharper 1" });
+        expect(payloadOf(relay[0]).mode).toBe("preview");
+        // Nothing stored as a translation; the preview renders under the click line.
+        expect(getTranslation(key("1"))).toBeUndefined();
+        const out = text(render(msg("1", "hola que tal")));
+        expect(out).toContain("≈ Translate");
+        expect(out).toContain("✦ reads this as: hi how are you doing… Upgrade");
+        expect(out).not.toContain("fine evening");
+        // Spent: the button goes, and the count went down.
+        expect(__getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("1", "hola que tal"))).toBeNull();
+        expect(__getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("2", "hola que tal"))!.label)
+            .toContain("2 of 3 left today");
+    });
+
+    it("never shows the trial's allowance as the preview count (no '299 of 300')", async () => {
+        answer({ relayQuota: { used: 1, cap: 300 } });
+        const btn = __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("1", "hola que tal"));
+        btn!.onClick!(undefined as any);
+        await flush();
+        const label = __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("2", "hola que tal"))!.label;
+        expect(label).not.toContain("300");
+        expect(label).toContain("of 3 left today");
+    });
+
+    it("the click line answers Enter and Space like a button", async () => {
+        answer({ google: { text: "hi there", lang: "es", conf: 0.99 } });
+        const node = render(msg("1", "hola que tal"));
+        const onKeyDown = node.props.onKeyDown;
+        expect(node.props.role).toBe("button");
+        onKeyDown({ key: "a", preventDefault() { } });
+        await flush();
+        expect(calls()).toHaveLength(0);
+        onKeyDown({ key: "Enter", preventDefault() { } });
+        await flush();
+        expect(calls("google")).toHaveLength(1);
+        const node2 = render(msg("2", "que pasa amigo"));
+        node2.props.onKeyDown({ key: " ", preventDefault() { } });
+        await flush();
+        expect(calls("google")).toHaveLength(2);
+    });
+
+    it("says Google is busy when a click lands during a Google cooldown", async () => {
+        setCooldown("google", Date.now() + 30_000);
+        clickable(render(msg("1", "hola que tal")))!.onClick();
+        await flush();
+        expect(calls()).toHaveLength(0);
+        expect(text(render(msg("1", "hola que tal")))).toBe("Google is busy. Try again in a moment.");
+        // Self-clearing: the click comes back.
+        await vi.advanceTimersByTimeAsync(FORCED_HINT_TTL_MS);
+        expect(clickable(render(msg("1", "hola que tal")))?.label).toBe("≈ Translate");
+    });
+
+    it("says Google is busy when the click itself was throttled", async () => {
+        native.translateBatch.mockResolvedValue({ ok: false, error: "google: HTTP 429", retryAfterMs: 10_000 });
+        clickable(render(msg("1", "hola que tal")))!.onClick();
+        await flush();
+        expect(text(render(msg("1", "hola que tal")))).toBe("Google is busy. Try again in a moment.");
     });
 });
 
@@ -577,5 +637,126 @@ describe("the weekly note", () => {
             settings.store.sublineCode = "SUBLINE-PAID";
         });
         expect(shownToasts.filter(t => t.message === "This week: 1 message in 1 language.")).toHaveLength(1);
+    });
+});
+
+// ---------------------------------------------------------------------------
+describe("review fixes: an older relay, retries, the announcement, clock skew", () => {
+    const ROMANIZED = "ana bghit nmchi l dar daba";
+
+    it("cuts a preview on the client too, when the relay ignores mode and returns the full ✦ line", async () => {
+        await restart(() => expiredLocally());
+        // An OLD relay: no truncation, no flag, the whole line.
+        answer({
+            google: { lang: "ar", text: "I want to walk the house now", conf: 1 },
+            relay: m => ({ id: m.id, lang: "ar", text: "I really do not want to go home tonight at all", skip: false })
+        });
+        clickable(render(msg("1", ROMANIZED)))!.onClick();
+        await flush();
+        const out = text(render(msg("1", ROMANIZED)));
+        expect(out).toContain("✦ reads this as: I really do not want… Upgrade");
+        expect(out).not.toContain("home tonight");
+    });
+
+    it("retries the startup status call at 5s, 15s, 60s, then every 5 minutes, until the relay answers", async () => {
+        // beforeEach's start() made call 1, which failed.
+        expect(native.relayStatus).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(4_999); await flush();
+        expect(native.relayStatus).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1); await flush();
+        expect(native.relayStatus).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(15_000); await flush();
+        expect(native.relayStatus).toHaveBeenCalledTimes(3);
+        await vi.advanceTimersByTimeAsync(60_000); await flush();
+        expect(native.relayStatus).toHaveBeenCalledTimes(4);
+        await vi.advanceTimersByTimeAsync(5 * 60_000); await flush();
+        expect(native.relayStatus).toHaveBeenCalledTimes(5);
+
+        // The relay answers: the trial is confirmed and retries stop.
+        native.relayStatus.mockResolvedValue({
+            ok: true, plan: "trial", used: 0, cap: 300, trialEndsAt: Date.now() + 5 * DAY_MS, serverNow: Date.now()
+        });
+        await vi.advanceTimersByTimeAsync(5 * 60_000); await flush();
+        expect(native.relayStatus).toHaveBeenCalledTimes(6);
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
+        await settle();
+        expect(calls("relay")).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(60 * 60_000); await flush();
+        expect(native.relayStatus).toHaveBeenCalledTimes(6);
+    });
+
+    it("stops retrying when the plugin stops", async () => {
+        plugin.stop!();
+        await vi.advanceTimersByTimeAsync(60 * 60_000); await flush();
+        expect(native.relayStatus).toHaveBeenCalledTimes(1);
+        await plugin.start!();   // afterEach stops it again
+    });
+
+    it("does not announce on the local clock alone until a full day past its end", async () => {
+        await restart(() => { settings.store.freeTrialStartedAt = Date.now() - TRIAL_MS - 2 * 60 * 60_000; });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
+        expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(0);
+        // The click line is there anyway (the local clock drives click mode).
+        expect(clickable(render(msg("1", "hola que tal")))?.label).toBe("≈ Translate");
+    });
+
+    it("announces as soon as the relay states the trial ended, even the same hour", async () => {
+        native.relayStatus.mockResolvedValue({
+            ok: true, plan: "taste", used: 0, cap: 3, trialEndsAt: Date.now() - 60_000, serverNow: Date.now()
+        });
+        await restart(() => { settings.store.freeTrialStartedAt = Date.now() - TRIAL_MS + 60_000; });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
+        expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(1);
+    });
+
+    it("announces after a 402 'trial ended' reply, and once per ending only", async () => {
+        native.relayStatus.mockResolvedValue({
+            ok: true, plan: "trial", used: 0, cap: 300, trialEndsAt: Date.now() + DAY_MS, serverNow: Date.now()
+        });
+        await restart();
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) =>
+            engine === "relay"
+                ? { ok: false, error: "relay: HTTP 402 trial ended" }
+                : { ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "es", text: "hi", skip: false })) });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
+        await settle();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("2", "que pasa amigo") });
+        expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(1);
+
+        // The same ending seen again after a restart (the relay now states it): no second toast.
+        const start = settings.store.freeTrialStartedAt;
+        native.relayStatus.mockResolvedValue({
+            ok: true, plan: "taste", used: 0, cap: 3, trialEndsAt: Date.now() - 1, serverNow: Date.now()
+        });
+        await restart(() => { settings.store.freeTrialStartedAt = start; });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("3", "hola otra vez") });
+        expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(1);
+    });
+
+    it("corrects a FAST client clock: a trial the relay says still runs stays automatic", async () => {
+        const realNow = Date.now();
+        vi.setSystemTime(realNow + 3 * DAY_MS);   // the reader's clock is 3 days ahead
+        native.relayStatus.mockResolvedValue({
+            ok: true, plan: "trial", used: 0, cap: 300, trialEndsAt: realNow + 2 * DAY_MS, serverNow: realNow
+        });
+        await restart();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
+        await settle();
+        expect(calls("relay")).toHaveLength(1);
+        expect(clickable(render(msg("2", "hola que tal")))).toBeNull();
+    });
+
+    it("corrects a SLOW client clock: a trial the relay says ended is over", async () => {
+        const realNow = Date.now();
+        vi.setSystemTime(realNow - 3 * DAY_MS);   // the reader's clock is 3 days behind
+        native.relayStatus.mockResolvedValue({
+            ok: true, plan: "taste", used: 0, cap: 3, trialEndsAt: realNow - DAY_MS, serverNow: realNow
+        });
+        await restart();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
+        await settle();
+        expect(calls()).toHaveLength(0);
+        expect(clickable(render(msg("1", "hola que tal")))?.label).toBe("≈ Translate");
+        expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(1);
     });
 });

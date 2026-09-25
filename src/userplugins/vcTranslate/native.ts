@@ -51,6 +51,8 @@ export type NativeResponse =
          */
         quotaUsed?: number;
         quotaCap?: number;
+        /** The relay's own clock on this success (v0.1.6 clients only). */
+        serverNow?: number;
     }
     | {
         ok: false;
@@ -83,6 +85,7 @@ interface EngineOutcome {
     /** The relay's taste-tier daily count on this success (`used`/`cap`). */
     quotaUsed?: number;
     quotaCap?: number;
+    serverNow?: number;
 }
 
 /**
@@ -165,7 +168,8 @@ async function runEngine(
             results: out.results,
             statedLimitPerMinute: out.rpmLimit,
             quotaUsed: out.used,
-            quotaCap: out.cap
+            quotaCap: out.cap,
+            serverNow: out.serverNow
         };
     }
     if (engine === "groq") return translateWithGroq(req, apiKey, fetch, model, debug);
@@ -219,7 +223,8 @@ export async function translateBatch(
             providerRateLimit: outcome.rateLimit,
             quotaLimitPerMinute: outcome.statedLimitPerMinute,
             quotaUsed: outcome.quotaUsed,
-            quotaCap: outcome.quotaCap
+            quotaCap: outcome.quotaCap,
+            serverNow: outcome.serverNow
         };
     } catch (err) {
         const raw = err instanceof Error ? err.message : "unknown error";
@@ -271,7 +276,7 @@ export async function translateBatch(
 }
 
 export type RelayStatusResponse =
-    | { ok: true; plan: string; used: number; cap: number; trialEndsAt?: number }
+    | { ok: true; plan: string; used: number; cap: number; trialEndsAt?: number; serverNow?: number }
     | { ok: false; error: string };
 
 /**
@@ -294,9 +299,10 @@ export async function relayStatus(
 ): Promise<RelayStatusResponse> {
     try {
         const status = await fetchRelayStatus(code, fetch);
-        return status.trialEndsAt === undefined
-            ? { ok: true, plan: status.plan, used: status.used, cap: status.cap }
-            : { ok: true, plan: status.plan, used: status.used, cap: status.cap, trialEndsAt: status.trialEndsAt };
+        const out: RelayStatusResponse = { ok: true, plan: status.plan, used: status.used, cap: status.cap };
+        if (status.trialEndsAt !== undefined) out.trialEndsAt = status.trialEndsAt;
+        if (status.serverNow !== undefined) out.serverNow = status.serverNow;
+        return out;
     } catch (err) {
         const raw = err instanceof Error ? err.message : "unknown error";
         return { ok: false, error: scrubKey(raw, code) };
