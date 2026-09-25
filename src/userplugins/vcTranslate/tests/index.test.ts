@@ -1392,6 +1392,14 @@ describe("the subtitle accessory", () => {
         expect(text(rendered)).toContain(two);
     });
 
+    it("trims a translation's leading and trailing line breaks, so pre-wrap adds no blank lines", () => {
+        setTranslation(key("1"), { lang: "de", text: "\n  first\nsecond  \n", via: "relay" });
+        const rendered = render(discordMessage("1", "erste\nzweite"));
+        expect(text(rendered)).toContain("first\nsecond");
+        expect(text(rendered)).not.toContain("\n  first");
+        expect(text(rendered)).not.toContain("second  \n");
+    });
+
     it("finds and renders a Google translation while Gemini is the configured engine", () => {
         // THE point of dropping the engine from the cache key. A fallback
         // translation written under Google used to be written to a key the

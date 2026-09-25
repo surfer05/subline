@@ -29,8 +29,36 @@ describe("buildPrompt — drift guard", () => {
             "JSON-encoded strings", "BCP-47",
             // Line breaks (field report, 0.1.6): a two-line message came back
             // as one line. The model must keep them, written as \n.
-            "Keep the same line breaks.", "Write each line break in your JSON text as \\n"
+            "Your reply must be valid JSON: escape quotes, backslashes and line breaks as JSON requires. "
+            + "Keep the same line breaks as the message, line for line. "
+            + "Do not add escape sequences to the translated text itself."
         ]) expect(p, clause).toContain(clause);
+        expect(p).not.toContain("never emit escape sequences");
+    });
+    it("repairs a RAW newline inside a JSON string; the rest of the batch still returns", async () => {
+        const raw = '{"translations":[{"id":"0","lang":"de","skip":false,"text":"Mommo\'s\nBut pizza"},'
+            + '{"id":"1","lang":"es","skip":false,"text":"hi"}]}';
+        vi.stubGlobal("fetch", vi.fn(async () => groqBody(raw)));
+        const r = await translate(req(["a\nb", "hola"]), groq("m"));
+        expect(r).toEqual([
+            { id: "0", lang: "de", text: "Mommo's\nBut pizza", skip: false },
+            { id: "1", lang: "es", text: "hi", skip: false }
+        ]);
+    });
+    it("repairs a raw newline in a reply wrapped in prose (then the salvage)", async () => {
+        const raw = 'Here you go:\n{"translations":[{"id":"0","lang":"de","skip":false,"text":"x\ny"}]}\nThanks';
+        vi.stubGlobal("fetch", vi.fn(async () => groqBody(raw)));
+        expect(await translate(req(["a\nb"]), groq("m"))).toEqual([{ id: "0", lang: "de", text: "x\ny", skip: false }]);
+    });
+    it("turns a literal backslash-n into a line break only for a multi-line source with no real break back", async () => {
+        vi.stubGlobal("fetch", vi.fn(async () => groqBody(JSON.stringify({ translations: [
+            { id: "0", lang: "de", skip: false, text: "one\\ntwo" },
+            { id: "1", lang: "es", skip: false, text: "c:\\new" }
+        ] }))));
+        expect(await translate(req(["eins\nzwei", "hola"]), groq("m"))).toEqual([
+            { id: "0", lang: "de", text: "one\ntwo", skip: false },
+            { id: "1", lang: "es", text: "c:\\new", skip: false }
+        ]);
     });
     it("keeps a multi-line message's line breaks through the parse", async () => {
         const twoLine = "For stuff like pasta etc., Mommo's\nBut if you only feel like pizza, Dirty Harry's";

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildPrompt, extractRows, mapRows, parseJsonText, stripCodeFence } from "../engines/llmShared";
+import { buildPrompt, escapeRawControlsInStrings, extractRows, mapRows, parseJsonText, restoreLineBreaks, stripCodeFence } from "../engines/llmShared";
 import type { BatchRequest } from "../types";
 import { fenced, REAL_GEMINI_FENCED_TEXT, REAL_GEMINI_TRANSLATIONS } from "./fixtures/realGeminiText";
 import { calls, __resetLogCalls } from "./stubs/utils-logger";
@@ -266,15 +266,17 @@ describe("line breaks survive the round trip", () => {
         targetLang: "en"
     };
 
-    it("the prompt tells the model to keep the same line breaks, as \\n", () => {
+    it("the prompt asks for valid JSON and the same line breaks, and no longer forbids every escape", () => {
         const prompt = buildPrompt(twoLine);
-        expect(prompt).toContain("Keep the same line breaks.");
-        expect(prompt).toContain("line for line");
-        expect(prompt).toContain("Write each line break in your JSON text as \\n");
+        expect(prompt).toContain(
+            "- Your reply must be valid JSON: escape quotes, backslashes and line breaks as JSON requires. "
+            + "Keep the same line breaks as the message, line for line. "
+            + "Do not add escape sequences to the translated text itself."
+        );
+        expect(prompt).not.toContain("never emit escape sequences");
         // The message itself stays one prompt line: the break is encoded.
         expect(prompt).toContain("mommo's\\nAber");
-        // The rule it qualifies is still there, unchanged.
-        expect(prompt).toContain("never emit escape sequences in your output.");
+        expect(prompt).toContain("JSON-encoded strings. Decode the escape sequences and translate the underlying text.");
     });
 
     it("a \\n in the model's JSON comes back as a real newline", () => {
@@ -285,5 +287,51 @@ describe("line breaks survive the round trip", () => {
         const rows = extractRows(parseJsonText(body, "test"), "test");
         const [result] = mapRows(rows, twoLine);
         expect(result).toMatchObject({ text: "For stuff like pasta etc., Mommo's\nBut if you only feel like pizza, Dirty Harry's" });
+    });
+
+    const twoRows: BatchRequest = {
+        messages: [
+            { id: "1", author: "ana", text: "Für so Pasta usw mommo's\nAber wenn du nur Bock auf Pizza hast Dirty Harry's" },
+            { id: "2", author: "ana", text: "hola amigo" }
+        ],
+        context: [],
+        targetLang: "en"
+    };
+
+    it("repairs a RAW newline inside a JSON string instead of failing the whole batch", () => {
+        const raw = '{"translations":[{"id":"1","lang":"de","skip":false,"text":"Mommo\'s\nBut pizza, Dirty Harry\'s"},'
+            + '{"id":"2","lang":"es","skip":false,"text":"hi\tfriend"}]}';
+        expect(() => JSON.parse(raw)).toThrow();
+        const rows = extractRows(parseJsonText(raw, "test"), "test");
+        const results = mapRows(rows, twoRows);
+        expect(results).toEqual([
+            { id: "1", lang: "de", text: "Mommo's\nBut pizza, Dirty Harry's", skip: false },
+            { id: "2", lang: "es", text: "hi\tfriend", skip: false }
+        ]);
+    });
+
+    it("repairs inside a fenced reply too, and leaves structure and escapes alone", () => {
+        const raw = '```json\n{"translations":[{"id":"1","lang":"de","skip":false,"text":"a \\"q\\"\nb"}]}\n```';
+        const [r] = mapRows(extractRows(parseJsonText(raw, "test"), "test"), twoRows);
+        expect(r).toMatchObject({ text: "a \"q\"\nb" });
+        // Newlines BETWEEN tokens are left as they are: only in-string ones change.
+        expect(escapeRawControlsInStrings('{\n"a": "x\ny"\n}')).toBe('{\n"a": "x\\ny"\n}');
+    });
+
+    it("valid JSON takes the plain path, untouched", () => {
+        const body = JSON.stringify({ translations: [{ id: "2", lang: "es", skip: false, text: "hi" }] });
+        expect(parseJsonText(body, "test")).toEqual(JSON.parse(body));
+        expect(escapeRawControlsInStrings(body)).toBe(body);
+    });
+
+    it("turns a literal backslash-n into a line break only when the source had one and the reply has none", () => {
+        const [r] = mapRows(extractRows(parseJsonText(JSON.stringify({ translations: [
+            { id: "1", lang: "de", skip: false, text: "Mommo's\\nBut pizza" }
+        ] }), "test"), "test"), twoRows);
+        expect(r).toMatchObject({ text: "Mommo's\nBut pizza" });
+        // One-line source: a literal \n is left alone.
+        expect(restoreLineBreaks("a\\nb", "one line")).toBe("a\\nb");
+        // The reply already has a real break: nothing else changes.
+        expect(restoreLineBreaks("a\nb \\n c", "x\ny")).toBe("a\nb \\n c");
     });
 });

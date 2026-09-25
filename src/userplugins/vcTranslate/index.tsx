@@ -3325,7 +3325,7 @@ function TranslationAccessory({ message }: { message: Message; }) {
               * was painted as one: HTML collapses "\n" to a space unless the
               * text says otherwise. pre-wrap keeps the breaks and still wraps.
               */}
-            <span style={TRANSLATION_TEXT_STYLE}>{entry.text}</span>
+            <span style={TRANSLATION_TEXT_STYLE}>{entry.text.trim()}</span>
             {/*
               * ALONGSIDE the line above, never instead of it — a forced click
               * on a message that already carries a Google ≈ line (the common
