@@ -20,9 +20,45 @@ export interface BatchRequest {
     targetLang: string;
 }
 export type Result =
-    | { id: string; lang: string; text: string; skip: false }
+    // `truncated` is set only by preview mode (see previewText), never by a
+    // provider, so a normal response is unchanged.
+    | { id: string; lang: string; text: string; skip: false; truncated?: boolean }
     | { id: string; skip: true }
     | { id: string; failed: true };
+
+/** Preview mode: the first 5 words, capped at 32 code points. */
+export const PREVIEW_WORDS = 5;
+export const PREVIEW_MAX_CODE_POINTS = 32;
+
+/**
+ * The preview a free install sees once its trial is over: enough of the
+ * translation to show it is real, not enough to read the conversation. The
+ * relay truncates ON THE SERVER, so in preview mode the full text never leaves
+ * the relay (a client-side cut would be one devtools edit away).
+ *
+ * Words are whitespace-split; a language without spaces (CJK) arrives as one
+ * long "word", which is why the code-point cap exists. Array.from counts code
+ * points, so a surrogate pair (emoji, rare CJK) is never split in half.
+ * `truncated` is true only when the preview differs from the full
+ * whitespace-normalised text, so a short line is not flagged.
+ */
+export function previewText(text: string): { text: string; truncated: boolean } {
+    const words = text.trim().split(/\s+/).filter(Boolean);
+    const full = words.join(" ");
+    let out = words.slice(0, PREVIEW_WORDS).join(" ");
+    const cps = Array.from(out);
+    if (cps.length > PREVIEW_MAX_CODE_POINTS) out = cps.slice(0, PREVIEW_MAX_CODE_POINTS).join("").trimEnd();
+    return { text: out, truncated: out !== full };
+}
+
+/** Apply previewText to every translated row; skipped/failed rows pass through. */
+export function toPreview(results: Result[]): Result[] {
+    return results.map(r => {
+        if (!("skip" in r) || r.skip !== false) return r;
+        const p = previewText(r.text);
+        return p.truncated ? { ...r, text: p.text, truncated: true } : { ...r, text: p.text };
+    });
+}
 
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
 // OpenRouter resells the SAME openai/gpt-oss-120b on Groq's hardware, pay as you

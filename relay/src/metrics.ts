@@ -12,7 +12,10 @@ export type Outcome =
     | "too_large" | "bad_payload" | "upstream_error" | "relay_key_fail"
     // The relay's OpenRouter balance ran out (upstream 402) and the Groq
     // fallback did not save the request. A billing alarm, never a user error.
-    | "relay_credit" | "not_found";
+    | "relay_credit" | "not_found"
+    // A v0.1.6 client asked for automatic translation after its 7-day trial.
+    // Refused before any spend; counts how many installs reached the trial wall.
+    | "trial_ended";
 
 /** A non-reversible short fingerprint of the code, so per-code volume can be
  *  seen in analytics without storing the credential. */

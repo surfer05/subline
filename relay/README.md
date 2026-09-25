@@ -21,6 +21,7 @@ translation** to Subline clients presenting an opaque per-user **code**.
 | `POST /v1/translate` | `Bearer <code>` | translate a batch → `{ok,results,used,cap}` |
 | `GET /v1/status` | `Bearer <code>` | `{ok,plan,used,cap,resetsInMs}` for the settings pane |
 | `POST /admin/codes` | `Bearer <ADMIN_TOKEN>` | mint / revoke codes |
+| `GET /admin/stats?days=14` | `Bearer <ADMIN_TOKEN>` | approximate daily owner counts (see below) |
 | `POST /webhook/mor` | Dodo Standard-Webhooks signature | issue/revoke on purchase/refund (inert until configured) |
 
 Responses use the plugin's exact `NativeResponse` shape, so the client `relay`
@@ -46,6 +47,46 @@ shape is rejected exactly like an unknown code.
   is what the plugin reads at startup to show "2 of 3 left today".
 - Metrics rows carry a plan label, so `ok`/`taste` (installs that tasted it) and
   `cap_exceeded`/`taste` (installs that hit the wall) are countable.
+
+## The 7-day trial and preview mode (v0.1.6+ clients)
+
+A v0.1.6+ plugin sends `x-subline-client: vcTranslate/<version>` (any value
+matching `^[A-Za-z0-9._/+-]{1,40}$`; only its presence matters, versions are
+never compared). Without it the relay behaves exactly as above, and never reads
+or writes a `trial:` key, so v0.1.5 installs see no change.
+
+- **Trial.** For a header'd `free_` bearer the relay stores `trial:<id>` = the
+  first-seen epoch ms, with **no TTL**: a TTL would let the key lapse and the
+  same id start a second trial. For 7 days from then the bearer is plan
+  `trial`: 300 messages/day (messages only, rpm 20), plus a per-IP ceiling of
+  600/day on its own counter `use:ipt:<ip>:<day>`. After day 7 it is plain taste
+  (3/day, `use:ip:` 6/day).
+- **`/v1/status`** for a header'd `free_` bearer adds `trialEndsAt` (epoch ms)
+  and reports `plan:"trial", cap:300` during the trial, `plan:"taste", cap:3` after.
+- **`mode:"auto"`** (body field) after the trial ends, from a header'd `free_`
+  bearer: `402 {ok:false,error:"trial ended",trialEndsAt}`, refused before any
+  reservation so it never spends the hand-pressed taste messages. Ignored
+  without the header.
+- **`mode:"preview"`** from any `free_` bearer (ignored for real codes): each
+  translated row is cut to its first 5 words, max 32 code points, and gets
+  `truncated:true` when shortened. The cut happens on the relay, so the full
+  text never leaves it. Charged exactly like a normal taste press.
+
+## Owner stats
+
+`GET /admin/stats?days=N` (1..30, default 14; `ADMIN_TOKEN`, same gate as
+`/admin/codes`) returns `{ok,approximate:true,days:[…]}`, **newest day first**,
+each `{day,activeFreeInstalls,trialsStarted,activeTrials,activePaidCodes,
+previewsServed,conversions:{monthly,annual,lifetime,paid,free}}`.
+
+Counters are KV keys `stat:<day>:<name>` (35-day TTL). Distinct actives use a
+2-day marker `seen:<kind>:<day>:<first 16 hex of SHA-256(bearer)>`, so no key or
+response ever holds a code, id, or IP. A conversion is counted when
+`license_key.created` creates a key that did not exist (a replay does not
+count). KV has no atomic increment, so concurrent requests can undercount
+slightly: these are **approximate owner metrics, never billing**. Every stats
+write runs in `ctx.waitUntil` and swallows errors, so stats can never slow or
+fail a translation or a webhook.
 
 ## Deploy runbook
 

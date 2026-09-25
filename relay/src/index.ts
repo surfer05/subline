@@ -18,9 +18,13 @@
  * system prompt, or reach the key — which is what makes a keyless relay safe to
  * expose. A valid code is not a general Groq proxy.
  */
-import { authCode, reserve, refund, usage, mintCode, applyMorEvent, rpmLimitFor, costFor, type Env, type CodeRecord } from "./codes";
-import { translateWithFallback, type BatchRequest, type TranslateError, type Provider } from "./translate";
+import {
+    authCode, reserve, refund, usage, mintCode, applyMorEvent, rpmLimitFor, costFor,
+    isTasteBearer, isNewClient, resolveFreePlan, type Env, type CodeRecord, type FreePlan
+} from "./codes";
+import { translateWithFallback, toPreview, type BatchRequest, type TranslateError, type Provider } from "./translate";
 import { record, type Outcome } from "./metrics";
+import { bumpStat, markActive, safely, clampDays, readStats } from "./stats";
 export { Budget } from "./budget";
 
 const MAX_MESSAGES = 40;     // client's QUALITY_MAX_BATCH is 25; headroom, not unbounded
@@ -139,6 +143,27 @@ function validBatch(v: unknown): v is BatchRequest {
     return true;
 }
 
+/**
+ * The v0.1.6 keyless plan for this request. A legacy (v0.1.5) client sends no
+ * `x-subline-client`, so it gets `free: null` and the record authCode already
+ * gave it — byte-identical to before, with no trial: KV read or write. A new
+ * client's well-formed free_ bearer is resolved to trial-or-taste. If that
+ * lookup itself fails (KV hiccup) the request degrades to the legacy taste
+ * behaviour rather than failing: the trial is a bonus, never a precondition.
+ */
+async function keylessPlan(
+    env: Env, ctx: ExecutionContext, req: Request, code: string | null, rec: CodeRecord, now: number
+): Promise<{ record: CodeRecord; free: FreePlan | null }> {
+    if (!isTasteBearer(code) || !isNewClient(req.headers.get("x-subline-client"))) return { record: rec, free: null };
+    try {
+        const free = await resolveFreePlan(env, code!, now);
+        if (free.started) ctx.waitUntil(safely(() => bumpStat(env, now, "trials_started")));
+        return { record: free.record, free };
+    } catch {
+        return { record: rec, free: null };
+    }
+}
+
 async function readBody(req: Request): Promise<unknown | null> {
     const buf = await req.arrayBuffer();
     if (buf.byteLength > MAX_BODY_BYTES) return null; // real bytes, not UTF-16 chars
@@ -172,23 +197,42 @@ export default {
                 return done(fail(msg, map[auth.reason]), auth.reason, code, 0);
             }
 
-            const plan = auth.record.plan ?? "free";
+            const now = Date.now();
+            const { record: rec, free } = await keylessPlan(env, ctx, req, code, auth.record, now);
+            // Owner stats (distinct installs / trials / paid codes per day), off
+            // the critical path and failure-proof.
+            ctx.waitUntil(safely(() => markActive(env, code!, rec.plan, now)));
+
+            const plan = rec.plan ?? "free";
             const body = await readBody(req);
             if (body === null) return done(fail("payload too large or malformed", 413), "too_large", code, 0, plan);
             if (!validBatch(body)) return done(fail("bad request", 400), "bad_payload", code, 0, plan);
             const batch = body as BatchRequest;
+            // `mode` is a v0.1.6 hint; any other value (or none) is legacy.
+            const mode = (body as any).mode;
+            // "auto" = the plugin translating on its own, which is the trial's
+            // feature. Once the trial is over, refuse it BEFORE reserving, so an
+            // automatic press can never spend the 3 taste messages the user
+            // meant to press by hand. Only a new client (free !== null) is told;
+            // a legacy client never sends a mode, and one that did gets taste.
+            if (mode === "auto" && free && !free.trialActive) {
+                return done(json({ ok: false, error: "trial ended", trialEndsAt: free.trialEndsAt }, 402), "trial_ended", code, 0, plan);
+            }
+            // "preview" is honoured only for a keyless install; a real code has
+            // paid for full text and always gets it.
+            const preview = mode === "preview" && isTasteBearer(code);
             const promptChars =
                 batch.context.reduce((n, c) => n + c.text.length + c.author.length, 0) +
                 batch.messages.reduce((n, m) => n + m.text.length + (m.author?.length ?? 0), 0) +
                 batch.targetLang.length;
-            const cost = costFor(auth.record, batch.messages.length, promptChars);
-            // The per-IP taste ceiling needs the caller's address, and ONLY for a
-            // taste request: no other plan grows an ip counter, and a request with
-            // no cf-connecting-ip (not fronted by Cloudflare) just skips the cap.
-            const tasteIp = plan === "taste" ? req.headers.get("cf-connecting-ip") : null;
+            const cost = costFor(rec, batch.messages.length, promptChars);
+            // The per-IP taste/trial ceiling needs the caller's address, and ONLY
+            // for a keyless request: no other plan grows an ip counter, and a
+            // request with no cf-connecting-ip (not fronted by Cloudflare) just
+            // skips the cap.
+            const tasteIp = plan === "taste" || plan === "trial" ? req.headers.get("cf-connecting-ip") : null;
 
-            const now = Date.now();
-            const res = await reserve(env, code!, auth.record, cost, now, tasteIp);
+            const res = await reserve(env, code!, rec, cost, now, tasteIp);
             if (!res.ok) {
                 const status = 429; // cap_exceeded / rate_limited / capacity all park the engine
                 const label = res.reason === "capacity" ? "capacity" : res.reason;
@@ -199,7 +243,7 @@ export default {
                     // 429 retunes the client to this code's real limit.
                     return done(json({
                         ok: false, error: "slow down", retryAfterMs: res.retryAfterMs,
-                        quotaLimitPerMinute: rpmLimitFor(auth.record)
+                        quotaLimitPerMinute: rpmLimitFor(rec)
                     }, status), label as Outcome, code, 0, plan);
                 }
                 return done(fail(
@@ -212,11 +256,14 @@ export default {
             const timer = setTimeout(() => controller.abort(), GROQ_TIMEOUT_MS);
             try {
                 const { primary, fallback } = providers(env);
-                const results = await translateWithFallback(batch, primary, fallback, controller.signal);
+                const full = await translateWithFallback(batch, primary, fallback, controller.signal);
                 clearTimeout(timer);
+                // Preview: cut on the server so the full text never leaves here.
+                const results = preview ? toPreview(full) : full;
+                if (preview) ctx.waitUntil(safely(() => bumpStat(env, now, "previews")));
                 // `rpmLimit` rides every success so the plugin's rate gate can
                 // tune itself to this code's ceiling without ever hitting it.
-                return done(json({ ok: true, results, used: res.used, cap: res.cap, rpmLimit: rpmLimitFor(auth.record) }), "ok", code, cost, plan);
+                return done(json({ ok: true, results, used: res.used, cap: res.cap, rpmLimit: rpmLimitFor(rec) }), "ok", code, cost, plan);
             } catch (e) {
                 clearTimeout(timer);
                 const err = e as TranslateError;
@@ -226,7 +273,7 @@ export default {
                 // also stops a client forcing slow batches to burn the key for
                 // free while their daily cap never advances.
                 if (!timedOut && err.status !== 401 && err.status !== 403) {
-                    ctx.waitUntil(refund(env, code!, cost, now, tasteIp));
+                    ctx.waitUntil(refund(env, code!, cost, now, tasteIp, rec.plan));
                 }
                 // The relay's OWN key failing (401/403 from an upstream) is a
                 // SERVER fault, never surfaced as "your code is bad".
@@ -256,8 +303,28 @@ export default {
             const code = bearer(req);
             const auth = await authCode(env, code);
             if (!auth.ok) return fail("invalid or missing code", auth.reason === "no_code" ? 401 : 403);
-            const u = await usage(env, code!, auth.record, Date.now());
-            return json({ ok: true, plan: auth.record.plan ?? "free", ...u });
+            const now = Date.now();
+            // A new client's status call starts the trial too, so the plugin can
+            // show "trial: 7 days left" at startup before any translation.
+            const { record: rec, free } = await keylessPlan(env, ctx, req, code, auth.record, now);
+            ctx.waitUntil(safely(() => markActive(env, code!, rec.plan, now)));
+            const u = await usage(env, code!, rec, now);
+            // Legacy clients (free === null) get exactly the pre-trial shape.
+            return json(free
+                ? { ok: true, plan: rec.plan ?? "free", ...u, trialEndsAt: free.trialEndsAt }
+                : { ok: true, plan: rec.plan ?? "free", ...u });
+        }
+
+        // ---- GET /admin/stats — approximate owner counts (ADMIN_TOKEN) ----
+        // Daily counts only (see stats.ts): never an id, a code, or an IP.
+        // Days are NEWEST FIRST; ?days= is clamped to 1..30, default 14.
+        if (url.pathname === "/admin/stats") {
+            if (req.method !== "GET") return fail("method not allowed", 405);
+            const token = bearer(req);
+            if (!env.ADMIN_TOKEN) return fail("admin disabled", 503);
+            if (!token || !(await timingSafeEqual(token, env.ADMIN_TOKEN))) return fail("unauthorized", 401);
+            const days = clampDays(url.searchParams.get("days"));
+            return json({ ok: true, approximate: true, days: await readStats(env, days, Date.now()) });
         }
 
         // ---- POST /admin/codes — mint / revoke (ADMIN_TOKEN gated) --------

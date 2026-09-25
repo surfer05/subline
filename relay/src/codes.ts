@@ -13,6 +13,8 @@
  * code — the router only calls authCode/reserve/refund, so nothing else moves.
  */
 
+import { bumpStat } from "./stats";
+
 export interface Env {
     CODES: KVNamespace;
     /** The atomic global spend guard (see budget.ts) — the real $50 ceiling. */
@@ -63,7 +65,9 @@ export interface CodeRecord {
     // Merchant-of-Record subscription/lifetime tiers alongside it. "taste" is
     // the keyless FREE install (see TASTE below): it is SYNTHETIC and never
     // stored, so it can be enumerated here without ever being mintable.
-    plan?: "free" | "taste" | "paid" | "monthly" | "annual" | "lifetime";
+    // "trial" is the same keyless install during its first 7 days (see TRIAL
+    // below): equally synthetic, equally never stored, never in KNOWN_PLANS.
+    plan?: "free" | "taste" | "trial" | "paid" | "monthly" | "annual" | "lifetime";
     /** Maker-facing note. NEVER put PII here — the relay stores no identity. */
     note?: string;
     /** Opaque Merchant-of-Record join id (subscription id, else payment id), kept
@@ -144,6 +148,77 @@ export function tasteRecord(): CodeRecord {
     return { status: "active", plan: "taste", dailyCap: TASTE_DAILY_CAP };
 }
 
+// ===========================================================================
+//  THE TRIAL — a keyless install's first 7 days, automatic translation
+// ===========================================================================
+//
+// A v0.1.6+ plugin announces itself with `x-subline-client`. For such a client,
+// a well-formed free_ bearer gets a 7-day trial measured from the first time
+// the relay ever saw that id: 300 messages a day (enough to leave automatic
+// translation on through a normal evening) instead of the taste tier's 3. After
+// day 7 the same bearer falls back to the taste record, exactly as a legacy
+// client always gets.
+//
+// The one piece of state is `trial:<id>` → first-seen epoch ms, written with NO
+// TTL on purpose: a TTL would let the key expire and the same id start a second
+// trial. The id is still client-chosen, so rerolling it buys a fresh trial;
+// the per-IP trial ceiling (use:ipt:) and the global budget guard are what keep
+// that farming tedious and harmless, exactly as for the taste tier.
+//
+// authCode never does this lookup (it resolves free_ with ZERO KV reads, and a
+// test pins that): the router calls resolveFreePlan only when the client header
+// is present, so a legacy v0.1.5 client never reads or writes a trial: key.
+
+export const TRIAL_MS = 7 * DAY_MS;
+/** Messages per UTC day for an install inside its trial. */
+export const TRIAL_DAILY_CAP = 300;
+/** Messages per UTC day across ALL trial ids behind one address. Twice one
+ *  install's cap so a household with two people is not starved, while a farmer
+ *  rerolling ids still hits a wall. */
+export const TRIAL_IP_DAILY_CAP = 600;
+
+/** The v0.1.6+ client marker. Its PRESENCE (in this shape) is the signal; the
+ *  version inside is never compared, so the relay needs no release lockstep. */
+const CLIENT_HEADER_RE = /^[A-Za-z0-9._\/+-]{1,40}$/;
+export function isNewClient(header: string | null | undefined): boolean {
+    return !!header && CLIENT_HEADER_RE.test(header);
+}
+
+/** The synthetic record for an install inside its trial. Never persisted. */
+export function trialRecord(): CodeRecord {
+    return { status: "active", plan: "trial", dailyCap: TRIAL_DAILY_CAP };
+}
+
+export interface FreePlan {
+    record: CodeRecord;
+    trialActive: boolean;
+    trialEndsAt: number;
+    /** True only on the request that wrote trial:<id> for the first time. */
+    started: boolean;
+}
+
+/** Resolve a WELL-FORMED free_ bearer (the caller has already authenticated it)
+ *  for a v0.1.6+ client: trial while inside its 7 days, taste after. Writes the
+ *  first-seen stamp on first sight. KV is eventually consistent, so two first
+ *  requests racing from different colos may both write; each writes ~now, so
+ *  the trial window moves by milliseconds at most. */
+export async function resolveFreePlan(env: Env, bearer: string, now: number): Promise<FreePlan> {
+    const key = `trial:${bearer.slice("free_".length)}`;
+    const raw = await env.CODES.get(key);
+    let firstSeen = raw === null ? NaN : Number(raw);
+    let started = false;
+    if (!Number.isFinite(firstSeen)) {
+        // Absent (or unreadable, which only a relay bug could produce): start now.
+        // NO expirationTtl — see the TRIAL block above for why.
+        firstSeen = now;
+        await env.CODES.put(key, String(firstSeen));
+        started = raw === null;
+    }
+    const trialEndsAt = firstSeen + TRIAL_MS;
+    const trialActive = now < trialEndsAt;
+    return { record: trialActive ? trialRecord() : tasteRecord(), trialActive, trialEndsAt, started };
+}
+
 export type AuthOutcome =
     | { ok: true; record: CodeRecord }
     | { ok: false; reason: "no_code" | "unknown_code" | "revoked" | "expired" };
@@ -204,7 +279,7 @@ export type ReserveOutcome =
  * the plugin's own rate gate tunes itself to this number instead of a
  * conservative guess.
  */
-const UNPAID_PLANS = new Set(["free", "taste"]);
+const UNPAID_PLANS = new Set(["free", "taste", "trial"]);
 export function rpmLimitFor(rec: CodeRecord): number {
     return rec.plan && !UNPAID_PLANS.has(rec.plan) ? 60 : 20;
 }
@@ -219,11 +294,23 @@ export function rpmLimitFor(rec: CodeRecord): number {
  * surcharge is pointless there anyway — 3 messages cannot move the budget.
  */
 export function costFor(rec: CodeRecord, messages: number, promptChars: number): number {
-    return rec.plan === "taste" ? messages : messages + Math.ceil(promptChars / 1000);
+    // A trial is the same keyless install, so it keeps the same honest unit.
+    return rec.plan === "taste" || rec.plan === "trial" ? messages : messages + Math.ceil(promptChars / 1000);
 }
 
-/** `ip` is the caller's cf-connecting-ip, passed ONLY for taste requests (and
- *  absent when the header is missing) — it enables the per-IP ceiling below. */
+/** Per-address counter key and ceiling for a keyless plan, or null for every
+ *  other plan (a real code never grows an ip counter). Taste and trial keep
+ *  SEPARATE counters so a household's trial traffic cannot eat a legacy
+ *  install's 6 taste messages, nor the other way round. */
+function ipGuard(plan: CodeRecord["plan"], ip: string | null | undefined, now: number): { key: string; cap: number } | null {
+    if (!ip) return null;
+    if (plan === "taste") return { key: `use:ip:${ip}:${today(now)}`, cap: TASTE_IP_DAILY_CAP };
+    if (plan === "trial") return { key: `use:ipt:${ip}:${today(now)}`, cap: TRIAL_IP_DAILY_CAP };
+    return null;
+}
+
+/** `ip` is the caller's cf-connecting-ip, passed ONLY for taste/trial requests
+ *  (and absent when the header is missing) — it enables the per-IP ceiling below. */
 export async function reserve(env: Env, code: string, rec: CodeRecord, cost: number, now: number, ip?: string | null): Promise<ReserveOutcome> {
     // 1) Per-minute rate limit (KV, soft): one shared paid key must not be
     //    drained by a runaway/scraping client. Well above a real user's rate.
@@ -245,11 +332,13 @@ export async function reserve(env: Env, code: string, rec: CodeRecord, cost: num
     //     another 3; the address behind it cannot be, cheaply. Checked BEFORE the
     //     budget guard so a farmed request never spends. No header (not fronted
     //     by Cloudflare, or a unit test) ⇒ skip the cap, never deny on its absence.
-    const ipKey = rec.plan === "taste" && ip ? `use:ip:${ip}:${today(now)}` : null;
+    //     A trial uses its own counter (use:ipt:) and ceiling, same logic.
+    const guard = ipGuard(rec.plan, ip, now);
+    const ipKey = guard?.key ?? null;
     let ipUsed = 0;
-    if (ipKey) {
-        ipUsed = await readCount(env, ipKey);
-        if (ipUsed + cost > TASTE_IP_DAILY_CAP) {
+    if (guard) {
+        ipUsed = await readCount(env, guard.key);
+        if (ipUsed + cost > guard.cap) {
             // Same shape as the per-bearer cap (the client cannot act on the
             // difference, and spelling out "your address is capped" would only
             // teach a farmer what to evade). used/cap stay the BEARER's numbers
@@ -281,17 +370,20 @@ export async function reserve(env: Env, code: string, rec: CodeRecord, cost: num
 /** Return a reservation when the upstream call failed, so a Groq outage never
  *  costs a user their quota. Best-effort; the global counter is left as-is
  *  (slack-tolerant) so the budget guard stays conservative. */
-export async function refund(env: Env, code: string, cost: number, now: number, ip?: string | null): Promise<void> {
+/** `plan` picks which address counter to give back (taste → use:ip:, trial →
+ *  use:ipt:). It defaults to taste so the pre-trial call signature keeps its
+ *  exact meaning. */
+export async function refund(env: Env, code: string, cost: number, now: number, ip?: string | null, plan: CodeRecord["plan"] = "taste"): Promise<void> {
     const dayKey = `use:${code}:${today(now)}`;
     const used = await readCount(env, dayKey);
     await env.CODES.put(dayKey, String(Math.max(0, used - cost)), { expirationTtl: 172_800 });
     // A taste request also held a per-IP reservation; give that back too, or one
     // upstream outage burns a whole household's free taste for the day. Passed
-    // only for taste requests, so nothing else grows an ip counter.
-    if (ip) {
-        const ipKey = `use:ip:${ip}:${today(now)}`;
-        const ipUsed = await readCount(env, ipKey);
-        await env.CODES.put(ipKey, String(Math.max(0, ipUsed - cost)), { expirationTtl: 172_800 });
+    // only for taste/trial requests, so nothing else grows an ip counter.
+    const guard = ipGuard(plan, ip, now);
+    if (guard) {
+        const ipUsed = await readCount(env, guard.key);
+        await env.CODES.put(guard.key, String(Math.max(0, ipUsed - cost)), { expirationTtl: 172_800 });
     }
 }
 
@@ -375,7 +467,7 @@ export function mintCode(): string {
 // paywall-bypass replay without any dedup state.
 
 const FREE_FALLBACK_CAP = 500; // the conservative cap for an unmapped/misconfigured variant
-// The plans a PURCHASE may map to. "taste" is deliberately NOT here: it is the
+// The plans a PURCHASE may map to. "taste" and "trial" are deliberately NOT here: they are the
 // synthetic keyless tier, so a product-id map must never be able to mint one
 // (that would be a stored free_-style record with a purchased cap).
 const KNOWN_PLANS = new Set(["free", "paid", "monthly", "annual", "lifetime"]);
@@ -635,7 +727,8 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
         // subscription id / revocation an out-of-order lifecycle event already
         // wrote, so a replay of this create can't wipe a live renewal or
         // un-revoke a refunded purchase.
-        const existing = safeParse(await env.CODES.get(`code:${key}`));
+        const rawExisting = await env.CODES.get(`code:${key}`);
+        const existing = safeParse(rawExisting);
         // #2: a subscription code must NEVER be born without an expiry, or a
         // missed/absent subscription event would leave it valid forever (the
         // authCode expiry net is skipped when expiresAt is undefined). Stamp a
@@ -667,6 +760,13 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
         // more now that the index is written. (KV lag can still hide the row;
         // authCode's lazy fold is the backstop.)
         if (await drainPending(env, rec, joinIds)) await env.CODES.put(`code:${key}`, JSON.stringify(rec));
+        // Owner stat: a genuinely NEW key is a conversion. A replayed/upserted
+        // create (the row already existed) must not count twice. Counts only,
+        // keyed by plan, and a stats failure is swallowed so it can never turn
+        // this webhook into a 500 (Dodo would retry a purchase already applied).
+        if (rawExisting === null) {
+            try { await bumpStat(env, now, `conv:${cfg.plan}`); } catch { /* approximate metrics only */ }
+        }
         return { action: cfg.mapped ? "created" : "created_unmapped_variant" };
     }
 
