@@ -477,3 +477,42 @@ export function setSublineCode(settingsPath: string | null, rawCode: string): Re
 
     return ok({ path: settingsPath, created: written.value.created, codeLength: code.length });
 }
+
+export interface EnsureRelayEngineReport {
+    /** The engine was not the relay and has been set to it. */
+    changed: boolean;
+    /** The engine before, for the log. An engine name, never a credential. */
+    previous: string | null;
+}
+
+/**
+ * A saved code with a different engine selected: select the relay again.
+ *
+ * The flow no longer shows the code screen when a code is saved, so
+ * `setSublineCode` (which sets the engine alongside the code) no longer runs
+ * for that user. A code with any other engine does nothing: the plugin keeps
+ * using that engine and the ✦ they paid for never arrives. So the engine is
+ * re-asserted here, and ONLY the engine: the code is read to decide, never
+ * rewritten, never returned. No saved code, or the relay already selected,
+ * writes nothing.
+ */
+export function ensureRelayEngine(settingsPath: string | null): Result<EnsureRelayEngineReport> {
+    if (settingsPath === null || readSublineCode(settingsPath) === null) return ok({ changed: false, previous: null });
+    let previous: string | null = null;
+    try {
+        const parsed = JSON.parse(readFileSync(settingsPath, "utf8")) as { plugins?: Record<string, Record<string, unknown>> };
+        const engine = parsed?.plugins?.[PLUGIN_SETTINGS_KEY]?.[ENGINE_KEY];
+        previous = typeof engine === "string" ? engine : null;
+    } catch {
+        // readSublineCode just parsed it; a change in between is refused by the write below.
+    }
+    if (previous === RELAY_ENGINE) return ok({ changed: false, previous });
+
+    const written = updatePluginSettings(
+        settingsPath,
+        existing => ({ ...existing, [ENGINE_KEY]: RELAY_ENGINE }),
+        "select the relay engine in Vencord's settings"
+    );
+    if (!written.ok) return written as Result<EnsureRelayEngineReport>;
+    return ok({ changed: true, previous });
+}

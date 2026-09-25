@@ -14,6 +14,7 @@ import {
     readDiscordLocale,
     readTargetLanguage,
     setSublineCode,
+    ensureRelayEngine,
     setTargetLanguage,
     SUPPORTED_LANGUAGE_CODES,
     TARGET_LANG_KEY,
@@ -307,6 +308,40 @@ describe("readTargetLanguage", () => {
         const corrupt = join(dir, "corrupt.json");
         writeFileSync(corrupt, "nope", "utf8");
         expect(readTargetLanguage(corrupt)).toBeNull();
+    });
+});
+
+describe("ensureRelayEngine", () => {
+    const write = (plugin: Record<string, unknown>) => {
+        const path = join(dir, "settings.json");
+        writeFileSync(path, JSON.stringify({ other: { keep: 1 }, plugins: { [PLUGIN_SETTINGS_KEY]: plugin, Other: { x: 1 } } }), "utf8");
+        return path;
+    };
+
+    it("selects the relay when a code is saved under another engine, and leaves the code alone", () => {
+        const path = write({ enabled: true, engine: "google", sublineCode: "slp_saved", targetLang: "en" });
+        const result = ensureRelayEngine(path);
+        expect(result.ok && result.value).toEqual({ changed: true, previous: "google" });
+        const written = JSON.parse(readFileSync(path, "utf8"));
+        expect(written.plugins[PLUGIN_SETTINGS_KEY]).toEqual({ enabled: true, engine: "relay", sublineCode: "slp_saved", targetLang: "en" });
+        expect(written.plugins.Other).toEqual({ x: 1 });
+        expect(written.other).toEqual({ keep: 1 });
+    });
+
+    it("writes nothing when the relay is already selected", () => {
+        const path = write({ engine: "relay", sublineCode: "slp_saved" });
+        const before = readFileSync(path, "utf8");
+        const result = ensureRelayEngine(path);
+        expect(result.ok && result.value).toEqual({ changed: false, previous: "relay" });
+        expect(readFileSync(path, "utf8")).toBe(before);
+    });
+
+    it("writes nothing when no code is saved", () => {
+        const path = write({ engine: "groq", sublineCode: "  " });
+        const before = readFileSync(path, "utf8");
+        expect(ensureRelayEngine(path).ok).toBe(true);
+        expect(readFileSync(path, "utf8")).toBe(before);
+        expect(ensureRelayEngine(null)).toEqual({ ok: true, value: { changed: false, previous: null } });
     });
 });
 

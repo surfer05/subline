@@ -25,6 +25,7 @@ import {
     discordSettingsPathFor,
     readDiscordLocale,
     readSublineCode,
+    ensureRelayEngine,
     setSublineCode,
     setTargetLanguage,
     vencordSettingsPathFor
@@ -522,6 +523,7 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
         setLanguage: code => setTargetLanguage(vencordSettings, code),
         setSublineCode: key => setSublineCode(vencordSettingsPathFor(platform, env, home), key),
         hasSublineCode: () => readSublineCode(vencordSettings) !== null,
+        ensureRelayEngine: () => ensureRelayEngine(vencordSettings),
 
         patch: (install, patchOptions) =>
             patchInstall(install, {

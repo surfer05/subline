@@ -41,7 +41,7 @@ import { awaitAppManagement, isLoggedAttempt } from "./appManagement.js";
 import type { QuitReport, RunningProcess } from "./discordProcess.js";
 import { findDiscordProcesses, quitDiscord } from "./discordProcess.js";
 import { defaultLanguage, endonymOf, languageOptions } from "./language.js";
-import type { LanguageOption, SetSublineCodeReport, SetTargetLanguageReport } from "./language.js";
+import type { EnsureRelayEngineReport, LanguageOption, SetSublineCodeReport, SetTargetLanguageReport } from "./language.js";
 import type { ModBundle } from "../bundle/bundle.js";
 import type { DiscordBranch, DiscordInstall } from "../patcher/locate.js";
 import type { PatchReport } from "../patcher/patch.js";
@@ -289,6 +289,8 @@ export interface FlowPorts {
     setSublineCode(key: string): Result<SetSublineCodeReport>;
     /** Whether the saved settings already hold a Subline code. Decides whether an UPDATE offers the code screen. */
     hasSublineCode(): boolean;
+    /** With a code saved, select the relay engine if something else is selected. Never touches the code. */
+    ensureRelayEngine(): Result<EnsureRelayEngineReport>;
 
     patch(install: DiscordInstall, options: { modBundleDir: string; overwriteForeignMod: boolean }): Result<PatchReport>;
     /**
@@ -524,7 +526,7 @@ export class InstallFlow {
                     // settings, so it can never clear a code saved earlier. If
                     // one is saved (this screen is normally not shown then),
                     // the rest of the run treats the user as a code-holder.
-                    if (this.ports.hasSublineCode()) this.codeConfigured = true;
+                    if (this.ports.hasSublineCode()) this.useSavedCode();
                     this.ports.log.info("code.skipped");
                     return this.permissionStep();
                 }
@@ -850,7 +852,7 @@ export class InstallFlow {
         // The saved code counts as configured for the rest of this run: the last
         // screen's wording and the background confirmation's expectations are
         // those of a code-holder, not of a keyless install.
-        this.codeConfigured = true;
+        this.useSavedCode();
         return this.permissionStep();
     }
 
@@ -958,10 +960,29 @@ export class InstallFlow {
     private codeStepUnlessSaved(): FlowState | Promise<FlowState> {
         if (this.ports.hasSublineCode()) {
             this.ports.log.info("flow.code-already-saved", { reason: "code in saved settings" });
-            this.codeConfigured = true;
+            this.useSavedCode();
             return this.permissionStep();
         }
         return this.codeStep();
+    }
+
+    /**
+     * Treat the saved code as this run's code, and make sure it is used.
+     *
+     * The code screen is skipped, so `setSublineCode` (which also selects the
+     * relay engine) does not run. A code with another engine selected would
+     * change nothing, so the engine is re-asserted. The code is never touched.
+     * A failure here is logged, not shown: translation still works on the
+     * engine that is selected, and the code can be re-entered in Discord.
+     */
+    private useSavedCode(): void {
+        this.codeConfigured = true;
+        const engine = this.ports.ensureRelayEngine();
+        if (!engine.ok) {
+            this.ports.log.warn("code.engine-reassert-failed", errorFields(engine.error));
+            return;
+        }
+        if (engine.value.changed) this.ports.log.info("code.engine-reasserted", { previous: engine.value.previous });
     }
 
     /* -------------------------------------------------------------------- *

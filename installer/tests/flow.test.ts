@@ -126,6 +126,7 @@ interface Script {
     setSublineCode?: Result<{ path: string; created: boolean; codeLength: number }>;
     /** Whether the saved settings already hold a code (an UPDATE consults this). */
     hasSublineCode?: boolean;
+    ensureRelayEngine?: Result<{ changed: boolean; previous: string | null }>;
     platform?: NodeJS.Platform;
 }
 
@@ -137,6 +138,8 @@ interface Harness {
     patchCalls: Array<{ modBundleDir: string; overwriteForeignMod: boolean }>;
     languageWrites: string[];
     codeWrites: string[];
+    /** How many times the flow asked for the relay engine to be re-selected. */
+    engineReasserts: number;
     verifyCalls: Array<{ expectedBuildId: string; patchedAt: number; launchedAt: number }>;
     /** How many times the mod bundle was copied to its runtime location. */
     bundleInstalls: number;
@@ -161,6 +164,7 @@ function harness(script: Script = {}): Harness {
         patchCalls: [],
         languageWrites: [],
         codeWrites: [],
+        engineReasserts: 0,
         verifyCalls: [],
         bundleInstalls: 0,
         helperInstalls: 0,
@@ -212,6 +216,10 @@ function harness(script: Script = {}): Harness {
         discordLocale: () => (script.discordLocale === undefined ? "tr" : script.discordLocale),
         systemLocale: () => "en-GB",
         hasSublineCode: () => script.hasSublineCode ?? false,
+        ensureRelayEngine: () => {
+            h.engineReasserts += 1;
+            return script.ensureRelayEngine ?? { ok: true, value: { changed: false, previous: "relay" } };
+        },
         setSublineCode: (code: string) => {
             h.codeWrites.push(code);
             return script.setSublineCode ?? {
@@ -1121,6 +1129,40 @@ describe("the optional Subline-code step", () => {
         expect(next.step).toBe("done");
         expect(next.detail).toContain("✦");
         expect(h.logged.some(l => l.event === "flow.code-already-saved")).toBe(true);
+    });
+
+    it("re-selects the relay engine for a saved code, without writing the code", async () => {
+        const h = harness({ hasSublineCode: true, ensureRelayEngine: { ok: true, value: { changed: true, previous: "google" } } });
+        await toDetection(h);
+        const done = await h.flow.send({ type: "set-language", code: "tr" });
+        expect(h.engineReasserts).toBe(1);
+        expect(h.codeWrites).toEqual([]);
+        expect(h.logged.some(l => l.event === "code.engine-reasserted" && l.fields.previous === "google")).toBe(true);
+        expect(done.step).toBe("done");
+    });
+
+    it("an update with a saved code re-selects the relay engine too", async () => {
+        const marker = { pluginBuildId: "0000000000000000" } as unknown as InstallState["marker"];
+        const st = { ...installState("patched-by-us", "subline"), marker };
+        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: true });
+        await h.flow.start();
+        expect(h.engineReasserts).toBe(1);
+        expect(h.codeWrites).toEqual([]);
+    });
+
+    it("a failed engine re-select is logged and the install carries on", async () => {
+        const h = harness({ hasSublineCode: true, ensureRelayEngine: { ok: false, error: fail("IO_ERROR", "read-only") } });
+        await toDetection(h);
+        const done = await h.flow.send({ type: "set-language", code: "tr" });
+        expect(h.logged.some(l => l.event === "code.engine-reassert-failed")).toBe(true);
+        expect(done.step).toBe("done");
+    });
+
+    it("no saved code: the engine is left alone", async () => {
+        const h = harness({ hasSublineCode: false });
+        await toDetection(h);
+        await h.flow.send({ type: "set-language", code: "tr" });
+        expect(h.engineReasserts).toBe(0);
     });
 
     it("Continue without a code never writes, so it can never clear a saved code", async () => {
