@@ -20,11 +20,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { installModBundle } from "../src/app/modInstall.js";
 import { inspectModBundle } from "../src/bundle/bundle.js";
 import { RELEASE_MANIFEST_FORMAT } from "../src/helper/release.js";
-import { runHelperOnce } from "../src/helper/helper.js";
+import { DEFAULT_UPDATE_INTERVAL_MS, runHelperOnce } from "../src/helper/helper.js";
+import { MIN_WINDOW_MS } from "../src/helper/health.js";
 import type { HelperPorts, HelperRunOptions, HelperRunReport } from "../src/helper/helper.js";
 import { helperStatePathFor, readHelperState, writeHelperState } from "../src/helper/state.js";
 import type { Alert } from "../src/helper/alerts.js";
-import { readPendingAlerts } from "../src/helper/alerts.js";
+import { DEFAULT_REPEAT_MS, readPendingAlerts } from "../src/helper/alerts.js";
 import type { DiscordInstall } from "../src/patcher/locate.js";
 import { readMarker } from "../src/patcher/marker.js";
 import { patchInstall, verifyPatch } from "../src/patcher/patch.js";
@@ -959,9 +960,19 @@ describe("the health check", () => {
         harness.feed = ok(releaseDocument(harness.shipped.buildId, new TextEncoder().encode("x")));
         writeBeacon(harness.beaconPath, harness.shipped.buildId, {});
 
-        // A fortnight of runs on a server that speaks the reader's language.
+        // Hourly runs (the helper's real cadence) on a server that speaks the
+        // reader's language, for twice the longest clock the helper keeps: the
+        // alert repeat window, the health window and the update interval.
+        //
+        // NOT a fortnight any more. Every run here is a full pass over REAL
+        // files (bundle inspection, patch verification, an atomic state write),
+        // about 0.5 ms each when the machine is idle and nothing waits on a
+        // timer. 337 of them made this the suite's slowest test by 5x, and
+        // under parallel load the synchronous I/O stretched it past the 5 s
+        // test timeout. Past the longest clock, extra days exercise nothing new.
+        const span = 2 * Math.max(DEFAULT_REPEAT_MS, MIN_WINDOW_MS, DEFAULT_UPDATE_INTERVAL_MS);
         let last = await harness.run();
-        for (let index = 0; index < 14 * 24; index += 1) {
+        for (let elapsed = 0; elapsed < span; elapsed += 60 * 60_000) {
             harness.advance(60 * 60_000);
             last = await harness.run();
         }

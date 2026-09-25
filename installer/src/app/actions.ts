@@ -29,7 +29,7 @@ export const ACTION_LABELS: Record<FlowActionType, string> = {
     "set-language": "Continue",
     "set-code": "Save code",
     // Says what is being declined: a code, not ✦. A free install still gets
-    // 3 ✦ a day by pressing ⚡, so "Use free Google only" was false.
+    // ≈ and ✦ automatically for 7 days, so "Use free Google only" was false.
     "skip-code": "Continue without a code",
     // Secondary: Subline already opened the pane itself. This is for someone
     // who closed it or lost it behind another window.

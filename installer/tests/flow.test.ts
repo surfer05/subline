@@ -326,6 +326,21 @@ describe("the happy path", () => {
         expect(h.launched).toBe(1);
     });
 
+    it("explains the free plan on the tiers screen, word for word", async () => {
+        const h = harness();
+        await h.flow.start();
+        const tiers = await h.flow.send({ type: "next" });
+
+        expect(tiers.step).toBe("tiers");
+        expect(tiers.detail).toBe(
+            "≈ is Google Translate: instant and free. ✦ is an AI that reads the conversation around a message, "
+            + "so slang and replies come out right. The first **7 days** are free and fully automatic. After that, "
+            + "messages translate when you click. A Subline code keeps everything automatic."
+        );
+        // The old free plan. It must not come back by accident.
+        expect(tiers.detail).not.toMatch(/3 free/);
+    });
+
     it("patches against the RUNTIME bundle directory, never a path inside the app", async () => {
         const h = harness();
         await toDetection(h);
@@ -1095,8 +1110,24 @@ describe("the optional Subline-code step", () => {
 
         expect(h.codeWrites).toEqual([]);
         expect(state.step).toBe("done");
-        // Google still translates everything, so this is not an error state.
+        // A free install is automatic for 7 days, then translates on click, so
+        // this is not an error state.
         expect(state.error).toBeNull();
+        // And the last screen says so, rather than promising automatic
+        // translation forever.
+        expect(state.detail).toContain(
+            "Without a code, this is automatic for your first 7 days. After that, click ≈ Translate under a message."
+        );
+    });
+
+    it("tells a code holder the ✦ line is coming, not the free plan", async () => {
+        const h = harness();
+        await toCodeStep(h);
+        const state = await h.flow.send({ type: "set-code", code: "slp_abcdefghijklmnop" });
+
+        expect(state.step).toBe("done");
+        expect(state.detail).toContain("With your code, the ✦ line follows a few seconds after the ≈ line.");
+        expect(state.detail).not.toContain("7 days");
     });
 
     it("stays on the step when the key cannot be saved", async () => {

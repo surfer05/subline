@@ -449,7 +449,7 @@ function updatePluginSettings(
  * selected changes nothing: the plugin would go on using Google (≈) and the
  * user would have pasted a code for no visible result. An empty code is a valid
  * choice (the user skipped) and is handled by the caller NOT calling this — the
- * plugin then simply stays on the free ≈ tier.
+ * plugin then simply stays on the free plan (7 days automatic, then on click).
  *
  * NOTHING HERE RETURNS OR LOGS THE CODE. The report carries its LENGTH, enough
  * to tell "pasted" from "pasted half of it" in a log that spec §7 forbids

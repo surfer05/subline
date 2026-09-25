@@ -107,6 +107,17 @@ describe("only a painted subtitle confirms an install", () => {
         expect(result.summary).toContain("✦");
     });
 
+    it("describes the free plan to a ≈-only install with no code, not a forever-automatic one", () => {
+        writeBeacon();
+        const result = verify({ expectUpgrade: false });
+        expect(result.status).toBe("translating-approx");
+        expect(result.summary).toContain(
+            "Without a code, ≈ and ✦ are automatic for your first 7 days, then messages translate when you click."
+        );
+        expect(result.summary).toContain("to keep everything automatic.");
+        expect(result.summary).not.toContain("—");
+    });
+
     it("does NOT confirm, and does NOT cry 'Discord changed', on translated-but-not-painted", () => {
         // A single install-time sample cannot tell "hasn't painted YET" (the
         // reader has not opened a foreign chat / a DM globe is off) from the

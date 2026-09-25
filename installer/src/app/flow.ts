@@ -448,9 +448,12 @@ export class InstallFlow {
             case "welcome":
                 return this.set(state({
                     step: "tiers",
+                    // The free plan (v0.1.6): 7 days fully automatic, then translate
+                    // on click. A code keeps everything automatic. `**` is bold.
                     detail: "≈ is Google Translate: instant and free. ✦ is an AI that reads the conversation around "
-                        + "a message, so slang and replies come out right. You get 3 free ✦ a day. A Subline code "
-                        + "makes ✦ automatic.",
+                        + "a message, so slang and replies come out right. The first **7 days** are free and fully "
+                        + "automatic. After that, messages translate when you click. A Subline code keeps everything "
+                        + "automatic.",
                     actions: ["next", "cancel"]
                 }));
 
@@ -514,9 +517,9 @@ export class InstallFlow {
             case "choose-code":
                 if (action.type === "set-code") return this.applyCode(action.code);
                 if (action.type === "skip-code") {
-                    // Skipping is a real answer, not a failure. Google (≈) still
-                    // translates everything; the ✦ AI tier simply stays off
-                    // until somebody adds a code.
+                    // Skipping is a real answer, not a failure. A free install is
+                    // fully automatic (≈ and ✦) for its first 7 days, then
+                    // translates on click until somebody adds a code.
                     this.ports.log.info("code.skipped");
                     return this.permissionStep();
                 }
@@ -964,8 +967,8 @@ export class InstallFlow {
             // aborted the whole install both times - the log shows the
             // identical mistake ten minutes apart. On a screen whose subject
             // is an optional extra, Cancel reads as "decline the extra", and
-            // the decline path this screen actually offers is "Use Google
-            // only". Someone who truly wants out can close the window.
+            // the decline path this screen actually offers is "Continue
+            // without a code". Someone who truly wants out can close the window.
             actions: ["set-code", "skip-code"]
         }));
     }
@@ -1474,7 +1477,9 @@ export class InstallFlow {
     private plainDoneDetail(): string {
         return "Subline is installed and Discord is opening. Messages in other languages get a translation "
             + "underneath them."
-            + (this.codeConfigured ? " With your code, the ✦ line follows a few seconds after the ≈ line." : "")
+            + (this.codeConfigured
+                ? " With your code, the ✦ line follows a few seconds after the ≈ line."
+                : " Without a code, this is automatic for your first 7 days. After that, click ≈ Translate under a message.")
             + " You can close this window.";
     }
 }
