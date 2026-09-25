@@ -916,3 +916,42 @@ describe("N7: channels the reader has not opted into, and a code pasted mid-sess
         expect(text(render(msg("4", "ana bghit nmchi l dar daba")))).toContain("≈ rough");
     });
 });
+
+// ---------------------------------------------------------------------------
+describe("NEW-1: the client counts today's three itself", () => {
+    it("counts down 3, 2, 1, 0 even when the relay states a trial-sized cap, and sends no fourth", async () => {
+        await restart(() => expiredLocally());
+        let served = 0;
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) => {
+            if (engine !== "relay") return { ok: true, results: [] };
+            served++;
+            return {
+                ok: true,
+                results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "es", text: "different words entirely here", skip: false })),
+                quotaUsed: served, quotaCap: 300
+            };
+        });
+        const label = () => __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("x", "hola que tal"))!.label;
+        expect(label()).toContain("3 of 3 left today");
+        for (const [id, left] of [["1", 2], ["2", 1], ["3", 0]] as const) {
+            __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg(id, "hola que tal"))!.onClick!(undefined as any);
+            await flush();
+            expect(label()).toContain(`${left} of 3 left today`);
+        }
+        __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("4", "hola que tal"))!.onClick!(undefined as any);
+        await flush();
+        expect(served).toBe(3);
+    });
+
+    it("survives a restart the same UTC day, and resets the next", async () => {
+        await restart(() => expiredLocally());
+        answer({ relay: m => ({ id: m.id, lang: "es", text: "other words", skip: false }), relayQuota: { used: 1, cap: 300 } });
+        __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("1", "hola que tal"))!.onClick!(undefined as any);
+        await flush();
+        const start = settings.store.freeTrialStartedAt;
+        await restart(() => { settings.store.freeTrialStartedAt = start; });
+        expect(__getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("2", "hola que tal"))!.label).toContain("2 of 3 left today");
+        vi.setSystemTime(Date.now() + DAY_MS);
+        expect(__getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("2", "hola que tal"))!.label).toContain("3 of 3 left today");
+    });
+});

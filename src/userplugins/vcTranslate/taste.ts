@@ -166,22 +166,64 @@ export function tasteCap(): number {
     return cap;
 }
 
-export function tasteUsed(): number {
-    return used ?? 0;
+/* ------------------------------------------------ the local second guard -- */
+
+/**
+ * THE CLIENT'S OWN COUNT, as a second guard beside the relay's. The relay is
+ * the authority, but a relay that counts a free id against something larger
+ * than three (an older relay, or one that resolved the id as a trial) must not
+ * turn "3 previews a day" into more, and must not leave the label stuck at
+ * "3 of 3". So every ✦ the relay actually SERVED under the taste allowance (a
+ * preview, or a ⚡ press) is counted here too, per UTC day, and persisted so a
+ * restart does not hand out three more. The label and the gate use whichever
+ * of the two counts is higher (the fewer left).
+ */
+export const LOCAL_TASTE_KEY = "VcTranslate_tasteToday";
+let localDay: string | null = null;
+let localUsed = 0;
+
+function localUsedToday(now: number): number {
+    return localDay === utcDay(now) ? localUsed : 0;
 }
 
-export function tasteRemaining(): number {
-    return Math.max(0, cap - tasteUsed());
+/** Read the persisted local count. A bad or missing value is a zero. */
+export async function loadLocalTasteCount(): Promise<void> {
+    try {
+        const raw = await DataStore.get<unknown>(LOCAL_TASTE_KEY) as { day?: unknown; used?: unknown } | undefined;
+        if (raw && typeof raw.day === "string" && typeof raw.used === "number" && Number.isFinite(raw.used) && raw.used >= 0) {
+            localDay = raw.day;
+            localUsed = Math.floor(raw.used);
+        }
+    } catch { /* a zero: the relay still guards */ }
 }
 
-/** Only a count the relay actually stated can close the door. See `used`. */
-export function tasteExhausted(): boolean {
-    return used !== null && used >= cap;
+/** One ✦ served under the taste allowance (a preview or a ⚡ press). */
+export function noteTasteSpent(now: number = Date.now()): void {
+    const day = utcDay(now);
+    if (localDay !== day) { localDay = day; localUsed = 0; }
+    localUsed++;
+    void DataStore.set(LOCAL_TASTE_KEY, { day: localDay, used: localUsed }).catch(() => { });
+}
+
+export function tasteUsed(now: number = Date.now()): number {
+    return Math.max(used ?? 0, localUsedToday(now));
+}
+
+export function tasteRemaining(now: number = Date.now()): number {
+    return Math.max(0, Math.min(cap, TASTE_CAP) - tasteUsed(now));
+}
+
+/**
+ * Only a count someone actually stated can close the door: the relay's (see
+ * `used`), or this client's own count of what the relay served today.
+ */
+export function tasteExhausted(now: number = Date.now()): boolean {
+    return (used !== null && used >= cap) || localUsedToday(now) >= Math.min(cap, TASTE_CAP);
 }
 
 /** "2 of 3 left today" — what the ⚡ button says before it is pressed. */
 export function tasteLabel(): string {
-    return `${tasteRemaining()} of ${cap} left today`;
+    return `${tasteRemaining()} of ${Math.min(cap, TASTE_CAP)} left today`;
 }
 
 // v0.1.6 dropped the two taste toasts ("3 of 3 free ✦ used today." and
@@ -197,4 +239,6 @@ export function __resetTaste(): void {
     used = null;
     cap = TASTE_CAP;
     readDay = null;
+    localDay = null;
+    localUsed = 0;
 }

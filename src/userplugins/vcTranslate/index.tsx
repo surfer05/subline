@@ -25,7 +25,7 @@ import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
 import {
-    installIdOnce, markTasteExhausted, recordTasteQuota, rolloverTasteIfNewUtcDay, TASTE_CAP, tasteBearer,
+    installIdOnce, loadLocalTasteCount, markTasteExhausted, noteTasteSpent, recordTasteQuota, rolloverTasteIfNewUtcDay, TASTE_CAP, tasteBearer,
     tasteCap, tasteExhausted, tasteLabel, tasteUsed
 } from "./taste";
 import {
@@ -1793,6 +1793,7 @@ async function runTier(
         // A trial-sized cap (a ⚡ press the relay counted against a running
         // trial) is not the taste allowance, and must never reach the "n of 3
         // left today" label as "299 of 300".
+        if (taste?.kind === "press") noteTasteSpent();
         if (taste?.kind === "press" && !(typeof res.quotaCap === "number" && res.quotaCap > TASTE_CAP)) {
             recordTasteQuota(res.quotaUsed, res.quotaCap);
             tasteLog(`press accepted — ${tasteUsed()} of ${tasteCap()} used today`);
@@ -2215,6 +2216,7 @@ async function requestPreview(message: Message, text: string, googleText: string
         return;
     }
     noteServerNow(res.serverNow);
+    noteTasteSpent();
     if (!(typeof res.quotaCap === "number" && res.quotaCap > TASTE_CAP)) recordTasteQuota(res.quotaUsed, res.quotaCap);
     const r = res.results.find(x => x.id === message.id);
     if (r === undefined || "failed" in r || r.skip) return;
@@ -3738,6 +3740,8 @@ export default definePlugin({
         // below, so the first translation of the session is counted into the
         // week it belongs to.
         await loadWeeklyStats();
+        // The client's own count of today's three (a second guard; taste.ts).
+        await loadLocalTasteCount();
         showWeeklyNoteIfDue();
 
         await loadEnabledChannels();
