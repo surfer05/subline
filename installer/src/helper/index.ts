@@ -8,7 +8,7 @@
 
 export {
     ALERTS_FILENAME, ALERTS_FORMAT, alertsPathFor, DEFAULT_REPEAT_MS, pendingAlertCodes,
-    raiseAlert, readPendingAlerts, resolveAlert
+    raiseAlert, readPendingAlerts, repeatMsFor, resolveAlert
 } from "./alerts.js";
 export type { Alert, AlertCode, AlertPorts, AlertRaised } from "./alerts.js";
 

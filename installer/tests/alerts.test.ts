@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
-    ALERTS_FILENAME, ALERTS_FORMAT, alertsPathFor, DEFAULT_REPEAT_MS, pendingAlertCodes, raiseAlert,
+    ALERTS_FILENAME, ALERTS_FORMAT, alertsPathFor, DEFAULT_REPEAT_MS, pendingAlertCodes, raiseAlert, repeatMsFor,
     readPendingAlerts, resolveAlert
 } from "../src/helper/alerts.js";
 import type { Alert, AlertPorts } from "../src/helper/alerts.js";
@@ -91,6 +91,28 @@ describe("raising an alert", () => {
 
         expect(second.notified).toBe(true);
         expect(shown).toHaveLength(2);
+    });
+
+    // "Discord updated and Subline could not put its translation back" means
+    // translation is off. At most twice a day: again only after 12 hours, and
+    // only while it is still failing.
+    it("repeats repatch-failed at most twice a day: not before 12 hours, again at 12", async () => {
+        expect(repeatMsFor("repatch-failed")).toBe(12 * 60 * 60 * 1000);
+        await raiseAlert(state, alert("repatch-failed"), ports());
+        clock += 12 * 60 * 60 * 1000 - 1;
+        expect((await raiseAlert(state, alert("repatch-failed"), ports())).notified).toBe(false);
+        clock += 1;
+        expect((await raiseAlert(state, alert("repatch-failed"), ports())).notified).toBe(true);
+        expect(shown).toHaveLength(2);
+    });
+
+    it("keeps every other alert on the 24 hour cadence", async () => {
+        expect(repeatMsFor("mod-stale")).toBe(DEFAULT_REPEAT_MS);
+        expect(DEFAULT_REPEAT_MS).toBe(24 * 60 * 60 * 1000);
+        await raiseAlert(state, alert("update-failed"), ports());
+        clock += 12 * 60 * 60 * 1000;
+        expect((await raiseAlert(state, alert("update-failed"), ports())).notified).toBe(false);
+        expect(shown).toHaveLength(1);
     });
 
     it("keeps the durable record even when the notification is suppressed as a repeat", async () => {

@@ -720,6 +720,49 @@ describe("when re-patching fails", () => {
 
         expect(readPendingAlerts(harness.productDir)).toEqual([]);
     });
+
+    // Field report (0.1.6): the sentence read "... Discord itself is fine. open
+    // Subline to finish." Every sentence starts with a capital. The cadence is
+    // at most twice a day while it keeps failing, and silence once fixed.
+    it("says 'Open Subline to finish.', repeats after 12 hours while failing, and goes quiet once repaired", async () => {
+        patchForReal(harness);
+        await harness.run();
+        simulateDiscordUpdate(harness.fixture.install, "0.0.407");
+
+        const failing: HelperPorts = {
+            ...harness.ports,
+            patch: (install, options) =>
+                patchInstall(install, {
+                    modBundleDir: options.modBundleDir,
+                    productVersion: PRODUCT_VERSION,
+                    hooks: { afterWrite: ({ asarPath }) => writeFileSync(asarPath, "not an asar at all") }
+                })
+        };
+        const repatchNotices = () => harness.notifications.filter(alert => alert.code === "repatch-failed");
+
+        await runHelperOnce(failing, { settle: FAST_SETTLE });
+        expect(repatchNotices()).toHaveLength(1);
+        expect(repatchNotices()[0]?.message).toContain("Discord itself is fine. Open Subline to finish.");
+        expect(repatchNotices()[0]?.message).not.toMatch(/\. [a-z]/);
+
+        harness.advance(11 * 60 * 60_000);
+        await runHelperOnce(failing, { settle: FAST_SETTLE });
+        expect(repatchNotices()).toHaveLength(1);
+
+        harness.advance(60 * 60_000);
+        await runHelperOnce(failing, { settle: FAST_SETTLE });
+        expect(repatchNotices()).toHaveLength(2);
+
+        // Repaired: the alert clears and nothing more is said, however long.
+        harness.advance(60_000);
+        await harness.run();
+        expect(readPendingAlerts(harness.productDir)).toEqual([]);
+        harness.advance(13 * 60 * 60_000);
+        await harness.run();
+        harness.advance(13 * 60 * 60_000);
+        await harness.run();
+        expect(repatchNotices()).toHaveLength(2);
+    });
 });
 
 /* ------------------------------------------------------------------------ *

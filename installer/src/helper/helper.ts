@@ -50,7 +50,7 @@ import type { InstallState } from "../patcher/state.js";
 import type { DiscordBuildInfo } from "../patcher/version.js";
 import type { VerificationReport, VerifyOptions } from "../verify/verify.js";
 import type { Alert, AlertCode, AlertRaised } from "./alerts.js";
-import { DEFAULT_REPEAT_MS, raiseAlert, resolveAlert } from "./alerts.js";
+import { raiseAlert, repeatMsFor, resolveAlert } from "./alerts.js";
 import type { HealthObservation } from "./health.js";
 import { observeHealth } from "./health.js";
 import type { ReleaseManifest, ReleaseVerifier } from "./release.js";
@@ -231,7 +231,7 @@ class Run {
             this.state,
             alert,
             { notify: a => this.ports.notify(a), productDir: this.ports.productDir, now: () => this.ports.now() },
-            this.options.alertRepeatMs ?? DEFAULT_REPEAT_MS
+            this.options.alertRepeatMs ?? repeatMsFor(code)
         );
         this.alerts.push(raised);
         this.decide("alert", code, raised.reason, { notified: raised.notified });
@@ -616,7 +616,7 @@ async function handlePatchFailure(
         await run.alert(
             "repatch-failed",
             "Discord updated and Subline could not put its translation back. Discord itself is fine. "
-            + "open Subline to finish.",
+            + "Open Subline to finish.",
             { code: error.code, failures, path: install.rootPath }
         );
     }

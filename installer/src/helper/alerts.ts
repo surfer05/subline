@@ -21,7 +21,8 @@
  * Spec §6: an updater that warns falsely gets ignored when it warns truthfully.
  * So:
  *
- *  - an alert is raised at most once per `DEFAULT_REPEAT_MS`, however many times
+ *  - an alert is raised at most once per `repeatMsFor(code)` (24h, 12h for
+ *    `repatch-failed`), however many times
  *    its condition is observed;
  *  - `resolve()` clears an alert the moment its condition goes away, so a
  *    transient failure leaves nothing behind for the app to show;
@@ -86,6 +87,23 @@ export interface Alert {
 /** How long before the same unresolved condition is worth notifying about again. */
 export const DEFAULT_REPEAT_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Codes that repeat sooner than the default.
+ *
+ * `repatch-failed` means translation is OFF until the user opens Subline, and
+ * once a day proved too easy to miss. At most twice a day: it repeats only
+ * while the failure persists and at least 12 hours after the last one, and a
+ * successful repatch clears it (see `resolveAlert`), so it goes quiet.
+ */
+export const REPEAT_MS_BY_CODE: Partial<Record<AlertCode, number>> = {
+    "repatch-failed": 12 * 60 * 60 * 1000
+};
+
+/** How long `code` waits before notifying again. */
+export function repeatMsFor(code: AlertCode): number {
+    return REPEAT_MS_BY_CODE[code] ?? DEFAULT_REPEAT_MS;
+}
+
 export interface AlertPorts {
     /** Show a system notification. Failure to notify is never fatal. */
     notify(alert: Alert): Promise<void>;
@@ -116,7 +134,7 @@ export async function raiseAlert(
     state: HelperState,
     alert: Alert,
     ports: AlertPorts,
-    repeatMs: number = DEFAULT_REPEAT_MS
+    repeatMs: number = repeatMsFor(alert.code)
 ): Promise<AlertRaised> {
     const previous: AlertMemory | undefined = state.alerts[alert.code];
     const dueAgain = previous === undefined || alert.at - previous.lastNotifiedAt >= repeatMs;
