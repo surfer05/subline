@@ -46,13 +46,15 @@ export interface SurfaceDeps {
     cancel(handle: unknown): void;
     debug?(message: string): void;
     /**
-     * The surfaces' own daily ✦ allowance (see budget.ts). When it is spent,
+     * The surfaces' own daily ✦ allowance in cost units (see budget.ts and
+     * `surfaceCost`). When it is spent,
      * nothing more goes to the relay today: roomy lines fall back to ≈, tight
      * marks show nothing new. Absent means unlimited (tests of other rules).
      */
-    budget?: { remaining(): number; spend(texts: number): void; };
+    budget?: { remaining(): number; spend(units: number): void; };
     /** At most this many relay requests per minute for surfaces (default 4). */
     maxQualityPerMinute?: number;
+    maxBatchBytes?: number;
     fastDebounceMs?: number;
     qualityDebounceMs?: number;
     maxBatch?: number;
@@ -63,6 +65,19 @@ export interface SurfaceDeps {
 export const SURFACE_FAST_DEBOUNCE_MS = 400;
 export const SURFACE_QUALITY_DEBOUNCE_MS = 1_500;
 export const SURFACE_MAX_BATCH = 25;
+/** A batch never carries more than this much text (UTF-8 bytes). */
+export const SURFACE_MAX_BATCH_BYTES = 20 * 1024;
+/** Longer texts are not surface-translated at all: no request, no line. */
+export const SURFACE_MAX_TEXT_CHARS = 2_000;
+
+/** What one text costs against the daily budget: 1 + one per started 1,000 characters. */
+export function surfaceCost(text: string): number {
+    return 1 + Math.ceil(text.length / 1000);
+}
+
+function byteLength(text: string): number {
+    return new TextEncoder().encode(text).length;
+}
 export const SURFACE_FAIL_RETRY_MS = 10 * 60_000;
 export const SURFACE_NOT_NOW_RETRY_MS = 60_000;
 export const SURFACE_MAX_QUALITY_PER_MINUTE = 4;
@@ -99,7 +114,7 @@ export class SurfaceService {
     want(text: string | null | undefined, options: WantOptions = {}): SurfaceEntry | null {
         if (typeof text !== "string" || !this.deps.isPaid()) return null;
         const norm = normalizeSurfaceText(text);
-        if (norm === "" || this.deps.locallySkipped(norm)) return null;
+        if (norm === "" || norm.length > SURFACE_MAX_TEXT_CHARS || this.deps.locallySkipped(norm)) return null;
         const key = surfaceKey(norm, this.deps.targetLang());
         const entry = this.deps.cache.get(key);
         if (entry?.skip) return null;
@@ -159,15 +174,16 @@ export class SurfaceService {
             queue.clear();
             return;
         }
-        let max = this.deps.maxBatch ?? SURFACE_MAX_BATCH;
+        const max = this.deps.maxBatch ?? SURFACE_MAX_BATCH;
+        const maxBytes = this.deps.maxBatchBytes ?? SURFACE_MAX_BATCH_BYTES;
+        let left = Number.POSITIVE_INFINITY;
         if (tier === "quality") {
-            const left = this.budgetLeft();
+            left = this.budgetLeft();
             if (left <= 0) {
                 // Today's surface ✦ is spent: nothing more goes to the relay.
                 queue.clear();
                 return;
             }
-            max = Math.min(max, left);
             // At most `maxQualityPerMinute` surface requests a minute. A full
             // window waits for its oldest request to age out.
             const now = this.deps.now();
@@ -177,9 +193,28 @@ export class SurfaceService {
                 this.arm(tier, this.qualitySends[0] + MINUTE_MS - now);
                 return;
             }
-            this.qualitySends.push(now);
         }
-        const batch = [...queue.entries()].slice(0, max);
+        // Pack by count, by size, and (for ✦) by what today's budget still
+        // allows. A text the budget can no longer afford is dropped from the
+        // ✦ queue; a roomy line keeps its ≈.
+        const batch: Array<[string, string]> = [];
+        let bytes = 0;
+        let units = 0;
+        for (const [key, text] of [...queue.entries()]) {
+            if (batch.length >= max) break;
+            const size = byteLength(text);
+            if (batch.length > 0 && bytes + size > maxBytes) break;
+            const cost = surfaceCost(text);
+            if (units + cost > left) {
+                if (batch.length === 0) { queue.delete(key); continue; }
+                break;
+            }
+            batch.push([key, text]);
+            bytes += size;
+            units += cost;
+        }
+        if (batch.length === 0) return;
+        if (tier === "quality") this.qualitySends.push(this.deps.now());
         for (const [key] of batch) {
             queue.delete(key);
             this.inFlight[tier].add(key);
@@ -198,7 +233,7 @@ export class SurfaceService {
             outcome = null;
         }
         if (generation !== this.generation) return;
-        if (tier === "quality" && outcome !== null) this.deps.budget?.spend(texts.length);
+        if (tier === "quality" && outcome !== null) this.deps.budget?.spend(units);
 
         const now = this.deps.now();
         batch.forEach(([key], i) => {

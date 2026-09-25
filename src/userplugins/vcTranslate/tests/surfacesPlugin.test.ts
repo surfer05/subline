@@ -317,16 +317,21 @@ describe("a paid install", () => {
         stage("Wir reden über Bücher");
         forumTitle({ ...GUILD_CHANNEL, name: "Hilfe beim Kochen gesucht" });
         await settle();
+        // One flex row: the mark, then Discord's element in a shrinkable cell.
         const t = thread("Wie repariere ich mein Fahrrad?");
-        expect(t[1]).toEqual(ORIGINAL);
-        expect(findTitle(t[0])).toBe("Title (✦ de): sharp: Wie repariere ich mein Fahrrad?");
-        expect(findTitle(stage("Wir reden über Bücher")[0])).toBe("Stage topic (✦ de): sharp: Wir reden über Bücher");
-        expect(findTitle(forumTitle({ ...GUILD_CHANNEL, name: "Hilfe beim Kochen gesucht" })[0])).toBe("Title (✦ de): sharp: Hilfe beim Kochen gesucht");
+        expect(t.type).toBe("span");
+        expect(t.props.style).toEqual({ display: "flex", alignItems: "center", minWidth: 0, gap: 4 });
+        const [markCell, originalCell] = t.children;
+        expect(findTitle(markCell)).toBe("Title (✦ de): sharp: Wie repariere ich mein Fahrrad?");
+        expect(originalCell.props.style).toMatchObject({ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" });
+        expect(originalCell.children).toEqual([ORIGINAL]);
+        expect(findTitle(stage("Wir reden über Bücher"))).toBe("Stage topic (✦ de): sharp: Wir reden über Bücher");
+        expect(findTitle(forumTitle({ ...GUILD_CHANNEL, name: "Hilfe beim Kochen gesucht" }))).toBe("Title (✦ de): sharp: Hilfe beim Kochen gesucht");
     });
 
     it("forum tags get a tight ✦ at the end of the tag row", async () => {
         __stubSetChannel("f1", { id: "f1", availableTags: [{ id: "t1", name: "Hilfe gesucht" }, { id: "t2", name: "Gelöst" }] });
-        const post = { guild_id: "g1", parent_id: "f1", appliedTags: ["t1", "t2"] };
+        const post = { id: "p1", guild_id: "g1", parent_id: "f1", appliedTags: ["t1", "t2"] };
         tagsMark(post);
         await settle();
         const tags = findTitle(tagsMark(post));
@@ -473,6 +478,85 @@ describe("privacy: surfaces follow the same channel rules as messages", () => {
     });
 });
 
+describe("channel-level text follows the message rules of its channel", () => {
+    beforeEach(() => paid());
+
+    function channelLevel(channelId: string) {
+        const channel = { id: channelId, guild_id: "g1", parent_id: "f1", appliedTags: ["t1"] };
+        __stubSetChannel("f1", { id: "f1", availableTags: [{ id: "t1", name: "Hilfe gesucht" }] });
+        return {
+            parsers: ["topic", "topic-truncated", "voice-status", "guidelines", "event"]
+                .map(p => parsed(p, "Hier wird geplaudert", { channelId })),
+            thread: P.threadTitleChildren(ORIGINAL, "Wie repariere ich mein Fahrrad?", channel),
+            stage: P.stageTopicChildren(ORIGINAL, "Wir reden über Bücher", channel),
+            forum: P.forumTitleChildren(ORIGINAL, { ...channel, name: "Hilfe beim Kochen" }),
+            tags: tagsMark(channel)
+        };
+    }
+
+    function expectUntouched(r: ReturnType<typeof channelLevel>) {
+        for (const out of r.parsers) expect(out).toEqual(["<Hier wird geplaudert>"]);
+        expect(r.thread).toBe(ORIGINAL);
+        expect(r.stage).toBe(ORIGINAL);
+        expect(r.forum).toBe(ORIGINAL);
+        expect(r.tags).toBeNull();
+    }
+
+    it("a server channel switched off here gets no topic, status, title or tag translation", async () => {
+        await toggleChannelOptOut("off1");
+        expectUntouched(channelLevel("off1"));
+        await settle();
+        expect(surfaceCalls()).toEqual([]);
+    });
+
+    it("with Global Auto off, only channels switched on get channel-level translation", async () => {
+        settings.store.globalAuto = false;
+        expectUntouched(channelLevel("plain1"));
+        await toggleChannel("on1");
+        const on = channelLevel("on1");
+        expect(on.parsers[1]).not.toEqual(["<Hier wird geplaudert>"]);
+        expect(on.thread).not.toBe(ORIGINAL);
+    });
+
+    it("an event with no channel follows the server rule; one with a channel follows that channel", async () => {
+        await toggleChannelOptOut("off2");
+        expect(parsed("event", "Spieleabend für alle", { channelId: "off2", guildId: "g1" })).toEqual(["<Spieleabend für alle>"]);
+        expect(parsed("event", "Spieleabend für alle", { guildId: "g1" })).not.toEqual(["<Spieleabend für alle>"]);
+        expect(parsed("event", "Spieleabend für alle", {})).toEqual(["<Spieleabend für alle>"]);
+    });
+});
+
+describe("size limits", () => {
+    beforeEach(() => paid());
+
+    it("a text over 2,000 characters is not sent and gets no line; the others in its batch still translate", async () => {
+        const long = "Das ist ein sehr langer Absatz über Pizza. ".repeat(100).slice(0, 4096);
+        const message = { ...embedMessage("big"), embeds: [{ rawTitle: "Neue Pizzeria in der Stadt", rawDescription: long }] };
+        accessory(message);
+        await settle();
+        const sent = surfaceCalls().flatMap(c => JSON.parse(c[2]).messages.map((m: any) => m.text));
+        expect(sent).toContain("Neue Pizzeria in der Stadt");
+        expect(sent.some((t: string) => t.length > 2000)).toBe(false);
+        const out = text(accessory(message));
+        expect(out).toContain("✦ de · sharp: Neue Pizzeria in der Stadt");
+        expect(out).not.toContain("sharp: Das ist ein sehr langer");
+    });
+
+    it("a batch of long fields splits so no request carries more than 20 KB", async () => {
+        const field = (i: number) => ({ rawName: `Feld ${i}`, rawValue: `Abschnitt ${i}: ` + "Wir erklären hier alles über die Regeln. ".repeat(40).slice(0, 1_900) });
+        const message = { ...embedMessage("fields"), embeds: [{ fields: Array.from({ length: 20 }, (_, i) => field(i)) }] };
+        accessory(message);
+        await settle(300_000);
+        const relay = surfaceCalls("relay").map(c => JSON.parse(c[2]).messages as Array<{ text: string; }>);
+        expect(relay.length).toBeGreaterThan(1);
+        for (const batch of relay) {
+            const bytes = batch.reduce((n, m) => n + new TextEncoder().encode(m.text).length, 0);
+            expect(bytes).toBeLessThanOrEqual(20 * 1024);
+        }
+        expect(relay.flat().filter(m => m.text.startsWith("Abschnitt"))).toHaveLength(20);
+    });
+});
+
 describe("budget and priority: messages always come first", () => {
     beforeEach(() => paid());
 
@@ -510,11 +594,11 @@ describe("budget and priority: messages always come first", () => {
         const times = timedAnswers();
         __stubSetSelectedChannel("c1");
         for (let i = 0; i < 300; i++) stubActivities.set(`u${i}`, [{ type: 4, state: `Heute bin ich wirklich müde, Nummer ${i}` }]);
-        // Enough queued statuses for the surfaces to use their whole minute's
-        // allowance (4 requests) back to back, right before the message.
+        // Enough queued statuses for the surfaces to take every slot they
+        // may (all but the two they must leave), right before the message.
         for (let i = 0; i < 150; i++) decorator(`u${i}`);
         await settle(7_000);
-        expect(times.filter(t => t.surface && t.engine === "relay").length).toBeGreaterThanOrEqual(3);
+        expect(times.filter(t => t.surface && t.engine === "relay").length).toBeGreaterThanOrEqual(2);
         const sentAt = Date.now();
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: { id: "live1", channel_id: "c1", content: "hola, ¿qué tal estáis todos?", author: { id: "u2", username: "ana" } } });
         for (let i = 150; i < 300; i++) decorator(`u${i}`);
@@ -544,7 +628,7 @@ describe("budget and priority: messages always come first", () => {
         expect(times.some(t => t.engine === "relay" && t.ids.includes("live2"))).toBe(true);
     });
 
-    it("the budget counts texts: 10 left means at most 10 more texts go to the relay today", async () => {
+    it("the budget counts cost units: 1 + one per started 1,000 characters, so 10 units buy 5 statuses", async () => {
         const times = timedAnswers();
         await DataStore.set(SURFACE_BUDGET_KEY, { day: utcDay(Date.now()), used: SURFACE_DAILY_BUDGET - 10 });
         await restart(paid);
@@ -552,7 +636,7 @@ describe("budget and priority: messages always come first", () => {
         for (let i = 0; i < 50; i++) decorator(`u${i}`);
         await settle(300_000);
         const texts = times.filter(t => t.surface && t.engine === "relay").reduce((n, t) => n + t.ids.length, 0);
-        expect(texts).toBe(10);
+        expect(texts).toBe(5);
     });
 
     it("surfaces pause entirely while Google or the relay is cooling down", async () => {

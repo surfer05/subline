@@ -341,3 +341,13 @@ describe("surface rendering", () => {
         expect(log).toHaveBeenCalledTimes(1);
     });
 });
+
+describe("surface cost units", () => {
+    it("costs 1 + one unit per started 1,000 characters", async () => {
+        const { surfaceCost } = await import("../surfaces/service");
+        expect(surfaceCost("Bin müde")).toBe(2);
+        expect(surfaceCost("x".repeat(1000))).toBe(2);
+        expect(surfaceCost("x".repeat(1001))).toBe(3);
+        expect(surfaceCost("x".repeat(2000))).toBe(3);
+    });
+});

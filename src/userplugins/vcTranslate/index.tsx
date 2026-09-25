@@ -3692,8 +3692,9 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
     if (engine === "relay") {
         // MESSAGES FIRST. A surface request takes a rate-gate slot only when
         // no message batch is queued or waiting, never queues for one, and
-        // leaves a slot free for the next message batch.
-        if (inFlightQuality.size > 0 || !tryAcquireIdleSlot(1)) return null;
+        // leaves two slots free, so even a second message batch right after
+        // does not wait.
+        if (inFlightQuality.size > 0 || !tryAcquireIdleSlot(2)) return null;
     }
     const req: BatchRequest = {
         messages: texts.map((text, i) => ({ id: `s${i}`, author: "", text })),
@@ -3875,8 +3876,18 @@ function isGuildChannel(channel: unknown): boolean {
     return typeof guildId === "string" && guildId !== "";
 }
 
-function isGuildChannelId(channelId: unknown): boolean {
-    return typeof channelId === "string" && isGuildChannel(ChannelStore.getChannel(channelId));
+/**
+ * Channel-level text follows THE SAME RULE AS MESSAGES in that channel: only
+ * where messages would be translated (Global Auto and the per-channel switch),
+ * and never in a DM or group DM.
+ */
+function channelTextAllowed(channel: unknown): boolean {
+    const id = (channel as any)?.id;
+    return isGuildChannel(channel) && typeof id === "string" && channelActive(id);
+}
+
+function channelIdTextAllowed(channelId: unknown): boolean {
+    return typeof channelId === "string" && channelTextAllowed(ChannelStore.getChannel(channelId));
 }
 
 /**
@@ -3895,11 +3906,15 @@ const PARSER_SURFACES: Record<string, { kind: SurfaceKind; label: string; tight:
     "event": { kind: "event", label: "Event", tight: false, guildOnly: true }
 };
 
-/** Discord's parser state says this text belongs to a server. */
-function parserStateIsGuild(state: unknown): boolean {
+/**
+ * May this parser's text go, given Discord's parser state? A channel id means
+ * the channel's own rule (as for messages). An event with no channel follows
+ * the guild-level rule: allowed in a server.
+ */
+function parserStateAllowed(parser: string, state: unknown): boolean {
     const s = state as { guildId?: unknown; channelId?: unknown } | null | undefined;
-    if (typeof s?.guildId === "string" && s.guildId !== "") return true;
-    return isGuildChannelId(s?.channelId);
+    if (typeof s?.channelId === "string" && s.channelId !== "") return channelIdTextAllowed(s.channelId);
+    return parser === "event" && typeof s?.guildId === "string" && s.guildId !== "";
 }
 
 /**
@@ -3913,7 +3928,7 @@ export function decorateParsed(parser: string, args: unknown[], out: unknown): u
         if (!isPaidSurfaceUser() || typeof source !== "string" || source.trim() === "") return out;
         const spec = PARSER_SURFACES[parser];
         if (spec === undefined) return out;
-        if (spec.guildOnly && !parserStateIsGuild(args[2])) return out;
+        if (spec.guildOnly && !parserStateAllowed(parser, args[2])) return out;
         const texts: SurfaceText[] = [{ kind: spec.kind, label: spec.label, text: source }];
         return spec.tight
             ? [<SurfaceHint key="subline-surface" texts={texts} before />, out]
@@ -3951,18 +3966,30 @@ const SurfaceMark = safe("surface mark", SurfaceMarkImpl, surfaceDebug);
  * element (never inside it), so Discord's own label and tooltip still read
  * the original text.
  */
-function withLeadingMark<T>(original: T, kind: SurfaceKind, text: unknown, channel: unknown): T | unknown[] {
+function withLeadingMark<T>(original: T, kind: SurfaceKind, text: unknown, channel: unknown): T | unknown {
     try {
-        if (!isPaidSurfaceUser() || !isGuildChannel(channel) || typeof text !== "string" || text.trim() === "") return original;
-        return [<SurfaceMark key="subline-surface" kind={kind} text={text} />, original];
+        if (!isPaidSurfaceUser() || !channelTextAllowed(channel) || typeof text !== "string" || text.trim() === "") return original;
+        // One flex row: the mark keeps its size, Discord's element takes the
+        // rest and can still shrink and truncate with its own ellipsis.
+        // (A bare [mark, element] put the mark on a line of its own, above a
+        // block-level element inside a no-wrap row.)
+        return (
+            <span key="subline-surface" style={LEADING_ROW_STYLE}>
+                <span style={{ flex: "0 0 auto", display: "inline-flex" }}><SurfaceMark kind={kind} text={text} /></span>
+                <span style={LEADING_ORIGINAL_STYLE}>{original as any}</span>
+            </span>
+        );
     } catch {
         return original;
     }
 }
 
+const LEADING_ROW_STYLE = { display: "flex", alignItems: "center", minWidth: 0, gap: 4 } as const;
+const LEADING_ORIGINAL_STYLE = { flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } as const;
+
 /** A tight ✦ at the end of a forum post's tag row, for its tags' names. */
 function ForumTagsMarkImpl({ channel }: { channel: any; }) {
-    if (!isPaidSurfaceUser() || !isGuildChannel(channel)) return null;
+    if (!isPaidSurfaceUser() || !channelTextAllowed(channel)) return null;
     const parent = channel.parent_id ? ChannelStore.getChannel(channel.parent_id) : null;
     const names = appliedTagNames(channel, parent);
     if (names.length === 0) return null;

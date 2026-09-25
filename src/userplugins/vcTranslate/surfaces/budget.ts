@@ -1,6 +1,8 @@
 /**
- * The surfaces' own daily ✦ allowance: at most 200 texts a UTC day per
- * install, counted here on the device.
+ * The surfaces' own daily ✦ allowance: 200 cost units a UTC day per install,
+ * counted here on the device. A text costs 1 + one unit per started 1,000
+ * characters (see surfaceCost in service.ts), so a status costs 2 and a long
+ * embed description up to 3.
  *
  * WHY A SEPARATE BUDGET. Surface requests are ordinary paid relay requests
  * and count against the same daily allowance as messages. Without a ceiling
@@ -50,9 +52,9 @@ export class SurfaceBudget {
         return Math.max(0, this.cap - this.used);
     }
 
-    spend(texts: number): void {
+    spend(units: number): void {
         this.roll();
-        this.used = Math.min(this.cap, this.used + Math.max(0, texts));
+        this.used = Math.min(this.cap, this.used + Math.max(0, units));
         void this.storage.set(SURFACE_BUDGET_KEY, { day: this.day, used: this.used }).catch(() => { });
     }
 
