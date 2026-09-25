@@ -122,15 +122,48 @@ describe("fix 1: status is read-only; a KV write failure never fails a request",
         expect(logged).not.toContain(IP);
     });
 
-    it("the same throwing KV: a trial translate and a taste translate still answer 200", async () => {
+    it("N1: the same throwing KV fails CLOSED for keyless: taste, trial and preview get 503, nothing spent, no model call", async () => {
         stubProvider();
-        const kv = fakeKV() as any;
+        const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+        const kv = fakeKV({ [`code:${PAID}`]: codeRec({ plan: "monthly", dailyCap: 1500 }) }) as any;
         kv.put = async () => { throw new Error("KV put failed"); };
         vi.spyOn(console, "warn").mockImplementation(() => {});
-        const { e } = makeEnv(kv);
-        expect((await press(e, ID_A, { client: true, ip: IP })).body).toMatchObject({ ok: true, used: 1, cap: 300 });
-        expect((await press(e, ID_B, { ip: IP })).body).toMatchObject({ ok: true, used: 1, cap: 3 });
+        const { e, budget } = makeEnv(kv);
+        let served = 0;
+        for (let i = 0; i < 50; i++) {
+            for (const r of [
+                await press(e, ID_A, { client: true, ip: IP }),                  // trial
+                await press(e, ID_B, { ip: IP }),                                 // legacy taste
+                await press(e, ID_C, { client: true, mode: "preview", ip: IP })   // preview
+            ]) {
+                if (r.status === 200) served++;
+                else {
+                    expect(r.status).toBe(503);
+                    expect(r.body).toMatchObject({ ok: false, error: "temporarily unavailable" });
+                }
+            }
+        }
+        expect(served).toBe(0);
+        expect(budget.total).toBe(0);
+        expect(fetchMock).not.toHaveBeenCalled();
+        // …while a paid code on the same broken KV is still served (fail-open).
+        const paid = await press(e, PAID, { ip: IP });
+        expect(paid.status).toBe(200);
+        expect(fetchMock).toHaveBeenCalled();
         await expect(settle()).resolves.toBeUndefined();
+    });
+
+    it("N1: a keyless request whose budget is refused rolls its counters back", async () => {
+        stubProvider();
+        const kv = fakeKV();
+        const { e } = makeEnv(kv, { GLOBAL_BUDGET_MESSAGES: "1" } as any);
+        await press(e, ID_A, { ip: IP });      // spends the whole budget
+        const before = { ...kv._dump() };
+        const r = await press(e, ID_B, { ip: IP });
+        expect(r.status).toBe(429);
+        const after = kv._dump();
+        expect(after[`use:${ID_B}:${new Date(T0).toISOString().slice(0, 10)}`] ?? "0").toBe("0");
+        for (const k of Object.keys(before).filter(k => k.startsWith("use:ip:"))) expect(after[k]).toBe(before[k]);
     });
 
     it("a failing refund write never rejects (it runs after the response)", async () => {
@@ -322,14 +355,15 @@ describe("fix 5: a failed trial lookup refuses mode auto instead of spending tas
         return kv;
     }
 
-    it("mode auto → 402 trial ended, nothing reserved", async () => {
+    it("N4: mode auto → 503 temporarily unavailable (never 'trial ended'), nothing reserved", async () => {
         stubProvider();
         vi.spyOn(console, "warn").mockImplementation(() => {});
         const kv = trialLookupDown();
         const { e, budget } = makeEnv(kv);
         const r = await press(e, ID_A, { client: true, mode: "auto", ip: IP });
-        expect(r.status).toBe(402);
-        expect(r.body).toEqual({ ok: false, error: "trial ended", now: T0 });
+        expect(r.status).toBe(503);
+        expect(r.body).toMatchObject({ ok: false, error: "temporarily unavailable" });
+        expect(JSON.stringify(r.body)).not.toContain("trial ended");
         await settle();
         expect(kv._dump()).toEqual({});
         expect(budget.total).toBe(0);

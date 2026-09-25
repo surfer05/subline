@@ -66,9 +66,19 @@ or writes a `trial:` key, so v0.1.5 installs see no change.
   (after `reserve()` passed the per-IP ceilings), never by `/v1/status` and
   never by a refused request. Until then the id is a *provisional* trial that
   starts now. The key has a **90-day TTL** from that first write, never
-  refreshed: after 90 days it lapses, and the same id, if seen again, can start
-  a second trial. Accepted: one extra week per id per 90 days, on an id that is
-  free to reroll anyway, instead of keeping every id ever seen forever.
+  refreshed: after 90 days it lapses. The relay alone would then offer that id
+  a second trial, and it would also never end a trial whose first write failed
+  (status keeps answering "now + 7 days"). The **client** is what closes both:
+  it keeps its own trial start (set on its first v0.1.6 run, never reset) and
+  takes the EARLIER of its own end and the relay's, and a status answer for an
+  unwritten id carries `trialProvisional: true`, which the client never lets
+  extend a trial.
+- **Keyless requests fail CLOSED on KV.** For taste, trial and preview the KV
+  counters are the only limit, so they are written *before* the global budget
+  is committed; if any write fails the request gets 503 "temporarily
+  unavailable" with nothing spent and no model call (partial writes are rolled
+  back best-effort). Paid codes stay fail-open. A failed trial lookup refuses
+  `mode:"auto"` with the same 503, never with "trial ended".
 - For 7 days from first sight the bearer is plan `trial`: 300 messages/day
   (messages only, rpm 20). Per IP (IPv6 on its /64): 600 messages/day on
   `use:ipt:<ip>:<day>` **and** 1,200 cost units/day on `use:iptc:<ip>:<day>`
@@ -77,7 +87,7 @@ or writes a `trial:` key, so v0.1.5 installs see no change.
   After day 7 it is plain taste (3/day, `use:ip:` 6/day).
 - **`/v1/status`** is **read-only** for every caller. For a header'd `free_`
   bearer it adds `trialEndsAt` (epoch ms; `now + 7 days` for an id not yet
-  written) and reports `plan:"trial", cap:300` during the trial,
+  written, marked `trialProvisional: true`) and reports `plan:"trial", cap:300` during the trial,
   `plan:"taste", cap:3` after.
 - **`now`** (the relay's epoch ms) rides every header'd `/v1/status`, every
   header'd translate success, and the 402 below, so the client can count

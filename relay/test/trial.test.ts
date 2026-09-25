@@ -109,7 +109,7 @@ describe("trial start: written on the first successful translate, never by statu
         const put = kv.put;
         kv.put = async (k: string, v: string, o?: any) => { puts++; return put(k, v, o); };
         const r = await status(env(kv), ID_A, true);
-        expect(r.body).toEqual({ ok: true, plan: "trial", used: 0, cap: 300, resetsInMs: r.body.resetsInMs, trialEndsAt: T0 + TRIAL_MS, now: T0 });
+        expect(r.body).toEqual({ ok: true, plan: "trial", used: 0, cap: 300, resetsInMs: r.body.resetsInMs, trialEndsAt: T0 + TRIAL_MS, trialProvisional: true, now: T0 });
         await settle();
         expect(puts).toBe(0);
         expect(kv._dump()).toEqual({});

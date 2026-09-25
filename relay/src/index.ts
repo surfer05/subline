@@ -224,13 +224,14 @@ export default {
                 return done(json({ ok: false, error: "trial ended", trialEndsAt: free.trialEndsAt, now }, 402), "trial_ended", code, 0, plan);
             }
             // The trial lookup itself failed, so this bearer may or may not still
-            // be in its trial. Fail CLOSED for an automatic press, same 402 shape
-            // (minus trialEndsAt, which is unknown): an outage must never let
-            // auto-translate drain the 3 messages the user meant to press by hand.
-            // The client just stops auto and retries later; a hand press still
-            // gets taste below.
+            // be in its trial. Refuse an automatic press with a plain 503 and
+            // spend nothing: an outage must never let auto-translate drain the 3
+            // messages the user meant to press by hand, and it must never TELL a
+            // user mid-trial that their trial ended (a 402 is reserved for an
+            // ending the relay actually has on record). A hand press still gets
+            // taste below.
             if (mode === "auto" && freeFailed) {
-                return done(json({ ok: false, error: "trial ended", now }, 402), "trial_ended", code, 0, plan);
+                return done(fail("temporarily unavailable", 503, 60_000), "capacity", code, 0, plan);
             }
             // "preview" is honoured only for a keyless install; a real code has
             // paid for full text and always gets it.
@@ -252,6 +253,11 @@ export default {
 
             const res = await reserve(env, code!, rec, cost, now, tasteIp, budgetCost);
             if (!res.ok) {
+                // A keyless request whose limit counters could not be written
+                // (KV failing) is refused CLOSED, before any spend (see reserve).
+                if (res.reason === "unavailable") {
+                    return done(fail("temporarily unavailable", 503, res.retryAfterMs), "capacity", code, 0, plan);
+                }
                 const status = 429; // cap_exceeded / rate_limited / capacity all park the engine
                 const label = res.reason === "capacity" ? "capacity" : res.reason;
                 if (res.reason === "rate_limited") {
@@ -355,7 +361,12 @@ export default {
             const base = { ok: true, plan: rec.plan ?? "free", ...u };
             // Legacy clients (no header) get exactly the pre-trial shape; a
             // header'd one also gets the server clock (`now`, epoch ms).
-            return json(free ? { ...base, trialEndsAt: free.trialEndsAt, now } : newClient ? { ...base, now } : base);
+            // `trialProvisional: true` marks an id the relay has never started a
+            // trial for: its trialEndsAt is only "now + 7 days", moves forward
+            // on every call, and the client must never let it extend a trial.
+            return json(free
+                ? { ...base, trialEndsAt: free.trialEndsAt, ...(free.provisional ? { trialProvisional: true } : {}), now }
+                : newClient ? { ...base, now } : base);
         }
 
         // ---- GET /admin/stats — approximate owner counts (ADMIN_TOKEN) ----

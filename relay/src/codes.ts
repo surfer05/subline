@@ -291,7 +291,7 @@ export async function authCode(env: Env, code: string | null): Promise<AuthOutco
 
 export type ReserveOutcome =
     | { ok: true; used: number; cap: number }
-    | { ok: false; reason: "cap_exceeded" | "rate_limited" | "capacity"; retryAfterMs: number; used?: number; cap?: number };
+    | { ok: false; reason: "cap_exceeded" | "rate_limited" | "capacity" | "unavailable"; retryAfterMs: number; used?: number; cap?: number };
 
 /**
  * RESERVE BEFORE SPEND. The cap is checked and the spend committed to KV
@@ -454,6 +454,55 @@ export async function reserve(
         }
     }
 
+    // 2c) KEYLESS FAILS CLOSED. For a taste/trial/preview request the KV
+    //     counters ARE the limit: nothing else stops one random free_ id from
+    //     translating without end. So they are written BEFORE the budget is
+    //     committed, and if any write fails the request is refused with
+    //     "unavailable" (503) having spent nothing: no budget, no model call.
+    //     A partial write is rolled back best-effort. A paid code keeps the
+    //     fail-open order below (budget first, soft counters): it has paid,
+    //     and its fairness cap is not what protects the money.
+    const redact = [code, ip ?? ""];
+    const keyless = rec.plan === "taste" || rec.plan === "trial";
+    if (keyless) {
+        const writes: { key: string; before: number; after: number; ttl: number }[] = [
+            { key: dayKey, before: used, after: used + cost, ttl: 172_800 },
+            ...(rpmTracked ? [{ key: rpmKey, before: rpm, after: rpm + 1, ttl: 120 }] : []),
+            ...guards.map((g, i) => ({
+                key: g.key, before: ipUsed[i]!, after: ipUsed[i]! + (g.unit === "cost" ? budgetCost : cost), ttl: 172_800
+            }))
+        ];
+        const done: typeof writes = [];
+        const rollback = async () => {
+            for (const w of done) {
+                try { await env.CODES.put(w.key, String(w.before), { expirationTtl: w.ttl }); } catch { /* best effort */ }
+            }
+        };
+        for (const w of writes) {
+            try {
+                await env.CODES.put(w.key, String(w.after), { expirationTtl: w.ttl });
+                done.push(w);
+            } catch (e) {
+                let msg = String((e as any)?.message ?? e).slice(0, 200);
+                for (const r of redact) if (r) msg = msg.split(r).join("<redacted>");
+                console.warn("reserve: keyless counter write failed, request refused", { error: msg });
+                await rollback();
+                return { ok: false, reason: "unavailable", retryAfterMs: 60_000 };
+            }
+        }
+        const freezeAtK = Number(env.GLOBAL_BUDGET_MESSAGES) || DEFAULT_GLOBAL_FREEZE;
+        const bresK = await env.BUDGET.get(env.BUDGET.idFromName("global")).fetch("https://budget.internal/reserve", {
+            method: "POST",
+            body: JSON.stringify({ cost: budgetCost, freezeAt: freezeAtK })
+        });
+        const decisionK = await bresK.json() as { allowed: boolean };
+        if (!decisionK.allowed) {
+            await rollback();
+            return { ok: false, reason: "capacity", retryAfterMs: 3_600_000 };
+        }
+        return { ok: true, used: used + cost, cap: rec.dailyCap };
+    }
+
     // 3) Global spend guard (ATOMIC — Durable Object). This is the real money
     //    ceiling; committed FIRST so a race can never push total dollars past
     //    the cap. If it freezes, nothing per-code is written. Charged the SPEND
@@ -468,10 +517,10 @@ export async function reserve(
     const decision = await bres.json() as { allowed: boolean };
     if (!decision.allowed) return { ok: false, reason: "capacity", retryAfterMs: 3_600_000 };
 
-    // 4) Commit the per-code counters (soft). Self-purge (daily 2d, rpm 2min).
-    //    A failed write is logged and ignored (see softPut): the budget is
-    //    already committed, so the request goes ahead.
-    const redact = [code, ip ?? ""];
+    // 4) Commit the per-code counters (soft; paid codes only, keyless returned
+    //    above). Self-purge (daily 2d, rpm 2min). A failed write is logged and
+    //    ignored (see softPut): the budget is already committed, so the paid
+    //    request goes ahead.
     await softPut(env, dayKey, String(used + cost), 172_800, "reserve", "day", redact);
     if (rpmTracked) await softPut(env, rpmKey, String(rpm + 1), 120, "reserve", "rpm", redact);
     for (let i = 0; i < guards.length; i++) {
