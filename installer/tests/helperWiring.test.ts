@@ -363,6 +363,8 @@ describe("the install flow installs the helper", () => {
                 ok: true as const,
                 value: { path: "/s.json", code, previous: null, created: true }
             }),
+            // No saved code, so the code screen is offered (and skipped by setLanguage).
+            hasSublineCode: () => false,
             patch: () => ({ ok: true as const, value: PATCH }),
             installHelper: async () => {
                 h.helperCalls += 1;
