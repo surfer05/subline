@@ -128,6 +128,15 @@ export interface BatchRequest {
     }[];
     context: { author: string; text: string }[];
     targetLang: string;
+    /**
+     * Relay only, and only ever set for a FREE install (see freePlan.ts):
+     * "auto" marks an automatic trial batch, so a relay whose record says the
+     * trial is over refuses it instead of spending the day's three previews on
+     * it; "preview" asks for a ✦ preview, which the relay cuts to its first few
+     * words before it leaves the server. Absent everywhere else, which is what
+     * every earlier client sent: the relay reads absence as the old behaviour.
+     */
+    mode?: "auto" | "preview";
 }
 
 /**
@@ -189,7 +198,11 @@ export type Result =
     // renderer can mark a translation it should not be trusted. Absent for the
     // LLM engines (they report no such number) and absent when `sourceLang`
     // pinned the language, because then nothing was detected to be unsure of.
-    | { id: string; lang: string; text: string; skip: false; conf?: number }
+    //
+    // `truncated` is set only by the relay's preview mode: the text is the
+    // first few words of the ✦ translation, not all of it, and must never be
+    // stored or shown as a full translation.
+    | { id: string; lang: string; text: string; skip: false; conf?: number; truncated?: boolean }
     | { id: string; skip: true }
     // `transport` marks a failure that never REACHED a verdict: a 429 that
     // survived the retry, a 5xx, a network drop, for THIS message while its

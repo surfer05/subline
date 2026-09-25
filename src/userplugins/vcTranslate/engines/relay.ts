@@ -1,5 +1,16 @@
+import { PLUGIN_VERSION } from "../buildStamp";
 import { HttpError } from "../httpError";
 import type { BatchRequest, Result } from "../types";
+
+/**
+ * Sent on every relay request so the relay can tell a client that knows about
+ * the free trial and ✦ previews (v0.1.6 and later) from an older one. Its
+ * PRESENCE is the signal, not the number: no earlier build ever sent it, so the
+ * relay keeps treating a request without it exactly as it always has. It
+ * identifies the build, never the user.
+ */
+export const CLIENT_HEADER = "x-subline-client";
+export const CLIENT_ID = `vcTranslate/${PLUGIN_VERSION}`;
 
 /**
  * The Subline relay: keyless AI translation. The user's "key" is an opaque
@@ -58,6 +69,12 @@ export interface RelayStatus {
     used: number;
     /** The day's allowance (3 on the taste tier). */
     cap: number;
+    /**
+     * When this free install's trial ends (or ended), epoch ms, as the relay
+     * recorded it. Only a relay that knows about trials states it, and only
+     * for a free install id; absent otherwise.
+     */
+    trialEndsAt?: number;
 }
 
 /** A non-negative, finite integer the relay stated, or undefined. */
@@ -80,7 +97,7 @@ export async function fetchRelayStatus(
 ): Promise<RelayStatus> {
     const res = await fetchImpl(RELAY_STATUS_URL, {
         method: "GET",
-        headers: { authorization: `Bearer ${code}` }
+        headers: { authorization: `Bearer ${code}`, [CLIENT_HEADER]: CLIENT_ID }
     });
 
     let body: any = null;
@@ -103,7 +120,10 @@ export async function fetchRelayStatus(
     if (used === undefined || cap === undefined || cap === 0) {
         throw new HttpError("relay: malformed status", 502);
     }
-    return { plan: typeof body.plan === "string" ? body.plan : "", used, cap };
+    const trialEndsAt = typeof body.trialEndsAt === "number" && Number.isFinite(body.trialEndsAt) && body.trialEndsAt > 0
+        ? body.trialEndsAt
+        : undefined;
+    return { plan: typeof body.plan === "string" ? body.plan : "", used, cap, trialEndsAt };
 }
 
 export async function translateWithRelay(
@@ -121,7 +141,7 @@ export async function translateWithRelayDetailed(
 ): Promise<RelayOutcome> {
     const res = await fetchImpl(RELAY_URL, {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${code}` },
+        headers: { "content-type": "application/json", authorization: `Bearer ${code}`, [CLIENT_HEADER]: CLIENT_ID },
         body: JSON.stringify(req)
     });
 
@@ -157,6 +177,15 @@ export async function translateWithRelayDetailed(
         if (o.failed === true) return true;
         if (o.skip === true) return true;
         return o.skip === false && typeof o.lang === "string" && typeof o.text === "string";
+    }).map(r => {
+        // A preview flag that is anything but `true` is dropped, so nothing
+        // downstream can mistake a malformed flag for a full translation or
+        // the other way round.
+        if ("truncated" in r && (r as { truncated?: unknown }).truncated !== true) {
+            const { truncated: _drop, ...rest } = r as Result & { truncated?: unknown };
+            return rest as Result;
+        }
+        return r;
     });
     const rpmLimit = typeof body.rpmLimit === "number" && body.rpmLimit > 0 ? body.rpmLimit : undefined;
     // Same validation as fetchRelayStatus, for the same reason: these two

@@ -25,7 +25,7 @@ import { toggleChannel } from "../channels";
 import { cooldownUntil, setCooldown } from "../cooldownStore";
 import settings from "../settings";
 import { clearStore, getTranslation, makeKey, setTranslation } from "../store";
-import { INSTALL_ID_KEY, TASTE_CAP, TASTE_UPGRADE_URL, __resetTaste } from "../taste";
+import { INSTALL_ID_KEY, TASTE_CAP, __resetTaste } from "../taste";
 import { DEFAULT_GROQ_MODEL, FAST_DEBOUNCE_MS, QUALITY_DEBOUNCE_MS } from "../types";
 import type { NativeResponse } from "../native";
 import { __resetSettings } from "./stubs/api-settings";
@@ -1420,6 +1420,9 @@ describe("the subtitle accessory", () => {
         // The real case: "ne" in a German channel, detected as Hausa at 0.217
         // and rendered "it is" — the opposite of the intended "no". Fluent and
         // plausible, so the badge is the reader's only warning.
+        // (A PAID install: it keeps the "?" it always had. The free plan says
+        // the same thing in words, "≈ rough"; see the free-plan suite.)
+        settings.store.sublineCode = "SUBLINE-PAID";
         setTranslation(key("1"), { lang: "ha", text: "it is", via: "google", conf: 0.217 });
         const node = render(discordMessage("1", "ne"));
         expect(text(node)).toContain("ha?");
@@ -1443,6 +1446,7 @@ describe("the subtitle accessory", () => {
     it("marks a romanized Google line unsure even at full confidence", () => {
         // The measured case: ar detected at 1.00 from Latin text, negation
         // inverted. Confidence alone would let this through unmarked.
+        settings.store.sublineCode = "SUBLINE-PAID";   // paid: "?" (free: "≈ rough")
         setTranslation(key("1"), {
             lang: "ar", text: "I don't want to go home", via: "google", conf: 1
         });
@@ -1459,6 +1463,7 @@ describe("the subtitle accessory", () => {
     it("drops the low-confidence ? once the LLM has upgraded the line", async () => {
         // The ? means "Google was guessing at the language". Once the LLM has
         // answered, that caveat is no longer true and must not linger.
+        settings.store.sublineCode = "SUBLINE-PAID";   // paid: "?" (free: "≈ rough")
         setTranslation(key("1"), { lang: "ha", text: "it is", via: "google", conf: 0.217 });
         expect(text(render(discordMessage("1", "ne")))).toContain("ha?");
 
@@ -3358,8 +3363,11 @@ describe("the force-quality popover action (⚡)", () => {
  * way to find out what ✦ reads like was to buy it. Three deliberate ⚡ presses
  * a day is the answer. What these pin: the bearer is an install id and nothing
  * else, the count comes from the relay rather than from a local tally, the
- * fourth press sends NOTHING, the nudge is neutral and carries the link, and
- * automatic ✦ stays off — a free install still never batches.
+ * fourth press sends NOTHING (and, since v0.1.6, says nothing: the label is
+ * the count), and automatic ✦ stays off unless the relay confirms a free
+ * trial (see freePlanIndex.test.ts for the trial and the click-to-translate
+ * plan). These run in a trial the relay has NOT confirmed (relayStatus fails
+ * or answers with no trialEndsAt), which is the ⚡ taste's own world.
  */
 describe("the taste tier (three free ✦ a day)", () => {
     function forceButton(message: any) {
@@ -3458,7 +3466,7 @@ describe("the taste tier (three free ✦ a day)", () => {
         expect(getTranslation(key("1"))).toMatchObject({ via: "relay", text: "sharper 1" });
     });
 
-    it("counts down on the button from the relay's own count, then says the three are used", async () => {
+    it("counts down on the button from the relay's own count, and says nothing when the three are used", async () => {
         native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => {
             if (_e !== "relay") return { ok: true, results: [] };
             const { messages } = JSON.parse(payload);
@@ -3483,14 +3491,12 @@ describe("the taste tier (three free ✦ a day)", () => {
         expect(shownToasts).toHaveLength(0);
 
         await press("3");
-        // The transition, said once, right after the third lands.
-        expect(shownToasts).toHaveLength(1);
-        expect(shownToasts[0].message).toBe("3 of 3 free ✦ used today.");
-        expect(shownToasts[0].type).toBe("MESSAGE");
-        expect(shownToasts[0].type).not.toBe("FAILURE");
+        // v0.1.6: no "3 of 3 free ✦ used today." toast. The label is the count.
+        expect(forceButton(discordMessage("x", "hola"))!.label).toContain("0 of 3 left today");
+        expect(shownToasts).toHaveLength(0);
     });
 
-    it("sends nothing on the fourth press, and nudges with the link", async () => {
+    it("sends nothing on the fourth press, and says nothing either", async () => {
         relayAnswers(3);
         await press("1");
         const spent = relayCalls().length;
@@ -3501,16 +3507,12 @@ describe("the taste tier (three free ✦ a day)", () => {
         // NOTHING went out: the relay would refuse it, and a refusal the user
         // can see coming is a request nobody should spend.
         expect(relayCalls()).toHaveLength(spent);
-        expect(shownToasts).toHaveLength(1);
-        expect(shownToasts[0].message)
-            .toBe(`Today's 3 free ✦ are used. Upgrade for more. ${TASTE_UPGRADE_URL}`);
-        expect(shownToasts[0].message).toContain("https://surfer05.github.io/subline/#pricing");
-        // Neutral, never red: nothing is broken and ≈ keeps translating.
-        expect(shownToasts[0].type).toBe("MESSAGE");
-        expect(shownToasts[0].type).not.toBe("FAILURE");
+        // v0.1.6: the old "Today's 3 free ✦ are used. Upgrade for more." toast
+        // is gone. The ⚡ label already says "0 of 3 left today".
+        expect(shownToasts).toHaveLength(0);
     });
 
-    it("handles the relay's daily-limit 429 as the same quiet nudge, not a red error", async () => {
+    it("handles the relay's daily-limit 429 quietly: no toast, no red error", async () => {
         // The relay knew before we did — a second device, or a count this
         // install never saw. It must read exactly like a locally-known refusal.
         native.translateBatch.mockImplementation(async (engine: string) =>
@@ -3524,10 +3526,7 @@ describe("the taste tier (three free ✦ a day)", () => {
 
         await press("1");
 
-        expect(shownToasts).toHaveLength(1);
-        expect(shownToasts[0].message)
-            .toBe(`Today's 3 free ✦ are used. Upgrade for more. ${TASTE_UPGRADE_URL}`);
-        expect(shownToasts[0].type).not.toBe("FAILURE");
+        expect(shownToasts).toHaveLength(0);
         // Never the PAID wording, which names an allowance this user has not
         // bought and offers a tomorrow instead of an upgrade.
         expect(shownToasts.some(t => /allowance is used up/.test(t.message))).toBe(false);
@@ -3537,7 +3536,7 @@ describe("the taste tier (three free ✦ a day)", () => {
         shownToasts.length = 0;
         await press("2");
         expect(relayCalls()).toHaveLength(spent);
-        expect(shownToasts).toHaveLength(1);
+        expect(shownToasts).toHaveLength(0);
     });
 
     it("reuses one install id across presses, and persists it exactly once", async () => {
@@ -3570,10 +3569,10 @@ describe("the taste tier (three free ✦ a day)", () => {
         native.translateBatch.mockClear();
         await press("1");
         expect(relayCalls()).toHaveLength(0);
-        expect(shownToasts.some(t => /Upgrade for more/.test(t.message))).toBe(true);
+        expect(shownToasts.some(t => /Upgrade for more/.test(t.message))).toBe(false);
     });
 
-    it("never turns the automatic ✦ batcher on — a live message gets Google alone", async () => {
+    it("never turns the automatic ✦ batcher on without a confirmed trial — a live message gets Google alone", async () => {
         native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) =>
             _e === "google" ? googleAnswers(payload, "rough", "es") : { ok: true, results: [] });
 

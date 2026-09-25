@@ -271,7 +271,7 @@ export async function translateBatch(
 }
 
 export type RelayStatusResponse =
-    | { ok: true; plan: string; used: number; cap: number }
+    | { ok: true; plan: string; used: number; cap: number; trialEndsAt?: number }
     | { ok: false; error: string };
 
 /**
@@ -294,7 +294,9 @@ export async function relayStatus(
 ): Promise<RelayStatusResponse> {
     try {
         const status = await fetchRelayStatus(code, fetch);
-        return { ok: true, plan: status.plan, used: status.used, cap: status.cap };
+        return status.trialEndsAt === undefined
+            ? { ok: true, plan: status.plan, used: status.used, cap: status.cap }
+            : { ok: true, plan: status.plan, used: status.used, cap: status.cap, trialEndsAt: status.trialEndsAt };
     } catch (err) {
         const raw = err instanceof Error ? err.message : "unknown error";
         return { ok: false, error: scrubKey(raw, code) };

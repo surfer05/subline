@@ -1,12 +1,13 @@
 import * as DataStore from "@api/DataStore";
 
 /**
- * THE TASTE TIER — three ✦ translations a day for an install with no code.
+ * THE TASTE TIER — three ✦ a day for an install with no code.
  *
- * A free install translates with Google (≈) and has no quality tier at all:
- * the ⚡ button was hidden, so the only way to find out what ✦ reads like was
- * to buy it. Three deliberate presses a day is the answer — never automatic,
- * never a batch, only a message the reader chose. This module owns the two
+ * Once a free install's 7-day trial is over (see freePlan.ts), ✦ is no longer
+ * automatic. Three a day remain: spent on a deliberate ⚡ press (the full ✦
+ * line) or on a ✦ preview under a rough ≈ line the reader clicked (the first
+ * few words, cut by the relay). Never automatic, never a batch, only a message
+ * the reader chose. This module owns the two
  * pieces of state that makes possible: WHO is asking (an install id the relay
  * counts against) and HOW MANY are left today.
  *
@@ -27,9 +28,6 @@ export const INSTALL_ID_KEY = "VcTranslate_installId";
 
 /** The day's allowance, until a relay response says otherwise. */
 export const TASTE_CAP = 3;
-
-/** Where the nudge sends somebody who wants more than three. */
-export const TASTE_UPGRADE_URL = "https://surfer05.github.io/subline/#pricing";
 
 /* ------------------------------------------------------------ install id -- */
 
@@ -186,20 +184,11 @@ export function tasteLabel(): string {
     return `${tasteRemaining()} of ${cap} left today`;
 }
 
-/** "3 of 3 free ✦ used today." — shown once, right after the last one lands. */
-export function tasteUsedUpMessage(): string {
-    return `${cap} of ${cap} free ✦ used today.`;
-}
-
-/**
- * The nudge, for a press with nothing left. Neutral, never red: nothing is
- * broken, ≈ is still translating every message, and this is the one moment the
- * reader has just been shown what ✦ reads like.
- */
-export function tasteLimitMessage(): string {
-    // Never "unlimited": a paid code has a daily fair-use cap too.
-    return `Today's ${cap} free ✦ are used. Upgrade for more. ${TASTE_UPGRADE_URL}`;
-}
+// v0.1.6 dropped the two taste toasts ("3 of 3 free ✦ used today." and
+// "Today's 3 free ✦ are used. Upgrade for more."). The same three a day now
+// also pay for the free plan's ✦ previews, and those stop silently when the
+// day's three are gone: the ⚡ label already counts down, and a toast on top of
+// it was a nag rather than information.
 
 /** Test-only, same shape as cooldownStore's __resetCooldowns. */
 export function __resetTaste(): void {

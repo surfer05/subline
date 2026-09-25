@@ -1,7 +1,8 @@
 import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
-import { LocaleStore } from "@webpack/common";
+import { LocaleStore, React } from "@webpack/common";
 
+import { freePlanLine } from "./freePlan";
 import { notifySettingsChanged } from "./settingsBridge";
 import { DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_MODEL } from "./types";
 
@@ -27,7 +28,7 @@ function defaultTargetLang(): string {
 
 /** The engine value a Subline code turns on. Same string the installer seeds (RELAY_ENGINE). */
 export const RELAY_ENGINE = "relay";
-/** The engine a blank code falls back to: free ≈, plus the 3-a-day ✦ taste. */
+/** The engine a blank code falls back to: the free plan (a 7-day automatic trial, then translate on click). */
 export const FREE_ENGINE = "google";
 
 /**
@@ -55,6 +56,18 @@ function syncEngineToCode(): void {
     notifySettingsChanged();
 }
 
+/** A free install, as far as settings can tell: no Subline code saved. */
+function isFreeBySettings(): boolean {
+    const raw = settings.store.sublineCode;
+    return (typeof raw === "string" ? raw.trim() : "") === "";
+}
+
+/** The local trial start, or now when this install has not started one yet. */
+function trialStartedAt(): number {
+    const v = settings.store.freeTrialStartedAt;
+    return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : Date.now();
+}
+
 export const settings = definePluginSettings({
     engine: {
         type: OptionType.SELECT,
@@ -70,7 +83,7 @@ export const settings = definePluginSettings({
         // engine code still exists, unreachable, for the test suite; there is no
         // way into it from a shipped build. See tests/settings.test.ts.
         options: [
-            { label: "Google (free, 3 ✦ a day with ⚡)", value: "google", default: true },
+            { label: "Google (free plan)", value: "google", default: true },
             { label: "Subline (keyless AI, just paste your code)", value: "relay" }
         ],
         // engine is captured by value when the batcher is built, so a change
@@ -81,12 +94,37 @@ export const settings = definePluginSettings({
         type: OptionType.STRING,
         // Says where the code CAME FROM, not what it looks like: a bought code is
         // the store's license key and does not start with slp_.
-        description: "Subline code. It arrived by email when you bought Subline, or from the friend who set you up. Turns on ✦ AI translation. Without one, Subline translates everything with Google (≈).",
+        description: "Subline code. It arrived by email when you bought Subline, or from the friend who set you up. Keeps ≈ and ✦ AI translation automatic.",
         default: "",
         placeholder: "Paste your code",
         // Same immediacy requirement as the API keys: effectiveEngine() must
         // see a pasted/cleared code right away, not on next reload.
         onChange: syncEngineToCode
+    },
+    // Directly under the code, so a free install sees what its plan is right
+    // where it would paste a code to change it. Read-only, and hidden for a
+    // paid install, which is told nothing new (see freePlan.ts).
+    freePlanStatus: {
+        type: OptionType.COMPONENT,
+        component: () => {
+            const line = freePlanLine(isFreeBySettings(), trialStartedAt());
+            return line === null
+                ? null
+                : React.createElement("div", { style: { color: "var(--text-muted)", fontSize: "0.9rem" } }, line);
+        }
+    },
+    // When this install's free trial began (epoch ms), 0 until the first
+    // session that runs as a free install. CUSTOM so it never appears in the
+    // settings UI: it is bookkeeping, not a choice. The relay's own record of
+    // the trial outranks it (freePlan.ts); this is the fallback clock.
+    freeTrialStartedAt: {
+        type: OptionType.CUSTOM,
+        default: 0
+    },
+    // Whether the once-ever "your trial ended" toast has been shown.
+    freeTrialEndNoticeShown: {
+        type: OptionType.CUSTOM,
+        default: false
     },
     anthropicApiKey: {
         type: OptionType.STRING,
@@ -200,6 +238,9 @@ export const settings = definePluginSettings({
         default: false
     }
 }, {
+    freePlanStatus: {
+        hidden: () => !isFreeBySettings()
+    },
     anthropicApiKey: {
         // Permanently hidden: bring-your-own-key is not an offered path (see the
         // engine options above and tests/settings.test.ts). The field stays in

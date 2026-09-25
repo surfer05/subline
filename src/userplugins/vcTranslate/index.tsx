@@ -1,7 +1,6 @@
 import type { ChatBarProps } from "@api/ChatButtons";
 import { addMessagePopoverButton, removeMessagePopoverButton } from "@api/MessagePopover";
-import * as DataStore from "@api/DataStore";
-import { popNotice, showNotice } from "@api/Notices";
+import { showNotice } from "@api/Notices";
 import { Logger } from "@utils/Logger";
 import definePlugin, { PluginNative } from "@utils/types";
 import { relaunch } from "@utils/native";
@@ -14,6 +13,10 @@ import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
 import { isConfidentlyTargetLanguage } from "./detectLang";
 import {
+    __resetFreePlan, freeMode, markServerTrialEnded, noteServerTrialEnd, previewDiffers, PRICING_URL,
+    trialConfirmed, trialEndedMessage
+} from "./freePlan";
+import {
     acquireSlot, loadRateGateTuning, rateGateAvailable, rateGateSettings, rateGateWaitMs,
     resetRateGate, tuneRateGateToObservedLimit, tuneRateGateToProviderBudget
 } from "./rateGate";
@@ -23,7 +26,7 @@ import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
 import {
     installIdOnce, markTasteExhausted, recordTasteQuota, rolloverTasteIfNewUtcDay, tasteBearer,
-    tasteCap, tasteExhausted, tasteLabel, tasteLimitMessage, tasteUsed, tasteUsedUpMessage
+    tasteCap, tasteExhausted, tasteLabel, tasteUsed
 } from "./taste";
 import {
     recordError, recordPluginLoaded, recordRendered, recordTranslation, resetStatusBeacon
@@ -40,7 +43,7 @@ import {
 } from "./types";
 import { ENGINE_RANK, isRealTranslation, mayReplace } from "./upgrade";
 import { createUpdateWatch, UPDATE_CHECK_INTERVAL_MS, type UpdateWatch } from "./updateNotice";
-import { maybeShowUpgradeNudge } from "./upgradeNotice";
+import { __resetWeeklyStats, closeWeekIfDue, countShown, loadWeeklyStats } from "./weeklyNote";
 
 const Native = VencordNative.pluginHelpers.VcTranslate as PluginNative<typeof import("./native")>;
 const logger = new Logger("VcTranslate");
@@ -52,8 +55,6 @@ let fastBatcher: Batcher | null = null;
 let qualityBatcher: Batcher | null = null;
 // Watches for a Subline update staged on disk but not yet loaded (updateNotice.ts).
 let updateWatch: UpdateWatch | null = null;
-// Persisted flag so the free-tier upgrade nudge (upgradeNotice.ts) shows once, ever.
-const UPGRADE_NUDGE_SEEN_KEY = "vcTranslate:upgradeNudgeSeen";
 let sessionFallback = false;   // set when the configured LLM engine is unusable this session
 /**
  * Which engine+key `sessionFallback` was set against.
@@ -453,8 +454,25 @@ function modelFor(engine: EngineId): string {
     return typeof configured === "string" ? configured.trim() : "";
 }
 
-/** The engine actually in use — may differ from the configured one. */
+/**
+ * The engine actually in use — may differ from the configured one.
+ *
+ * One addition for the free plan, and only in the direction of MORE: a free
+ * install whose trial the relay has confirmed this session runs the relay as
+ * its quality tier, exactly as a paid install does (see `trialAutoActive`).
+ * Everything that reads this — the quality batcher, the ⚡ label, the chat-bar
+ * indicator — then treats the trial as what it is: the paid experience, for
+ * seven days. A paid install never reaches that branch (`baseEngine` already
+ * answers "relay" or a keyed engine for it).
+ */
 function effectiveEngine(): EngineId {
+    const base = baseEngine();
+    if (base === "google" && trialAutoActive()) return "relay";
+    return base;
+}
+
+/** The engine the configuration and the session's pins allow, before the free trial. */
+function baseEngine(): EngineId {
     const configured = settings.store.engine as EngineId;
     if (!isLlmEngine(configured)) return configured;
     // An expired block lifts itself here rather than needing a settings change
@@ -488,7 +506,89 @@ function isTasteInstall(): boolean {
         ? settings.store.sublineCode.trim()
         : "";
     if (configured === "relay" && code !== "") return false;
-    return effectiveEngine() === "google";
+    // baseEngine, not effectiveEngine: a free install in its trial runs the
+    // relay, and is still a free install.
+    return baseEngine() === "google";
+}
+
+/* --------------------------------------------------------- free plan -- */
+
+/**
+ * The install bearer, once the relay has CONFIRMED a running trial for it this
+ * session (see refreshTasteQuota). Null until then, and null for a paid
+ * install. This is the credential the trial's automatic ✦ is sent under.
+ */
+let trialBearer: string | null = null;
+/**
+ * The relay paused this trial's automatic ✦ (its daily allowance, or a
+ * minute's throttle). A plain timestamp, in memory only, and never the paid
+ * cooldown store: a paid code pasted later the same day must not inherit a
+ * pause that belonged to the free trial.
+ */
+let trialPausedUntil = 0;
+/** The relay refused the trial credential outright (401/403) this session. */
+let trialRefused = false;
+/** Whether this session has already asked the relay about the free plan. */
+let freeStatusAsked = false;
+
+/** The local trial start (see settings.ts's freeTrialStartedAt), or now if none. */
+function localTrialStart(): number {
+    const v = settings.store.freeTrialStartedAt;
+    return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : Date.now();
+}
+
+/**
+ * Start the trial clock the first time a free install runs this version. An
+ * install that already had one keeps it: the clock is never restarted.
+ */
+function ensureTrialStarted(): void {
+    const v = settings.store.freeTrialStartedAt;
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) return;
+    settings.store.freeTrialStartedAt = Date.now();
+}
+
+/**
+ * A free install whose trial is over: nothing is translated automatically, and
+ * a "≈ Translate" line under each message that may be foreign does it on click.
+ */
+function isClickMode(): boolean {
+    return isTasteInstall() && freeMode(localTrialStart()) === "click";
+}
+
+/**
+ * Automatic ✦ for a free install. Only while the RELAY has confirmed the trial
+ * this session: a trial the client merely believes in (an older relay, or no
+ * answer yet) still translates every message automatically, with ≈ alone.
+ */
+function trialAutoActive(): boolean {
+    return trialBearer !== null && !trialRefused && isTasteInstall() && trialConfirmed();
+}
+
+/**
+ * The free-plan state changed under a running session (the relay confirmed a
+ * trial, or said it is over). Rebuild so the quality tier appears or goes,
+ * and give the channel on screen its ✦ right away rather than on the next
+ * open. Nothing is re-sent to Google: catch-up only re-asks for what a tier
+ * still has to do.
+ */
+function onFreePlanChanged(): void {
+    if (fastBatcher === null) return;   // stopped
+    rebuildBatcher();
+    if (isClickMode()) return;
+    const open = SelectedChannelStore.getChannelId();
+    if (open) catchUp(open);
+}
+
+/** "Your 7-day free trial ended..." once, ever, the first time it becomes true on screen. */
+function maybeAnnounceTrialEnded(): void {
+    if (settings.store.freeTrialEndNoticeShown === true) return;
+    settings.store.freeTrialEndNoticeShown = true;
+    Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message: trialEndedMessage() });
+}
+
+/** Open the pricing page in the browser. */
+function openPricing(): void {
+    (globalThis as any).VencordNative?.native?.openExternal?.(PRICING_URL);
 }
 
 /**
@@ -502,9 +602,35 @@ function isTasteInstall(): boolean {
  */
 interface TasteRun {
     credential: string;
+    /**
+     * "press": one deliberate ⚡ taste (3 a day). "auto": the free trial's
+     * automatic ✦, sent with `mode: "auto"` so a relay whose record says the
+     * trial is over refuses it rather than spending a preview on it.
+     */
+    kind: "press" | "auto";
     /** The relay answered "daily limit reached" — handled quietly, never as an error. */
-    onDailyLimit: () => void;
+    onDailyLimit: (retryAfterMs?: number) => void;
 }
+
+/**
+ * The free trial's automatic ✦ is the relay engine under the install bearer.
+ * Derived at send time, from the one thing that says so: a relay flush with
+ * no Subline code configured, while the trial is confirmed. A paid code is
+ * never replaced by this, however the rest of the state looks.
+ */
+function trialRunFor(engine: EngineId): TasteRun | undefined {
+    if (engine !== "relay" || trialBearer === null) return undefined;
+    const code = typeof settings.store.sublineCode === "string" ? settings.store.sublineCode.trim() : "";
+    if (code !== "") return undefined;
+    return {
+        credential: trialBearer,
+        kind: "auto",
+        onDailyLimit: retryAfterMs => {
+            trialPausedUntil = Date.now() + (retryAfterMs ?? DEFAULT_COOLDOWN_MS);
+        }
+    };
+}
+
 
 function tasteLog(message: string): void {
     if (settings.store.debugLogging) logger.debug(`[taste] ${message}`);
@@ -520,35 +646,35 @@ function tasteLog(message: string): void {
  * anything the user is waiting on.
  */
 async function refreshTasteQuota(): Promise<void> {
+    freeStatusAsked = true;
     try {
         const id = await installIdOnce();
-        const res = await Native.relayStatus(tasteBearer(id));
+        const bearer = tasteBearer(id);
+        const res = await Native.relayStatus(bearer);
         if (res.ok) {
-            recordTasteQuota(res.used, res.cap);
-            tasteLog(`the relay says ${tasteUsed()} of ${tasteCap()} used today`);
+            // THE FREE PLAN, as the relay records it. `trialEndsAt` is only
+            // stated by a relay that knows about trials; an older one leaves
+            // the local clock in charge (and ✦ off: see trialAutoActive).
+            const wasAuto = trialAutoActive();
+            const wasClick = isClickMode();
+            noteServerTrialEnd(res.trialEndsAt);
+            if (res.plan === "trial") {
+                trialBearer = bearer;
+                tasteLog("the relay confirms the free trial: ✦ is automatic");
+            } else {
+                // The day's three: counted against the taste allowance only.
+                // A trial states its own, larger allowance, which is not what
+                // the ⚡ taste label counts.
+                recordTasteQuota(res.used, res.cap);
+                tasteLog(`the relay says ${tasteUsed()} of ${tasteCap()} used today`);
+            }
+            if (wasAuto !== trialAutoActive() || wasClick !== isClickMode()) onFreePlanChanged();
         } else {
             tasteLog(`today's count is unknown: ${res.error}`);
         }
     } catch {
         tasteLog("today's count is unknown: the status call did not complete");
     }
-}
-
-/** The funnel's two messages. Neutral (MESSAGE), never red — nothing is broken. */
-function showTasteLimitNudge(): void {
-    Toasts.show({
-        id: Toasts.genId(),
-        type: Toasts.Type.MESSAGE,
-        message: tasteLimitMessage()
-    });
-}
-
-function showTasteUsedUp(): void {
-    Toasts.show({
-        id: Toasts.genId(),
-        type: Toasts.Type.MESSAGE,
-        message: tasteUsedUpMessage()
-    });
 }
 
 /* ------------------------------------------------- LLM cooldown / fallback -- */
@@ -1085,8 +1211,24 @@ function writeResult(key: string, value: StoredTranslation): void {
         // counting it would let a dead install (every LLM result refused, or
         // every batch a failure marker) still report translations. See
         // statusBeacon.ts. Never the text, never the id: only which tier.
-        if (isRealTranslation(value)) recordTranslation(value.via);
+        if (isRealTranslation(value)) {
+            recordTranslation(value.via);
+            // The weekly note counts a message ONCE: the first time a real
+            // translation for it reaches the store. The ✦ line replacing its
+            // ≈ line is the same message (see weeklyNote.ts).
+            if (!isRealTranslation(existing)) {
+                showWeeklyNoteIfDue();
+                countShown(value.lang);
+            }
+        }
     }
+}
+
+/** "This week: N messages in M languages." At most once a week, never for an empty one. */
+function showWeeklyNoteIfDue(): void {
+    const note = closeWeekIfDue();
+    if (note === null) return;
+    Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message: note });
 }
 
 /**
@@ -1232,8 +1374,12 @@ async function runTier(
     // where the credential comes from, that the relay's daily count is
     // recorded, and that a refusal is handled quietly instead of parking the
     // engine and announcing a paid user's quota.
-    taste?: TasteRun
+    tasteRun?: TasteRun
 ): Promise<void> {
+    // A free install's relay request, whichever kind: a ⚡ taste (passed in)
+    // or the trial's automatic ✦ (derived here, see trialRunFor). Undefined
+    // for every paid and keyed request, which read exactly as before.
+    const taste = tasteRun ?? trialRunFor(engine);
     const isQuality = engine !== "google";
     // The in-flight set belonging to THIS tier. The other tier's request for
     // the same id (if any) is a separate round trip and settles on its own.
@@ -1286,7 +1432,9 @@ async function runTier(
         // by IP and answers 429 with an HTML block page; retrying into that is
         // how a transient block becomes a sustained one — and unlike the LLMs,
         // Google has no rate gate to fall back on.
-        if (isCoolingDown(engine)) {
+        // The trial's own pause (its daily allowance, or a throttle) is a
+        // cooldown in all but name, kept apart from the paid store on purpose.
+        if (isCoolingDown(engine) || (taste?.kind === "auto" && Date.now() < trialPausedUntil)) {
             if (debug) {
                 logger.debug(
                     `[flush] ${engine}: blocked — cooling down for another `
@@ -1356,7 +1504,13 @@ async function runTier(
                 taste !== undefined
                     ? taste.credential
                     : isLlmEngine(engine) ? apiKeyFor(engine) : "",
-                JSON.stringify(engine === "google" ? withSourceLangs(req) : req),
+                JSON.stringify(
+                    engine === "google"
+                        ? withSourceLangs(req)
+                        // The trial's automatic ✦ says so (see TasteRun);
+                        // a ⚡ taste sends what every earlier client sent.
+                        : taste?.kind === "auto" ? { ...req, mode: "auto" } : req
+                ),
                 // The relay has no model setting, so `modelFor("relay")` is ""
                 // either way; `undefined` is what the relay contract states a
                 // taste request sends, and saying so here keeps this call site
@@ -1434,7 +1588,28 @@ async function runTier(
                 // a RED toast about a rejected key that the user never entered.
                 // The only fact worth keeping is the one the relay stated: the
                 // day's three are gone. The caller turns that into the nudge.
-                if (isDailyLimit(res.error)) {
+                if (taste.kind === "auto") {
+                    // THE TRIAL'S AUTOMATIC ✦. Every refusal is quiet: ≈ is
+                    // already on screen for these messages, and none of these
+                    // is something the reader did or can fix.
+                    if (/trial ended/i.test(res.error)) {
+                        // The relay's record says the seven days are over. It
+                        // is the authority, so the session follows it now.
+                        tasteLog("the relay says the free trial has ended");
+                        markServerTrialEnded();
+                        rebuildBatcher();
+                    } else if (isDailyLimit(res.error) || res.retryAfterMs) {
+                        tasteLog("the relay paused the trial's ✦ for now; ≈ keeps working");
+                        taste.onDailyLimit(res.retryAfterMs);
+                    } else if (/\b40[13]\b/.test(res.error)) {
+                        // Not a key the user entered, so never the red
+                        // "rejected your code" toast: the trial's ✦ simply
+                        // stops for this session, and ≈ carries on.
+                        tasteLog(`the relay refused the trial credential (${errorCode})`);
+                        trialRefused = true;
+                        rebuildBatcher();
+                    }
+                } else if (isDailyLimit(res.error)) {
                     tasteLog("the relay says today's three are used — nothing more is sent today");
                     taste.onDailyLimit();
                 } else {
@@ -1559,7 +1734,7 @@ async function runTier(
         // throw in the write loop must not lose the one number the ⚡ button
         // has to show, and a press whose count was lost would be a press the
         // user is never told about.
-        if (taste !== undefined) {
+        if (taste?.kind === "press") {
             recordTasteQuota(res.quotaUsed, res.quotaCap);
             tasteLog(`press accepted — ${tasteUsed()} of ${tasteCap()} used today`);
         }
@@ -1743,9 +1918,10 @@ async function forceQualityTranslate(message: Message): Promise<void> {
  * render the ✦ it comes back with.
  *
  * DELIBERATE PRESSES ONLY. Nothing here is reachable from MESSAGE_CREATE,
- * catch-up or scroll-back — a free install builds no quality batcher at all
- * (see `rebuildBatcher`), so automatic ✦ stays off exactly as it was. Three a
- * day is only meaningful if the user spends them on messages they chose.
+ * catch-up or scroll-back. A free install gets automatic ✦ only during a trial
+ * the relay has confirmed, and that runs as the ordinary quality batcher under
+ * the install bearer (see `trialRunFor`), never through here. Three a day is
+ * only meaningful if the user spends them on messages they chose.
  *
  * Routed through `runTier` rather than calling `Native.translateBatch` here,
  * for the same reason `forceQualityTranslate` is: the write then lands through
@@ -1764,9 +1940,10 @@ async function tasteTranslate(message: Message): Promise<void> {
 
     if (tasteExhausted()) {
         // NOTHING IS SENT. The relay would refuse it, and a refusal the user
-        // can see coming is a request nobody should spend.
+        // can see coming is a request nobody should spend. Nothing is SAID
+        // either (v0.1.6): the button's own label already reads "0 of 3 left
+        // today", and a toast on top of it was a nag, not information.
         tasteLog(`${message.id}: press ignored — today's ${tasteCap()} are used, nothing sent`);
-        showTasteLimitNudge();
         return;
     }
 
@@ -1804,36 +1981,145 @@ async function tasteTranslate(message: Message): Promise<void> {
         targetLang: settings.store.targetLang
     };
 
-    const wasExhausted = tasteExhausted();
-    let hitDailyLimit = false;
-
     try {
         await runTier(
             "relay", req, batcherGeneration, undefined,
             outcome => setForcedHint(message.id, outcome),
             {
                 credential: tasteBearer(id),
-                onDailyLimit: () => {
-                    hitDailyLimit = true;
-                    markTasteExhausted();
-                }
+                kind: "press",
+                // The relay knew before we did. Recorded, and nothing said:
+                // the label already counts down to "0 of 3 left today".
+                onDailyLimit: () => markTasteExhausted()
             }
         );
     } finally {
         forcedInFlight.delete(message.id);
         notifyForcedInFlight();
     }
+}
 
-    if (hitDailyLimit) {
-        // The relay knew before we did. Same neutral nudge as a press the
-        // local count already refused — the user cannot tell the two apart,
-        // and should not have to.
-        showTasteLimitNudge();
+/* --------------------------------------------- click to translate -- */
+
+/**
+ * Messages whose "≈ Translate" click is out right now, so the accessory can
+ * say so. Notified through the same listeners as the ⚡ indicator.
+ */
+const clickInFlight = new Set<string>();
+
+/**
+ * The ✦ previews this session has been shown: the first few words of the real
+ * ✦ translation, cut by the relay. Kept apart from the translation store on
+ * purpose: a preview is not a translation, is never persisted, and must never
+ * replace or be mistaken for the ≈ line it sits under.
+ */
+const previews = new Map<string, { text: string; truncated: boolean }>();
+/** Messages a preview has already been asked for this session: one per message. */
+const previewAsked = new Set<string>();
+const MAX_PREVIEWS_KEPT = 200;
+
+/**
+ * Is this Google line one the plugin's own confidence logic says not to
+ * trust? The SAME test the subtitle has always used for its "?" mark: a
+ * detection Google itself was unsure of, or a normally non-Latin language
+ * "detected" from Latin letters (see romanized.ts). Only ever true of a
+ * Google line; an LLM result is never second-guessed here.
+ */
+function googleUnsure(entry: { via: EngineId; lang: string; conf?: number }, content: string): {
+    unsure: boolean; romanized: boolean;
+} {
+    if (ENGINE_RANK[entry.via] !== 0) return { unsure: false, romanized: false };
+    const romanized = isRomanizedGuess(entry.lang, content);
+    const unsure = (entry.conf !== undefined && entry.conf < MIN_DETECT_CONFIDENCE) || romanized;
+    return { unsure, romanized };
+}
+
+/**
+ * The "≈ Translate" click: the normal ≈ Google translation, for this one
+ * message, because the reader asked for it.
+ *
+ * Routed through runTier like any fast-tier batch, so it lands through
+ * writeResult/mayReplace and shows the ≈ line exactly as the automatic path
+ * would. Then, and only if that line is one the confidence logic rates rough,
+ * and only while today's previews last, the relay is asked what ✦ reads it as.
+ */
+async function clickTranslate(message: Message): Promise<void> {
+    if (clickInFlight.has(message.id) || inFlightFast.has(message.id)) return;
+    const channelId = message.channel_id;
+    const pending: PendingMessage = {
+        id: message.id,
+        author: message.author?.username ?? "unknown",
+        text: readableContent(message.content ?? "", channelId),
+        channelId,
+        replyToId: replyParentId(message)
+    };
+    clickInFlight.add(message.id);
+    inFlightFast.add(message.id);
+    notifyForcedInFlight();
+    try {
+        await runTier("google", {
+            messages: [{ id: pending.id, author: pending.author, text: pending.text, replyToId: pending.replyToId }],
+            context: [],
+            targetLang: settings.store.targetLang
+        }, batcherGeneration, channelId);
+    } finally {
+        clickInFlight.delete(message.id);
+        notifyForcedInFlight();
+    }
+
+    const entry = getTranslation(makeKey(message.id, settings.store.targetLang));
+    if (!isRealTranslation(entry) || entry.via !== "google") return;
+    if (!googleUnsure(entry, message.content ?? "").unsure) return;
+    await requestPreview(message, pending.text, entry.text);
+}
+
+/**
+ * Ask the relay what ✦ reads this message as, in PREVIEW mode: the relay
+ * translates it for real and returns only the first few words, so the full
+ * text never reaches a free install. Three a day, the same allowance as the ⚡
+ * taste. When the three are gone nothing is sent and nothing is said.
+ */
+async function requestPreview(message: Message, text: string, googleText: string): Promise<void> {
+    if (previewAsked.has(message.id)) return;
+    if (rolloverTasteIfNewUtcDay()) void refreshTasteQuota();
+    if (tasteExhausted()) {
+        tasteLog(`${message.id}: no preview, today's ${tasteCap()} are used`);
         return;
     }
-    // The transition, not the state: said once, right after the third lands,
-    // and never again on a day whose three were already gone when it started.
-    if (!wasExhausted && tasteExhausted()) showTasteUsedUp();
+    previewAsked.add(message.id);
+    const id = await installIdOnce();
+    const req: BatchRequest = {
+        messages: [{ id: message.id, author: message.author?.username ?? "unknown", text, replyToId: replyParentId(message) }],
+        context: contextBefore(message, FORCED_CONTEXT_SIZE),
+        targetLang: settings.store.targetLang,
+        mode: "preview"
+    };
+    let res: Awaited<ReturnType<typeof Native.translateBatch>> | null;
+    try {
+        res = await Native.translateBatch("relay", tasteBearer(id), JSON.stringify(req), undefined, settings.store.debugLogging);
+    } catch {
+        res = null;
+    }
+    if (res === null || !res.ok) {
+        if (res !== null && isDailyLimit(res.error)) markTasteExhausted();
+        tasteLog(`${message.id}: no preview (${res === null ? "IPC call rejected" : "the relay refused"})`);
+        return;
+    }
+    recordTasteQuota(res.quotaUsed, res.quotaCap);
+    const r = res.results.find(x => x.id === message.id);
+    if (r === undefined || "failed" in r || r.skip) return;
+    // ✦ reads it the same way ≈ does: a preview would show the reader nothing
+    // they cannot already read, so it is not shown.
+    if (!previewDiffers(r.text, googleText)) {
+        tasteLog(`${message.id}: ✦ agrees with ≈, no preview shown`);
+        return;
+    }
+    if (previews.size >= MAX_PREVIEWS_KEPT) {
+        const oldest = previews.keys().next();
+        if (!oldest.done) previews.delete(oldest.value);
+    }
+    previews.set(message.id, { text: r.text, truncated: r.truncated === true });
+    notifyForcedInFlight();
 }
 
 function rebuildBatcher() {
@@ -2026,6 +2312,20 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true, r
         // consuming context see a coherent conversation either way.
         fastBatcher?.recordContext(pending);
         if (allowQuality && recordContext) qualityBatcher?.recordContext(pending);
+        return;
+    }
+
+    // THE FREE PLAN AFTER ITS TRIAL: nothing is translated automatically.
+    // This message may be foreign (no local rule placed it in the reader's
+    // language), so the accessory offers "≈ Translate" under it instead, and
+    // a click is what spends a request (see clickTranslate). The first time
+    // that happens after the trial, the reader is told why, once.
+    if (isClickMode()) {
+        fastBatcher?.recordContext(pending);
+        if (settings.store.debugLogging) {
+            logger.debug(`[enqueue] ${pending.id}: free plan, translates on click`);
+        }
+        maybeAnnounceTrialEnded();
         return;
     }
 
@@ -2323,6 +2623,21 @@ function catchUp(channelId: string, opts: CatchUpOptions = {}) {
     if (!channelActive(channelId)) return;
     if (!becomingFocused && !isFocusedChannel(channelId)) return;
 
+    // The free plan after its trial translates on click only, so a backlog
+    // costs nothing. It can still be the first time a "≈ Translate" line is
+    // on screen, which is the moment the once-ever trial-ended note is for.
+    if (isClickMode()) {
+        if (settings.store.freeTrialEndNoticeShown !== true) {
+            const me = UserStore.getCurrentUser()?.id;
+            const loaded = MessageStore.getMessages(channelId);
+            const messages: any[] = loaded && typeof loaded.toArray === "function" ? loaded.toArray() : [];
+            if (messages.some(m => !isLocallySkipped(m?.content ?? "", m?.author?.id === me))) {
+                maybeAnnounceTrialEnded();
+            }
+        }
+        return;
+    }
+
     const count = settings.store.catchUpCount;
     if (count <= 0) return;
 
@@ -2577,6 +2892,58 @@ function forcedHintDisplay(hint: ForcedHint): { text: string; title: string } {
     }
 }
 
+/**
+ * "≈ Translate": the free plan's line under a message that may be foreign,
+ * once the trial is over. Muted like every other subtitle prefix, and a real
+ * button, because it is the whole way a free install reads a message now.
+ * Nothing for a message the local rules already place in the reader's own
+ * language: those were never going to be translated automatically either.
+ */
+function clickToTranslateLine(message: Message) {
+    if (clickInFlight.has(message.id)) {
+        return (
+            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
+                ≈ translating…
+            </div>
+        );
+    }
+    const isOwn = message.author?.id === UserStore.getCurrentUser()?.id;
+    if (isLocallySkipped(message.content ?? "", isOwn)) return null;
+    return (
+        <div
+            role="button"
+            tabIndex={0}
+            style={{ fontSize: "0.85rem", color: "var(--text-muted)", cursor: "pointer" }}
+            title="Translate this message with Google (≈)"
+            onClick={() => { void clickTranslate(message); }}
+        >
+            ≈ Translate
+        </div>
+    );
+}
+
+/**
+ * "✦ reads this as: the leak says the… Upgrade" — the real ✦ translation's
+ * first few words, under a ≈ line rated rough. See requestPreview.
+ */
+function previewLine(messageId: string) {
+    const preview = previews.get(messageId);
+    if (preview === undefined) return null;
+    return (
+        <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
+            ✦ reads this as: {preview.text}{preview.truncated ? "…" : ""}{" "}
+            <a
+                href={PRICING_URL}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e: any) => { e?.preventDefault?.(); openPricing(); }}
+            >
+                Upgrade
+            </a>
+        </div>
+    );
+}
+
 function TranslationAccessory({ message }: { message: Message; }) {
     const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
 
@@ -2613,6 +2980,8 @@ function TranslationAccessory({ message }: { message: Message; }) {
     // click can never render alongside a fresh "⚡ translating…". Never read
     // when `forcing` is true, for exactly that reason.
     const hint = forcing ? undefined : forcedHintFor(message.id);
+    // The free plan after its trial: translate on click (see isClickMode).
+    const clickMode = isClickMode();
 
     if (!entry) {
         // Nothing to show yet — UNLESS a forced request is why: the reader
@@ -2640,6 +3009,7 @@ function TranslationAccessory({ message }: { message: Message; }) {
                 </div>
             );
         }
+        if (clickMode) return clickToTranslateLine(message);
         return null;
     }
 
@@ -2683,6 +3053,13 @@ function TranslationAccessory({ message }: { message: Message; }) {
     // container's muted colour, i.e. becomes unreadable. --text-default is the
     // current name, --text-normal the legacy one, and the literal is a
     // dark-theme-readable last resort if Discord renames it again.
+    // On the free plan after its trial nothing retries a message on its own,
+    // so a click that did not land offers the click again rather than a
+    // "waiting" or "failed" line that would never change.
+    if (clickMode && !forcing && !hint && ("failed" in entry || "deferred" in entry)) {
+        return clickToTranslateLine(message);
+    }
+
     if ("failed" in entry) {
         return (
             <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
@@ -2752,11 +3129,12 @@ function TranslationAccessory({ message }: { message: Message; }) {
     // Latin-only text — is an independent signal that catches exactly that,
     // regardless of what confidence was reported. Only Google's own lines are
     // a script GUESS in the first place; an LLM result is never checked here.
-    const romanized = isRomanizedGuess(entry.lang, message.content ?? "");
-    const unsure = ENGINE_RANK[entry.via] === 0 && (
-        (entry.conf !== undefined && entry.conf < MIN_DETECT_CONFIDENCE)
-        || romanized
-    );
+    const { unsure, romanized } = googleUnsure(entry, message.content ?? "");
+    // THE FREE PLAN SAYS IT IN WORDS. The same judgement as the "?" mark, and
+    // only that judgement: "≈ rough" appears exactly when the confidence logic
+    // above rates this Google line unreliable, never to make ≈ look worse
+    // than it is. A paid install keeps the "?" it always had.
+    const rough = unsure && isTasteInstall();
     const langName = languageName(entry.lang);
     const title = !unsure
         ? `Translated by ${provenance.label} · ${langName}`
@@ -2782,7 +3160,7 @@ function TranslationAccessory({ message }: { message: Message; }) {
     return (
         <div style={{ fontSize: "0.95rem", color: TEXT_COLOUR, fontStyle: "italic" }}>
             <span style={{ color: "var(--text-muted)" }} title={title}>
-                {provenance.glyph} {entry.lang}{unsure ? "?" : ""} ·{" "}
+                {rough ? "≈ rough" : provenance.glyph} {entry.lang}{unsure && !rough ? "?" : ""} ·{" "}
             </span>
             {entry.text}
             {/*
@@ -2804,6 +3182,7 @@ function TranslationAccessory({ message }: { message: Message; }) {
                     {" "}· {forcedHintDisplay(hint).text}
                 </span>
             )}
+            {entry.via === "google" && previewLine(message.id)}
         </div>
     );
 }
@@ -3169,31 +3548,27 @@ export default definePlugin({
         });
         updateWatch.start();
 
-        // One-time, dismissible pointer for free-tier users to the ✦ AI upgrade
-        // (upgradeNotice.ts). Fire-and-forget: never blocks start, never throws.
-        void maybeShowUpgradeNudge({
-            onFreeTier: () => effectiveEngine() === "google",
-            hasNudged: async () => (await DataStore.get<boolean>(UPGRADE_NUDGE_SEEN_KEY)) === true,
-            markNudged: () => DataStore.set(UPGRADE_NUDGE_SEEN_KEY, true),
-            showNudge: () => showNotice(
-                "Subline is translating with free Google (≈). Unlock sharper ✦ AI translation, "
-                + "cheaper than Nitro.",
-                "See plans",
-                () => {
-                    // Opens the pricing page in the browser; buyers paste the code they get
-                    // back into Subline's settings (the sublineCode field) to switch on ✦.
-                    (globalThis as any).VencordNative?.native?.openExternal?.("https://surfer05.github.io/subline#pricing");
-                    popNotice();
-                }
-            )
-        });
+        // THE FREE PLAN. The first session a free install runs this version
+        // starts its 7-day trial clock (an install that already has one keeps
+        // it). The relay is then asked, never awaited, what it has on record:
+        // whether the trial is running (✦ turns on) or over (translate on
+        // click), and how many of today's three ✦ previews are left. A slow or
+        // unreachable relay delays nothing: until it answers, the local clock
+        // decides, and a trial it has not confirmed translates with ≈ alone.
+        //
+        // (The old once-ever "Subline is translating with free Google" notice
+        // is gone: during the trial it is not true, and afterwards the one
+        // trial-ended toast says what changed.)
+        if (isTasteInstall()) {
+            ensureTrialStarted();
+            void refreshTasteQuota();
+        }
 
-        // How many of today's three tastes are left, for a free install (see
-        // taste.ts). Read once per session and never awaited: the count only
-        // has to be right by the time somebody looks at the ⚡ button, and a
-        // slow or unreachable relay must not delay a single translation. It
-        // exists so closing Discord does not silently hand the user three more.
-        if (isTasteInstall()) void refreshTasteQuota();
+        // The weekly note's running count. Awaited, like the channel lists
+        // below, so the first translation of the session is counted into the
+        // week it belongs to.
+        await loadWeeklyStats();
+        showWeeklyNoteIfDue();
 
         await loadEnabledChannels();
         // AWAITED, unlike the translation cache below: this decides whether the
@@ -3223,6 +3598,12 @@ export default definePlugin({
             // Order matters: lift a stale pin BEFORE rebuilding, so the new
             // batcher is built for the engine the user now has credentials for.
             releaseFallbackIfCredentialChanged();
+            // A code cleared mid-session is a free install from now on: its
+            // trial starts (or resumes) exactly as it would at start().
+            if (isTasteInstall()) {
+                ensureTrialStarted();
+                if (!freeStatusAsked) void refreshTasteQuota();
+            }
             rebuildBatcher();
         });
         FluxDispatcher.subscribe("MESSAGE_CREATE", onMessageCreate);
@@ -3333,6 +3714,18 @@ export default definePlugin({
         // looks exactly like one applied twenty-one times.
         forcedInFlightListeners.clear();
         deferredChannels.clear();
+        // The free plan's session state. The relay is asked again on the next
+        // start(); the trial's start time and the weekly count are persisted
+        // and read back then.
+        trialBearer = null;
+        trialPausedUntil = 0;
+        trialRefused = false;
+        freeStatusAsked = false;
+        __resetFreePlan();
+        clickInFlight.clear();
+        previews.clear();
+        previewAsked.clear();
+        __resetWeeklyStats();
         // clearStore() has existed and worked the whole time, and the plugin
         // never called it — only the test harness did, which is why the tests
         // were better isolated than the shipped code. It drops the in-memory
