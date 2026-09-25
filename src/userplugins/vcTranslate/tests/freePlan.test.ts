@@ -2,7 +2,7 @@ import { __resetSettings } from "@api/Settings";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
-    __resetFreePlan, announceableTrialEnd, DAY_MS, isNewEnding, freeMode, freePlanLine, markServerTrialEnded, noteServerTrialEnd,
+    __resetFreePlan, announceableTrialEnd, DAY_MS, isNewEnding, freeMode, freePlanLine, noteServerTrialEnd, trialEndsAt,
     previewDiffers, previewText, PRICING_URL, TRIAL_MS, trialConfirmed, trialDaysLeft, trialEndedMessage
 } from "../freePlan";
 import settings from "../settings";
@@ -24,33 +24,42 @@ describe("the free plan's clock", () => {
         expect(freeMode(T0, T0 + TRIAL_MS)).toBe("click");
     });
 
-    it("lets the relay's record outrank the local clock, in both directions", () => {
+    it("takes the EARLIER of the local end and the relay's end", () => {
         // A wiped settings file restarts the local clock; the relay remembers.
-        noteServerTrialEnd(T0 - 1);
+        noteServerTrialEnd(T0 - 1, undefined, T0);
         expect(freeMode(T0, T0)).toBe("click");
-        // And a relay that says the trial still runs is believed too.
-        noteServerTrialEnd(T0 + 3 * DAY_MS);
-        expect(freeMode(T0 - 30 * DAY_MS, T0)).toBe("trial");
+        // A relay that says "still running" can never extend a local trial
+        // that is over (N2/N3: an unwritten or lapsed relay record).
+        noteServerTrialEnd(T0 + 3 * DAY_MS, undefined, T0);
+        expect(freeMode(T0 - 30 * DAY_MS, T0)).toBe("click");
+        // With no local start at all, the relay's end alone decides.
+        expect(freeMode(0, T0)).toBe("trial");
+        expect(freeMode(0, T0 + 3 * DAY_MS)).toBe("click");
+    });
+
+    it("N2: a provisional relay answer never extends a local trial, and never counts as an ending", () => {
+        const start = T0 - TRIAL_MS + DAY_MS;   // one local day left
+        noteServerTrialEnd(T0 + TRIAL_MS, T0, T0, true);   // "now + 7 days", provisional
+        expect(trialEndsAt(start)).toBe(start + TRIAL_MS);
+        expect(freeMode(start, start + TRIAL_MS)).toBe("click");
+        expect(announceableTrialEnd(start, start + TRIAL_MS)).toBeNull();
+        expect(announceableTrialEnd(start, start + TRIAL_MS + DAY_MS)).toBe(start + TRIAL_MS);
     });
 
     it("ignores a malformed trialEndsAt rather than acting on it", () => {
         for (const bad of [undefined, null, "soon", NaN, -5, 0, Infinity]) noteServerTrialEnd(bad);
-        expect(trialConfirmed(T0)).toBe(false);
+        expect(trialConfirmed(T0, T0)).toBe(false);
         expect(freeMode(T0, T0)).toBe("trial");
     });
 
     it("confirms a trial only when the relay said so and it has not run out", () => {
-        expect(trialConfirmed(T0)).toBe(false);
-        noteServerTrialEnd(T0 + DAY_MS);
-        expect(trialConfirmed(T0)).toBe(true);
-        expect(trialConfirmed(T0 + DAY_MS)).toBe(false);
-    });
-
-    it("ends at once when the relay refuses an automatic request as 'trial ended'", () => {
-        noteServerTrialEnd(T0 + 5 * DAY_MS);
-        markServerTrialEnded(T0);
-        expect(trialConfirmed(T0)).toBe(false);
-        expect(freeMode(T0, T0)).toBe("click");
+        expect(trialConfirmed(T0, T0)).toBe(false);
+        noteServerTrialEnd(T0 + DAY_MS, undefined, T0);
+        expect(trialConfirmed(T0, T0)).toBe(true);
+        expect(trialConfirmed(T0, T0 + DAY_MS)).toBe(false);
+        // …and not past the LOCAL end either, whatever the relay says.
+        noteServerTrialEnd(T0 + 30 * DAY_MS, undefined, T0);
+        expect(trialConfirmed(T0, T0 + TRIAL_MS)).toBe(false);
     });
 
     it("counts days left rounded up, never 0 while the trial runs", () => {

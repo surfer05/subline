@@ -94,7 +94,10 @@ describe.skipIf(!built)("the built bundle's settings section", () => {
         // 241,429 bytes on 2026-08-24, before the panes came out; 218,570
         // after. A generous ceiling — this is here to catch the panes coming
         // BACK, which would add tens of kilobytes, not to police build size.
-        expect(statSync(RENDERER).size).toBeLessThan(235_000);
+        // Raised 235,000 -> 240,000 for v0.1.6: the free-plan plugin code
+        // (trial, click-to-translate, previews) measured 235,362 bytes. The
+        // panes coming back (~23 KB) would still land far above this.
+        expect(statSync(RENDERER).size).toBeLessThan(240_000);
     });
 });
 

@@ -66,6 +66,9 @@ export type NativeResponse =
          * limited". See rateHint.ts's modelFromGeminiBody.
          */
         quotaModel?: string;
+        /** A relay 402 "trial ended": when the relay has the trial ending, and its clock. */
+        trialEndsAt?: number;
+        serverNow?: number;
     };
 
 /**
@@ -265,18 +268,22 @@ export async function translateBatch(
             ? scrubKey(named, apiKey)
             : undefined;
 
+        const endsAt = (err as { trialEndsAt?: unknown })?.trialEndsAt;
+        const serverNow = (err as { serverNow?: unknown })?.serverNow;
         return {
             ok: false,
             error: scrubKey(raw, apiKey),
             retryAfterMs,
             quotaLimitPerMinute,
-            quotaModel
+            quotaModel,
+            ...(typeof endsAt === "number" ? { trialEndsAt: endsAt } : {}),
+            ...(typeof serverNow === "number" ? { serverNow } : {})
         };
     }
 }
 
 export type RelayStatusResponse =
-    | { ok: true; plan: string; used: number; cap: number; trialEndsAt?: number; serverNow?: number }
+    | { ok: true; plan: string; used: number; cap: number; trialEndsAt?: number; serverNow?: number; trialProvisional?: boolean }
     | { ok: false; error: string };
 
 /**
@@ -302,6 +309,7 @@ export async function relayStatus(
         const out: RelayStatusResponse = { ok: true, plan: status.plan, used: status.used, cap: status.cap };
         if (status.trialEndsAt !== undefined) out.trialEndsAt = status.trialEndsAt;
         if (status.serverNow !== undefined) out.serverNow = status.serverNow;
+        if (status.trialProvisional === true) out.trialProvisional = true;
         return out;
     } catch (err) {
         const raw = err instanceof Error ? err.message : "unknown error";

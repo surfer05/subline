@@ -79,6 +79,8 @@ export interface RelayStatus {
     trialEndsAt?: number;
     /** The relay's own clock (epoch ms), for the skew correction in freePlan.ts. */
     serverNow?: number;
+    /** The relay has not started a trial for this id yet: `trialEndsAt` is only "now + 7 days". */
+    trialProvisional?: boolean;
 }
 
 /** A non-negative, finite integer the relay stated, or undefined. */
@@ -128,7 +130,10 @@ export async function fetchRelayStatus(
         ? body.trialEndsAt
         : undefined;
     const serverNow = typeof body.now === "number" && Number.isFinite(body.now) && body.now > 0 ? body.now : undefined;
-    return { plan: typeof body.plan === "string" ? body.plan : "", used, cap, trialEndsAt, serverNow };
+    return {
+        plan: typeof body.plan === "string" ? body.plan : "", used, cap, trialEndsAt, serverNow,
+        trialProvisional: body.trialProvisional === true ? true : undefined
+    };
 }
 
 export async function translateWithRelay(
@@ -159,7 +164,7 @@ export async function translateWithRelayDetailed(
 
     if (!res.ok || !body || body.ok !== true) {
         const detail = body && typeof body.error === "string" ? ` ${body.error}` : "";
-        throw new HttpError(
+        const err = new HttpError(
             `relay: HTTP ${res.status}${detail}`,
             res.status,
             body && typeof body.retryAfterMs === "number" ? body.retryAfterMs : undefined,
@@ -169,6 +174,12 @@ export async function translateWithRelayDetailed(
                 ? body.quotaLimitPerMinute
                 : undefined
         );
+        // A 402 "trial ended" states WHEN the relay has the trial ending, on
+        // its own clock. The renderer only believes an ending that comes with
+        // a past trialEndsAt (freePlan.ts), so both ride along.
+        if (body && typeof body.trialEndsAt === "number") (err as any).trialEndsAt = body.trialEndsAt;
+        if (body && typeof body.now === "number") (err as any).serverNow = body.now;
+        throw err;
     }
     // Validate rather than blind-cast: the relay is our own server, but a
     // corrupted or hostile response must not inject malformed entries into the

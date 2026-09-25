@@ -13,6 +13,7 @@ const native = vi.hoisted(() => {
 
 import plugin, { FORCE_QUALITY_POPOVER_ID, FORCED_HINT_TTL_MS } from "../index";
 import { setCooldown } from "../cooldownStore";
+import { toggleChannelOptOut } from "../channels";
 import { DAY_MS, TRIAL_MS } from "../freePlan";
 import type { NativeResponse } from "../native";
 import settings from "../settings";
@@ -23,7 +24,7 @@ import { __resetSettings } from "./stubs/api-settings";
 import * as DataStore from "./stubs/api-datastore";
 import { __getPopoverButton, __reset as __resetMessagePopover } from "./stubs/api-messagepopover";
 import {
-    __resetWebpackCommon, __stubSetSelectedChannel, FluxDispatcher, shownToasts, stubMessages
+    __resetWebpackCommon, __stubMarkAsDm, __stubSetSelectedChannel, FluxDispatcher, shownToasts, stubMessages
 } from "./stubs/webpack-common";
 
 /**
@@ -238,7 +239,7 @@ describe("during the trial: automatic", () => {
         await restart();
         native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) =>
             engine === "relay"
-                ? { ok: false, error: "relay: HTTP 402 trial ended" }
+                ? { ok: false, error: "relay: HTTP 402 trial ended", trialEndsAt: Date.now() - 1, serverNow: Date.now() }
                 : { ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "es", text: "hi", skip: false })) });
 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
@@ -716,7 +717,7 @@ describe("review fixes: an older relay, retries, the announcement, clock skew", 
         await restart();
         native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) =>
             engine === "relay"
-                ? { ok: false, error: "relay: HTTP 402 trial ended" }
+                ? { ok: false, error: "relay: HTTP 402 trial ended", trialEndsAt: Date.now() - 1, serverNow: Date.now() }
                 : { ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "es", text: "hi", skip: false })) });
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
         await settle();
@@ -758,5 +759,160 @@ describe("review fixes: an older relay, retries, the announcement, clock skew", 
         expect(calls()).toHaveLength(0);
         expect(clickable(render(msg("1", "hola que tal")))?.label).toBe("≈ Translate");
         expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(1);
+    });
+});
+
+// ---------------------------------------------------------------------------
+describe("re-review fixes", () => {
+    const trialStatus = (over: Record<string, unknown> = {}) => ({
+        ok: true, plan: "trial", used: 0, cap: 300, trialEndsAt: Date.now() + 5 * DAY_MS, serverNow: Date.now(), ...over
+    });
+
+    it("N2: a trial whose relay record was never written still ends at local start + 7 days", async () => {
+        // The relay keeps answering a PROVISIONAL "now + 7 days" (its first
+        // write failed). The local start is one hour from its end.
+        const start = Date.now() - TRIAL_MS + 60 * 60_000;
+        native.relayStatus.mockImplementation(async () => trialStatus({ trialEndsAt: Date.now() + TRIAL_MS, trialProvisional: true }));
+        await restart(() => { settings.store.freeTrialStartedAt = start; });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
+        await settle();
+        expect(calls("relay")).toHaveLength(1);   // still in the trial: ✦ is on
+
+        vi.setSystemTime(start + TRIAL_MS + 1);
+        native.translateBatch.mockClear();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("2", "que pasa amigo") });
+        await settle();
+        expect(calls()).toHaveLength(0);
+        expect(clickable(render(msg("2", "que pasa amigo")))?.label).toBe("≈ Translate");
+        // The provisional answer is not a stated ending: no toast before local end + 24h.
+        expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(0);
+    });
+
+    it("N3: after the relay's 90-day record lapses, an install with a local start gets no new trial", async () => {
+        // The relay has forgotten the id and started it afresh (a real, non-
+        // provisional record 6 days from its end). The local start is 100 days old.
+        native.relayStatus.mockResolvedValue(trialStatus({ trialEndsAt: Date.now() + 6 * DAY_MS }));
+        const start = Date.now() - 100 * DAY_MS;
+        await restart(() => { settings.store.freeTrialStartedAt = start; });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
+        await settle();
+        expect(calls()).toHaveLength(0);
+        expect(clickable(render(msg("1", "hola que tal")))?.label).toBe("≈ Translate");
+        expect(settings.store.freeTrialStartedAt).toBe(start);   // never reset
+    });
+
+    it("N4: a relay outage mid-trial (503) says nothing and changes nothing", async () => {
+        native.relayStatus.mockResolvedValue(trialStatus());
+        await restart();
+        const start = settings.store.freeTrialStartedAt;
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) =>
+            engine === "relay"
+                ? { ok: false, error: "relay: HTTP 503 temporarily unavailable" }
+                : { ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "es", text: "hi", skip: false })) });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
+        await settle();
+        expect(shownToasts).toHaveLength(0);
+        expect(clickable(render(msg("2", "que pasa amigo")))).toBeNull();
+        expect(settings.store.freeTrialStartedAt).toBe(start);
+        answer();
+        native.translateBatch.mockClear();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("3", "otra cosa amigo") });
+        await settle();
+        expect(calls("relay")).toHaveLength(1);   // still automatic ✦
+    });
+
+    it("N4: a 402 'trial ended' with no past trialEndsAt is not believed", async () => {
+        native.relayStatus.mockResolvedValue(trialStatus());
+        await restart();
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) =>
+            engine === "relay"
+                ? { ok: false, error: "relay: HTTP 402 trial ended" }
+                : { ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "es", text: "hi", skip: false })) });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
+        await settle();
+        expect(shownToasts).toHaveLength(0);
+        expect(clickable(render(msg("2", "que pasa amigo")))).toBeNull();
+    });
+
+    it("N5: a preview that reads the same as ≈ says so, and ⚡ is gone once asked", async () => {
+        await restart(() => expiredLocally());
+        setTranslation(key("1"), { lang: "es", text: "hi, how are you", via: "google", conf: 0.99 });
+        answer({ relay: m => ({ id: m.id, lang: "es", text: "Hi how are you", skip: false }), relayQuota: { used: 1, cap: 3 } });
+        const btn = __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("1", "hola que tal"));
+        btn!.onClick!(undefined as any);
+        await flush();
+        expect(calls("relay")).toHaveLength(1);
+        expect(text(render(msg("1", "hola que tal")))).toContain("✦ reads this the same way.");
+        expect(__getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("1", "hola que tal"))).toBeNull();
+    });
+
+    it("N5: ⚡ is hidden once a preview was asked even if the relay refused it", async () => {
+        await restart(() => expiredLocally());
+        native.translateBatch.mockResolvedValue({ ok: false, error: "relay: HTTP 503 temporarily unavailable" });
+        __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("1", "hola que tal"))!.onClick!(undefined as any);
+        await flush();
+        expect(__getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("1", "hola que tal"))).toBeNull();
+    });
+});
+
+// ---------------------------------------------------------------------------
+describe("N7: channels the reader has not opted into, and a code pasted mid-session", () => {
+    const DM = "dm1";
+    const dmMsg = (id: string, content: string) => ({ ...msg(id, content), channel_id: DM });
+
+    for (const mode of ["trial", "click"] as const) {
+        it(`${mode}: a DM sends nothing and shows no click line`, async () => {
+            native.relayStatus.mockResolvedValue({ ok: true, plan: "trial", used: 0, cap: 300, trialEndsAt: Date.now() + 5 * DAY_MS, serverNow: Date.now() });
+            await restart(() => { if (mode === "click") expiredLocally(); });
+            if (mode === "click") native.relayStatus.mockResolvedValue({ ok: false, error: "down" });
+            __stubMarkAsDm(DM);
+            __stubSetSelectedChannel(DM);
+            FluxDispatcher.dispatch("MESSAGE_CREATE", { message: dmMsg("1", "hola que tal") });
+            stubMessages.set(DM, [dmMsg("2", "bonjour tout le monde")]);
+            FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: DM });
+            await settle();
+            expect(calls()).toHaveLength(0);
+            expect(render(dmMsg("1", "hola que tal"))).toBeNull();
+            expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(0);
+        });
+
+        it(`${mode}: a server channel switched off sends nothing and shows no click line`, async () => {
+            native.relayStatus.mockResolvedValue({ ok: true, plan: "trial", used: 0, cap: 300, trialEndsAt: Date.now() + 5 * DAY_MS, serverNow: Date.now() });
+            await restart(() => { if (mode === "click") expiredLocally(); });
+            await toggleChannelOptOut(CHANNEL);
+            FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
+            stubMessages.set(CHANNEL, [msg("2", "bonjour tout le monde")]);
+            FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+            await settle();
+            expect(calls()).toHaveLength(0);
+            expect(render(msg("1", "hola que tal"))).toBeNull();
+        });
+    }
+
+    it("click mode: pasting a code turns everything automatic with no labels or previews; removing it returns to the free plan", async () => {
+        await restart(() => expiredLocally());
+        expect(clickable(render(msg("1", "hola que tal")))?.label).toBe("≈ Translate");
+
+        settings.store.sublineCode = "SUBLINE-PAID";
+        answer({ google: { lang: "ar", text: "I want to walk", conf: 1 } });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("2", "ana bghit nmchi l dar daba") });
+        await settle();
+        const relay = calls("relay");
+        expect(relay.length).toBeGreaterThan(0);
+        expect(relay.every(c => c[1] === "SUBLINE-PAID" && payloadOf(c).mode === undefined)).toBe(true);
+        expect(render(msg("3", "hola que tal"))).toBeNull();   // no click line
+        setTranslation(key("4"), { lang: "ar", text: "I want to walk", via: "google", conf: 1 });
+        const out = text(render(msg("4", "ana bghit nmchi l dar daba")));
+        expect(out).not.toContain("rough");
+        expect(out).not.toContain("reads this as");
+        expect(__getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("5", "hola que tal"))!.label).not.toContain("Preview");
+
+        settings.store.sublineCode = "";
+        native.translateBatch.mockClear();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("6", "que pasa amigo") });
+        await settle();
+        expect(calls()).toHaveLength(0);
+        expect(clickable(render(msg("6", "que pasa amigo")))?.label).toBe("≈ Translate");
+        expect(text(render(msg("4", "ana bghit nmchi l dar daba")))).toContain("≈ rough");
     });
 });

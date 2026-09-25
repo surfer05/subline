@@ -54,13 +54,26 @@ export function noteServerNow(serverNow: unknown, localNow: number = Date.now())
 }
 
 /**
- * Record the relay's `trialEndsAt` (relay clock). Pass the relay's `now` from
- * the same response when there is one, so the offset is current.
+ * Whether the relay's `trialEndsAt` is only PROVISIONAL: the relay has never
+ * started a trial for this id (its first write has not happened, or its
+ * 90-day record lapsed), so it answers "now + 7 days", a date that moves
+ * forward on every call. Such a date can confirm that ✦ is on offer, but it
+ * can never extend a trial and never counts as a stated ending.
  */
-export function noteServerTrialEnd(endsAt: unknown, serverNow?: unknown, localNow: number = Date.now()): void {
+let serverProvisional = false;
+
+/**
+ * Record the relay's `trialEndsAt` (relay clock). Pass the relay's `now` from
+ * the same response when there is one, so the offset is current, and whether
+ * the relay marked the answer `trialProvisional`.
+ */
+export function noteServerTrialEnd(
+    endsAt: unknown, serverNow?: unknown, localNow: number = Date.now(), provisional = false
+): void {
     noteServerNow(serverNow, localNow);
     if (!sane(endsAt)) return;
     serverTrialEndsAt = endsAt - clockOffsetMs;
+    serverProvisional = provisional === true;
 }
 
 /** Has the relay said anything about this trial this session? */
@@ -68,15 +81,26 @@ export function relayHasSpoken(): boolean {
     return serverTrialEndsAt !== null;
 }
 
-/** The relay refused an automatic request with "trial ended": it is over now. */
-export function markServerTrialEnded(now: number = Date.now()): void {
-    serverTrialEndsAt = Math.min(serverTrialEndsAt ?? now, now);
-}
-
-/** The end of the trial on the LOCAL clock: the relay's word when it has given one, else the local start's. */
+/**
+ * The end of the trial on the LOCAL clock.
+ *
+ * THE EARLIER of the two clocks, never the later. The local start is set the
+ * first time a v0.1.6 build runs as a free install and this plugin never
+ * resets it, so its end is a hard ceiling: a relay record that was never
+ * written (status keeps saying "now + 7 days") or that lapsed after its 90-day
+ * TTL (a fresh trial on the relay's side) can never give this install a second
+ * week. The relay's end still wins when it is EARLIER (a wiped settings file
+ * restarted the local clock, but the relay remembers). A provisional relay
+ * answer is ignored whenever there is a local start. The relay's end is used
+ * alone only when there is no local start at all (`localStartedAt` <= 0).
+ */
 export function trialEndsAt(localStartedAt: number): number {
-    if (serverTrialEndsAt !== null) return serverTrialEndsAt;
-    return localStartedAt + TRIAL_MS;
+    const hasLocal = localStartedAt > 0;
+    const localEnd = localStartedAt + TRIAL_MS;
+    if (serverTrialEndsAt === null) return hasLocal ? localEnd : Date.now() + TRIAL_MS;
+    if (!hasLocal) return serverTrialEndsAt;
+    if (serverProvisional) return localEnd;
+    return Math.min(localEnd, serverTrialEndsAt);
 }
 
 /** Automatic (trial) or click-to-translate, for a FREE install. */
@@ -88,14 +112,16 @@ export function freeMode(localStartedAt: number, now: number = Date.now()): Free
 export const LOCAL_END_GRACE_MS = DAY_MS;
 
 /**
- * The end of the trial that is safe to ANNOUNCE, or null. Only an ending the
- * relay stated (its `trialEndsAt` is past, or it refused a batch as "trial
- * ended"). If the relay has never answered this session, the local clock may
- * stand in, but only a full day after its own end: a wrong "your trial
- * ended" is worse than a late one.
+ * The end of the trial that is safe to ANNOUNCE, or null. An ending the relay
+ * stated (a non-provisional `trialEndsAt` that is past, which includes a 402
+ * "trial ended" that carried one) is announced at once. Otherwise (the relay
+ * never answered, only answered provisionally, or still has a later end on
+ * record) the local clock may stand in, but only a full day after its own end:
+ * a wrong "your trial ended" is worse than a late one.
  */
 export function announceableTrialEnd(localStartedAt: number, now: number = Date.now()): number | null {
-    if (serverTrialEndsAt !== null) return now >= serverTrialEndsAt ? serverTrialEndsAt : null;
+    if (serverTrialEndsAt !== null && !serverProvisional && now >= serverTrialEndsAt) return serverTrialEndsAt;
+    if (localStartedAt <= 0) return null;
     const localEnd = localStartedAt + TRIAL_MS;
     return now >= localEnd + LOCAL_END_GRACE_MS ? localEnd : null;
 }
@@ -110,15 +136,16 @@ export function isNewEnding(end: number, announced: number): boolean {
 }
 
 /**
- * Has the relay itself confirmed a running trial this session?
+ * Has the relay itself confirmed a running trial this session, and is it
+ * still running by the effective end above?
  *
- * Automatic ✦ during the trial is gated on this, not on the local clock: the
- * relay is what pays for ✦ and what enforces the trial, so a client that only
- * THINKS it is in its trial (an old relay, or no answer yet) translates with
- * ≈ automatically and asks for no ✦ it would be refused.
+ * Automatic ✦ during the trial is gated on this, not on the local clock alone:
+ * the relay is what pays for ✦ and what enforces the trial, so a client that
+ * only THINKS it is in its trial (an old relay, or no answer yet) translates
+ * with ≈ automatically and asks for no ✦ it would be refused.
  */
-export function trialConfirmed(now: number = Date.now()): boolean {
-    return serverTrialEndsAt !== null && now < serverTrialEndsAt;
+export function trialConfirmed(localStartedAt: number, now: number = Date.now()): boolean {
+    return serverTrialEndsAt !== null && now < trialEndsAt(localStartedAt);
 }
 
 /** Whole days left in the trial, rounded up, never below 1 while it runs. */
@@ -196,5 +223,6 @@ export function previewDiffers(preview: string, googleText: string): boolean {
 /** Test-only: forget what the relay said. */
 export function __resetFreePlan(): void {
     serverTrialEndsAt = null;
+    serverProvisional = false;
     clockOffsetMs = 0;
 }

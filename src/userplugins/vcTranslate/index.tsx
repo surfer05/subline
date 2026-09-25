@@ -13,7 +13,7 @@ import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
 import { isConfidentlyTargetLanguage } from "./detectLang";
 import {
-    __resetFreePlan, announceableTrialEnd, freeMode, isNewEnding, markServerTrialEnded, noteServerNow,
+    __resetFreePlan, announceableTrialEnd, freeMode, isNewEnding, noteServerNow,
     noteServerTrialEnd, previewDiffers, previewText, PRICING_URL, trialConfirmed, trialEndedMessage
 } from "./freePlan";
 import {
@@ -526,6 +526,8 @@ let trialBearer: string | null = null;
  * pause that belonged to the free trial.
  */
 let trialPausedUntil = 0;
+/** How long the trial's ✦ pauses after a "trial ended" the relay did not back with a past end. */
+const TRIAL_UNCLEAR_PAUSE_MS = 5 * 60_000;
 /** The relay refused the trial credential outright (401/403) this session. */
 let trialRefused = false;
 /** Whether this session has already asked the relay about the free plan. */
@@ -561,7 +563,7 @@ function isClickMode(): boolean {
  * answer yet) still translates every message automatically, with ≈ alone.
  */
 function trialAutoActive(): boolean {
-    return trialBearer !== null && !trialRefused && isTasteInstall() && trialConfirmed();
+    return trialBearer !== null && !trialRefused && isTasteInstall() && trialConfirmed(localTrialStart());
 }
 
 /**
@@ -699,7 +701,7 @@ async function refreshTasteQuota(): Promise<void> {
             clearStatusRetry();
             const wasAuto = trialAutoActive();
             const wasClick = isClickMode();
-            noteServerTrialEnd(res.trialEndsAt, res.serverNow);
+            noteServerTrialEnd(res.trialEndsAt, res.serverNow, Date.now(), res.trialProvisional === true);
             if (res.plan === "trial") {
                 trialBearer = bearer;
                 tasteLog("the relay confirms the free trial: ✦ is automatic");
@@ -1636,11 +1638,20 @@ async function runTier(
                     // already on screen for these messages, and none of these
                     // is something the reader did or can fix.
                     if (/trial ended/i.test(res.error)) {
-                        // The relay's record says the seven days are over. It
-                        // is the authority, so the session follows it now.
-                        tasteLog("the relay says the free trial has ended");
-                        markServerTrialEnded();
-                        onFreePlanChanged();
+                        // Believed ONLY with a past trialEndsAt from the
+                        // relay (on its clock): telling a reader mid-trial that
+                        // their trial ended is the one thing this must never
+                        // do. A 402 without one just pauses ✦ for a while.
+                        const wasClick = isClickMode();
+                        noteServerTrialEnd(res.trialEndsAt, res.serverNow);
+                        if (typeof res.trialEndsAt === "number" && isClickMode()) {
+                            tasteLog("the relay says the free trial has ended");
+                            if (!wasClick) onFreePlanChanged();
+                            else rebuildBatcher();
+                        } else {
+                            tasteLog("the relay refused the trial's ✦ without a past end; pausing, ≈ keeps working");
+                            taste.onDailyLimit(TRIAL_UNCLEAR_PAUSE_MS);
+                        }
                     } else if (isDailyLimit(res.error) || res.retryAfterMs) {
                         tasteLog("the relay paused the trial's ✦ for now; ≈ keeps working");
                         taste.onDailyLimit(res.retryAfterMs);
@@ -2069,7 +2080,7 @@ const clickInFlight = new Set<string>();
  * purpose: a preview is not a translation, is never persisted, and must never
  * replace or be mistaken for the ≈ line it sits under.
  */
-const previews = new Map<string, { text: string; truncated: boolean }>();
+const previews = new Map<string, { text: string; truncated: boolean; same?: true }>();
 /** Messages a preview has already been asked for this session: one per message. */
 const previewAsked = new Set<string>();
 const MAX_PREVIEWS_KEPT = 200;
@@ -2215,8 +2226,16 @@ async function requestPreview(message: Message, text: string, googleText: string
     const preview = { text: cut.text, truncated: cut.truncated || r.truncated === true };
     // ✦ reads it the same way ≈ does: a preview would show the reader nothing
     // they cannot already read, so it is not shown.
+    // It still cost one of the three, so the reader is told what it found:
+    // "✦ reads this the same way." rather than nothing at all.
     if (googleText !== null && !previewDiffers(preview.text, googleText)) {
-        tasteLog(`${message.id}: ✦ agrees with ≈, no preview shown`);
+        tasteLog(`${message.id}: ✦ agrees with ≈`);
+        if (previews.size >= MAX_PREVIEWS_KEPT) {
+            const oldest = previews.keys().next();
+            if (!oldest.done) previews.delete(oldest.value);
+        }
+        previews.set(message.id, { text: "", truncated: false, same: true });
+        notifyForcedInFlight();
         return;
     }
     if (previews.size >= MAX_PREVIEWS_KEPT) {
@@ -3046,6 +3065,13 @@ function clickToTranslateLine(message: Message) {
 function previewLine(messageId: string) {
     const preview = previews.get(messageId);
     if (preview === undefined) return null;
+    if (preview.same) {
+        return (
+            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
+                ✦ reads this the same way.
+            </div>
+        );
+    }
     return (
         <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
             ✦ reads this as: {preview.text}{preview.truncated ? "…" : ""}{" "}
@@ -3363,8 +3389,10 @@ function forceQualityPopoverRender(message: Message) {
 
     if (taste && isClickMode()) {
         // After the trial ⚡ is a ✦ PREVIEW, from the same three a day as the
-        // preview under a rough ≈ line. Nothing to offer once one is shown.
-        if (previews.has(message.id)) return null;
+        // preview under a rough ≈ line. Nothing to offer once one has been
+        // asked for this message: asking again would spend another of the
+        // three for the same answer.
+        if (previews.has(message.id) || previewAsked.has(message.id)) return null;
         return {
             label: `Preview Subline ✦ (${tasteLabel()})`,
             icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
