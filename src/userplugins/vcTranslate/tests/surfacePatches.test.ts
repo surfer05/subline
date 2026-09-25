@@ -14,7 +14,7 @@ vi.hoisted(() => {
 
 import plugin from "../index";
 import { SURFACE_PATCHES } from "../surfaces/patches";
-import { BUNDLE_EXCERPTS } from "./fixtures/discordBundleExcerpts";
+import { BUNDLE_SITES } from "./fixtures/discordBundleExcerpts";
 
 /** Vencord's `\i` (an identifier), as its patcher expands it. */
 function canon(match: RegExp): RegExp {
@@ -24,22 +24,25 @@ function canon(match: RegExp): RegExp {
 }
 
 describe("surface patches against Discord's current public bundle", () => {
-    it("has an excerpt for every replacement", () => {
+    it("has the matched sites for every replacement", () => {
         const total = SURFACE_PATCHES.reduce((n, p) => n + p.replacement.length, 0);
-        expect(BUNDLE_EXCERPTS).toHaveLength(total);
+        expect(BUNDLE_SITES).toHaveLength(total);
+        // Minimal substrings only, never whole stretches of Discord's code.
+        for (const e of BUNDLE_SITES) for (const site of e.sites) expect(site.length).toBeLessThan(200);
     });
 
-    for (const ex of BUNDLE_EXCERPTS) {
+    for (const ex of BUNDLE_SITES) {
         const patch = SURFACE_PATCHES[ex.patch];
         const r = patch.replacement[ex.replacement];
-        it(`${patch.surface} [${ex.patch}.${ex.replacement}] matches exactly as checked (${ex.count}x in module ${ex.module})`, () => {
+        it(`${patch.surface} [${ex.patch}.${ex.replacement}] matches each checked site once (${ex.sites.length} in module ${ex.module})`, () => {
             const re = canon(r.match);
-            const all = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
-            expect([...ex.excerpt.matchAll(all)]).toHaveLength(ex.count);
-
-            // The replacement changes the code, and calls a method the plugin has.
-            const replaced = ex.excerpt.replace(re, r.replace.replaceAll("$self", "P"));
-            expect(replaced).not.toBe(ex.excerpt);
+            const once = new RegExp(re.source, re.flags.replace("g", "") + "g");
+            for (const site of ex.sites) {
+                expect([...site.matchAll(once)]).toHaveLength(1);
+                // The replacement changes the code, and calls a method the plugin has.
+                const replaced = site.replace(re, r.replace.replaceAll("$self", "P"));
+                expect(replaced).not.toBe(site);
+            }
             const called = [...r.replace.matchAll(/\$self\.(\w+)/g)].map(m => m[1]);
             for (const name of called) expect(typeof (plugin as any)[name], name).toBe("function");
         });

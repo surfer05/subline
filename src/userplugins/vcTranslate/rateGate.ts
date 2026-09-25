@@ -229,6 +229,20 @@ export function rateGateWaitMs(): number {
 }
 
 /**
+ * Take a token only if nobody is waiting for one AND more than `reserve`
+ * tokens are free, without ever queueing. For background work (surface
+ * translations) that must never delay a message batch: it takes what is
+ * idle and leaves at least `reserve` tokens for the next message batch, so a
+ * batch that arrives right after still goes out at once.
+ */
+export function tryAcquireIdleSlot(reserve = 1): boolean {
+    refill(Date.now());
+    if (waiters.length > 0 || tokens <= reserve) return false;
+    tokens--;
+    return true;
+}
+
+/**
  * Resolves immediately if a token is available, otherwise queues and
  * resolves once the bucket refills enough to reach the front of the queue.
  */

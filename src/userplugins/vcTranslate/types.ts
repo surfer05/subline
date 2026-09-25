@@ -113,6 +113,12 @@ export interface BatchRequest {
      * reactive quality flush is not being fired.
      */
     patientRetries?: boolean;
+    /**
+     * Google only: at most this many of the batch's texts in flight at once.
+     * Surface translations (profiles, embeds and more) send 1, so background
+     * text never bursts the free endpoint messages depend on.
+     */
+    maxConcurrency?: number;
     messages: {
         id: string;
         author: string;

@@ -14,6 +14,9 @@ const native = vi.hoisted(() => {
 import plugin, { __surfaceService, SURFACE_ACCESSORY_ID } from "../index";
 import settings from "../settings";
 import { clearStore, makeKey, setTranslation } from "../store";
+import { toggleChannel, toggleChannelOptOut } from "../channels";
+import { setCooldown } from "../cooldownStore";
+import { SURFACE_BUDGET_KEY, SURFACE_DAILY_BUDGET, utcDay } from "../surfaces/budget";
 import { SURFACE_CACHE_KEY } from "../surfaces/cache";
 import { __resetTaste } from "../taste";
 import * as DataStore from "./stubs/api-datastore";
@@ -21,7 +24,7 @@ import { accessories } from "./stubs/api-messageaccessories";
 import { __reset as __resetMessagePopover } from "./stubs/api-messagepopover";
 import { __resetSettings } from "./stubs/api-settings";
 import {
-    __resetWebpackCommon, __stubSetChannel, __stubSetSelectedChannel, PresenceStore, shownToasts, stubActivities, stubMessageById, stubProfiles
+    __resetWebpackCommon, __stubMarkAsDm, __stubSetChannel, __stubSetSelectedChannel, FluxDispatcher, PresenceStore, shownToasts, stubActivities, stubMessageById, stubProfiles
 } from "./stubs/webpack-common";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -91,11 +94,17 @@ const decorator = (userId: string) => deep((plugin as any).renderMemberListDecor
 const profile = (props: any) => deep((plugin as any).renderProfileSurface(props));
 const P = plugin as any;
 const bioLine = (props: any) => deep(P.renderBioLine(props));
-const mark = (kind: string, text: unknown) => deep(P.renderSurfaceMark(kind, text));
+const GUILD_CHANNEL = { id: "c1", guild_id: "g1" };
+/** Discord's own child, which a non-paid install must get back as the SAME value. */
+const ORIGINAL = { type: "discord-original", props: {}, children: [] };
+const thread = (title: unknown, channel: unknown = GUILD_CHANNEL) => deep(P.threadTitleChildren(ORIGINAL, title, channel));
+const stage = (topic: unknown, channel: unknown = GUILD_CHANNEL) => deep(P.stageTopicChildren(ORIGINAL, topic, channel));
+const forumTitle = (channel: unknown) => deep(P.forumTitleChildren(ORIGINAL, channel));
 const tagsMark = (channel: any) => deep(P.renderForumTagsMark(channel));
-const onboarding = (prompt: any) => deep(P.renderOnboardingPrompt(prompt));
-/** One of Discord's parser functions, wrapped as the patch wraps it. */
-const parsed = (parser: string, text: string) => deep(P.wrapParser(parser, (t: string) => [`<${t}>`])(text, true, {}));
+const onboarding = (prompt: any) => deep(P.onboardingHeading(ORIGINAL, prompt));
+/** One of Discord's parser functions, wrapped as the patch wraps it, in a server channel by default. */
+const parsed = (parser: string, text: string, state: unknown = { channelId: "c1" }) =>
+    deep(P.wrapParser(parser, (t: string) => [`<${t}>`])(text, true, state));
 
 const embedMessage = (id = "m1") => ({
     id, channel_id: "c1", type: 0, content: "",
@@ -162,11 +171,16 @@ describe("free and trial installs see no change", () => {
             decorator("u1"),
             profile({ user: { id: "u1" } }),
             bioLine({ userId: "u1", userBio: "Ich liebe Pizza" }),
-            mark("thread-title", "Wie repariere ich mein Fahrrad?"),
-            mark("stage-topic", "Wir reden über Bücher"),
-            tagsMark({ parent_id: "f1", appliedTags: ["t1"] }),
-            onboarding({ title: "Was spielst du gern?", options: [] })
+            tagsMark({ guild_id: "g1", parent_id: "f1", appliedTags: ["t1"] })
         ];
+    }
+
+    /** Patches that wrap Discord's own child hand back that very child. */
+    function childrenUntouched() {
+        expect(P.threadTitleChildren(ORIGINAL, "Wie repariere ich mein Fahrrad?", GUILD_CHANNEL)).toBe(ORIGINAL);
+        expect(P.stageTopicChildren(ORIGINAL, "Wir reden über Bücher", GUILD_CHANNEL)).toBe(ORIGINAL);
+        expect(P.forumTitleChildren(ORIGINAL, { ...GUILD_CHANNEL, name: "Hilfe beim Kochen" })).toBe(ORIGINAL);
+        expect(P.onboardingHeading(ORIGINAL, { title: "Was spielst du gern?", options: [] })).toBe(ORIGINAL);
     }
 
     /** Discord's own parser output, which must come back untouched. */
@@ -177,8 +191,9 @@ describe("free and trial installs see no change", () => {
     }
 
     it("a free install renders nothing extra and sends zero surface requests", async () => {
-        expect(renderEverything()).toEqual([null, null, null, null, null, null, null, null]);
+        expect(renderEverything()).toEqual([null, null, null, null, null]);
         parsersUntouched();
+        childrenUntouched();
         await settle();
         expect(surfaceCalls()).toEqual([]);
     });
@@ -187,8 +202,9 @@ describe("free and trial installs see no change", () => {
         native.relayStatus.mockResolvedValue({ ok: true, plan: "trial", used: 0, cap: 300, trialEndsAt: Date.now() + 5 * DAY_MS });
         await restart();
         await settle(100);
-        expect(renderEverything()).toEqual([null, null, null, null, null, null, null, null]);
+        expect(renderEverything()).toEqual([null, null, null, null, null]);
         parsersUntouched();
+        childrenUntouched();
         await settle();
         expect(surfaceCalls()).toEqual([]);
     });
@@ -196,8 +212,9 @@ describe("free and trial installs see no change", () => {
     it("a paid install with the setting off sends zero surface requests", async () => {
         paid();
         settings.store.translateSurfaces = false;
-        expect(renderEverything()).toEqual([null, null, null, null, null, null, null, null]);
+        expect(renderEverything()).toEqual([null, null, null, null, null]);
         parsersUntouched();
+        childrenUntouched();
         await settle();
         expect(surfaceCalls()).toEqual([]);
     });
@@ -277,7 +294,7 @@ describe("a paid install", () => {
         const tight = parsed("topic-truncated", topic);
         expect(tight[1]).toEqual([`<${topic}>`]);
         expect(tight[0].type).toBe("span");
-        expect(findTitle(tight[0])).toBe(`Topic (✦ de): sharp: ${topic}`);
+        expect(findTitle(tight[0])).toBe(`Description (✦ de): sharp: ${topic}`);
 
         const voice = parsed("voice-status", "Wir spielen gerade Minecraft");
         await settle();
@@ -287,24 +304,32 @@ describe("a paid install", () => {
         for (const p of ["topic", "rule", "guidelines", "event"]) {
             const text = `Bitte seid nett zueinander, Regel ${p}`;
             parsed(p, text);
-            await settle();
+            // Past the surfaces' four-a-minute relay cap.
+            await settle(61_000);
             const out = parsed(p, text);
             expect(out[0]).toEqual([`<${text}>`]);
             expect(text2(out[1])).toContain(`✦ de · sharp: ${text}`);
         }
     });
 
-    it("thread titles, stage topics and forum tags get a tight ✦ with the translation in its tooltip", async () => {
-        mark("thread-title", "Wie repariere ich mein Fahrrad?");
-        mark("stage-topic", "Wir reden über Bücher");
+    it("thread titles, stage topics and forum titles get a ✦ beside Discord's own element, which is untouched", async () => {
+        thread("Wie repariere ich mein Fahrrad?");
+        stage("Wir reden über Bücher");
+        forumTitle({ ...GUILD_CHANNEL, name: "Hilfe beim Kochen gesucht" });
         await settle();
-        expect(findTitle(mark("thread-title", "Wie repariere ich mein Fahrrad?"))).toBe("Title (✦ de): sharp: Wie repariere ich mein Fahrrad?");
-        expect(findTitle(mark("stage-topic", "Wir reden über Bücher"))).toBe("Stage topic (✦ de): sharp: Wir reden über Bücher");
+        const t = thread("Wie repariere ich mein Fahrrad?");
+        expect(t[1]).toEqual(ORIGINAL);
+        expect(findTitle(t[0])).toBe("Title (✦ de): sharp: Wie repariere ich mein Fahrrad?");
+        expect(findTitle(stage("Wir reden über Bücher")[0])).toBe("Stage topic (✦ de): sharp: Wir reden über Bücher");
+        expect(findTitle(forumTitle({ ...GUILD_CHANNEL, name: "Hilfe beim Kochen gesucht" })[0])).toBe("Title (✦ de): sharp: Hilfe beim Kochen gesucht");
+    });
 
+    it("forum tags get a tight ✦ at the end of the tag row", async () => {
         __stubSetChannel("f1", { id: "f1", availableTags: [{ id: "t1", name: "Hilfe gesucht" }, { id: "t2", name: "Gelöst" }] });
-        tagsMark({ parent_id: "f1", appliedTags: ["t1", "t2"] });
+        const post = { guild_id: "g1", parent_id: "f1", appliedTags: ["t1", "t2"] };
+        tagsMark(post);
         await settle();
-        const tags = findTitle(tagsMark({ parent_id: "f1", appliedTags: ["t1", "t2"] }));
+        const tags = findTitle(tagsMark(post));
         expect(tags).toContain("Tag (✦ de): sharp: Hilfe gesucht");
         expect(tags).toContain("Tag (✦ de): sharp: Gelöst");
     });
@@ -324,7 +349,9 @@ describe("a paid install", () => {
         const prompt = { title: "Was spielst du gern?", options: [{ title: "Rollenspiele", description: "Lange Abende mit Freunden" }] };
         onboarding(prompt);
         await settle();
-        const out = text(onboarding(prompt));
+        const both = onboarding(prompt);
+        expect(both[0]).toEqual(ORIGINAL);
+        const out = text(both[1]);
         expect(out).toContain("Question · ✦ de · sharp: Was spielst du gern?");
         expect(out).toContain("Option · ✦ de · sharp: Rollenspiele");
         expect(out).toContain("Option · ✦ de · sharp: Lange Abende mit Freunden");
@@ -363,10 +390,11 @@ describe("a paid install", () => {
         expect(profile(undefined)).toBeNull();
         expect(profile({ user: null })).toBeNull();
         expect(accessory(null)).toBeNull();
-        expect(mark("thread-title", undefined)).toBeNull();
+        expect(P.threadTitleChildren(ORIGINAL, undefined, GUILD_CHANNEL)).toBe(ORIGINAL);
+        expect(P.stageTopicChildren(ORIGINAL, "Wir reden", undefined)).toBe(ORIGINAL);
         expect(tagsMark(undefined)).toBeNull();
         expect(bioLine(undefined)).toBeNull();
-        expect(onboarding(42)).toBeNull();
+        expect(deep(P.onboardingHeading(ORIGINAL, 42))[1]).toBeNull();
         expect(parsed("topic", 42 as any)).toEqual(["<42>"]);
     });
 
@@ -385,5 +413,164 @@ describe("a paid install", () => {
         accessory(embedMessage());
         await settle();
         expect(surfaceCalls().length).toBeGreaterThan(first);
+    });
+});
+
+describe("privacy: surfaces follow the same channel rules as messages", () => {
+    beforeEach(() => paid());
+
+    it("a DM or group DM sends nothing: no embed, poll, forward or reply line", async () => {
+        __stubMarkAsDm("d1");
+        __stubMarkAsDm("gdm1");
+        const inDm = { ...embedMessage("dm1"), channel_id: "d1" };
+        const inGroup = {
+            ...embedMessage("gdm1m"), channel_id: "gdm1",
+            poll: { question: { text: "Pizza oder Pasta heute?" }, answers: [] },
+            messageSnapshots: [{ message: { content: "Schau dir das an" } }]
+        };
+        expect(accessory(inDm)).toBeNull();
+        expect(accessory(inGroup)).toBeNull();
+        await settle();
+        expect(surfaceCalls()).toEqual([]);
+    });
+
+    it("a server channel the reader switched off sends nothing", async () => {
+        await toggleChannelOptOut("c1");
+        expect(accessory(embedMessage())).toBeNull();
+        await settle();
+        expect(surfaceCalls()).toEqual([]);
+    });
+
+    it("a DM the reader switched on is translated like its messages", async () => {
+        __stubMarkAsDm("d2");
+        await toggleChannel("d2");
+        accessory({ ...embedMessage("dm2"), channel_id: "d2" });
+        await settle();
+        expect(surfaceCalls("relay")).toHaveLength(1);
+    });
+
+    it("a reply quoting a DM message is not translated from a server channel", async () => {
+        __stubMarkAsDm("d1");
+        stubMessageById.set("d1:q9", { id: "q9", content: "Das ist privat, bitte nicht weitersagen" });
+        const reply = { ...embedMessage("m9"), embeds: [], type: 19, messageReference: { channel_id: "d1", message_id: "q9" } };
+        expect(accessory(reply)).toBeNull();
+        await settle();
+        expect(surfaceCalls()).toEqual([]);
+    });
+
+    it("channel-level text in a DM (topic, voice status, titles) is never translated", async () => {
+        __stubMarkAsDm("d1");
+        for (const p of ["topic", "topic-truncated", "voice-status", "guidelines", "event"]) {
+            expect(parsed(p, "Hier wird geplaudert", { channelId: "d1" })).toEqual(["<Hier wird geplaudert>"]);
+        }
+        const dm = { id: "d1" };
+        expect(P.threadTitleChildren(ORIGINAL, "Wie repariere ich mein Fahrrad?", dm)).toBe(ORIGINAL);
+        expect(P.stageTopicChildren(ORIGINAL, "Wir reden über Bücher", dm)).toBe(ORIGINAL);
+        expect(P.forumTitleChildren(ORIGINAL, { ...dm, name: "Hilfe beim Kochen" })).toBe(ORIGINAL);
+        expect(tagsMark({ ...dm, parent_id: "f1", appliedTags: ["t1"] })).toBeNull();
+        await settle();
+        expect(surfaceCalls()).toEqual([]);
+    });
+});
+
+describe("budget and priority: messages always come first", () => {
+    beforeEach(() => paid());
+
+    /** Record when each call was made, so per-minute rates can be checked. */
+    function timedAnswers() {
+        const times: Array<{ at: number; engine: string; surface: boolean; ids: string[]; }> = [];
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) => {
+            const ids = JSON.parse(payload).messages.map((m: any) => m.id);
+            times.push({ at: Date.now(), engine, surface: ids[0] === "s0", ids });
+            return {
+                ok: true,
+                results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "de", text: `${engine}: ${m.text}`, skip: false, ...(engine === "google" ? { conf: 0.99 } : {}) }))
+            };
+        });
+        return times;
+    }
+
+    it("scrolling a 1,000-row member list never sends more than 4 surface relay requests a minute, or any Google request", async () => {
+        const times = timedAnswers();
+        for (let i = 0; i < 1000; i++) stubActivities.set(`u${i}`, [{ type: 4, state: `Heute bin ich wirklich müde, Nummer ${i}` }]);
+        // Twenty rows come into view every two seconds for 200 seconds.
+        for (let step = 0; step < 50; step++) {
+            for (let i = step * 20; i < step * 20 + 20; i++) decorator(`u${i}`);
+            await settle(2_000);
+        }
+        await settle(120_000);
+        const relay = times.filter(t => t.surface && t.engine === "relay").map(t => t.at);
+        expect(relay.length).toBeGreaterThan(0);
+        for (const at of relay) expect(relay.filter(x => x >= at && x < at + 60_000).length).toBeLessThanOrEqual(4);
+        // Tight marks are ✦ only: no ≈ fan-out to Google.
+        expect(times.filter(t => t.surface && t.engine === "google")).toEqual([]);
+    });
+
+    it("a message batch that arrives mid-scroll goes out on time, without waiting behind surfaces", async () => {
+        const times = timedAnswers();
+        __stubSetSelectedChannel("c1");
+        for (let i = 0; i < 300; i++) stubActivities.set(`u${i}`, [{ type: 4, state: `Heute bin ich wirklich müde, Nummer ${i}` }]);
+        // Enough queued statuses for the surfaces to use their whole minute's
+        // allowance (4 requests) back to back, right before the message.
+        for (let i = 0; i < 150; i++) decorator(`u${i}`);
+        await settle(7_000);
+        expect(times.filter(t => t.surface && t.engine === "relay").length).toBeGreaterThanOrEqual(3);
+        const sentAt = Date.now();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: { id: "live1", channel_id: "c1", content: "hola, ¿qué tal estáis todos?", author: { id: "u2", username: "ana" } } });
+        for (let i = 150; i < 300; i++) decorator(`u${i}`);
+        await settle(5_000);
+        const message = times.find(t => t.engine === "relay" && t.ids.includes("live1"));
+        expect(message).toBeDefined();
+        // The quality debounce (1.5s) and nothing more: no wait at the gate.
+        expect(message!.at - sentAt).toBeLessThan(2_000);
+    });
+
+    it("once 200 surface texts are spent today, surfaces stop asking for ✦ but messages still get it", async () => {
+        const times = timedAnswers();
+        await DataStore.set(SURFACE_BUDGET_KEY, { day: utcDay(Date.now()), used: SURFACE_DAILY_BUDGET });
+        await restart(paid);
+        stubActivities.set("u1", [{ type: 4, state: "Bin gleich zurück, muss kochen" }]);
+        decorator("u1");
+        accessory(embedMessage());
+        await settle();
+        expect(times.filter(t => t.surface && t.engine === "relay")).toEqual([]);
+        // Roomy lines fall back to ≈; tight marks show nothing.
+        expect(text(accessory(embedMessage()))).toContain("≈ de · google: Neue Pizzeria in der Stadt");
+        expect(decorator("u1")).toBeNull();
+
+        __stubSetSelectedChannel("c1");
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: { id: "live2", channel_id: "c1", content: "hola, ¿qué tal estáis todos?", author: { id: "u2", username: "ana" } } });
+        await settle();
+        expect(times.some(t => t.engine === "relay" && t.ids.includes("live2"))).toBe(true);
+    });
+
+    it("the budget counts texts: 10 left means at most 10 more texts go to the relay today", async () => {
+        const times = timedAnswers();
+        await DataStore.set(SURFACE_BUDGET_KEY, { day: utcDay(Date.now()), used: SURFACE_DAILY_BUDGET - 10 });
+        await restart(paid);
+        for (let i = 0; i < 50; i++) stubActivities.set(`u${i}`, [{ type: 4, state: `Heute bin ich wirklich müde, Nummer ${i}` }]);
+        for (let i = 0; i < 50; i++) decorator(`u${i}`);
+        await settle(300_000);
+        const texts = times.filter(t => t.surface && t.engine === "relay").reduce((n, t) => n + t.ids.length, 0);
+        expect(texts).toBe(10);
+    });
+
+    it("surfaces pause entirely while Google or the relay is cooling down", async () => {
+        const times = timedAnswers();
+        setCooldown("google", Date.now() + 10 * 60_000);
+        accessory(embedMessage());
+        stubActivities.set("u1", [{ type: 4, state: "Bin gleich zurück, muss kochen" }]);
+        decorator("u1");
+        await settle();
+        expect(times.filter(t => t.surface)).toEqual([]);
+    });
+
+    it("roomy lines ask Google one text at a time", async () => {
+        const times = timedAnswers();
+        accessory(embedMessage());
+        await settle();
+        const google = native.translateBatch.mock.calls.find(c => c[0] === "google" && JSON.parse(c[2]).messages[0]?.id === "s0");
+        expect(JSON.parse(google![2]).maxConcurrency).toBe(1);
+        void times;
     });
 });

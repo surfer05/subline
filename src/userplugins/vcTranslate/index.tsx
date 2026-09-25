@@ -23,7 +23,7 @@ import {
 } from "./freePlan";
 import {
     acquireSlot, loadRateGateTuning, rateGateAvailable, rateGateSettings, rateGateWaitMs,
-    resetRateGate, tuneRateGateToObservedLimit, tuneRateGateToProviderBudget
+    resetRateGate, tryAcquireIdleSlot, tuneRateGateToObservedLimit, tuneRateGateToProviderBudget
 } from "./rateGate";
 import { isRomanizedGuess } from "./romanized";
 import settings from "./settings";
@@ -48,6 +48,7 @@ import {
 } from "./types";
 import { ENGINE_RANK, isRealTranslation, mayReplace } from "./upgrade";
 import { createUpdateWatch, UPDATE_CHECK_INTERVAL_MS, type UpdateWatch } from "./updateNotice";
+import { SurfaceBudget } from "./surfaces/budget";
 import { SurfaceCache } from "./surfaces/cache";
 import {
     appliedTagNames, customStatusText, messageSurfaceTexts, onboardingPromptTexts, replyReference,
@@ -3654,6 +3655,7 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
 
 let surfaceCache: SurfaceCache | null = null;
 let surfaceService: SurfaceService | null = null;
+let surfaceBudget: SurfaceBudget | null = null;
 
 /** The message-accessory id the surfaces register. */
 export const SURFACE_ACCESSORY_ID = "VcTranslateSurfaces";
@@ -3684,15 +3686,20 @@ function surfaceDebug(message: string): void {
  */
 async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promise<SurfaceOutcome> {
     const engine: EngineId = tier === "fast" ? "google" : "relay";
-    if (!isPaidSurfaceUser() || isCoolingDown(engine)) return null;
+    // Surfaces pause entirely while EITHER engine is cooling down: whatever
+    // capacity is left then belongs to the conversation.
+    if (!isPaidSurfaceUser() || isCoolingDown("google") || isCoolingDown("relay")) return null;
     if (engine === "relay") {
-        await acquireSlot();
-        if (!isPaidSurfaceUser()) return null;
+        // MESSAGES FIRST. A surface request takes a rate-gate slot only when
+        // no message batch is queued or waiting, never queues for one, and
+        // leaves a slot free for the next message batch.
+        if (inFlightQuality.size > 0 || !tryAcquireIdleSlot(1)) return null;
     }
     const req: BatchRequest = {
         messages: texts.map((text, i) => ({ id: `s${i}`, author: "", text })),
         context: [],
-        targetLang: settings.store.targetLang
+        targetLang: settings.store.targetLang,
+        ...(engine === "google" ? { maxConcurrency: 1 } : {})
     };
     let res: Awaited<ReturnType<typeof Native.translateBatch>>;
     try {
@@ -3738,12 +3745,17 @@ function startSurfaces(): SurfaceService {
         schedule: (fn, ms) => setTimeout(fn, ms),
         cancel: handle => clearTimeout(handle as ReturnType<typeof setTimeout>)
     });
+    surfaceBudget = new SurfaceBudget(
+        { get: key => DataStore.get(key), set: (key, value) => DataStore.set(key, value) },
+        () => Date.now()
+    );
     surfaceService = new SurfaceService({
         isPaid: isPaidSurfaceUser,
         targetLang: () => settings.store.targetLang,
         locallySkipped: text => shouldSkip(text, false) || isConfidentlyTargetLanguage(text, settings.store.targetLang),
         translate: translateSurfaceBatch,
         cache: surfaceCache,
+        budget: surfaceBudget,
         now: () => Date.now(),
         schedule: (fn, ms) => setTimeout(fn, ms),
         cancel: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
@@ -3766,12 +3778,17 @@ export function __surfaceService(): SurfaceService | null {
 function SurfaceAccessoryImpl({ message }: { message: Message; }) {
     if (!isPaidSurfaceUser() || message == null) return null;
     const channelId = (message as any).channel_id as string;
+    // THE SAME RULE AS MESSAGES. A DM, a group DM, or a channel the reader
+    // switched off sends nothing, embeds and polls included. A DM the reader
+    // opted in is translated like its messages are.
+    if (typeof channelId !== "string" || !channelActive(channelId)) return null;
     const texts: SurfaceText[] = messageSurfaceTexts(message)
         .map(t => ({ ...t, text: readableContent(t.text, channelId) }));
 
     let storedReply: any = null;
     const ref = replyReference(message);
-    if (ref !== null) {
+    // A quoted message from another channel follows that channel's rule.
+    if (ref !== null && channelActive(ref.channelId)) {
         const quoted = (MessageStore as any).getMessage?.(ref.channelId, ref.messageId);
         const content = typeof quoted?.content === "string" ? quoted.content : "";
         if (content.trim() !== "") {
@@ -3847,26 +3864,56 @@ function BioLineImpl(props: any) {
 }
 const BioLine = safe("bio line", BioLineImpl, surfaceDebug);
 
-/** What each wrapped Discord parser translates, and whether it has room for a line. */
-const PARSER_SURFACES: Record<string, { kind: SurfaceKind; label: string; tight: boolean; }> = {
-    "topic": { kind: "topic", label: "Topic", tight: false },
-    "topic-truncated": { kind: "topic", label: "Topic", tight: true },
-    "voice-status": { kind: "voice-status", label: "Voice status", tight: true },
-    "rule": { kind: "rule", label: "Rule", tight: false },
-    "guidelines": { kind: "guidelines", label: "Guidelines", tight: false },
-    "event": { kind: "event", label: "Event", tight: false }
+/**
+ * Is this a server (guild) channel? Channel-level surfaces (topics, voice
+ * status, thread and forum titles, tags, stage topics, event and rules text)
+ * are only ever translated there: NEVER in a DM or group DM, which have no
+ * guild_id.
+ */
+function isGuildChannel(channel: unknown): boolean {
+    const guildId = (channel as any)?.guild_id;
+    return typeof guildId === "string" && guildId !== "";
+}
+
+function isGuildChannelId(channelId: unknown): boolean {
+    return typeof channelId === "string" && isGuildChannel(ChannelStore.getChannel(channelId));
+}
+
+/**
+ * What each wrapped Discord parser translates, and whether it has room for a
+ * line. `parseTopic` also renders a voice channel's description, so the label
+ * is the neutral "Description", not "Topic". `guildOnly: false` is for
+ * membership rules, which only exist in a server and may be rendered with no
+ * channel id at all.
+ */
+const PARSER_SURFACES: Record<string, { kind: SurfaceKind; label: string; tight: boolean; guildOnly: boolean; }> = {
+    "topic": { kind: "topic", label: "Description", tight: false, guildOnly: true },
+    "topic-truncated": { kind: "topic", label: "Description", tight: true, guildOnly: true },
+    "voice-status": { kind: "voice-status", label: "Voice status", tight: true, guildOnly: true },
+    "rule": { kind: "rule", label: "Rule", tight: false, guildOnly: false },
+    "guidelines": { kind: "guidelines", label: "Guidelines", tight: false, guildOnly: true },
+    "event": { kind: "event", label: "Event", tight: false, guildOnly: true }
 };
+
+/** Discord's parser state says this text belongs to a server. */
+function parserStateIsGuild(state: unknown): boolean {
+    const s = state as { guildId?: unknown; channelId?: unknown } | null | undefined;
+    if (typeof s?.guildId === "string" && s.guildId !== "") return true;
+    return isGuildChannelId(s?.channelId);
+}
 
 /**
  * What a wrapped Discord parser returns: its own output untouched, plus, for
- * a paid install and a foreign text, a small line after it or a tight ✦
- * before it. Anything unexpected returns the output exactly as Discord made it.
+ * a paid install and a foreign text in a server, a small line after it or a
+ * tight ✦ before it. Anything else returns Discord's output exactly as made.
  */
-export function decorateParsed(parser: string, source: unknown, out: unknown): unknown {
+export function decorateParsed(parser: string, args: unknown[], out: unknown): unknown {
     try {
+        const source = args[0];
         if (!isPaidSurfaceUser() || typeof source !== "string" || source.trim() === "") return out;
         const spec = PARSER_SURFACES[parser];
         if (spec === undefined) return out;
+        if (spec.guildOnly && !parserStateIsGuild(args[2])) return out;
         const texts: SurfaceText[] = [{ kind: spec.kind, label: spec.label, text: source }];
         return spec.tight
             ? [<SurfaceHint key="subline-surface" texts={texts} before />, out]
@@ -3884,11 +3931,11 @@ function wrapParser(parser: string, fn: unknown): unknown {
     if (typeof fn !== "function") return fn;
     const original = fn as (...args: unknown[]) => unknown;
     return function (this: unknown, ...args: unknown[]) {
-        return decorateParsed(parser, args[0], original.apply(this, args));
+        return decorateParsed(parser, args, original.apply(this, args));
     };
 }
 
-/** A tight ✦ for one text (a thread title, a stage topic), placed before it. */
+/** A tight ✦ for one text (a thread title, a stage topic). */
 function SurfaceMarkImpl({ kind, text }: { kind: SurfaceKind; text: unknown; }) {
     if (!isPaidSurfaceUser() || typeof text !== "string" || text.trim() === "") return null;
     const label = kind === "stage-topic" ? "Stage topic" : kind === "thread-title" ? "Title" : "Text";
@@ -3896,9 +3943,26 @@ function SurfaceMarkImpl({ kind, text }: { kind: SurfaceKind; text: unknown; }) 
 }
 const SurfaceMark = safe("surface mark", SurfaceMarkImpl, surfaceDebug);
 
+/**
+ * THE ORIGINAL CHILD, UNTOUCHED, unless this is a paid install in a server
+ * channel. Every patch that sits inside Discord's own element goes through
+ * this, so for everyone else the element, its aria-label and its tooltip
+ * are exactly Discord's. When it does apply, the mark sits BESIDE Discord's
+ * element (never inside it), so Discord's own label and tooltip still read
+ * the original text.
+ */
+function withLeadingMark<T>(original: T, kind: SurfaceKind, text: unknown, channel: unknown): T | unknown[] {
+    try {
+        if (!isPaidSurfaceUser() || !isGuildChannel(channel) || typeof text !== "string" || text.trim() === "") return original;
+        return [<SurfaceMark key="subline-surface" kind={kind} text={text} />, original];
+    } catch {
+        return original;
+    }
+}
+
 /** A tight ✦ at the end of a forum post's tag row, for its tags' names. */
 function ForumTagsMarkImpl({ channel }: { channel: any; }) {
-    if (!isPaidSurfaceUser() || channel == null) return null;
+    if (!isPaidSurfaceUser() || !isGuildChannel(channel)) return null;
     const parent = channel.parent_id ? ChannelStore.getChannel(channel.parent_id) : null;
     const names = appliedTagNames(channel, parent);
     if (names.length === 0) return null;
@@ -3938,11 +4002,27 @@ export default definePlugin({
      */
     patches: SURFACE_PATCHES.map(({ find, replacement }) => ({ find, replacement })),
 
-    renderProfileSurface: (props: any) => <ProfileHint {...(props ?? {})} />,
-    renderBioLine: (props: any) => <BioLine {...(props ?? {})} />,
-    renderSurfaceMark: (kind: SurfaceKind, text: unknown) => <SurfaceMark kind={kind} text={text} />,
-    renderForumTagsMark: (channel: unknown) => <ForumTagsMark channel={channel} />,
-    renderOnboardingPrompt: (prompt: unknown) => <OnboardingLines prompt={prompt} />,
+    // Every method below is called from a patch inside Discord's own code.
+    // For anyone who is not a paid install each returns exactly what Discord
+    // would have had there: null where the patch appends a child, and the
+    // original child where it wraps one.
+    renderProfileSurface: (props: any) => isPaidSurfaceUser() ? <ProfileHint {...(props ?? {})} /> : null,
+    renderBioLine: (props: any) => isPaidSurfaceUser() ? <BioLine {...(props ?? {})} /> : null,
+    renderForumTagsMark: (channel: unknown) => isPaidSurfaceUser() ? <ForumTagsMark channel={channel} /> : null,
+    stageTopicChildren: (original: unknown, topic: unknown, channel: unknown) =>
+        withLeadingMark(original, "stage-topic", topic, channel),
+    threadTitleChildren: (original: unknown, title: unknown, thread: unknown) =>
+        withLeadingMark(original, "thread-title", title, thread),
+    forumTitleChildren: (original: unknown, channel: any) =>
+        withLeadingMark(original, "thread-title", channel?.name, channel),
+    onboardingHeading: (heading: unknown, prompt: unknown) => {
+        try {
+            if (!isPaidSurfaceUser()) return heading;
+            return [heading, <OnboardingLines key="subline-surface" prompt={prompt} />];
+        } catch {
+            return heading;
+        }
+    },
     wrapParser,
 
     // Declarative — unlike the force-quality popover above, this is the ONLY
@@ -4006,6 +4086,7 @@ export default definePlugin({
         startSurfaces();
         addMessageAccessory(SURFACE_ACCESSORY_ID, props => <SurfaceAccessory message={props.message} />);
         void surfaceCache?.load();
+        void surfaceBudget?.load();
 
         // Registered here (and removed in stop()) rather than left as a
         // static side effect of the module loading: the plugin can be
@@ -4148,6 +4229,7 @@ export default definePlugin({
         surfaceCache?.clear();
         surfaceService = null;
         surfaceCache = null;
+        surfaceBudget = null;
         setSurfaceService(null);
         removeMessagePopoverButton(FORCE_QUALITY_POPOVER_ID);
         // Stop the update watch so a stopped plugin leaves no interval armed to

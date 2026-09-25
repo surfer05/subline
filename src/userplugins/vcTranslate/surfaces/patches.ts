@@ -8,9 +8,10 @@
  * FAIL SAFE BY CONSTRUCTION. No patch is grouped, so each replacement stands
  * alone: if Discord moves one piece of code, Vencord logs one "had no effect"
  * warning for that replacement and every other surface keeps working. Every
- * inserted call is a `$self` method that returns the original value (or
- * nothing) when the install is not paid, when the input is not what it
- * expects, or when anything throws.
+ * inserted call is a `$self` method that returns Discord's own value
+ * UNCHANGED (the same child, or null where a child is appended) when the
+ * install is not paid, when the text is not in a server, when the input is
+ * not what it expects, or when anything throws.
  *
  * Plain data, so tests and the bundle check can import it without Discord.
  */
@@ -79,12 +80,14 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
         find: "__invalid_threadMainContent",
         replacement: [
             {
-                match: /(renderSubtitle=\(\)=>\{let (\i)=this\.props\.stageInstance\?\.topic;return null==\2\?null:\(0,\i\.jsx\)\(\i\.\i,\{children:)\2\}/,
-                replace: "$1[$self.renderSurfaceMark(\"stage-topic\",$2),$2]}"
+                // Wraps Discord's own subtitle element; it and its children
+                // are untouched for everyone but a paid install.
+                match: /(renderSubtitle=\(\)=>\{let (\i)=this\.props\.stageInstance\?\.topic;return null==\2\?null:)(\(0,\i\.jsx\)\(\i\.\i,\{children:\2\}\))/,
+                replace: "$1$self.stageTopicChildren($3,$2,this.props.channel)"
             },
             {
-                match: /(__invalid_threadMainContent\),children:\[\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-sm\/medium",color:"none",className:\i\.\i,children:\(0,\i\.jsx\)\(\i\.\i,\{"aria-hidden":!0,children:)(\i)\}/,
-                replace: "$1[$self.renderSurfaceMark(\"thread-title\",arguments[0]?.thread?.name),$2]}"
+                match: /(__invalid_threadMainContent\),children:\[\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-sm\/medium",color:"none",className:\i\.\i,children:)(\(0,\i\.jsx\)\(\i\.\i,\{"aria-hidden":!0,children:(\i)\}\))/,
+                replace: "$1$self.threadTitleChildren($2,$3,arguments[0]?.thread)"
             }
         ]
     },
@@ -93,8 +96,8 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
         source: "written against the current bundle (the forum post card)",
         find: "postTitleRef:",
         replacement: [{
-            match: /(?<=\("span",\{ref:\i,children:\[\i)(?=,\i&&\(0,\i\.jsx\)\("span")/,
-            replace: ",$self.renderSurfaceMark(\"thread-title\",arguments[0]?.channel?.name)"
+            match: /(?<=\("span",\{ref:\i,children:\[)(\i)(?=,\i&&\(0,\i\.jsx\)\("span")/,
+            replace: "$self.forumTitleChildren($1,arguments[0]?.channel)"
         }]
     },
     {
@@ -120,8 +123,8 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
         source: "written against the current bundle (the onboarding flow)",
         find: "gotoNextPrompt:",
         replacement: [{
-            match: /(variant:"heading-xl\/semibold",color:"text-strong",id:\i,children:(\i)\.title\}\))/g,
-            replace: "$1,$self.renderOnboardingPrompt($2)"
+            match: /(\(0,\i\.jsx\)\(\i\.\i,\{className:\i\.\i,variant:"heading-xl\/semibold",color:"text-strong",id:\i,children:(\i)\.title\}\))/g,
+            replace: "$self.onboardingHeading($1,$2)"
         }]
     }
 ];

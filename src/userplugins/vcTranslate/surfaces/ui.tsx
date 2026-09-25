@@ -3,10 +3,13 @@
  *
  * NEVER REPLACES THE ORIGINAL. Every component here only ADDS: a small line
  * under the original where there is room, or a tiny ✦ with a hover tooltip
- * where there is not (lists, rows, the chat bar). The tight form is inline and
- * one character tall, so no list row changes height.
+ * where there is not (list rows, titles, tags, the channel header). The tight
+ * form is inline and one character tall, so no list row changes height.
  *
- * ≈ FIRST, THEN ✦, as under messages. A ≈ line Google itself was unsure of
+ * TIGHT MARKS ARE ✦ ONLY. They never ask Google, so a long list costs no ≈
+ * fan-out, and they show nothing until ✦ has the text.
+ *
+ * LINES: ≈ FIRST, THEN ✦, as under messages. A ≈ line Google itself was unsure of
  * (the same confidence and romanization rules the message subtitle uses) is
  * not shown at all: a paid reader waits the moment for ✦ instead of reading
  * "≈ rough".
@@ -115,22 +118,24 @@ export function hintTitle(texts: SurfaceText[]): string | null {
     if (service === null) return null;
     const parts: string[] = [];
     for (const t of texts) {
-        const shown = displayFor(service.want(t.text), t.text);
+        // Tight marks are ✦ only: never a ≈ line, never a Google request.
+        const entry = service.want(t.text, { tight: true });
+        const shown = entry?.quality ? displayFor({ at: entry.at, quality: entry.quality }, t.text) : null;
         if (shown !== null) parts.push(`${t.label} (${shown.glyph} ${shown.lang}): ${shown.text}`);
     }
     return parts.length === 0 ? null : parts.join("\n\n");
 }
 
 /**
- * Tight: a tiny ✦ (or ≈ until ✦ arrives) with the translation in its hover
- * tooltip. Inline, one character, so a list row keeps its height.
+ * Tight: a tiny ✦ with the translation in its hover tooltip, once ✦ has it.
+ * Inline, one character, so a list row keeps its height.
  */
 export function SurfaceHint({ texts, before }: { texts: SurfaceText[]; before?: boolean; }) {
     useSurfaceUpdates();
     try {
         const title = Array.isArray(texts) ? hintTitle(texts) : null;
         if (title === null) return null;
-        const glyph = title.includes("(✦") ? "✦" : "≈";
+        const glyph = "✦";
         const style = before ? { ...MARK_STYLE, marginLeft: 0, marginRight: "4px" } : MARK_STYLE;
         return (
             <span style={style} title={title} aria-label={title} data-subline-surface="hint">

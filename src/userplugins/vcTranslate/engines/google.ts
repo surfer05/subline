@@ -171,7 +171,10 @@ export async function translateWithGoogle(
     // bursts wholesale - observed: channel-switching re-ran catch-up and every
     // message re-deferred, while single messages in live traffic got through.
     // Slower catch-up is translations; fast catch-up was a repeated no-op.
-    const concurrency = req.patientRetries === true ? 2 : CONCURRENCY;
+    const standard = req.patientRetries === true ? 2 : CONCURRENCY;
+    const concurrency = typeof req.maxConcurrency === "number" && req.maxConcurrency >= 1
+        ? Math.min(standard, Math.floor(req.maxConcurrency))
+        : standard;
     const results: Result[] = [];
     // Kept so a request that was refused OUTRIGHT — every message, no
     // exceptions — can still be rethrown. That is the shape of a real block,

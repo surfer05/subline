@@ -45,6 +45,14 @@ export interface SurfaceDeps {
     schedule(fn: () => void, ms: number): unknown;
     cancel(handle: unknown): void;
     debug?(message: string): void;
+    /**
+     * The surfaces' own daily ✦ allowance (see budget.ts). When it is spent,
+     * nothing more goes to the relay today: roomy lines fall back to ≈, tight
+     * marks show nothing new. Absent means unlimited (tests of other rules).
+     */
+    budget?: { remaining(): number; spend(texts: number): void; };
+    /** At most this many relay requests per minute for surfaces (default 4). */
+    maxQualityPerMinute?: number;
     fastDebounceMs?: number;
     qualityDebounceMs?: number;
     maxBatch?: number;
@@ -57,6 +65,16 @@ export const SURFACE_QUALITY_DEBOUNCE_MS = 1_500;
 export const SURFACE_MAX_BATCH = 25;
 export const SURFACE_FAIL_RETRY_MS = 10 * 60_000;
 export const SURFACE_NOT_NOW_RETRY_MS = 60_000;
+export const SURFACE_MAX_QUALITY_PER_MINUTE = 4;
+const MINUTE_MS = 60_000;
+
+export interface WantOptions {
+    /**
+     * A tight mark (a tooltip on a list row, a title, a tag). Tight marks use
+     * ✦ only: Google is never asked, so a long list costs no ≈ fan-out.
+     */
+    tight?: boolean;
+}
 
 const TIERS: SurfaceTier[] = ["fast", "quality"];
 
@@ -69,6 +87,8 @@ export class SurfaceService {
     private generation = 0;
     /** Requests actually sent, per tier. For tests and debug logging. */
     readonly sent: Record<SurfaceTier, number> = { fast: 0, quality: 0 };
+    /** When each recent surface relay request left, for the per-minute cap. */
+    private qualitySends: number[] = [];
 
     constructor(private readonly deps: SurfaceDeps) { }
 
@@ -76,7 +96,7 @@ export class SurfaceService {
      * What to show for `text` right now, and queue whatever is still missing.
      * `null` means show nothing: not paid, nothing foreign, or nothing yet.
      */
-    want(text: string | null | undefined): SurfaceEntry | null {
+    want(text: string | null | undefined, options: WantOptions = {}): SurfaceEntry | null {
         if (typeof text !== "string" || !this.deps.isPaid()) return null;
         const norm = normalizeSurfaceText(text);
         if (norm === "" || this.deps.locallySkipped(norm)) return null;
@@ -84,9 +104,13 @@ export class SurfaceService {
         const entry = this.deps.cache.get(key);
         if (entry?.skip) return null;
         if (entry?.quality) return entry;
-        if (!entry?.fast) this.queue("fast", key, norm);
-        this.queue("quality", key, norm);
+        if (!options.tight && !entry?.fast) this.queue("fast", key, norm);
+        if (this.budgetLeft() > 0) this.queue("quality", key, norm);
         return entry ?? null;
+    }
+
+    private budgetLeft(): number {
+        return this.deps.budget ? this.deps.budget.remaining() : Number.POSITIVE_INFINITY;
     }
 
     subscribe(listener: () => void): () => void {
@@ -105,6 +129,7 @@ export class SurfaceService {
             this.retryAt[tier].clear();
         }
         this.listeners.clear();
+        this.qualitySends = [];
     }
 
     private queue(tier: SurfaceTier, key: string, text: string): void {
@@ -115,11 +140,11 @@ export class SurfaceService {
         this.arm(tier);
     }
 
-    private arm(tier: SurfaceTier): void {
+    private arm(tier: SurfaceTier, atLeastMs = 0): void {
         if (this.timers[tier] !== null) return;
-        const ms = tier === "fast"
+        const ms = Math.max(atLeastMs, tier === "fast"
             ? this.deps.fastDebounceMs ?? SURFACE_FAST_DEBOUNCE_MS
-            : this.deps.qualityDebounceMs ?? SURFACE_QUALITY_DEBOUNCE_MS;
+            : this.deps.qualityDebounceMs ?? SURFACE_QUALITY_DEBOUNCE_MS);
         this.timers[tier] = this.deps.schedule(() => {
             this.timers[tier] = null;
             void this.flush(tier);
@@ -134,7 +159,26 @@ export class SurfaceService {
             queue.clear();
             return;
         }
-        const max = this.deps.maxBatch ?? SURFACE_MAX_BATCH;
+        let max = this.deps.maxBatch ?? SURFACE_MAX_BATCH;
+        if (tier === "quality") {
+            const left = this.budgetLeft();
+            if (left <= 0) {
+                // Today's surface ✦ is spent: nothing more goes to the relay.
+                queue.clear();
+                return;
+            }
+            max = Math.min(max, left);
+            // At most `maxQualityPerMinute` surface requests a minute. A full
+            // window waits for its oldest request to age out.
+            const now = this.deps.now();
+            this.qualitySends = this.qualitySends.filter(t => now - t < MINUTE_MS);
+            const cap = this.deps.maxQualityPerMinute ?? SURFACE_MAX_QUALITY_PER_MINUTE;
+            if (this.qualitySends.length >= cap) {
+                this.arm(tier, this.qualitySends[0] + MINUTE_MS - now);
+                return;
+            }
+            this.qualitySends.push(now);
+        }
         const batch = [...queue.entries()].slice(0, max);
         for (const [key] of batch) {
             queue.delete(key);
@@ -154,6 +198,7 @@ export class SurfaceService {
             outcome = null;
         }
         if (generation !== this.generation) return;
+        if (tier === "quality" && outcome !== null) this.deps.budget?.spend(texts.length);
 
         const now = this.deps.now();
         batch.forEach(([key], i) => {
