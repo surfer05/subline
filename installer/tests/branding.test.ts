@@ -90,17 +90,22 @@ describe.skipIf(!built)("the built bundle's settings section", () => {
         }
     });
 
-    it("is smaller than the bundle that shipped all seven panes", () => {
-        // 241,429 bytes on 2026-08-24, before the panes came out; 218,570
-        // after. A generous ceiling — this is here to catch the panes coming
-        // BACK, which would add tens of kilobytes, not to police build size.
-        // Raised 235,000 -> 240,000 for v0.1.6: the free-plan plugin code
-        // (trial, click-to-translate, previews) measured 235,362 bytes. The
-        // panes coming back (~23 KB) would still land far above this.
-        // Raised 240,000 -> 255,000 for v0.1.7: translating profiles, embeds
-        // and more (the surfaces/ module) measured 247,895 bytes. The panes
-        // coming back (~23 KB) would still land above this.
-        expect(statSync(RENDERER).size).toBeLessThan(255_000);
+    it("carries no code from the removed Themes, Cloud and Patch Helper panes, and stays a sane size", () => {
+        // What this used to check by SIZE, checked by CONTENT: a ceiling had
+        // to be raised every time the plugin itself grew, which says nothing
+        // about the panes. These strings live only inside those panes' own
+        // components, so any one of them in the bundle means a pane is back.
+        const paneMarkers = {
+            themes: ["Enter Theme Links...", "Edit QuickCSS"],
+            cloud: ["Enable Cloud Integrations", "Reset Cloud Data"],
+            patchHelper: ["Insert the substring before the match", "Compiled successfully"]
+        };
+        for (const [pane, markers] of Object.entries(paneMarkers)) {
+            for (const marker of markers) expect(bundle, `${pane}: ${marker}`).not.toContain(marker);
+        }
+        // A sanity bound only (about 4x today's bundle): catches a build that
+        // pulled in something enormous, not ordinary growth of the plugin.
+        expect(statSync(RENDERER).size).toBeLessThan(1_000_000);
     });
 });
 
