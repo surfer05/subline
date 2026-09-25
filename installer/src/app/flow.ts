@@ -520,6 +520,11 @@ export class InstallFlow {
                     // Skipping is a real answer, not a failure. A free install is
                     // fully automatic (≈ and ✦) for its first 7 days, then
                     // translates on click until somebody adds a code.
+                    // NOTHING IS WRITTEN HERE. Skipping never touches Vencord's
+                    // settings, so it can never clear a code saved earlier. If
+                    // one is saved (this screen is normally not shown then),
+                    // the rest of the run treats the user as a code-holder.
+                    if (this.ports.hasSublineCode()) this.codeConfigured = true;
                     this.ports.log.info("code.skipped");
                     return this.permissionStep();
                 }
@@ -936,6 +941,26 @@ export class InstallFlow {
         }
         this.chosenLanguage = saved.value.code;
         this.ports.log.info("language.saved", { lang: saved.value.code, created: saved.value.created });
+        return this.codeStepUnlessSaved();
+    }
+
+    /**
+     * The code screen, unless a code is already saved.
+     *
+     * A SAVED CODE IS NEVER ASKED FOR AGAIN. Field evidence (0.1.6): a Discord
+     * update removed the patch, so the next run was a fresh install as far as
+     * the flow could tell (no marker, so not `updating`), and it walked the user
+     * from the language screen to an empty "Your Subline code" field although
+     * Vencord's settings still held their code. The flow only consulted the
+     * saved code on the update path. Changing a code later stays where it has
+     * always been: the plugin's settings inside Discord.
+     */
+    private codeStepUnlessSaved(): FlowState | Promise<FlowState> {
+        if (this.ports.hasSublineCode()) {
+            this.ports.log.info("flow.code-already-saved", { reason: "code in saved settings" });
+            this.codeConfigured = true;
+            return this.permissionStep();
+        }
         return this.codeStep();
     }
 

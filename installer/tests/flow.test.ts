@@ -1103,6 +1103,38 @@ describe("the optional Subline-code step", () => {
         expect(state.step).toBe("done");
     });
 
+    // FIELD EVIDENCE (0.1.6): a Discord update removed the patch, so the next
+    // run looked like a fresh install (no marker), and it went language →
+    // an empty "Your Subline code" field although settings.json still held
+    // the code and engine "relay". A saved code is never asked for again.
+    it("is skipped on a fresh-looking install when a code is already saved", async () => {
+        const h = harness({ hasSublineCode: true });
+        const seen: string[] = [];
+        h.flow.onChange = st => seen.push(st.step);
+        await toDetection(h);
+        const next = await h.flow.send({ type: "set-language", code: "tr" });
+        expect(seen).not.toContain("choose-code");
+        expect(next.step).not.toBe("choose-code");
+        expect(h.codeWrites).toEqual([]);
+        expect(h.patchCalls.length).toBeGreaterThan(0);
+        // The last screen speaks to a code-holder.
+        expect(next.step).toBe("done");
+        expect(next.detail).toContain("✦");
+        expect(h.logged.some(l => l.event === "flow.code-already-saved")).toBe(true);
+    });
+
+    it("Continue without a code never writes, so it can never clear a saved code", async () => {
+        const h = harness({ hasSublineCode: false });
+        await toCodeStep(h);
+        // A code appears in the saved settings while the screen is open
+        // (e.g. pasted in Discord). Skipping must leave it alone.
+        h.ports.hasSublineCode = () => true;
+        const state = await h.flow.send({ type: "skip-code" });
+        expect(h.codeWrites).toEqual([]);
+        expect(state.step).toBe("done");
+        expect(state.detail).toContain("✦");
+    });
+
     it("skipping is a normal answer, not a failure", async () => {
         const h = harness();
         await toCodeStep(h);
