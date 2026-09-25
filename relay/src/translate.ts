@@ -213,17 +213,22 @@ function parseRows(content: string, req: BatchRequest): Result[] {
     try {
         parsed = JSON.parse(unfenced);
     } catch {
-        // First a raw line break inside a string (escapeRawControlsInStrings),
-        // then the preamble/trailer salvage, over the repaired text.
-        const repaired = escapeRawControlsInStrings(unfenced);
+        // ORDER MATTERS. First the preamble/trailer salvage, exactly as before.
+        // Only then the raw-control repair, and only over the SLICED JSON:
+        // run over prose, one stray double quote before the JSON flips the
+        // in-string state and the repair would break a reply the salvage
+        // alone parses (measured: prose with an odd quote, then pretty-printed
+        // JSON).
+        const sliced = sliceJson(unfenced);
         let done = false;
-        if (repaired !== unfenced) {
-            try { parsed = JSON.parse(repaired); done = true; } catch { /* salvage below */ }
+        if (sliced !== null) {
+            try { parsed = JSON.parse(sliced); done = true; } catch { /* repair below */ }
         }
         if (!done) {
-            const salvaged = sliceJson(repaired);
-            if (salvaged === null) throw { status: 502 } as TranslateError;
-            try { parsed = JSON.parse(salvaged); }
+            const target = sliced ?? unfenced;
+            const repaired = escapeRawControlsInStrings(target);
+            if (repaired === target) throw { status: 502 } as TranslateError;
+            try { parsed = JSON.parse(repaired); }
             catch { throw { status: 502 } as TranslateError; }
         }
     }

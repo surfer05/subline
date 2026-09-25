@@ -45,6 +45,15 @@ describe("buildPrompt — drift guard", () => {
             { id: "1", lang: "es", text: "hi", skip: false }
         ]);
     });
+    it("prose with an odd quote before pretty-printed JSON still parses (salvage before repair)", async () => {
+        const pretty = JSON.stringify({ translations: [{ id: "0", lang: "de", text: "hi", skip: false }, { id: "1", lang: "es", text: "yo", skip: false }] }, null, 2);
+        const raw = `Sure, here is the "translation:\n${pretty}\nDone.`;
+        vi.stubGlobal("fetch", vi.fn(async () => groqBody(raw)));
+        expect(await translate(req(["a", "b"]), groq("m"))).toEqual([
+            { id: "0", lang: "de", text: "hi", skip: false },
+            { id: "1", lang: "es", text: "yo", skip: false }
+        ]);
+    });
     it("repairs a raw newline in a reply wrapped in prose (then the salvage)", async () => {
         const raw = 'Here you go:\n{"translations":[{"id":"0","lang":"de","skip":false,"text":"x\ny"}]}\nThanks';
         vi.stubGlobal("fetch", vi.fn(async () => groqBody(raw)));
