@@ -22,14 +22,15 @@
  * unpacked app, builds into `release/unpacked.noindex` instead, which Spotlight
  * skips.)
  *
- * It removes DIRECTORIES only, and only directly inside `outDir`, and only when
+ * It removes DIRECTORIES only (a symlink to one is removed as a link, never
+ * followed), and only directly inside `outDir`, and only when
  * at least one distributable exists: a release that produced nothing to ship
  * keeps its unpacked output for diagnosis.
  *
  * Imports only Node builtins: loaded by raw Node from the release script.
  */
 
-import { readdirSync, rmSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /** The files a release ships. Everything else in `release/` that is a directory is scratch. */
@@ -44,7 +45,7 @@ export interface UnpackedRemoval {
 
 export function removeUnpackedOutputs(outDir: string): UnpackedRemoval {
     const entries = readdirSync(outDir);
-    const shippable = entries.filter(name => DISTRIBUTABLE.test(name) && statSync(join(outDir, name)).isFile());
+    const shippable = entries.filter(name => DISTRIBUTABLE.test(name) && lstatSync(join(outDir, name)).isFile());
     if (shippable.length === 0) {
         return { removed: [], skipped: "no .dmg, .zip or .exe was produced, so the unpacked output is kept for diagnosis" };
     }
@@ -52,9 +53,28 @@ export function removeUnpackedOutputs(outDir: string): UnpackedRemoval {
     const removed: string[] = [];
     for (const name of entries) {
         const path = join(outDir, name);
-        if (!statSync(path).isDirectory()) continue;
+        // lstat, not stat: a symlink to a directory is removed as a LINK. Its
+        // target lives somewhere else and is never followed or emptied.
+        const entry = lstatSync(path);
+        if (entry.isSymbolicLink()) {
+            if (isDirectoryTarget(path)) {
+                rmSync(path, { force: true });
+                removed.push(name);
+            }
+            continue;
+        }
+        if (!entry.isDirectory()) continue;
         rmSync(path, { recursive: true, force: true });
         removed.push(name);
     }
     return { removed, skipped: null };
+}
+
+/** Whether a symlink points at a directory (false when dangling). */
+function isDirectoryTarget(path: string): boolean {
+    try {
+        return statSync(path).isDirectory();
+    } catch {
+        return false;
+    }
 }

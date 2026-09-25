@@ -23,7 +23,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -734,7 +734,8 @@ describe("Windows packaging", () => {
         expect(winOf({ SUBLINE_WIN_SIGN: "1" }).cscLink).toBeUndefined();
         // Signing stays opt-in for the Mac too: the Windows switch is its own.
         expect(winOf({ SUBLINE_SIGN: "1" }).cscLink).toBe("");
-    });
+        // Four cold Node processes: allow for a loaded machine (one run took 5.5s).
+    }, 30_000);
 
     it("the CRC hook refuses a certificate rather than shipping unsigned while the log says signing", async () => {
         const { default: fix } = await import("../packaging/fixNsisCrc.cjs");
@@ -817,6 +818,22 @@ describe("removing the unpacked app copies", () => {
             "SHA256SUMS", "Subline-0.1.7-arm64.dmg", "Subline-0.1.7-x64.dmg", "Subline-Setup-0.1.7.exe",
             "subline-mod-abc.zip", "subline-release.json"
         ]);
+    });
+
+    it("removes a symlinked directory as a link only, never its target", () => {
+        tree(true);
+        const elsewhere = mkdtempSync(join(tmpdir(), "subline-link-target-"));
+        try {
+            mkdirSync(join(elsewhere, "Subline.app"));
+            writeFileSync(join(elsewhere, "Subline.app", "keep"), "keep");
+            symlinkSync(elsewhere, join(out, "linked"));
+            const result = removeUnpackedOutputs(out);
+            expect(result.removed).toContain("linked");
+            expect(existsSync(join(out, "linked"))).toBe(false);
+            expect(readFileSync(join(elsewhere, "Subline.app", "keep"), "utf8")).toBe("keep");
+        } finally {
+            rmSync(elsewhere, { recursive: true, force: true });
+        }
     });
 
     it("keeps the unpacked output when there is nothing to ship", () => {
