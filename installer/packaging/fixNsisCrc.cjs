@@ -27,6 +27,17 @@ const zlib = require("node:zlib");
 const NSIS_SIG = Buffer.from("EFBEADDE4E756C6C736F6674496E7374", "hex");
 
 exports.default = async function fixNsisCrc(configuration) {
+    // THIS HOOK IS NOT A SIGNER, and it replaces electron-builder's signtool
+    // call. If electron-builder resolved a certificate, somebody meant to sign
+    // and this would quietly ship the file unsigned. Refuse instead. By
+    // default electron-builder.js sets win.cscLink to "", so no certificate is
+    // ever resolved (see WINDOWS_SIGNING_REQUESTED there).
+    if (configuration.cscInfo != null) {
+        throw new Error(
+            "A Windows code-signing certificate was found, but packaging/fixNsisCrc.cjs replaces signtool and "
+            + "signs nothing. Wire signtool into the win.sign hook before signing Windows builds."
+        );
+    }
     const path = configuration.path;
     if (!path || !path.toLowerCase().endsWith(".exe")) return;
 

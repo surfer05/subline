@@ -128,7 +128,8 @@ read from the environment at the moment it is used.
 | 6 | `electron-builder --win` (with `--win`) — unsigned, deliberately | |
 | 7 | `ditto` the mod bundle into `subline-mod-<buildId>.zip` | |
 | 8 | Notarize and staple each `.dmg` | **yes** |
-| 9 | Write `subline-release.json` and `SHA256SUMS`, print the publish command | |
+| 9 | Write `subline-release.json` and `SHA256SUMS` | |
+| 10 | Delete the unpacked `release/mac*/Subline.app` and `release/win-unpacked/` copies (Spotlight indexes them), then print the publish command | |
 
 Flags: `--win`, `--dry-run` (everything but the two signing steps), `--skip-tests`,
 `--allow-dirty` (never for a real release — the build id is a digest of the
@@ -312,17 +313,23 @@ suspicious to a heuristic scanner.
 
 ### Adding a certificate later
 
-A config change, not a rewrite. Set two environment variables and rebuild:
+The Windows build is unsigned on purpose, and explicitly: `electron-builder.js`
+sets an empty `win.cscLink` unless `SUBLINE_WIN_SIGN=1`, so no certificate is
+ever looked up. Without that, electron-builder would fall back to `CSC_LINK`,
+which a Mac release uses for the Developer ID `.p12`. The build log line
+"signing with signtool.exe" is electron-builder's own and prints either way.
+With no certificate it signs nothing.
 
-```sh
-export CSC_LINK=/path/to/cert.pfx      # or its base64
-export CSC_KEY_PASSWORD=…
-pnpm dist:win
-```
+Signing Windows takes three things:
 
-electron-builder signs with no edit to `electron-builder.js` at all. For a
-hardware token (EV certificates are token-bound), add `certificateSubjectName`
-and `signingHashAlgorithms` to the `win` block.
+1. `SUBLINE_WIN_SIGN=1`, plus `WIN_CSC_LINK` (path or base64 of the `.pfx`) and
+   `CSC_KEY_PASSWORD`.
+2. A `win.sign` hook that calls signtool. Today `win.sign` is
+   `packaging/fixNsisCrc.cjs`, which only repairs the uninstaller CRC and
+   replaces electron-builder's signer. It refuses to run when a certificate is
+   present, so a half-configured build fails instead of shipping unsigned.
+3. For a hardware token (EV certificates are token-bound),
+   `certificateSubjectName` and `signingHashAlgorithms` in the `win` block.
 
 ---
 

@@ -73,6 +73,7 @@ import {
     renderReleaseManifest
 } from "../packaging/manifest.ts";
 import { isNotarizationRequested, notarizeAndStaple, NOTARIZE_FLAG_VAR } from "../packaging/notarize.ts";
+import { removeUnpackedOutputs } from "../packaging/unpacked.ts";
 
 /**
  * The env var `electron-builder.js` reads to decide whether to sign at all.
@@ -271,6 +272,17 @@ async function main() {
         .filter(name => /\.(dmg|zip|exe)$/.test(name))
         .map(name => digestFile(join(OUT_DIR, name)));
     writeFileSync(join(OUT_DIR, CHECKSUMS_ASSET_NAME), renderChecksums(distributables), "utf8");
+
+    /* -------------------------------------------------------------------- */
+    heading("Remove the unpacked app copies");
+    // electron-builder leaves a full, runnable Subline.app in release/mac*/
+    // (and win-unpacked/). Spotlight indexes them, and a user opened one by
+    // mistake. Nothing after this point needs them: the app inside each DMG
+    // was notarized and stapled during packaging, and every step above reads
+    // only the .dmg/.zip/.exe files. See packaging/unpacked.ts.
+    const unpacked = removeUnpackedOutputs(OUT_DIR);
+    if (unpacked.skipped !== null) say(`   kept: ${unpacked.skipped}`);
+    for (const name of unpacked.removed) say(`   removed ${join("release", name)}/`);
 
     /* -------------------------------------------------------------------- */
     heading("Ready to publish — this script does not");

@@ -58,6 +58,23 @@ const SIGNING_REQUESTED = process.env.SUBLINE_SIGN === "1" || process.env.SUBLIN
 if (!SIGNING_REQUESTED) process.env.CSC_IDENTITY_AUTO_DISCOVERY = "false";
 
 /**
+ * WINDOWS IS UNSIGNED, EXPLICITLY, unless `SUBLINE_WIN_SIGN` is set.
+ *
+ * electron-builder resolves a Windows certificate from `WIN_CSC_LINK`, and
+ * falls back to `CSC_LINK`, the variable a Mac release uses for the Developer
+ * ID .p12. So a release run with `CSC_LINK` set would hand Apple's certificate
+ * to the Windows signer. Today nothing would actually be signed (the `win.sign`
+ * hook below replaces signtool, see packaging/fixNsisCrc.cjs), but the build
+ * log would say "signing" with that file, and a later change to the hook would
+ * sign with it for real. An empty `cscLink` on the Windows block wins over both
+ * variables, so no certificate is ever looked up. The line
+ * "signing with signtool.exe" in a build log is electron-builder's own, printed
+ * before it decides anything; with no certificate it signs nothing.
+ */
+const WINDOWS_SIGNING_REQUESTED =
+    process.env.SUBLINE_WIN_SIGN === "1" || process.env.SUBLINE_WIN_SIGN === "true";
+
+/**
  * @type {import("electron-builder").Configuration}
  */
 const config = {
@@ -245,12 +262,15 @@ const config = {
          * warning. "Click More info → Run anyway" is a fine thing to ask a
          * friend; "add a Defender exclusion" is not.
          *
-         * ADDING A CERTIFICATE IS A CONFIG CHANGE, NOT A REWRITE. Setting
-         * `CSC_LINK` (path or base64 of the .pfx) and `CSC_KEY_PASSWORD` in the
-         * environment makes electron-builder sign with no edit to this file at
-         * all. For a hardware token, add `certificateSubjectName` and
-         * `signingHashAlgorithms` to this block.
+         * ADDING A CERTIFICATE IS NOT JUST AN ENV VAR. It needs
+         * `SUBLINE_WIN_SIGN=1` plus `WIN_CSC_LINK`/`CSC_KEY_PASSWORD`, AND a
+         * `win.sign` hook that calls signtool: the CRC hook above REPLACES
+         * electron-builder's signer, so on its own it signs nothing. That hook
+         * refuses to run when handed a certificate, so a half-configured
+         * signing build fails instead of shipping unsigned while the log says
+         * "signing". See WINDOWS_SIGNING_REQUESTED at the top of this file.
          */
+        ...(WINDOWS_SIGNING_REQUESTED ? {} : { cscLink: "" }),
         target: [{ target: "nsis", arch: ["x64"] }]
     },
 

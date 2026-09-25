@@ -23,7 +23,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,6 +40,7 @@ import {
 import {
     isNotarizationRequested, notarizeAndStaple, notarytoolArgs, readNotarizeAuth
 } from "../packaging/notarize.js";
+import { removeUnpackedOutputs } from "../packaging/unpacked.js";
 import { inspectBundleDir } from "../src/bundle/spec.js";
 import {
     RELEASE_FEED_ENABLED, RELEASE_FEED_URL, RELEASE_MANIFEST_ASSET_NAME as FEED_ASSET_NAME,
@@ -715,6 +716,34 @@ describe("Windows packaging", () => {
         expect(config.win.certificatePassword).toBeUndefined();
     });
 
+    // The v0.1.6 build log said "signing with signtool.exe". That line is
+    // electron-builder's own, printed before it decides anything. No
+    // certificate may ever be resolved for Windows by accident: CSC_LINK is
+    // the Mac release's Developer ID .p12, and electron-builder falls back to
+    // it for Windows. An empty win.cscLink beats both variables.
+    it("never resolves a Windows certificate unless SUBLINE_WIN_SIGN is set, even with CSC_LINK set", () => {
+        const winOf = (env: Record<string, string>) => JSON.parse(execFileSync(
+            process.execPath,
+            ["--input-type=module", "-e",
+             `const c = (await import(${JSON.stringify(join(INSTALLER_DIR, "electron-builder.js"))})).default;`
+             + "process.stdout.write(JSON.stringify(c.win));"],
+            { env: { PATH: process.env.PATH ?? "", ...env }, encoding: "utf8" }
+        ));
+        expect(winOf({}).cscLink).toBe("");
+        expect(winOf({ CSC_LINK: "/tmp/developer-id.p12", WIN_CSC_LINK: "/tmp/x.pfx" }).cscLink).toBe("");
+        expect(winOf({ SUBLINE_WIN_SIGN: "1" }).cscLink).toBeUndefined();
+        // Signing stays opt-in for the Mac too: the Windows switch is its own.
+        expect(winOf({ SUBLINE_SIGN: "1" }).cscLink).toBe("");
+    });
+
+    it("the CRC hook refuses a certificate rather than shipping unsigned while the log says signing", async () => {
+        const { default: fix } = await import("../packaging/fixNsisCrc.cjs");
+        await expect(fix({ path: "/nowhere/Subline-Setup.exe", cscInfo: { file: "/tmp/cert.pfx", password: "" } }))
+            .rejects.toThrow(/signs nothing/);
+        // No certificate: the ordinary path, which never throws for a missing file type.
+        await expect(fix({ path: "/nowhere/readme.txt", cscInfo: null })).resolves.toBeUndefined();
+    });
+
     it("never asks for elevation — Discord is per-user on Windows (§5)", () => {
         const { nsis } = config;
         expect(nsis.perMachine).toBe(false);
@@ -741,9 +770,61 @@ describe("the release script", () => {
         expect(source).not.toMatch(/sh\("gh"/);
     });
 
+    it("deletes the unpacked app copies at the end, and pack:dir builds where Spotlight does not look", () => {
+        const source = readFileSync(join(INSTALLER_DIR, "scripts", "release.mjs"), "utf8");
+        expect(source).toContain("removeUnpackedOutputs(OUT_DIR)");
+        // After the checksums (the last step that reads release/) and before the publish list.
+        const removal = source.indexOf("removeUnpackedOutputs(OUT_DIR)");
+        expect(removal).toBeGreaterThan(source.indexOf("renderChecksums(distributables)"));
+        expect(removal).toBeGreaterThan(source.indexOf("notarizeAndStaple({"));
+        expect(removal).toBeLessThan(source.indexOf("Ready to publish"));
+        expect(packageJson().scripts["pack:dir"]).toContain("-c.directories.output=release/unpacked.noindex");
+    });
+
     it("refuses to build a release that would not be notarized", () => {
         const source = readFileSync(join(INSTALLER_DIR, "scripts", "release.mjs"), "utf8");
         expect(source).toContain("isNotarizationRequested");
+    });
+});
+
+describe("removing the unpacked app copies", () => {
+    // v0.1.6: full Subline.app copies stayed in release/mac*/, Spotlight
+    // indexed them, and a user opened one by mistake.
+    let out: string;
+    beforeEach(() => { out = mkdtempSync(join(tmpdir(), "subline-unpacked-")); });
+    afterEach(() => { rmSync(out, { recursive: true, force: true }); });
+
+    function tree(withDistributables: boolean) {
+        for (const dir of ["mac/Subline.app/Contents", "mac-arm64/Subline.app/Contents", "win-unpacked/resources"]) {
+            mkdirSync(join(out, dir), { recursive: true });
+            writeFileSync(join(out, dir, "x"), "x");
+        }
+        writeFileSync(join(out, "SHA256SUMS"), "sums");
+        writeFileSync(join(out, "subline-release.json"), "{}");
+        if (withDistributables) {
+            for (const f of ["Subline-0.1.7-arm64.dmg", "Subline-0.1.7-x64.dmg", "Subline-Setup-0.1.7.exe", "subline-mod-abc.zip"]) {
+                writeFileSync(join(out, f), f);
+            }
+        }
+    }
+
+    it("removes every unpacked directory and keeps every file", () => {
+        tree(true);
+        const result = removeUnpackedOutputs(out);
+        expect(result.skipped).toBeNull();
+        expect(result.removed.sort()).toEqual(["mac", "mac-arm64", "win-unpacked"]);
+        expect(readdirSync(out).sort()).toEqual([
+            "SHA256SUMS", "Subline-0.1.7-arm64.dmg", "Subline-0.1.7-x64.dmg", "Subline-Setup-0.1.7.exe",
+            "subline-mod-abc.zip", "subline-release.json"
+        ]);
+    });
+
+    it("keeps the unpacked output when there is nothing to ship", () => {
+        tree(false);
+        const result = removeUnpackedOutputs(out);
+        expect(result.removed).toEqual([]);
+        expect(result.skipped).toMatch(/kept for diagnosis/);
+        expect(existsSync(join(out, "mac-arm64", "Subline.app"))).toBe(true);
     });
 });
 
