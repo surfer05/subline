@@ -153,6 +153,23 @@ describe("fix 1: status is read-only; a KV write failure never fails a request",
         await expect(settle()).resolves.toBeUndefined();
     });
 
+    it("NEW-2: a frozen budget costs a keyless request ZERO KV writes", async () => {
+        stubProvider();
+        const kv = countingKV();
+        const { e, budget } = makeEnv(kv);
+        budget.frozen = true;
+        for (const r of [
+            await press(e, ID_A, { client: true, ip: IP }),
+            await press(e, ID_B, { ip: IP }),
+            await press(e, ID_C, { client: true, mode: "preview", ip: IP })
+        ]) {
+            expect(r.status).toBe(429);
+            expect(r.body).toMatchObject({ ok: false, error: "temporarily unavailable" });
+        }
+        await settle();
+        expect(kv._puts).toEqual([]);
+    });
+
     it("N1: a keyless request whose budget is refused rolls its counters back", async () => {
         stubProvider();
         const kv = fakeKV();

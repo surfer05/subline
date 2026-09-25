@@ -380,11 +380,37 @@ describe("preview mode", () => {
         expect(kv._dump()[`stat:${dayOf(T0)}:previews`]).toBe("1");
     });
 
-    it("a trial bearer in preview is also cut", async () => {
+    it("a trial bearer in preview is also cut, and charged to the taste allowance (cap 3)", async () => {
         stubProvider(["one two three four five six"]);
         const r = await press(env(fakeKV()), ID_A, { client: true, mode: "preview" });
-        expect(r.body).toMatchObject({ cap: 300 });
+        expect(r.body).toMatchObject({ cap: 3, used: 1 });
         expect(r.body.results[0].truncated).toBe(true);
+    });
+
+    it("NEW-1: a never-started id gets 3 previews a day, then refused; and a preview never reads or starts a trial", async () => {
+        stubProvider(["one two three four five six"]);
+        const kv = fakeKV() as any;
+        const reads: string[] = [];
+        const get = kv.get;
+        kv.get = async (k: string) => { reads.push(k); return get(k); };
+        const e = env(kv);
+        const served: number[] = [];
+        for (let i = 0; i < 20; i++) served.push((await press(e, ID_A, { client: true, mode: "preview" })).status);
+        expect(served.filter(s => s === 200)).toHaveLength(3);
+        expect(served.slice(3).every(s => s === 429)).toBe(true);
+        await settle();
+        expect(reads.some(k => k.startsWith("trial:"))).toBe(false);
+        expect(Object.keys(kv._dump()).some(k => k.startsWith("trial:"))).toBe(false);
+    });
+
+    it("NEW-1: a lapsed or active trial id gets the same 3 previews a day", async () => {
+        stubProvider(["one two three four five six"]);
+        for (const firstSeen of [T0 - 100 * 86_400_000, T0 - 86_400_000]) {
+            const e = env(fakeKV({ [`trial:${"a".repeat(32)}`]: String(firstSeen) }));
+            const served: number[] = [];
+            for (let i = 0; i < 10; i++) served.push((await press(e, ID_A, { client: true, mode: "preview" })).status);
+            expect(served.filter(s => s === 200)).toHaveLength(3);
+        }
     });
 
     it("preview is ignored for a paid code: full text", async () => {

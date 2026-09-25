@@ -465,6 +465,18 @@ export async function reserve(
     const redact = [code, ip ?? ""];
     const keyless = rec.plan === "taste" || rec.plan === "trial";
     if (keyless) {
+        // A FROZEN budget refuses everything, so ask it first: writing four
+        // counters only to roll all four back is pure KV churn on exactly the
+        // day the relay is already out of money. The rollback below stays for
+        // the race where the budget freezes between this read and the reserve.
+        const budgetStub = env.BUDGET.get(env.BUDGET.idFromName("global"));
+        const freezeAtK = Number(env.GLOBAL_BUDGET_MESSAGES) || DEFAULT_GLOBAL_FREEZE;
+        try {
+            const st = await (await budgetStub.fetch("https://budget.internal/status")).json() as { total?: number; frozen?: boolean };
+            if (st.frozen === true || (typeof st.total === "number" && st.total >= freezeAtK)) {
+                return { ok: false, reason: "capacity", retryAfterMs: 3_600_000 };
+            }
+        } catch { /* unknown: fall through; the reserve below still decides */ }
         const writes: { key: string; before: number; after: number; ttl: number }[] = [
             { key: dayKey, before: used, after: used + cost, ttl: 172_800 },
             ...(rpmTracked ? [{ key: rpmKey, before: rpm, after: rpm + 1, ttl: 120 }] : []),
@@ -490,8 +502,7 @@ export async function reserve(
                 return { ok: false, reason: "unavailable", retryAfterMs: 60_000 };
             }
         }
-        const freezeAtK = Number(env.GLOBAL_BUDGET_MESSAGES) || DEFAULT_GLOBAL_FREEZE;
-        const bresK = await env.BUDGET.get(env.BUDGET.idFromName("global")).fetch("https://budget.internal/reserve", {
+        const bresK = await budgetStub.fetch("https://budget.internal/reserve", {
             method: "POST",
             body: JSON.stringify({ cost: budgetCost, freezeAt: freezeAtK })
         });

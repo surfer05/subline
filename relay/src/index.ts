@@ -20,7 +20,7 @@
  */
 import {
     authCode, reserve, refund, usage, mintCode, applyMorEvent, rpmLimitFor, costFor, budgetCostFor,
-    isTasteBearer, isNewClient, resolveFreePlan, startTrial, type Env, type CodeRecord, type FreePlan
+    isTasteBearer, isNewClient, resolveFreePlan, startTrial, tasteRecord, type Env, type CodeRecord, type FreePlan
 } from "./codes";
 import { translateWithFallback, toPreview, type BatchRequest, type TranslateError, type Provider } from "./translate";
 import { record, type Outcome } from "./metrics";
@@ -206,15 +206,25 @@ export default {
             }
 
             const now = Date.now();
-            const { record: rec, free, freeFailed, newClient } = await keylessPlan(env, req, code, auth.record, now);
-
-            const plan = rec.plan ?? "free";
             const body = await readBody(req);
-            if (body === null) return done(fail("payload too large or malformed", 413), "too_large", code, 0, plan);
-            if (!validBatch(body)) return done(fail("bad request", 400), "bad_payload", code, 0, plan);
+            const authPlan = auth.record.plan ?? "free";
+            if (body === null) return done(fail("payload too large or malformed", 413), "too_large", code, 0, authPlan);
+            if (!validBatch(body)) return done(fail("bad request", 400), "bad_payload", code, 0, authPlan);
             const batch = body as BatchRequest;
             // `mode` is a v0.1.6 hint; any other value (or none) is legacy.
             const mode = (body as any).mode;
+            // "preview" is honoured only for a keyless install; a real code has
+            // paid for full text and always gets it.
+            const preview = mode === "preview" && isTasteBearer(code);
+            // A PREVIEW IS ALWAYS THE TASTE ALLOWANCE (3 a day), whatever the
+            // id's trial state: it never reads trial:<id> and never starts a
+            // trial. Otherwise an id whose trial never started (or whose record
+            // lapsed) would be resolved as a provisional 300-a-day trial and
+            // its "3 previews a day" would not be 3.
+            const { record: rec, free, freeFailed, newClient } = preview
+                ? { record: tasteRecord(), free: null, freeFailed: false, newClient: isNewClient(req.headers.get("x-subline-client")) }
+                : await keylessPlan(env, req, code, auth.record, now);
+            const plan = rec.plan ?? "free";
             // "auto" = the plugin translating on its own, which is the trial's
             // feature. Once the trial is over, refuse it BEFORE reserving, so an
             // automatic press can never spend the 3 taste messages the user
@@ -233,9 +243,6 @@ export default {
             if (mode === "auto" && freeFailed) {
                 return done(fail("temporarily unavailable", 503, 60_000), "capacity", code, 0, plan);
             }
-            // "preview" is honoured only for a keyless install; a real code has
-            // paid for full text and always gets it.
-            const preview = mode === "preview" && isTasteBearer(code);
             const promptChars =
                 batch.context.reduce((n, c) => n + c.text.length + c.author.length, 0) +
                 batch.messages.reduce((n, m) => n + m.text.length + (m.author?.length ?? 0), 0) +

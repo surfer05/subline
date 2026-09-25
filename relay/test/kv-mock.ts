@@ -22,7 +22,9 @@ import { applyBudget, type BudgetState } from "../src/budget";
 export function fakeBudget() {
     const state: BudgetState = { total: 0, frozen: false };
     const stub = {
-        fetch: async (_url: string, init: any) => {
+        fetch: async (url: string, init: any) => {
+            // /status, as the real Budget DO answers it (see budget.ts).
+            if (String(url).endsWith("/status")) return { json: async () => ({ total: state.total, frozen: state.frozen }) } as any;
             const { cost, freezeAt } = JSON.parse(init.body);
             const r = applyBudget(state, cost, freezeAt);
             if (r.allowed) { state.total = r.total; state.frozen = r.frozen; }
