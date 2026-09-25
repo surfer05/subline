@@ -19,7 +19,7 @@ translation** to Subline clients presenting an opaque per-user **code**.
 | Route | Auth | Purpose |
 |---|---|---|
 | `POST /v1/translate` | `Bearer <code>` | translate a batch → `{ok,results,used,cap}` |
-| `GET /v1/status` | `Bearer <code>` | `{ok,plan,used,cap,resetsInMs}` for the settings pane |
+| `GET /v1/status` | `Bearer <code>` | `{ok,plan,used,cap,resetsInMs}` for the settings pane (read-only; v0.1.6 clients also get `trialEndsAt`, `now`) |
 | `POST /admin/codes` | `Bearer <ADMIN_TOKEN>` | mint / revoke codes |
 | `GET /admin/stats?days=14` | `Bearer <ADMIN_TOKEN>` | approximate daily owner counts (see below) |
 | `POST /webhook/mor` | Dodo Standard-Webhooks signature | issue/revoke on purchase/refund (inert until configured) |
@@ -37,12 +37,18 @@ bearer can never be minted, revoked, or given a bigger cap. Any other `free_`
 shape is rejected exactly like an unknown code.
 
 - **3 quality translations a day**, counted as MESSAGES only (no prompt-size
-  surcharge), so 3 presses means 3 translations however long they are.
+  surcharge), so 3 presses means 3 translations however long they are. The
+  global budget guard is still charged the real spend (messages +
+  ceil(promptChars/1000)), as for a paid code.
 - Same daily counter as every plan (`use:free_<id>:<day>`), same UTC midnight
   reset, same `{ok:false,error:"daily limit reached",retryAfterMs}` on the cap.
 - **6 messages a day per IP** (`use:ip:<ip>:<day>`, from `cf-connecting-ip`), so
-  rerolling the random id does not simply reset the cap. Skipped when the header
-  is absent; the global budget guard applies as it does to everything.
+  rerolling the random id does not simply reset the cap. An IPv6 caller is
+  keyed on its /64 (first 4 hextets, e.g. `2001:db8:1:2::/64`), since one
+  subscriber can pick any address inside it. Skipped when the header is absent;
+  the global budget guard applies as it does to everything.
+- No per-minute `rl:` counter: with a daily cap of 3 it can never reach the
+  rate limit of 20, so it is neither read nor written.
 - `GET /v1/status` answers `{ok:true,plan:"taste",used,cap:3,resetsInMs}`, which
   is what the plugin reads at startup to show "2 of 3 left today".
 - Metrics rows carry a plan label, so `ok`/`taste` (installs that tasted it) and
@@ -56,21 +62,40 @@ never compared). Without it the relay behaves exactly as above, and never reads
 or writes a `trial:` key, so v0.1.5 installs see no change.
 
 - **Trial.** For a header'd `free_` bearer the relay stores `trial:<id>` = the
-  first-seen epoch ms, with **no TTL**: a TTL would let the key lapse and the
-  same id start a second trial. For 7 days from then the bearer is plan
-  `trial`: 300 messages/day (messages only, rpm 20), plus a per-IP ceiling of
-  600/day on its own counter `use:ipt:<ip>:<day>`. After day 7 it is plain taste
-  (3/day, `use:ip:` 6/day).
-- **`/v1/status`** for a header'd `free_` bearer adds `trialEndsAt` (epoch ms)
-  and reports `plan:"trial", cap:300` during the trial, `plan:"taste", cap:3` after.
+  first-seen epoch ms, written on that id's **first successful translate**
+  (after `reserve()` passed the per-IP ceilings), never by `/v1/status` and
+  never by a refused request. Until then the id is a *provisional* trial that
+  starts now. The key has a **90-day TTL** from that first write, never
+  refreshed: after 90 days it lapses, and the same id, if seen again, can start
+  a second trial. Accepted: one extra week per id per 90 days, on an id that is
+  free to reroll anyway, instead of keeping every id ever seen forever.
+- For 7 days from first sight the bearer is plan `trial`: 300 messages/day
+  (messages only, rpm 20). Per IP (IPv6 on its /64): 600 messages/day on
+  `use:ipt:<ip>:<day>` **and** 1,200 cost units/day on `use:iptc:<ip>:<day>`
+  (a cost unit is what the global budget is charged: messages +
+  ceil(promptChars/1000)), so long messages hit a wall before 600 of them do.
+  After day 7 it is plain taste (3/day, `use:ip:` 6/day).
+- **`/v1/status`** is **read-only** for every caller. For a header'd `free_`
+  bearer it adds `trialEndsAt` (epoch ms; `now + 7 days` for an id not yet
+  written) and reports `plan:"trial", cap:300` during the trial,
+  `plan:"taste", cap:3` after.
+- **`now`** (the relay's epoch ms) rides every header'd `/v1/status`, every
+  header'd translate success, and the 402 below, so the client can count
+  `trialEndsAt` down against the relay's clock. Header-less responses are
+  byte-identical to v0.1.5.
 - **`mode:"auto"`** (body field) after the trial ends, from a header'd `free_`
-  bearer: `402 {ok:false,error:"trial ended",trialEndsAt}`, refused before any
-  reservation so it never spends the hand-pressed taste messages. Ignored
-  without the header.
+  bearer: `402 {ok:false,error:"trial ended",trialEndsAt,now}`, refused before
+  any reservation so it never spends the hand-pressed taste messages. If the
+  trial lookup itself fails (KV error), `mode:"auto"` gets the same 402 without
+  `trialEndsAt`; a hand press in that outage gets taste. Ignored without the
+  header.
 - **`mode:"preview"`** from any `free_` bearer (ignored for real codes): each
   translated row is cut to its first 5 words, max 32 code points, and gets
-  `truncated:true` when shortened. The cut happens on the relay, so the full
-  text never leaves it. Charged exactly like a normal taste press.
+  `truncated:true` when shortened. The cut happens on the relay, so a preview
+  request never gets the full text back. Only the v0.1.6 client sends
+  `mode:"preview"`: a header-less legacy (v0.1.5) request still gets full ✦
+  text within its 3/day taste allowance. Charged exactly like a normal taste
+  press.
 
 ## Owner stats
 
@@ -81,12 +106,17 @@ previewsServed,conversions:{monthly,annual,lifetime,paid,free}}`.
 
 Counters are KV keys `stat:<day>:<name>` (35-day TTL). Distinct actives use a
 2-day marker `seen:<kind>:<day>:<first 16 hex of SHA-256(bearer)>`, so no key or
-response ever holds a code, id, or IP. A conversion is counted when
+response ever holds a code, id, or IP. They are written only after a
+successful `reserve()` (never by `/v1/status`), so "active" means "got a
+translation that day". A conversion is counted when
 `license_key.created` creates a key that did not exist (a replay does not
 count). KV has no atomic increment, so concurrent requests can undercount
 slightly: these are **approximate owner metrics, never billing**. Every stats
 write runs in `ctx.waitUntil` and swallows errors, so stats can never slow or
-fail a translation or a webhook.
+fail a translation or a webhook. The spend counters (`use:`, `rl:`, per-IP)
+are written after the budget guard has cleared the request; if KV refuses one
+of those writes the relay logs the counter name and KV's error (never the code,
+id, or IP) and still serves the request.
 
 ## Deploy runbook
 

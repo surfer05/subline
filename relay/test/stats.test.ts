@@ -6,7 +6,8 @@ import { fakeKV, codeRec, fakeBudget } from "./kv-mock";
 
 // ===========================================================================
 //  OWNER STATS — approximate daily counts in KV, read at GET /admin/stats.
-//  Counts only: no stat/seen key and no response ever carries an id or code.
+//  No stat/seen key and no response ever carries an id or code: stat keys hold
+//  a day and a counter name, seen keys a 16-hex SHA-256 fingerprint.
 // ===========================================================================
 
 const HEX_A = "a".repeat(32), HEX_B = "b".repeat(32);
@@ -45,11 +46,22 @@ const press = async (e: Env, bearer: string, client = false) => {
         headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json", ...(client ? { "x-subline-client": "vcTranslate/0.1.5" } : {}) },
         body: JSON.stringify({ messages: [{ id: "0", author: "a", text: "hola" }], context: [], targetLang: "en" })
     }), e, ctx);
-    return { status: res.status, body: await res.json() as any };
+    const out = { status: res.status, body: await res.json() as any };
+    // Settle this request's stats writes before the next request starts. They
+    // hash the bearer with crypto.subtle (a real thread-pool hop), so two
+    // requests' read-modify-writes could otherwise interleave nondeterministically
+    // and double count or lose a bump: the very KV race stats.ts documents as
+    // acceptable in production, but not something a test should depend on.
+    await settle();
+    return out;
 };
-const status = (e: Env, bearer: string, client = false) => worker.fetch(new Request("https://relay/v1/status", {
-    headers: { authorization: `Bearer ${bearer}`, ...(client ? { "x-subline-client": "vcTranslate/0.1.5" } : {}) }
-}), e, ctx);
+const status = async (e: Env, bearer: string, client = false) => {
+    const res = await worker.fetch(new Request("https://relay/v1/status", {
+        headers: { authorization: `Bearer ${bearer}`, ...(client ? { "x-subline-client": "vcTranslate/0.1.5" } : {}) }
+    }), e, ctx);
+    await settle();
+    return res;
+};
 const stats = async (e: Env, q = "", auth: string | null = "admin-tok", method = "GET") => {
     const res = await worker.fetch(new Request(`https://relay/admin/stats${q}`, {
         method, headers: auth ? { authorization: `Bearer ${auth}` } : {}
@@ -65,7 +77,7 @@ beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(T0);
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); pending.length = 0; });
 
 describe("distinct daily actives", () => {
-    it("a free id counts once per day across translate and status, and again the next day", async () => {
+    it("a free id counts once per day across translates, and again the next day (status never counts)", async () => {
         stubProvider();
         const kv = fakeKV();
         const e = env(kv);

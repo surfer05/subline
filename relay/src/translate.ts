@@ -33,8 +33,11 @@ export const PREVIEW_MAX_CODE_POINTS = 32;
 /**
  * The preview a free install sees once its trial is over: enough of the
  * translation to show it is real, not enough to read the conversation. The
- * relay truncates ON THE SERVER, so in preview mode the full text never leaves
- * the relay (a client-side cut would be one devtools edit away).
+ * relay truncates ON THE SERVER, so a preview request never gets the full text
+ * back (a client-side cut would be one devtools edit away). That is all it
+ * promises: preview is a mode the v0.1.6 client asks for. A header-less legacy
+ * (v0.1.5) free_ request sends no mode and still gets full text, within its
+ * 3-a-day taste allowance.
  *
  * Words are whitespace-split; a language without spaces (CJK) arrives as one
  * long "word", which is why the code-point cap exists. Array.from counts code

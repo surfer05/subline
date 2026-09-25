@@ -7,10 +7,11 @@
  * dashboard to read; these need only the ADMIN_TOKEN the maker already has. And
  * "distinct installs per day" needs a seen-marker, which is state, not a row.
  *
- * PRIVACY: counts only. A key never contains a code, an install id, or an IP.
- * Distinct counting uses a marker keyed by a 16-hex SHA-256 FINGERPRINT of the
- * bearer, which self-expires in 2 days; the stat keys themselves carry only a
- * day and a counter name.
+ * PRIVACY: not quite counts only, so said plainly. A key never contains a code,
+ * an install id, or an IP. The stat keys carry only a day and a counter name
+ * (35-day TTL). Distinct counting also stores one marker per code or install
+ * per day, keyed by a 16-hex SHA-256 FINGERPRINT of the bearer, which
+ * self-expires in 2 days.
  *
  * APPROXIMATE, NEVER BILLING: KV has no atomic read-modify-write, so two
  * concurrent requests can both read N and both write N+1 (and two first
@@ -20,7 +21,11 @@
  *
  * NEVER ON THE CRITICAL PATH: the router runs every write here inside
  * ctx.waitUntil through `safely`, so a slow or failing KV write can never slow
- * or fail a translation.
+ * or fail a translation. And ONLY AFTER A SUCCESSFUL RESERVE (never from
+ * /v1/status, never for a refused or malformed request): a caller can mint
+ * random free_ ids at will, so any write reachable before the per-IP ceiling
+ * would be a free KV write per request. The cost is that "active" means "got a
+ * translation that day", not "opened Discord".
  */
 import type { Env, CodeRecord } from "./codes";
 

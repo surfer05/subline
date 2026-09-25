@@ -297,7 +297,9 @@ describe("metrics: the funnel is countable", () => {
         await press(e, "slp_real");
         await press(e, "slp_unknown");
         await settle();
-        expect(m.rows.map(r => [r.blobs[0], r.blobs[2]])).toEqual([
+        // Sorted: each row is written from its own waitUntil after an async
+        // fingerprint digest, so arrival order between requests is not defined.
+        expect(m.rows.map(r => [r.blobs[0], r.blobs[2]]).sort()).toEqual([
             ["ok", "monthly"],
             ["unknown_code", "-"],
         ]);

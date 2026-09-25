@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import worker from "../src/index";
 import {
-    reserve, refund, rpmLimitFor, costFor, trialRecord, resolveFreePlan, isNewClient,
-    TRIAL_MS, TRIAL_DAILY_CAP, TRIAL_IP_DAILY_CAP, type Env
+    reserve, refund, rpmLimitFor, costFor, trialRecord, resolveFreePlan, startTrial, isNewClient,
+    TRIAL_MS, TRIAL_DAILY_CAP, TRIAL_IP_DAILY_CAP, TRIAL_KEY_TTL_S, type Env
 } from "../src/codes";
 import { previewText } from "../src/translate";
 import { fakeKV, codeRec, fakeBudget } from "./kv-mock";
@@ -102,13 +102,49 @@ describe("the client marker", () => {
 });
 
 // ---------------------------------------------------------------------------
-describe("trial start: first header'd sight, stamped forever", () => {
-    it("a header'd status call starts the trial and stores first-seen with NO TTL", async () => {
-        const kv = fakeKV();
+describe("trial start: written on the first successful translate, never by status", () => {
+    it("a header'd status call on a fresh id shows a PROVISIONAL trial and writes nothing", async () => {
+        const kv = fakeKV() as any;
+        let puts = 0;
+        const put = kv.put;
+        kv.put = async (k: string, v: string, o?: any) => { puts++; return put(k, v, o); };
         const r = await status(env(kv), ID_A, true);
-        expect(r.body).toMatchObject({ ok: true, plan: "trial", used: 0, cap: 300, trialEndsAt: T0 + TRIAL_MS });
+        expect(r.body).toEqual({ ok: true, plan: "trial", used: 0, cap: 300, resetsInMs: r.body.resetsInMs, trialEndsAt: T0 + TRIAL_MS, now: T0 });
+        await settle();
+        expect(puts).toBe(0);
+        expect(kv._dump()).toEqual({});
+    });
+
+    it("the first successful translate writes trial:<id> with a 90-day TTL and counts trials_started", async () => {
+        stubProvider();
+        const kv = fakeKV();
+        await press(env(kv), ID_A, { client: true, ip: IP });
+        await settle();
         expect(kv._dump()[`trial:${HEX_A}`]).toBe(String(T0));
-        expect(kv._opts(`trial:${HEX_A}`)).toBeUndefined(); // no expirationTtl: no second trial
+        expect(kv._opts(`trial:${HEX_A}`)).toEqual({ expirationTtl: 90 * 86_400 });
+        expect(TRIAL_KEY_TTL_S).toBe(90 * 86_400);
+        expect(kv._dump()[`stat:${dayOf(T0)}:trials_started`]).toBe("1");
+    });
+
+    it("a translate REFUSED by reserve (per-IP cap) starts no trial and writes no stats", async () => {
+        stubProvider();
+        const kv = fakeKV({ [`use:ipt:${IP}:${dayOf(T0)}`]: "600" });
+        const r = await press(env(kv), ID_A, { client: true, ip: IP });
+        expect(r.status).toBe(429);
+        await settle();
+        expect(Object.keys(kv._dump())).toEqual([`use:ipt:${IP}:${dayOf(T0)}`]);
+    });
+
+    it("a malformed batch from a fresh id writes nothing either", async () => {
+        const kv = fakeKV();
+        const res = await worker.fetch(new Request("https://relay/v1/translate", {
+            method: "POST",
+            headers: { authorization: `Bearer ${ID_A}`, "content-type": "application/json", "x-subline-client": CLIENT },
+            body: JSON.stringify({ messages: [], context: [], targetLang: "en" })
+        }), env(kv), ctx);
+        expect(res.status).toBe(400);
+        await settle();
+        expect(kv._dump()).toEqual({});
     });
 
     it("a header'd translate also starts it, and later calls do not move first-seen", async () => {
@@ -122,10 +158,13 @@ describe("trial start: first header'd sight, stamped forever", () => {
         expect((await status(e, ID_A, true)).body.trialEndsAt).toBe(T0 + TRIAL_MS);
     });
 
-    it("resolveFreePlan reports started only on the first write", async () => {
-        const e = env(fakeKV());
-        expect((await resolveFreePlan(e, ID_A, T0)).started).toBe(true);
-        expect((await resolveFreePlan(e, ID_A, T0 + 1)).started).toBe(false);
+    it("resolveFreePlan is read-only: provisional until startTrial writes", async () => {
+        const kv = fakeKV();
+        const e = env(kv);
+        expect(await resolveFreePlan(e, ID_A, T0)).toMatchObject({ provisional: true, trialActive: true, trialEndsAt: T0 + TRIAL_MS });
+        expect(kv._dump()).toEqual({});
+        await startTrial(e, ID_A, T0);
+        expect(await resolveFreePlan(e, ID_A, T0 + DAY)).toMatchObject({ provisional: false, trialActive: true, trialEndsAt: T0 + TRIAL_MS });
     });
 });
 
@@ -214,7 +253,8 @@ describe("after day 7", () => {
         stubProvider();
         const kv = fakeKV();
         const e = env(kv);
-        await status(e, ID_A, true);
+        await press(e, ID_A, { client: true }); // the first translate starts the trial
+        await settle();
         at(T0 + TRIAL_MS - 1);
         expect((await status(e, ID_A, true)).body.plan).toBe("trial");
         at(T0 + 7 * DAY + 1);
@@ -232,7 +272,7 @@ describe("after day 7", () => {
         await kv.put(`trial:${HEX_A}`, String(T0 - 8 * DAY));
         const r = await press(e, ID_A, { client: true, mode: "auto", ip: IP });
         expect(r.status).toBe(402);
-        expect(r.body).toEqual({ ok: false, error: "trial ended", trialEndsAt: T0 - 8 * DAY + TRIAL_MS });
+        expect(r.body).toEqual({ ok: false, error: "trial ended", trialEndsAt: T0 - 8 * DAY + TRIAL_MS, now: T0 });
         await settle();
         expect(Object.keys(kv._dump()).some(k => k.startsWith("use:") || k.startsWith("rl:"))).toBe(false);
         expect(m.rows.map(r => [r.blobs[0], r.blobs[2]])).toEqual([["trial_ended", "taste"]]);
@@ -283,10 +323,11 @@ describe("a legacy (v0.1.5) client is untouched", () => {
         expect(Object.keys(kv._dump()).some(k => k.startsWith("trial:"))).toBe(false);
     });
 
-    it("a paid code with the header is untouched: no trial key, no trialEndsAt", async () => {
+    it("a paid code with the header: no trial key, no trialEndsAt, only the server clock", async () => {
         const kv = fakeKV({ "code:slp_real": codeRec({ dailyCap: 500, plan: "monthly" }) });
         const s = await status(env(kv), "slp_real", true);
-        expect(Object.keys(s.body).sort()).toEqual(["cap", "ok", "plan", "resetsInMs", "used"]);
+        expect(Object.keys(s.body).sort()).toEqual(["cap", "now", "ok", "plan", "resetsInMs", "used"]);
+        expect(s.body.now).toBe(T0);
         expect(Object.keys(kv._dump()).some(k => k.startsWith("trial:"))).toBe(false);
     });
 

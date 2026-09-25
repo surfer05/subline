@@ -19,8 +19,8 @@
  * expose. A valid code is not a general Groq proxy.
  */
 import {
-    authCode, reserve, refund, usage, mintCode, applyMorEvent, rpmLimitFor, costFor,
-    isTasteBearer, isNewClient, resolveFreePlan, type Env, type CodeRecord, type FreePlan
+    authCode, reserve, refund, usage, mintCode, applyMorEvent, rpmLimitFor, costFor, budgetCostFor,
+    isTasteBearer, isNewClient, resolveFreePlan, startTrial, type Env, type CodeRecord, type FreePlan
 } from "./codes";
 import { translateWithFallback, toPreview, type BatchRequest, type TranslateError, type Provider } from "./translate";
 import { record, type Outcome } from "./metrics";
@@ -147,20 +147,28 @@ function validBatch(v: unknown): v is BatchRequest {
  * The v0.1.6 keyless plan for this request. A legacy (v0.1.5) client sends no
  * `x-subline-client`, so it gets `free: null` and the record authCode already
  * gave it — byte-identical to before, with no trial: KV read or write. A new
- * client's well-formed free_ bearer is resolved to trial-or-taste. If that
- * lookup itself fails (KV hiccup) the request degrades to the legacy taste
- * behaviour rather than failing: the trial is a bonus, never a precondition.
+ * client's well-formed free_ bearer is resolved to trial-or-taste, READ-ONLY
+ * (an unseen id is a provisional trial; see startTrial for when it is written).
+ *
+ * If that lookup itself fails (KV hiccup) the request degrades to the legacy
+ * taste record rather than failing, and `freeFailed` says so: the router then
+ * refuses mode:"auto" (it cannot tell a trial from an ended one, and must not
+ * let an automatic press spend the hand-pressed taste messages) while a press
+ * by hand still gets taste. `newClient` is the header check on its own, which
+ * decides whether a response may carry v0.1.6-only fields like `now`.
  */
 async function keylessPlan(
-    env: Env, ctx: ExecutionContext, req: Request, code: string | null, rec: CodeRecord, now: number
-): Promise<{ record: CodeRecord; free: FreePlan | null }> {
-    if (!isTasteBearer(code) || !isNewClient(req.headers.get("x-subline-client"))) return { record: rec, free: null };
+    env: Env, req: Request, code: string | null, rec: CodeRecord, now: number
+): Promise<{ record: CodeRecord; free: FreePlan | null; freeFailed: boolean; newClient: boolean }> {
+    const newClient = isNewClient(req.headers.get("x-subline-client"));
+    if (!isTasteBearer(code) || !newClient) return { record: rec, free: null, freeFailed: false, newClient };
     try {
         const free = await resolveFreePlan(env, code!, now);
-        if (free.started) ctx.waitUntil(safely(() => bumpStat(env, now, "trials_started")));
-        return { record: free.record, free };
-    } catch {
-        return { record: rec, free: null };
+        return { record: free.record, free, freeFailed: false, newClient };
+    } catch (e) {
+        // The cause, never the id: an outage should be diagnosable from logs.
+        console.warn("trial lookup failed, degrading to taste", { error: String((e as any)?.message ?? e).slice(0, 200) });
+        return { record: rec, free: null, freeFailed: true, newClient };
     }
 }
 
@@ -198,10 +206,7 @@ export default {
             }
 
             const now = Date.now();
-            const { record: rec, free } = await keylessPlan(env, ctx, req, code, auth.record, now);
-            // Owner stats (distinct installs / trials / paid codes per day), off
-            // the critical path and failure-proof.
-            ctx.waitUntil(safely(() => markActive(env, code!, rec.plan, now)));
+            const { record: rec, free, freeFailed, newClient } = await keylessPlan(env, req, code, auth.record, now);
 
             const plan = rec.plan ?? "free";
             const body = await readBody(req);
@@ -216,7 +221,16 @@ export default {
             // meant to press by hand. Only a new client (free !== null) is told;
             // a legacy client never sends a mode, and one that did gets taste.
             if (mode === "auto" && free && !free.trialActive) {
-                return done(json({ ok: false, error: "trial ended", trialEndsAt: free.trialEndsAt }, 402), "trial_ended", code, 0, plan);
+                return done(json({ ok: false, error: "trial ended", trialEndsAt: free.trialEndsAt, now }, 402), "trial_ended", code, 0, plan);
+            }
+            // The trial lookup itself failed, so this bearer may or may not still
+            // be in its trial. Fail CLOSED for an automatic press, same 402 shape
+            // (minus trialEndsAt, which is unknown): an outage must never let
+            // auto-translate drain the 3 messages the user meant to press by hand.
+            // The client just stops auto and retries later; a hand press still
+            // gets taste below.
+            if (mode === "auto" && freeFailed) {
+                return done(json({ ok: false, error: "trial ended", now }, 402), "trial_ended", code, 0, plan);
             }
             // "preview" is honoured only for a keyless install; a real code has
             // paid for full text and always gets it.
@@ -225,14 +239,18 @@ export default {
                 batch.context.reduce((n, c) => n + c.text.length + c.author.length, 0) +
                 batch.messages.reduce((n, m) => n + m.text.length + (m.author?.length ?? 0), 0) +
                 batch.targetLang.length;
+            // Two units: `cost` is the per-bearer daily count the client sees
+            // (messages only for taste/trial), `budgetCost` is the real spend the
+            // global guard and the trial's per-IP cost cap are charged.
             const cost = costFor(rec, batch.messages.length, promptChars);
+            const budgetCost = budgetCostFor(batch.messages.length, promptChars);
             // The per-IP taste/trial ceiling needs the caller's address, and ONLY
             // for a keyless request: no other plan grows an ip counter, and a
             // request with no cf-connecting-ip (not fronted by Cloudflare) just
             // skips the cap.
             const tasteIp = plan === "taste" || plan === "trial" ? req.headers.get("cf-connecting-ip") : null;
 
-            const res = await reserve(env, code!, rec, cost, now, tasteIp);
+            const res = await reserve(env, code!, rec, cost, now, tasteIp, budgetCost);
             if (!res.ok) {
                 const status = 429; // cap_exceeded / rate_limited / capacity all park the engine
                 const label = res.reason === "capacity" ? "capacity" : res.reason;
@@ -252,18 +270,39 @@ export default {
                 ), label as Outcome, code, 0, plan);
             }
 
+            // Every KV write that is not a spend counter happens only from here
+            // on, after reserve() passed the per-bearer and per-IP ceilings and
+            // the budget. Before this point a request with a fresh random free_
+            // id costs the relay reads only, so rerolling ids cannot be turned
+            // into unbounded KV writes.
+            if (free?.provisional) {
+                // First successful press of this id: make its trial real.
+                ctx.waitUntil(startTrial(env, code!, now).catch(e =>
+                    console.warn("trial start write failed", { error: String((e as any)?.message ?? e).slice(0, 200) })));
+            }
+            // Owner stats (distinct installs / trials / paid codes per day), off
+            // the critical path and failure-proof.
+            ctx.waitUntil(safely(() => markActive(env, code!, rec.plan, now)));
+
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), GROQ_TIMEOUT_MS);
             try {
                 const { primary, fallback } = providers(env);
                 const full = await translateWithFallback(batch, primary, fallback, controller.signal);
                 clearTimeout(timer);
-                // Preview: cut on the server so the full text never leaves here.
+                // Preview: cut on the server, so a request that asks for a
+                // preview never gets the full text back. Only a v0.1.6 client
+                // asks; a legacy (v0.1.5) free_ press sends no mode and still
+                // gets full ✦ text within its 3-a-day taste allowance.
                 const results = preview ? toPreview(full) : full;
                 if (preview) ctx.waitUntil(safely(() => bumpStat(env, now, "previews")));
                 // `rpmLimit` rides every success so the plugin's rate gate can
                 // tune itself to this code's ceiling without ever hitting it.
-                return done(json({ ok: true, results, used: res.used, cap: res.cap, rpmLimit: rpmLimitFor(rec) }), "ok", code, cost, plan);
+                // `now` (server epoch ms) only for a header'd client, so it can
+                // count trialEndsAt down against the relay's clock rather than a
+                // skewed local one; a legacy body stays byte-identical.
+                const ok = { ok: true, results, used: res.used, cap: res.cap, rpmLimit: rpmLimitFor(rec) };
+                return done(json(newClient ? { ...ok, now } : ok), "ok", code, cost, plan);
             } catch (e) {
                 clearTimeout(timer);
                 const err = e as TranslateError;
@@ -273,7 +312,7 @@ export default {
                 // also stops a client forcing slow batches to burn the key for
                 // free while their daily cap never advances.
                 if (!timedOut && err.status !== 401 && err.status !== 403) {
-                    ctx.waitUntil(refund(env, code!, cost, now, tasteIp, rec.plan));
+                    ctx.waitUntil(refund(env, code!, cost, now, tasteIp, rec.plan, budgetCost));
                 }
                 // The relay's OWN key failing (401/403 from an upstream) is a
                 // SERVER fault, never surfaced as "your code is bad".
@@ -304,15 +343,19 @@ export default {
             const auth = await authCode(env, code);
             if (!auth.ok) return fail("invalid or missing code", auth.reason === "no_code" ? 401 : 403);
             const now = Date.now();
-            // A new client's status call starts the trial too, so the plugin can
-            // show "trial: 7 days left" at startup before any translation.
-            const { record: rec, free } = await keylessPlan(env, ctx, req, code, auth.record, now);
-            ctx.waitUntil(safely(() => markActive(env, code!, rec.plan, now)));
+            // READ-ONLY, for every caller: no trial write, no stats, no seen
+            // marker. Status is free to call with any random free_ id, so any
+            // write here would be a KV write anyone can trigger at will. A new
+            // client's unseen id is shown a PROVISIONAL trial (plan "trial",
+            // trialEndsAt = now + 7 days) so the plugin can say "trial: 7 days
+            // left" at startup; the trial is written on its first successful
+            // translate.
+            const { record: rec, free, newClient } = await keylessPlan(env, req, code, auth.record, now);
             const u = await usage(env, code!, rec, now);
-            // Legacy clients (free === null) get exactly the pre-trial shape.
-            return json(free
-                ? { ok: true, plan: rec.plan ?? "free", ...u, trialEndsAt: free.trialEndsAt }
-                : { ok: true, plan: rec.plan ?? "free", ...u });
+            const base = { ok: true, plan: rec.plan ?? "free", ...u };
+            // Legacy clients (no header) get exactly the pre-trial shape; a
+            // header'd one also gets the server clock (`now`, epoch ms).
+            return json(free ? { ...base, trialEndsAt: free.trialEndsAt, now } : newClient ? { ...base, now } : base);
         }
 
         // ---- GET /admin/stats — approximate owner counts (ADMIN_TOKEN) ----

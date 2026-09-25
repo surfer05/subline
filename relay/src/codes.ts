@@ -159,11 +159,22 @@ export function tasteRecord(): CodeRecord {
 // day 7 the same bearer falls back to the taste record, exactly as a legacy
 // client always gets.
 //
-// The one piece of state is `trial:<id>` → first-seen epoch ms, written with NO
-// TTL on purpose: a TTL would let the key expire and the same id start a second
-// trial. The id is still client-chosen, so rerolling it buys a fresh trial;
-// the per-IP trial ceiling (use:ipt:) and the global budget guard are what keep
-// that farming tedious and harmless, exactly as for the taste tier.
+// The one piece of state is `trial:<id>` → first-seen epoch ms, written with a
+// 90-day TTL (TRIAL_KEY_TTL_S). The TTL counts from the FIRST write and is never
+// refreshed, so 90 days after an id's trial began its key lapses and that id,
+// if it shows up again, can start a second 7-day trial. Accepted: that is one
+// extra week per id per 90 days, the id is rerollable for free anyway, and
+// without a TTL every id ever seen (including throwaway farmed ones) would sit
+// in KV forever. The per-IP trial ceilings (use:ipt: messages, use:iptc: cost
+// units) and the global budget guard are what keep farming tedious and
+// harmless, exactly as for the taste tier.
+//
+// WRITE ONLY AFTER A SUCCESSFUL RESERVE. Resolving the plan never writes: an
+// unseen id is a PROVISIONAL trial (first-seen = now) and the router calls
+// startTrial only once /v1/translate has passed reserve(), i.e. after the
+// per-IP ceilings. Otherwise /v1/status (or a translate that is then refused)
+// with a fresh random id would be one free KV write per request, a
+// write-amplification lever anyone could pull without spending a message.
 //
 // authCode never does this lookup (it resolves free_ with ZERO KV reads, and a
 // test pins that): the router calls resolveFreePlan only when the client header
@@ -176,6 +187,15 @@ export const TRIAL_DAILY_CAP = 300;
  *  install's cap so a household with two people is not starved, while a farmer
  *  rerolling ids still hits a wall. */
 export const TRIAL_IP_DAILY_CAP = 600;
+/** Budget COST UNITS (messages + ceil(promptChars/1000), what the global guard
+ *  is charged) per UTC day across all trial ids behind one address. The message
+ *  cap alone does not bound spend: one message can ride with ~32 KB of prompt
+ *  (text + context, the body limit), about 33 units, so 600 messages could be
+ *  ~20,000 units. This bounds an address at 1,200 while ordinary chat (short
+ *  lines, about 2 units a message) meets the 600-message cap first. */
+export const TRIAL_IP_DAILY_COST_CAP = 1_200;
+/** trial:<id> lifetime from its first write (see the TRIAL block above). */
+export const TRIAL_KEY_TTL_S = 90 * 86_400;
 
 /** The v0.1.6+ client marker. Its PRESENCE (in this shape) is the signal; the
  *  version inside is never compared, so the relay needs no release lockstep. */
@@ -193,30 +213,40 @@ export interface FreePlan {
     record: CodeRecord;
     trialActive: boolean;
     trialEndsAt: number;
-    /** True only on the request that wrote trial:<id> for the first time. */
-    started: boolean;
+    /** True when no trial:<id> exists yet: the trial reported is PROVISIONAL
+     *  (first-seen = now) and nothing has been written. The router makes it
+     *  real with startTrial, only after a successful reserve. */
+    provisional: boolean;
+}
+
+function trialKey(bearer: string): string {
+    return `trial:${bearer.slice("free_".length)}`;
 }
 
 /** Resolve a WELL-FORMED free_ bearer (the caller has already authenticated it)
- *  for a v0.1.6+ client: trial while inside its 7 days, taste after. Writes the
- *  first-seen stamp on first sight. KV is eventually consistent, so two first
- *  requests racing from different colos may both write; each writes ~now, so
- *  the trial window moves by milliseconds at most. */
+ *  for a v0.1.6+ client: trial while inside its 7 days, taste after. READ-ONLY:
+ *  an unseen id (or an unreadable value, which only a relay bug could produce)
+ *  is a provisional trial starting now, and nothing is written here (see WRITE
+ *  ONLY AFTER A SUCCESSFUL RESERVE above). */
 export async function resolveFreePlan(env: Env, bearer: string, now: number): Promise<FreePlan> {
-    const key = `trial:${bearer.slice("free_".length)}`;
-    const raw = await env.CODES.get(key);
-    let firstSeen = raw === null ? NaN : Number(raw);
-    let started = false;
-    if (!Number.isFinite(firstSeen)) {
-        // Absent (or unreadable, which only a relay bug could produce): start now.
-        // NO expirationTtl — see the TRIAL block above for why.
-        firstSeen = now;
-        await env.CODES.put(key, String(firstSeen));
-        started = raw === null;
-    }
+    const raw = await env.CODES.get(trialKey(bearer));
+    const stored = raw === null ? NaN : Number(raw);
+    const provisional = !Number.isFinite(stored);
+    const firstSeen = provisional ? now : stored;
     const trialEndsAt = firstSeen + TRIAL_MS;
     const trialActive = now < trialEndsAt;
-    return { record: trialActive ? trialRecord() : tasteRecord(), trialActive, trialEndsAt, started };
+    return { record: trialActive ? trialRecord() : tasteRecord(), trialActive, trialEndsAt, provisional };
+}
+
+/** Make a provisional trial real: stamp trial:<id> = now with the 90-day TTL,
+ *  then count it. Called only after a successful reserve. KV is eventually
+ *  consistent, so two first requests racing from different colos may both
+ *  write; each writes ~now, so the window moves by milliseconds at most (and
+ *  trials_started may count that id twice; an approximate owner metric).
+ *  Throws only if the trial write itself fails; the stat bump is best-effort. */
+export async function startTrial(env: Env, bearer: string, now: number): Promise<void> {
+    await env.CODES.put(trialKey(bearer), String(now), { expirationTtl: TRIAL_KEY_TTL_S });
+    try { await bumpStat(env, now, "trials_started"); } catch { /* approximate owner metric only */ }
 }
 
 export type AuthOutcome =
@@ -285,38 +315,114 @@ export function rpmLimitFor(rec: CodeRecord): number {
 }
 
 /**
- * What one batch costs against the daily cap.
+ * What one batch costs against the per-bearer DAILY CAP (the used/cap the client
+ * sees).
  *
  * A CODE is charged messages plus a prompt-size surcharge, so a client cannot
  * buy cheap tokens by stuffing huge texts into few messages. A TASTE install is
  * charged MESSAGES ONLY: its cap is 3, and "3 free translations" has to mean 3
  * presses whatever the length, or the nudge ("2 of 3 left today") lies. The
- * surcharge is pointless there anyway — 3 messages cannot move the budget.
+ * money side of a long keyless message is not lost: the global budget and the
+ * trial's per-IP cost cap are charged budgetCostFor() instead (see reserve).
  */
 export function costFor(rec: CodeRecord, messages: number, promptChars: number): number {
     // A trial is the same keyless install, so it keeps the same honest unit.
-    return rec.plan === "taste" || rec.plan === "trial" ? messages : messages + Math.ceil(promptChars / 1000);
+    return rec.plan === "taste" || rec.plan === "trial" ? messages : budgetCostFor(messages, promptChars);
 }
 
-/** Per-address counter key and ceiling for a keyless plan, or null for every
- *  other plan (a real code never grows an ip counter). Taste and trial keep
- *  SEPARATE counters so a household's trial traffic cannot eat a legacy
- *  install's 6 taste messages, nor the other way round. */
-function ipGuard(plan: CodeRecord["plan"], ip: string | null | undefined, now: number): { key: string; cap: number } | null {
-    if (!ip) return null;
-    if (plan === "taste") return { key: `use:ip:${ip}:${today(now)}`, cap: TASTE_IP_DAILY_CAP };
-    if (plan === "trial") return { key: `use:ipt:${ip}:${today(now)}`, cap: TRIAL_IP_DAILY_CAP };
-    return null;
+/** What one batch really costs in SPEND units, whatever the plan: messages plus
+ *  one unit per started 1,000 prompt chars. This is what the global Budget guard
+ *  is charged for every plan (for a code it equals costFor), so a keyless
+ *  install's messages-only daily count can never hide real spend from the
+ *  money ceiling. */
+export function budgetCostFor(messages: number, promptChars: number): number {
+    return messages + Math.ceil(promptChars / 1000);
+}
+
+/**
+ * The address a per-IP ceiling is keyed on. IPv4 is used as is. IPv6 is cut to
+ * its /64 prefix (the first 4 hextets after expanding `::`), because one
+ * subscriber is normally handed a whole /64 and can pick a new address inside
+ * it at will: keyed on the full address, every one of 2^64 addresses would get
+ * its own ceiling. Hextets are lowercased and stripped of leading zeros so two
+ * spellings of one prefix share a key. An IPv4-mapped IPv6 (::ffff:a.b.c.d) is
+ * treated as its IPv4. Anything unparseable is used as is (lowercased): it can
+ * only ever be its own bucket, never someone else's.
+ */
+export function ipBucket(ip: string): string {
+    const raw = ip.trim().toLowerCase();
+    if (!raw.includes(":")) return raw;
+    const mapped = /^[0:]*:ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(raw);
+    if (mapped) return mapped[1]!;
+    const halves = raw.split("::");
+    if (halves.length > 2) return raw;
+    const head = halves[0] ? halves[0].split(":") : [];
+    const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+    const missing = 8 - head.length - tail.length;
+    if (halves.length === 1 ? missing !== 0 : missing < 1) return raw;
+    const full = [...head, ...Array(halves.length === 2 ? missing : 0).fill("0"), ...tail];
+    if (!full.every(h => /^[0-9a-f]{1,4}$/.test(h))) return raw;
+    return full.slice(0, 4).map(h => h.replace(/^0+(?=.)/, "")).join(":") + "::/64";
+}
+
+/** One per-address ceiling: its counter key, its limit, and which unit it
+ *  counts (messages, or budget cost units). */
+interface IpGuard { key: string; cap: number; unit: "messages" | "cost" }
+
+/** Per-address ceilings for a keyless plan; empty for every other plan (a real
+ *  code never grows an ip counter). Taste and trial keep SEPARATE counters so a
+ *  household's trial traffic cannot eat a legacy install's 6 taste messages,
+ *  nor the other way round. A trial has two: messages (use:ipt:) and budget
+ *  cost units (use:iptc:), so long messages cannot spend 600 messages' worth of
+ *  maximum-size prompts. */
+function ipGuards(plan: CodeRecord["plan"], ip: string | null | undefined, now: number): IpGuard[] {
+    if (!ip) return [];
+    const b = ipBucket(ip), d = today(now);
+    if (plan === "taste") return [{ key: `use:ip:${b}:${d}`, cap: TASTE_IP_DAILY_CAP, unit: "messages" }];
+    if (plan === "trial") return [
+        { key: `use:ipt:${b}:${d}`, cap: TRIAL_IP_DAILY_CAP, unit: "messages" },
+        { key: `use:iptc:${b}:${d}`, cap: TRIAL_IP_DAILY_COST_CAP, unit: "cost" }
+    ];
+    return [];
+}
+
+/** Write a soft counter, and if KV refuses, say so and carry on. These counters
+ *  are fairness limits, not the money guard (that is the Budget DO, already
+ *  committed by the time they are written), so a failed write must never turn a
+ *  paid-for, budget-cleared request into an error. The log names the counter
+ *  and KV's error, never the code, id, or address. */
+async function softPut(env: Env, key: string, value: string, ttlS: number, where: string, counter: string, redact: string[]): Promise<void> {
+    try {
+        await env.CODES.put(key, value, { expirationTtl: ttlS });
+    } catch (e) {
+        let msg = String((e as any)?.message ?? e).slice(0, 200);
+        for (const r of redact) if (r) msg = msg.split(r).join("<redacted>");
+        console.warn(`${where}: KV counter write failed, request continues`, { counter, error: msg });
+    }
 }
 
 /** `ip` is the caller's cf-connecting-ip, passed ONLY for taste/trial requests
- *  (and absent when the header is missing) — it enables the per-IP ceiling below. */
-export async function reserve(env: Env, code: string, rec: CodeRecord, cost: number, now: number, ip?: string | null): Promise<ReserveOutcome> {
+ *  (and absent when the header is missing) — it enables the per-IP ceilings.
+ *  `cost` is the per-bearer daily count (costFor); `budgetCost` is what the
+ *  global guard and the per-IP cost cap are charged (budgetCostFor). It
+ *  defaults to `cost`, which is right for a code, where the two are equal. */
+export async function reserve(
+    env: Env, code: string, rec: CodeRecord, cost: number, now: number, ip?: string | null, budgetCost: number = cost
+): Promise<ReserveOutcome> {
     // 1) Per-minute rate limit (KV, soft): one shared paid key must not be
     //    drained by a runaway/scraping client. Well above a real user's rate.
-    const rpmKey = `rl:${code}:${Math.floor(now / 60_000)}`;
-    const rpm = await readCount(env, rpmKey);
+    //    SKIPPED (no read, no write) when the daily cap makes it unreachable:
+    //    every successful reserve adds at least 1 to the day's count (the router
+    //    never sends a batch of 0 messages), so a bearer gets at most dailyCap
+    //    successes per UTC day, and a minute never straddles UTC midnight. With
+    //    dailyCap < rpmLimit (taste: 3 < 20) the rl: counter could never reach
+    //    its limit, so writing it changes no decision. Both counters share the
+    //    same KV read-modify-write race, so this holds exactly as softly as the
+    //    counters themselves already do.
     const rpmLimit = rpmLimitFor(rec);
+    const rpmTracked = rec.dailyCap >= rpmLimit;
+    const rpmKey = `rl:${code}:${Math.floor(now / 60_000)}`;
+    const rpm = rpmTracked ? await readCount(env, rpmKey) : 0;
     if (rpm >= rpmLimit) return { ok: false, reason: "rate_limited", retryAfterMs: 60_000 - (now % 60_000) };
 
     // 2) Daily per-code cap (KV, soft fairness — bounded by the atomic global
@@ -327,18 +433,19 @@ export async function reserve(env: Env, code: string, rec: CodeRecord, cost: num
         return { ok: false, reason: "cap_exceeded", retryAfterMs: msUntilUtcMidnight(now), used, cap: rec.dailyCap };
     }
 
-    // 2b) TASTE ONLY: daily ceiling per ADDRESS, shared by every free id behind
-    //     it. The taste id is generated by the client, so it can be rerolled for
-    //     another 3; the address behind it cannot be, cheaply. Checked BEFORE the
-    //     budget guard so a farmed request never spends. No header (not fronted
-    //     by Cloudflare, or a unit test) ⇒ skip the cap, never deny on its absence.
-    //     A trial uses its own counter (use:ipt:) and ceiling, same logic.
-    const guard = ipGuard(rec.plan, ip, now);
-    const ipKey = guard?.key ?? null;
-    let ipUsed = 0;
-    if (guard) {
-        ipUsed = await readCount(env, guard.key);
-        if (ipUsed + cost > guard.cap) {
+    // 2b) KEYLESS ONLY: daily ceilings per ADDRESS (an IPv6 /64, see ipBucket),
+    //     shared by every free id behind it. The id is generated by the client,
+    //     so it can be rerolled for another 3; the address behind it cannot be,
+    //     cheaply. Checked BEFORE the budget guard so a farmed request never
+    //     spends. No header (not fronted by Cloudflare, or a unit test) ⇒ skip
+    //     the cap, never deny on its absence. A trial has its own counters
+    //     (use:ipt: messages, use:iptc: cost units), same logic.
+    const guards = ipGuards(rec.plan, ip, now);
+    const ipUsed: number[] = [];
+    for (const g of guards) {
+        const n = await readCount(env, g.key);
+        ipUsed.push(n);
+        if (n + (g.unit === "cost" ? budgetCost : cost) > g.cap) {
             // Same shape as the per-bearer cap (the client cannot act on the
             // difference, and spelling out "your address is capped" would only
             // teach a farmer what to evade). used/cap stay the BEARER's numbers
@@ -349,20 +456,28 @@ export async function reserve(env: Env, code: string, rec: CodeRecord, cost: num
 
     // 3) Global spend guard (ATOMIC — Durable Object). This is the real money
     //    ceiling; committed FIRST so a race can never push total dollars past
-    //    the cap. If it freezes, nothing per-code is written.
+    //    the cap. If it freezes, nothing per-code is written. Charged the SPEND
+    //    units (budgetCost), so a keyless install's messages-only count cannot
+    //    hide the prompt size from the ceiling.
     const freezeAt = Number(env.GLOBAL_BUDGET_MESSAGES) || DEFAULT_GLOBAL_FREEZE;
     const budget = env.BUDGET.get(env.BUDGET.idFromName("global"));
     const bres = await budget.fetch("https://budget.internal/reserve", {
         method: "POST",
-        body: JSON.stringify({ cost, freezeAt })
+        body: JSON.stringify({ cost: budgetCost, freezeAt })
     });
     const decision = await bres.json() as { allowed: boolean };
     if (!decision.allowed) return { ok: false, reason: "capacity", retryAfterMs: 3_600_000 };
 
     // 4) Commit the per-code counters (soft). Self-purge (daily 2d, rpm 2min).
-    await env.CODES.put(dayKey, String(used + cost), { expirationTtl: 172_800 });
-    await env.CODES.put(rpmKey, String(rpm + 1), { expirationTtl: 120 });
-    if (ipKey) await env.CODES.put(ipKey, String(ipUsed + cost), { expirationTtl: 172_800 });
+    //    A failed write is logged and ignored (see softPut): the budget is
+    //    already committed, so the request goes ahead.
+    const redact = [code, ip ?? ""];
+    await softPut(env, dayKey, String(used + cost), 172_800, "reserve", "day", redact);
+    if (rpmTracked) await softPut(env, rpmKey, String(rpm + 1), 120, "reserve", "rpm", redact);
+    for (let i = 0; i < guards.length; i++) {
+        const g = guards[i]!;
+        await softPut(env, g.key, String(ipUsed[i]! + (g.unit === "cost" ? budgetCost : cost)), 172_800, "reserve", g.unit === "cost" ? "ip_cost" : "ip", redact);
+    }
 
     return { ok: true, used: used + cost, cap: rec.dailyCap };
 }
@@ -370,20 +485,27 @@ export async function reserve(env: Env, code: string, rec: CodeRecord, cost: num
 /** Return a reservation when the upstream call failed, so a Groq outage never
  *  costs a user their quota. Best-effort; the global counter is left as-is
  *  (slack-tolerant) so the budget guard stays conservative. */
-/** `plan` picks which address counter to give back (taste → use:ip:, trial →
- *  use:ipt:). It defaults to taste so the pre-trial call signature keeps its
- *  exact meaning. */
-export async function refund(env: Env, code: string, cost: number, now: number, ip?: string | null, plan: CodeRecord["plan"] = "taste"): Promise<void> {
-    const dayKey = `use:${code}:${today(now)}`;
-    const used = await readCount(env, dayKey);
-    await env.CODES.put(dayKey, String(Math.max(0, used - cost)), { expirationTtl: 172_800 });
+/** `plan` picks which address counters to give back (taste → use:ip:, trial →
+ *  use:ipt: and use:iptc:). It defaults to taste so the pre-trial call
+ *  signature keeps its exact meaning; `budgetCost` (default `cost`) is what
+ *  the cost-unit counter gives back. Never throws: it runs in waitUntil after
+ *  the response, and a failed refund only leaves a counter slightly high. */
+export async function refund(
+    env: Env, code: string, cost: number, now: number, ip?: string | null,
+    plan: CodeRecord["plan"] = "taste", budgetCost: number = cost
+): Promise<void> {
+    const redact = [code, ip ?? ""];
+    const giveBack = async (key: string, by: number, counter: string) => {
+        let n: number;
+        try { n = await readCount(env, key); } catch { return; }
+        await softPut(env, key, String(Math.max(0, n - by)), 172_800, "refund", counter, redact);
+    };
+    await giveBack(`use:${code}:${today(now)}`, cost, "day");
     // A taste request also held a per-IP reservation; give that back too, or one
     // upstream outage burns a whole household's free taste for the day. Passed
     // only for taste/trial requests, so nothing else grows an ip counter.
-    const guard = ipGuard(plan, ip, now);
-    if (guard) {
-        const ipUsed = await readCount(env, guard.key);
-        await env.CODES.put(guard.key, String(Math.max(0, ipUsed - cost)), { expirationTtl: 172_800 });
+    for (const g of ipGuards(plan, ip, now)) {
+        await giveBack(g.key, g.unit === "cost" ? budgetCost : cost, g.unit === "cost" ? "ip_cost" : "ip");
     }
 }
 
