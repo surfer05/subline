@@ -2947,6 +2947,9 @@ function onMessagesLoaded(payload: any) {
 
 const TEXT_COLOUR = "var(--text-default, var(--text-normal, #dbdee1))";
 
+/** The translation itself: keeps the message's own line breaks (see the accessory). */
+const TRANSLATION_TEXT_STYLE = { whiteSpace: "pre-wrap" } as const;
+
 /**
  * How each engine's output is announced on the subtitle itself.
  *
@@ -3317,7 +3320,12 @@ function TranslationAccessory({ message }: { message: Message; }) {
             <span style={{ color: "var(--text-muted)" }} title={title}>
                 {rough ? "≈ rough" : provenance.glyph} {entry.lang}{unsure && !rough ? "?" : ""} ·{" "}
             </span>
-            {entry.text}
+            {/*
+              * LINE BREAKS SHOW. A two-line message came back as two lines and
+              * was painted as one: HTML collapses "\n" to a space unless the
+              * text says otherwise. pre-wrap keeps the breaks and still wraps.
+              */}
+            <span style={TRANSLATION_TEXT_STYLE}>{entry.text}</span>
             {/*
               * ALONGSIDE the line above, never instead of it — a forced click
               * on a message that already carries a Google ≈ line (the common

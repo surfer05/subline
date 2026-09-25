@@ -26,8 +26,18 @@ describe("buildPrompt — drift guard", () => {
             "'children', 'sacrifice'", "guys', 'mate', 'dude'",
             "3 for ع, 7 for ح", "Keep slang as slang and profanity as profanity",
             "Return exactly one entry per message id given",
-            "JSON-encoded strings", "BCP-47"
+            "JSON-encoded strings", "BCP-47",
+            // Line breaks (field report, 0.1.6): a two-line message came back
+            // as one line. The model must keep them, written as \n.
+            "Keep the same line breaks.", "Write each line break in your JSON text as \\n"
         ]) expect(p, clause).toContain(clause);
+    });
+    it("keeps a multi-line message's line breaks through the parse", async () => {
+        const twoLine = "For stuff like pasta etc., Mommo's\nBut if you only feel like pizza, Dirty Harry's";
+        vi.stubGlobal("fetch", vi.fn(async () => groqBody(JSON.stringify({ translations: [{ id: "0", lang: "de", text: twoLine, skip: false }] }))));
+        const r = await translate(req(["Für so Pasta usw mommo's\nAber wenn du nur Bock auf Pizza hast Dirty Harry's"]), groq("m"));
+        expect(r).toEqual([{ id: "0", lang: "de", text: twoLine, skip: false }]);
+        expect(buildPrompt(req(["a\nb"]))).toContain('"a\\nb"');
     });
     it("includes context only when present, and never translates it", () => {
         const withCtx: BatchRequest = { ...req(["hola"]), context: [{ author: "z", text: "hey" }] };

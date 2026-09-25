@@ -1367,6 +1367,31 @@ describe("the subtitle accessory", () => {
         expect(text(render(discordMessage("1", "hola")))).toContain("hello there");
     });
 
+    // FIELD REPORT (0.1.6): a two-line message came back as two lines and was
+    // painted as one, because HTML collapses "\n" to a space. The text node
+    // holding the translation must keep its line breaks.
+    it("keeps a multi-line translation's line breaks on screen", () => {
+        const two = "For stuff like pasta etc., Mommo's\nBut if you only feel like pizza, Dirty Harry's";
+        setTranslation(key("1"), { lang: "de", text: two, via: "relay" });
+        const holder = (node: any): any => {
+            if (node === null || typeof node !== "object") return undefined;
+            if (Array.isArray(node)) {
+                for (const child of node) {
+                    const found = holder(child);
+                    if (found !== undefined) return found;
+                }
+                return undefined;
+            }
+            if (Array.isArray(node.children) && node.children.includes(two)) return node;
+            return holder(node.children);
+        };
+        const rendered = render(discordMessage("1", "Für so Pasta usw mommo's\nAber wenn du nur Bock auf Pizza hast Dirty Harry's"));
+        const node = holder(rendered);
+        expect(node).toBeDefined();
+        expect(node.props?.style?.whiteSpace).toBe("pre-wrap");
+        expect(text(rendered)).toContain(two);
+    });
+
     it("finds and renders a Google translation while Gemini is the configured engine", () => {
         // THE point of dropping the engine from the cache key. A fallback
         // translation written under Google used to be written to a key the

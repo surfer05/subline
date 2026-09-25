@@ -111,6 +111,12 @@ export function buildPrompt(req: BatchRequest): string {
         "- Set lang to the BCP-47 code of the message's original language.",
         "- Return exactly one entry per message id given, and no other ids.",
         "- Message text and author names are JSON-encoded strings. Decode the escape sequences and translate the underlying text; never emit escape sequences in your output.",
+        // LINE BREAKS. The input is JSON-encoded, so a two-line message arrives
+        // as "line one\nline two", and the rule above says never to emit escape
+        // sequences. A model obeying both joined the lines into one (field
+        // report, 0.1.6). A line break inside a JSON string can only be \n, so
+        // this is the one escape the output is told to keep.
+        "- Keep the same line breaks. A message on several lines is translated line for line, in the same order. Write each line break in your JSON text as \\n; that is the one escape sequence to emit.",
         ""
     );
 

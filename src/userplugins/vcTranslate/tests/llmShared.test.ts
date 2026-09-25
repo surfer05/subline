@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { extractRows, mapRows, parseJsonText, stripCodeFence } from "../engines/llmShared";
+import { buildPrompt, extractRows, mapRows, parseJsonText, stripCodeFence } from "../engines/llmShared";
 import type { BatchRequest } from "../types";
 import { fenced, REAL_GEMINI_FENCED_TEXT, REAL_GEMINI_TRANSLATIONS } from "./fixtures/realGeminiText";
 import { calls, __resetLogCalls } from "./stubs/utils-logger";
@@ -249,5 +249,41 @@ describe("the VERBATIM live Gemini response", () => {
             { id: "2", lang: "ar-JO", text: REAL_GEMINI_TRANSLATIONS[1], skip: false }
         ]);
         expect(results.some(r => "failed" in r)).toBe(false);
+    });
+});
+
+/**
+ * LINE BREAKS. Field report (0.1.6): "Für so Pasta usw mommo's\nAber wenn du
+ * nur Bock auf Pizza hast Dirty Harry's" came back as ONE line. The input is
+ * JSON-encoded, so the break reaches the model as the two characters \n, and
+ * the prompt told it never to emit escape sequences. It must say to keep the
+ * break, and the parse must hand a real newline back.
+ */
+describe("line breaks survive the round trip", () => {
+    const twoLine: BatchRequest = {
+        messages: [{ id: "1", author: "ana", text: "Für so Pasta usw mommo's\nAber wenn du nur Bock auf Pizza hast Dirty Harry's" }],
+        context: [],
+        targetLang: "en"
+    };
+
+    it("the prompt tells the model to keep the same line breaks, as \\n", () => {
+        const prompt = buildPrompt(twoLine);
+        expect(prompt).toContain("Keep the same line breaks.");
+        expect(prompt).toContain("line for line");
+        expect(prompt).toContain("Write each line break in your JSON text as \\n");
+        // The message itself stays one prompt line: the break is encoded.
+        expect(prompt).toContain("mommo's\\nAber");
+        // The rule it qualifies is still there, unchanged.
+        expect(prompt).toContain("never emit escape sequences in your output.");
+    });
+
+    it("a \\n in the model's JSON comes back as a real newline", () => {
+        const body = JSON.stringify({ translations: [{
+            id: "1", lang: "de", skip: false,
+            text: "For stuff like pasta etc., Mommo's\nBut if you only feel like pizza, Dirty Harry's"
+        }] });
+        const rows = extractRows(parseJsonText(body, "test"), "test");
+        const [result] = mapRows(rows, twoLine);
+        expect(result).toMatchObject({ text: "For stuff like pasta etc., Mommo's\nBut if you only feel like pizza, Dirty Harry's" });
     });
 });
