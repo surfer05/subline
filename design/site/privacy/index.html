@@ -55,23 +55,23 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 </head>
 <body>
 <p class="kicker">Privacy</p>
-<h2 class="sec">Where your messages go</h2>
-<p class="lead">Translating means sending text somewhere. Here's exactly where.</p>
+<h2 class="sec">What gets sent</h2>
+<p class="lead">To translate, text has to go somewhere. Here's where, and what's kept.</p>
 <table class="pv">
-<thead><tr><th>What</th><th>Goes where</th><th>Stored?</th></tr></thead>
+<thead><tr><th>What</th><th>Goes to</th><th>Kept</th></tr></thead>
 <tbody>
-<tr><td>Message text</td><td><b>Google</b> for the instant ≈ line. For the ✦ line, <b>Subline's own relay</b> gets the message and a few messages before it. It sends them to OpenRouter, which runs the AI on Groq or a similar host, and returns the translation. If OpenRouter fails, the relay sends them straight to Groq.</td><td>No. The relay stores no message text.</td></tr>
-<tr><td>Who sent it</td><td>For the ✦ line, the sender's Discord username goes to the relay with the text, so the AI can tell who said what. If a message mentions a person, channel, or role, that name goes as part of the text, to Google and the relay. Avatars and server names are never sent.</td><td>No.</td></tr>
-<tr><td>Profiles, embeds and more</td><td>Paid installs only, and only with <b>Translate profiles, embeds and more</b> on. Texts go in small batches, with no messages around them and no names. The ✦ translation comes from <b>Subline's own relay</b>. Text shown as a line under the original also goes to <b>Google</b> for the quick ≈ line. Text shown only when you hover a small ✦ goes to the relay alone. What goes: embed, poll, forwarded message and reply preview text, only from channels that translate messages. So never from a DM or group DM you have not turned on, and never from a channel you switched off. Custom statuses and About me text of people whose profile, member list row or DM list row you see. Channel topics and descriptions, voice channel statuses, thread and forum post titles, forum tags, stage topics and forum guidelines, only in server channels where messages are translated. They follow the same Global Auto and per-channel settings, and never come from DMs. Event descriptions follow their channel, or the server if they have none. Server rules and onboarding questions, only in servers. Text Subline is sure is in your language is not sent, and neither is text over 2,000 characters. The relay gets at most 200 units of this a day: each text costs 1 unit, plus 1 for every started 1,000 characters. After that, lines under the original still get a ≈ line from Google, and nothing more goes to the relay that day. Messages always go first.</td><td>The relay stores no text. Your device keeps these translations for up to 30 days, at most 2,000 of them, so the same text is not sent twice. It also keeps a count of today's texts.</td></tr>
-<tr><td>Your Subline code</td><td>An access token that unlocks the ✦ AI. No name, email, or personal info is attached. It goes to the relay only when you translate.</td><td>A count of today's translations for the code, deleted after 2 days. A daily marker that the code was used, stored as a 16-hex SHA-256 hash of the code, deleted after 2 days.</td></tr>
-<tr><td>Free install id</td><td>Free installs send a random id when Discord starts and with each free ✦. It times your 7 free days and counts your 3 free ✦ previews a day. It is not tied to your name or account. Each free ✦ also counts your IP address, to limit abuse.</td><td>A count of today's translations for the id, deleted after 2 days. A daily marker that the id was used, stored as a 16-hex SHA-256 hash of the id, deleted after 2 days. The time the id first got a translation, kept 90 days. The app keeps its own record of when your trial started, and that is what ends it. A count per IP address, deleted after 2 days. For an IPv6 address, only its first half is used.</td></tr>
-<tr><td>Usage data</td><td>The Discord app sends none. For each request, the relay records whether it worked, the plan, and how many messages it had. Each record carries a short hash of the code or id, never the code or id itself. No message text, no names.</td><td>Daily totals for all users together, kept 35 days. The per-request records are kept in Cloudflare's analytics service.</td></tr>
+<tr><td>Messages</td><td><b>Google</b> for <span class="gl-inline">≈</span>. Our <b>relay</b> for <span class="gl-inline">✦</span>, with a few earlier messages for context. The relay asks an AI through OpenRouter or Groq.</td><td>Nothing.</td></tr>
+<tr><td>Usernames</td><td>Sent with <span class="gl-inline">✦</span> so the AI knows who said what.</td><td>Nothing.</td></tr>
+<tr><td>Profiles and embeds</td><td>Paid only. Bios, statuses, embeds, polls, topics and titles you see, from channels Subline translates.</td><td>Cached on your device for 30 days.</td></tr>
+<tr><td>Your code</td><td>Unlocks <span class="gl-inline">✦</span>. No name or email attached.</td><td>Daily counts, deleted after 2 days.</td></tr>
+<tr><td>Free installs</td><td>A random id that times your 7 days. Your IP is counted to stop abuse.</td><td>Daily counts for 2 days. First use for 90 days.</td></tr>
+<tr><td>Stats</td><td>Totals only. No text, no names.</td><td>35 days.</td></tr>
 </tbody></table>
 <ul class="off">
-  <li><span class="t">off</span><div><b>DMs are off.</b> A DM is never translated on its own. You can turn one on per conversation. Or press ⚡ on one message to translate it. That sends it and the few messages before it.</div></li>
-  <li><span class="t">off</span><div><b>Your own messages are never translated.</b> If you read English, Subline skips text it is sure is English before sending anything. Everything else goes to Google, which skips what is already in your language. After a free trial ends, only the messages you click go. With ✦ on, a few recent messages, yours included, go to the relay as context.</div></li>
-  <li><span class="t">you</span><div><b>Turn it off.</b> To stop one channel, hover over a message in it and click the globe button, labeled <b>Disable auto-translate here</b>. Click it again to turn the channel back on. To stop every server channel, switch off <b>Global Auto</b> in the VcTranslate plugin settings. After that, only channels you turn on with the globe button translate.</div></li>
+  <li><span class="t">off</span><div><b>DMs are off.</b> Turn one on per chat, or press ⚡ on a single message.</div></li>
+  <li><span class="t">off</span><div><b>Your own messages</b> are never translated.</div></li>
+  <li><span class="t">you</span><div><b>Turn it off</b> anytime. The globe button stops one channel. <b>Global Auto</b> in settings stops all of them.</div></li>
 </ul>
-<p class="fine" style="margin-top:30px;max-width:64ch">Subline is an independent project. The source is on GitHub. It is not affiliated with, endorsed by, or connected to Discord. It's a client modification you install yourself. Use it at your own discretion.</p>
+<p class="fine" style="margin-top:30px;max-width:64ch">Subline is independent and not made by Discord. You install it yourself, at your own discretion.</p>
 </body>
 </html>
