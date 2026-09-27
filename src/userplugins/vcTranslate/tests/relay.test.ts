@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-    fetchRelayStatus, RELAY_STATUS_URL, translateWithRelay, translateWithRelayDetailed
+    fetchRelayCheckout, fetchRelayStatus, RELAY_CHECKOUT_URL, RELAY_STATUS_URL, translateWithRelay, translateWithRelayDetailed
 } from "../engines/relay";
 import type { BatchRequest } from "../types";
 
@@ -113,5 +113,53 @@ describe("fetchRelayStatus", () => {
             ok: true, status: 200, json: async () => ({ ok: true, plan: "taste", used: "two" })
         });
         await expect(fetchRelayStatus("free_abc", fetchImpl as any)).rejects.toThrow(/malformed status/);
+    });
+});
+
+describe("the purchase on /v1/status", () => {
+    const status = (body: any) => fetchRelayStatus("free_" + "a".repeat(32), vi.fn().mockResolvedValue({
+        ok: true, status: 200, json: async () => ({ ok: true, plan: "trial", used: 0, cap: 300, ...body })
+    }) as any);
+
+    it("passes a linked purchase through", async () => {
+        expect((await status({ purchase: { code: " LK-1 ", plan: "annual" } })).purchase).toEqual({ code: "LK-1", plan: "annual" });
+    });
+
+    it("ignores a malformed one", async () => {
+        expect((await status({ purchase: { code: "", plan: "annual" } })).purchase).toBeUndefined();
+        expect((await status({ purchase: { code: 7 } })).purchase).toBeUndefined();
+        expect((await status({ purchase: "LK-1" })).purchase).toBeUndefined();
+        expect((await status({})).purchase).toBeUndefined();
+    });
+});
+
+describe("fetchRelayCheckout", () => {
+    it("posts the plan with the install bearer and returns the URL", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: true, status: 200, json: async () => ({ ok: true, url: "https://checkout.dodopayments.com/session/cks_1" })
+        });
+        const url = await fetchRelayCheckout("free_" + "a".repeat(32), "annual", fetchImpl as any);
+        expect(url).toBe("https://checkout.dodopayments.com/session/cks_1");
+        const [target, init] = fetchImpl.mock.calls[0];
+        expect(target).toBe(RELAY_CHECKOUT_URL);
+        expect(RELAY_CHECKOUT_URL).toBe("https://subline-relay.rahul05alok.workers.dev/v1/checkout");
+        expect(init.method).toBe("POST");
+        expect(init.headers.authorization).toBe(`Bearer free_${"a".repeat(32)}`);
+        expect(init.headers["x-subline-client"]).toMatch(/^vcTranslate\//);
+        expect(JSON.parse(init.body)).toEqual({ plan: "annual" });
+    });
+
+    it("throws on a refusal, so the caller uses the static link", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({
+            ok: false, status: 503, json: async () => ({ ok: false, error: "checkout unavailable" })
+        });
+        await expect(fetchRelayCheckout("free_x", "monthly", fetchImpl as any)).rejects.toThrow(/HTTP 503 checkout unavailable/);
+    });
+
+    it("gives up after its timeout", async () => {
+        const fetchImpl = vi.fn((_u: string, init: any) => new Promise((_r, reject) => {
+            init.signal.addEventListener("abort", () => reject(new Error("aborted")));
+        }));
+        await expect(fetchRelayCheckout("free_x", "monthly", fetchImpl as any, 5)).rejects.toThrow(/aborted/);
     });
 });

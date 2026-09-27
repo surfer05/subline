@@ -290,10 +290,14 @@ is empty, the key was rejected, or the engine is rate limited right now.
 active channel is the sign something is actually wrong** (usually a quota
 issue) — a `≈` line that is merely a few seconds old is not.
 
-The **"Target language code"** setting defaults to your Discord client's own
-language (`en-US` becomes `en`, `pt-BR` becomes `pt`, and so on) rather than
-always English. Set it explicitly if you want subtitles in something other
-than the language your client is in.
+The **Reading language** setting is a dropdown of language names (the same
+list the installer's language screen offers, see `languages.ts`). It defaults
+to your Discord client's own language (`en-US` becomes `en`, `pt-BR` becomes
+`pt`, and so on) rather than always English. Changing it takes effect at once:
+the batchers are rebuilt for the new language, translations cached in the old
+one are dropped, and the channel on screen is translated again. An old
+free-text value from an earlier build (`pt-BR`, `English`) is turned into its
+code at start.
 
 ## Engines
 
@@ -1074,7 +1078,7 @@ of results.
 | 20 | Post a message containing a link, and let Discord's preview embed load | The embed's own `MESSAGE_UPDATE` must not trigger an extra translation request for that message — you should see the normal fast-tier request (plus one quality-tier request if an LLM is configured), not a duplicate of either from the embed loading | ☐ |
 | 21 | Open the plugin settings with engine = Google, then switch to Claude | The "Anthropic API key" field is absent for Google and appears for Claude | ☐ |
 | 22 | Select Claude while the key field is empty, then post a message | Exactly one "no Anthropic API key" toast; pasting a valid key afterwards starts using Claude with no restart | ☐ |
-| 23 | Check the "Target language code" setting on a fresh install with a non-English Discord client | It defaults to your client's language as a bare code (`pt`, not `pt-BR`) | ☐ |
+| 23 | Check the "Reading language" setting on a fresh install with a non-English Discord client | It defaults to your client's language as a bare code (`pt`, not `pt-BR`) | ☐ |
 | 24 | **Focus:** with `globalAuto` on, sit in channel A while someone posts a non-English message in channel B | Nothing is requested for B while you are in A (check the provider dashboard). Opening B translates its recent backlog then | ☐ |
 | 25 | **Focus, popout:** pop a channel out into its own window and post there while the main window is on another channel | Expected to *not* translate live — a known, documented simplification. It should still translate once that channel is opened in the main window | ☐ |
 | 26 | **Local English skip:** post a plain English sentence in an English-target channel | No subtitle **and no API request at all** (the dashboard count must not move) | ☐ |

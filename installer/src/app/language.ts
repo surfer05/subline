@@ -54,6 +54,10 @@ export interface LanguageOption {
  * language the product cannot deliver is a worse lie than a short list. These
  * are the bare codes both engines handle, which is the intersection that
  * matters.
+ *
+ * SHARED with the plugin's Reading Language dropdown
+ * (src/userplugins/vcTranslate/languages.ts). This app cannot import that file,
+ * so the two are kept equal by tests/languageShared.test.ts: change both.
  */
 export const SUPPORTED_LANGUAGE_CODES: readonly string[] = [
     "af", "am", "ar", "az", "be", "bg", "bn", "bs", "ca", "cs", "cy", "da", "de", "el", "en",

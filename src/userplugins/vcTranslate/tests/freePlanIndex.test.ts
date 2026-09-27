@@ -21,10 +21,11 @@ import { clearStore, getTranslation, makeKey, setTranslation } from "../store";
 import { __resetTaste } from "../taste";
 import { WEEK_MS, WEEKLY_KEY } from "../weeklyNote";
 import { __resetSettings } from "./stubs/api-settings";
+import { __resetNotices, shownNotices } from "./stubs/api-notices";
 import * as DataStore from "./stubs/api-datastore";
 import { __getPopoverButton, __reset as __resetMessagePopover } from "./stubs/api-messagepopover";
 import {
-    __resetWebpackCommon, __stubMarkAsDm, __stubSetSelectedChannel, FluxDispatcher, shownToasts, stubMessages
+    __resetWebpackCommon, __stubMarkAsDm, __stubSetSelectedChannel, FluxDispatcher, openedModals, shownToasts, stubMessages
 } from "./stubs/webpack-common";
 
 /**
@@ -43,6 +44,9 @@ const key = (id: string) => makeKey(id, "en");
 const msg = (id: string, content: string, authorId = "u1") => ({
     id, channel_id: CHANNEL, content, author: { id: authorId, username: "ana" }
 });
+
+/** The trial-ended notices raised (a notice bar with an Upgrade button, not a toast). */
+const endedNotices = () => shownNotices.filter(n => /trial ended/.test(String(n.message)));
 
 async function flush() {
     for (let i = 0; i < 30; i++) await Promise.resolve();
@@ -125,6 +129,7 @@ beforeEach(async () => {
     __resetTaste();
     __resetSettings();
     __resetWebpackCommon();
+    __resetNotices();
     __resetMessagePopover();
     DataStore.__reset();
     settings.store.globalAuto = true;
@@ -307,26 +312,30 @@ describe("after the trial: translate on click", () => {
         // the local end is a full day past. See the announce suite below.)
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("2", "que pasa amigo") });
-        const ended = shownToasts.filter(t => /trial ended/.test(t.message));
+        const ended = endedNotices();
         expect(ended).toHaveLength(1);
         expect(ended[0].message).toBe(
             "Your 7-day free trial ended. Messages now translate when you click. Upgrade to keep it automatic."
         );
         expect(ended[0].message).not.toContain("http");
-        expect(ended[0].type).toBe("MESSAGE");
+        expect(ended[0].buttonText).toBe("Upgrade");
+        // Its button opens the Upgrade panel.
+        ended[0].onOkClick();
+        expect(openedModals).toHaveLength(1);
+        expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(0);
         expect(settings.store.freeTrialEndNoticeFor).toBeGreaterThan(0);
 
         // Never again, not even after a restart.
         const shown = settings.store.freeTrialStartedAt;
         await restart(() => { settings.store.freeTrialStartedAt = shown; });
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("3", "hola otra vez") });
-        expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(1);
+        expect(endedNotices()).toHaveLength(1);
     });
 
     it("also tells it on opening a channel whose backlog is foreign", () => {
         stubMessages.set(CHANNEL, [msg("2", "bonjour tout le monde")]);
         FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
-        expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(1);
+        expect(endedNotices()).toHaveLength(1);
     });
 
     it("does not tell it for a backlog of the reader's own language", () => {
@@ -482,9 +491,12 @@ describe("the ✦ preview after a click on a rough line", () => {
         expect(out).toContain("✦ reads this as: I don't want to go… Upgrade");
         // The preview is never stored as a translation.
         expect(getTranslation(key("1"))).toMatchObject({ via: "google" });
-        // The link goes to pricing.
+        // The link opens the Upgrade panel.
         const link = clickable(node);
         expect(link?.label).toBe("Upgrade");
+        expect(openedModals).toHaveLength(0);
+        link!.onClick();
+        expect(openedModals).toHaveLength(1);
     });
 
     it("does not ask for a preview when the ≈ line is not rough", async () => {
@@ -696,7 +708,7 @@ describe("review fixes: an older relay, retries, the announcement, clock skew", 
     it("does not announce on the local clock alone until a full day past its end", async () => {
         await restart(() => { settings.store.freeTrialStartedAt = Date.now() - TRIAL_MS - 2 * 60 * 60_000; });
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
-        expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(0);
+        expect(endedNotices()).toHaveLength(0);
         // The click line is there anyway (the local clock drives click mode).
         expect(clickable(render(msg("1", "hola que tal")))?.label).toBe("≈ Translate");
     });
@@ -707,7 +719,7 @@ describe("review fixes: an older relay, retries, the announcement, clock skew", 
         });
         await restart(() => { settings.store.freeTrialStartedAt = Date.now() - TRIAL_MS + 60_000; });
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
-        expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(1);
+        expect(endedNotices()).toHaveLength(1);
     });
 
     it("announces after a 402 'trial ended' reply, and once per ending only", async () => {
@@ -722,7 +734,7 @@ describe("review fixes: an older relay, retries, the announcement, clock skew", 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
         await settle();
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("2", "que pasa amigo") });
-        expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(1);
+        expect(endedNotices()).toHaveLength(1);
 
         // The same ending seen again after a restart (the relay now states it): no second toast.
         const start = settings.store.freeTrialStartedAt;
@@ -731,7 +743,7 @@ describe("review fixes: an older relay, retries, the announcement, clock skew", 
         });
         await restart(() => { settings.store.freeTrialStartedAt = start; });
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("3", "hola otra vez") });
-        expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(1);
+        expect(endedNotices()).toHaveLength(1);
     });
 
     it("corrects a FAST client clock: a trial the relay says still runs stays automatic", async () => {
@@ -758,7 +770,7 @@ describe("review fixes: an older relay, retries, the announcement, clock skew", 
         await settle();
         expect(calls()).toHaveLength(0);
         expect(clickable(render(msg("1", "hola que tal")))?.label).toBe("≈ Translate");
-        expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(1);
+        expect(endedNotices()).toHaveLength(1);
     });
 });
 
@@ -785,7 +797,7 @@ describe("re-review fixes", () => {
         expect(calls()).toHaveLength(0);
         expect(clickable(render(msg("2", "que pasa amigo")))?.label).toBe("≈ Translate");
         // The provisional answer is not a stated ending: no toast before local end + 24h.
-        expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(0);
+        expect(endedNotices()).toHaveLength(0);
     });
 
     it("N3: after the relay's 90-day record lapses, an install with a local start gets no new trial", async () => {
@@ -873,7 +885,7 @@ describe("N7: channels the reader has not opted into, and a code pasted mid-sess
             await settle();
             expect(calls()).toHaveLength(0);
             expect(render(dmMsg("1", "hola que tal"))).toBeNull();
-            expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(0);
+            expect(endedNotices()).toHaveLength(0);
         });
 
         it(`${mode}: a server channel switched off sends nothing and shows no click line`, async () => {
