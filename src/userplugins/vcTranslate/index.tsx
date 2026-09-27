@@ -2,7 +2,7 @@ import type { ChatBarProps } from "@api/ChatButtons";
 import * as DataStore from "@api/DataStore";
 import { addMessageAccessory, removeMessageAccessory } from "@api/MessageAccessories";
 import { addMessagePopoverButton, removeMessagePopoverButton } from "@api/MessagePopover";
-import { showNotice } from "@api/Notices";
+import { popNotice, showNotice } from "@api/Notices";
 import { Logger } from "@utils/Logger";
 import definePlugin, { PluginNative } from "@utils/types";
 import { relaunch } from "@utils/native";
@@ -16,7 +16,7 @@ import { createBatcher, type Batcher } from "./batcher";
 import { renderDiscordMarkup, type MarkupResolvers } from "./discordMarkup";
 import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel, toggleChannelOptOut } from "./channels";
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
-import { DECODED_TITLE, DECODED_WORD, decodedPrefix, decodeMessage, translatableText } from "./decode";
+import { DECODED_TITLE, decodedPrefix, decodeMessage, translatableText } from "./decode";
 import { isConfidentlyTargetLanguage } from "./detectLang";
 import {
     __resetFreePlan, announceableTrialEnd, freeMode, isNewEnding, noteServerNow,
@@ -702,11 +702,19 @@ function getCheckoutFlow(): CheckoutFlow {
  */
 function onPurchaseLinked(purchase: Purchase): void {
     if (!isTasteInstall()) return;   // a code arrived some other way meanwhile
+    // The reader cleared this very code in settings. The relay keeps the link
+    // for 30 days, so without this it would come straight back.
+    if (purchase.code === settings.store.clearedPurchaseCode) return;
     settings.store.sublineCode = purchase.code;
     if (settings.store.engine !== "relay") settings.store.engine = "relay";
     trialBearer = null;
     clearStatusRetry();
-    Toasts.show({ id: Toasts.genId(), type: Toasts.Type.SUCCESS, message: UPGRADE_COPY.purchasedToast });
+    // A notice, not a toast: it stays until dismissed. The purchase usually
+    // lands while the buyer is still in the browser (a subscription can sit in
+    // Pending for minutes), and a toast gone after a few seconds said nothing.
+    // Every path that saves a purchased code comes through here, and the
+    // isTasteInstall() guard above makes it once per saved code.
+    showNotice(UPGRADE_COPY.purchasedNotice, UPGRADE_COPY.purchasedNoticeButton, popNotice);
     onFreePlanChanged();
 }
 
@@ -4204,7 +4212,7 @@ function decodedInPlace(content: string, channelId: string) {
     }
     return (
         <span title={readable} data-subline-surface="in-place">
-            <span style={{ opacity: 0.75 }}>{DECODED_WORD} · </span>{shown as any}
+            <span style={{ opacity: 0.75 }}>{decodedPrefix(d.kind)}</span>{shown as any}
         </span>
     );
 }
@@ -4486,18 +4494,31 @@ export default definePlugin({
         const cacheReady = loadPersistedTranslations();
 
         rebuildBatcher();
+        let wasFree = isTasteInstall();
+        let lastCode = typeof settings.store.sublineCode === "string" ? settings.store.sublineCode.trim() : "";
         onSettingsChanged(() => {
             // Order matters: lift a stale pin BEFORE rebuilding, so the new
             // batcher is built for the engine the user now has credentials for.
             releaseFallbackIfCredentialChanged();
             onTargetLangMaybeChanged();
             // A code cleared mid-session is a free install from now on: its
-            // trial starts (or resumes) exactly as it would at start().
-            if (isTasteInstall()) {
+            // trial starts (or resumes) exactly as it would at start(), and the
+            // relay is asked again what this install's free plan is (the answer
+            // from before the code was saved no longer describes it).
+            const free = isTasteInstall();
+            const flipped = free !== wasFree;
+            wasFree = free;
+            const code = typeof settings.store.sublineCode === "string" ? settings.store.sublineCode.trim() : "";
+            if (flipped && free && lastCode !== "") settings.store.clearedPurchaseCode = lastCode;
+            if (code !== "") lastCode = code;
+            if (free) {
                 ensureTrialStarted();
-                if (!freeStatusAsked) void refreshTasteQuota();
+                if (!freeStatusAsked || flipped) void refreshTasteQuota();
             }
             rebuildBatcher();
+            // Paid and free draw different lines (click mode, previews): redraw
+            // what is on screen now, not on the next message.
+            if (flipped) onFreePlanChanged();
         });
         FluxDispatcher.subscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.subscribe("MESSAGE_UPDATE", onMessageUpdate);

@@ -81,6 +81,11 @@ describe.skipIf(!built)("the built bundle's settings section", () => {
         expect(bundle).toContain("vencord_cloud_panel");
     });
 
+    it("opens with the plugin's own one-line description, not the old subtitles line", () => {
+        expect(bundle).toContain("Subline translates messages in other languages and shows the translation underneath.");
+        expect(bundle).not.toContain("shows them as subtitles underneath");
+    });
+
     it("still renders the plugin's own settings controls", () => {
         // The point of the whole exercise: the pane that replaced seven has to
         // contain something. These are vcTranslate's setting keys, which reach

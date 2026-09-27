@@ -164,7 +164,8 @@ describe("surface hooks", () => {
 
     it("the settings toggle exists, defaults on, and is hidden without a code", () => {
         const def = (settings as any).def.translateSurfaces;
-        expect(def.description).toBe("Translate profiles, embeds and more");
+        expect(def.displayName).toBe("Profiles, embeds and more");
+        expect(def.description).toBe("Also translate statuses, bios, embeds, polls, topics and titles.");
         expect(settings.store.translateSurfaces).toBe(true);
         expect(def.hidden()).toBe(true);
         paid();
@@ -682,16 +683,16 @@ describe("the reply bar", () => {
         const free = bar(quoted("q9", "c1", morse));
         expect(free.type).toBe("span");
         expect(free.props.title).toBe(morse);
-        expect(text(free)).toBe("decoded · <md:HAPPY BIRTHDAY @Gojer|c1>");
+        expect(text(free)).toBe("decoded · morse · <md:HAPPY BIRTHDAY @Gojer|c1>");
         paid();
         setTranslation(makeKey("q9", "en"), { skipped: true, via: "google" } as any);
-        expect(text(bar(quoted("q9", "c1", morse)))).toBe("decoded · <md:HAPPY BIRTHDAY @Gojer|c1>");
+        expect(text(bar(quoted("q9", "c1", morse)))).toBe("decoded · morse · <md:HAPPY BIRTHDAY @Gojer|c1>");
         await settle();
         expect(surfaceCalls()).toEqual([]);
     });
 
     it("decodes only the code in a quoted message that is partly words", () => {
-        expect(text(bar(quoted("q8", "c1", "or ..-. ..- -.-. -.- / -.-- --- ..- / .... .- -.- .- ..")))).toBe("decoded · <md:or FUCK YOU HAKAI|c1>");
+        expect(text(bar(quoted("q8", "c1", "or ..-. ..- -.-. -.- / -.-- --- ..- / .... .- -.- .- ..")))).toBe("decoded · morse · <md:or FUCK YOU HAKAI|c1>");
     });
 
     it("reuses the quoted message's translation, in place of the quoted line, original in the tooltip; nothing sent", async () => {
