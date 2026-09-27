@@ -295,6 +295,22 @@ language (`en-US` becomes `en`, `pt-BR` becomes `pt`, and so on) rather than
 always English. Set it explicitly if you want subtitles in something other
 than the language your client is in.
 
+### Codes and fancy text, decoded locally
+
+A message written entirely in Morse, 8-bit binary, grade 1 Braille, Base64,
+ROT13 or spaced letter emoji (🇭 🇪 🇾) gets a line under it such as
+`≈ morse · HAPPY BIRTHDAY`. This runs on your computer with no network, on
+every plan. If the decoded text is in another language, the decoded text (not
+the code) goes through the normal translators and its translation appears
+under the decoded line. The rules are strict on purpose: "...", "ok.", links,
+code blocks, hashes, tokens and country flags (🇯🇵) never decode. See
+`decode.ts`; the labels are in `DECODER_LABELS`.
+
+Fancy fonts (𝓱𝓸𝓵𝓪, ｈｏｌａ, ⓗⓞⓛⓐ, ʜᴏʟᴀ), upside-down text and Zalgo marks are
+turned back into plain letters before language detection and translation, so
+they translate like any other message. Code, links and Discord markup are left
+exactly as written, and usernames are never touched. See `normalize.ts`.
+
 ## Engines
 
 **Two tiers, not one selected engine.** *Every* incoming message is sent to
