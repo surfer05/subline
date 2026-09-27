@@ -109,6 +109,43 @@ describe("decoded line under a message", () => {
     });
 });
 
+describe("codes in a message already in the reader's language", () => {
+    it("gets its decoded line, and no translation", async () => {
+        const msg = discordMessage("1", "You can tell him this -- . . - / -- . / - --- -.. .- -.--");
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg });
+        await settle();
+        expect(native.translateBatch).not.toHaveBeenCalled();
+        const text = rendered(msg);
+        expect(text).toContain("decoded · morse · MEET ME TODAY");
+        expect(text).not.toContain("hello friend");
+    });
+
+    it("decodes a code followed by a mention, and sends nothing", async () => {
+        const msg = discordMessage("1", ".... .- .--. .--. -.-- / -... .. .-. - .... -.. .- -.-- / @Gojer");
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg });
+        await settle();
+        expect(native.translateBatch).not.toHaveBeenCalled();
+        expect(rendered(msg)).toContain("decoded · morse · HAPPY BIRTHDAY");
+    });
+});
+
+describe("language labels", () => {
+    it("never shows an undetermined language code", () => {
+        for (const lang of ["und", "zxx", "", "qq"]) {
+            clearStore();
+            setTranslation(makeKey("1", "en"), { lang, text: "hello friend", via: "google" });
+            const text = rendered(discordMessage("1", "hola amigo que tal"));
+            expect(text, lang).toContain("≈ · hello friend");
+            if (lang !== "") expect(text, lang).not.toContain(lang + " ·");
+        }
+    });
+
+    it("still shows a real one", () => {
+        setTranslation(makeKey("1", "en"), { lang: "es", text: "hello friend", via: "google" });
+        expect(rendered(discordMessage("1", "hola amigo que tal"))).toContain("≈ es · hello friend");
+    });
+});
+
 describe("decoded and normalised text goes through the normal pipeline", () => {
     it("sends a foreign decoded message to translation as its decoded text", async () => {
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "aG9sYSBhbWlnbw==") });

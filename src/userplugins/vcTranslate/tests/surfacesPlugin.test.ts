@@ -357,6 +357,18 @@ describe("a paid install", () => {
         expect(out).not.toContain("Bin gleich zurück");
     });
 
+    it("a line whose language the engine could not name shows no language label", async () => {
+        native.translateBatch.mockImplementation(async (engine: string, _key: string, payload: string) => ({
+            ok: true,
+            results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "und", text: `${engine === "relay" ? "sharp" : "rough"}: ${m.text}`, skip: false }))
+        }));
+        bioLine({ userId: "u1", userBio: "Ich liebe Pizza und lange Spaziergänge" });
+        await settle();
+        const out = text(bioLine({ userId: "u1", userBio: "Ich liebe Pizza und lange Spaziergänge" }));
+        expect(out).toContain("✦ · sharp: Ich liebe Pizza und lange Spaziergänge");
+        expect(out).not.toContain("und ·");
+    });
+
     it("an onboarding question gets lines for itself and its options", async () => {
         const prompt = { title: "Was spielst du gern?", options: [{ title: "Rollenspiele", description: "Lange Abende mit Freunden" }] };
         onboarding(prompt);
@@ -663,6 +675,23 @@ describe("the reply bar", () => {
         expect(P.replyQuoteChildren(ORIGINAL, props(quoted("q1")))).toBe(ORIGINAL);
         await settle();
         expect(surfaceCalls()).toEqual([]);
+    });
+
+    it("shows a quoted code decoded in place, original on hover, on any plan and with nothing sent", async () => {
+        const morse = ".... .- .--. .--. -.-- / -... .. .-. - .... -.. .- -.-- / @Gojer";
+        const free = bar(quoted("q9", "c1", morse));
+        expect(free.type).toBe("span");
+        expect(free.props.title).toBe(morse);
+        expect(text(free)).toBe("decoded · <md:HAPPY BIRTHDAY @Gojer|c1>");
+        paid();
+        setTranslation(makeKey("q9", "en"), { skipped: true, via: "google" } as any);
+        expect(text(bar(quoted("q9", "c1", morse)))).toBe("decoded · <md:HAPPY BIRTHDAY @Gojer|c1>");
+        await settle();
+        expect(surfaceCalls()).toEqual([]);
+    });
+
+    it("decodes only the code in a quoted message that is partly words", () => {
+        expect(text(bar(quoted("q8", "c1", "or ..-. ..- -.-. -.- / -.-- --- ..- / .... .- -.- .- ..")))).toBe("decoded · <md:or FUCK YOU HAKAI|c1>");
     });
 
     it("reuses the quoted message's translation, in place of the quoted line, original in the tooltip; nothing sent", async () => {

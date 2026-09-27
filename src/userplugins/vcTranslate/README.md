@@ -307,10 +307,22 @@ ROT13 or spaced letter emoji (🇭 🇪 🇾) gets a line under it such as
 every plan. If the decoded text is in another language, the decoded text (not
 the code) goes through the normal translators and its translation appears
 under the decoded line. The rules are strict on purpose: "...", "ok.", links,
-code blocks, hashes, tokens and country flags (🇯🇵) never decode. Morse needs
-five or more letters that read as words, or one short word on its own (SOS, HI,
-HELLO). See
+code blocks, hashes, tokens and country flags (🇯🇵) never decode. Morse is
+claimed when every decoded word is a common English word (`wordList.ts`, from
+SCOWL, permissive license, about 14,000 words) or chat shorthand (LOL, LMAO),
+or when it has five or more letters that read as words. See
 `decode.ts`; the labels are in `DECODER_LABELS`.
+
+Morse and binary are also found INSIDE a message ("tell him .... .. / .-- --- .-. .-.. -..",
+or a code followed by a mention or emoji). Each run is judged by the same
+rules and must have at least three codes, so a dash or an ellipsis in a
+sentence is never a run. The decoded line shows only the decoded run(s). The
+decoded line shows even when the message is already in your language (it is
+then not translated). A reply bar quoting such a message shows it decoded in
+place, the original on hover, on every plan.
+
+A line whose language the engine could not name ("und", "zxx", or any code
+that is not a language) shows no language label (`langLabel.ts`).
 
 Fancy fonts (𝓱𝓸𝓵𝓪, ｈｏｌａ, ⓗⓞⓛⓐ, ʜᴏʟᴀ), upside-down text and Zalgo marks are
 turned back into plain letters before language detection and translation, so

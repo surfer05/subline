@@ -24,6 +24,7 @@
 
 import { React } from "@webpack/common";
 
+import { languageLabel } from "../langLabel";
 import { isRomanizedGuess } from "../romanized";
 import { MIN_DETECT_CONFIDENCE } from "../types";
 import type { SurfaceEntry } from "./cache";
@@ -56,6 +57,12 @@ export function displayFor(entry: SurfaceEntry | null | undefined, source: strin
     const unsure = (fast.conf !== undefined && fast.conf < MIN_DETECT_CONFIDENCE) || isRomanizedGuess(fast.lang, source);
     if (unsure) return null;
     return { glyph: "≈", lang: fast.lang, text: fast.text.trim() };
+}
+
+/** " es" after the glyph, or nothing when the engine named no language ("und"). */
+function langSuffix(lang: unknown): string {
+    const label = languageLabel(lang);
+    return label === null ? "" : ` ${label}`;
 }
 
 /** Re-render when any surface translation lands. */
@@ -104,7 +111,7 @@ export function SurfaceLines({ texts }: { texts: SurfaceText[]; }) {
             if (shown === null) continue;
             lines.push(
                 <div key={`${t.kind}:${t.text}`} style={LINE_STYLE} data-subline-surface={t.kind}>
-                    <span>{LABELLED_KINDS.has(t.kind) ? `${t.label} · ` : ""}{shown.glyph} {shown.lang} · </span>
+                    <span>{LABELLED_KINDS.has(t.kind) ? `${t.label} · ` : ""}{shown.glyph}{langSuffix(shown.lang)} · </span>
                     <span>{shown.text}</span>
                 </div>
             );

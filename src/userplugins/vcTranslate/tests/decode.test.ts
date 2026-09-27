@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { decodeMessage, DECODER_LABELS, translatableText } from "../decode";
+import { commonEnglishWordCount, isCommonEnglishWord } from "../wordList";
 import { normalizeText } from "../normalize";
 
 const kindOf = (s: string) => decodeMessage(s)?.kind ?? null;
@@ -44,6 +45,69 @@ describe("Morse", () => {
     });
     it("rejects an ellipsis written with spaces", () => {
         expect(decodeMessage("... ... ...")).toBeNull();
+    });
+});
+
+describe("Morse judged against the common-word list", () => {
+    it("decodes short words that are common English words, and chat shorthand", () => {
+        expect(textOf("--- ..- -.-. ....")).toBe("OUCH");
+        expect(textOf(".-.. -- .- ---")).toBe("LMAO");
+        expect(textOf("-. --- / -.-- --- ..-")).toBe("NO YOU");
+    });
+    it("still rejects letters that spell no word", () => {
+        for (const s of ["- . -", ". - .", "-- - -- - --", "--- -.- .-.. --- .-..", "... .. ..."]) {
+            expect(decodeMessage(s), s).toBeNull(); // TET, ETE, MTMTM, OKLOL, SIS
+        }
+    });
+    it("accepts a name only through the multi-letter rules, never the list", () => {
+        expect(decodeMessage(".- -. -.. ..")).toBeNull(); // ANDI: four letters, not a common word
+        expect(isCommonEnglishWord("andi")).toBe(false);
+    });
+    it("bundles a real list, parsed on first use", () => {
+        expect(commonEnglishWordCount()).toBeGreaterThan(10_000);
+        for (const w of ["ouch", "you", "no", "birthday", "happy"]) expect(isCommonEnglishWord(w), w).toBe(true);
+        for (const w of ["tet", "ete", "sis", "oklol", "mtmtm", "m", "cs"]) expect(isCommonEnglishWord(w), w).toBe(false);
+    });
+});
+
+describe("codes inside a message", () => {
+    it("decodes Morse that follows ordinary words, and shows only the decoded run", () => {
+        const d = decodeMessage("or ..-. ..- -.-. -.- / -.-- --- ..- / .... .- -.- .- ..")!;
+        expect(d.kind).toBe("morse");
+        expect(d.text).toBe("FUCK YOU HAKAI");
+        expect(d.partial).toBe(true);
+        expect(d.inPlace).toBe("or FUCK YOU HAKAI");
+    });
+    it("looks past a mention or emoji after the code", () => {
+        const d = decodeMessage(".... .- .--. .--. -.-- / -... .. .-. - .... -.. .- -.-- / @Gojer")!;
+        expect(d.text).toBe("HAPPY BIRTHDAY");
+        expect(d.partial).toBeUndefined();
+        expect(d.inPlace).toBe("HAPPY BIRTHDAY @Gojer");
+        expect(d.translatable).toBe("happy birthday");
+        expect(textOf("<:cake:123456> .... .- .--. .--. -.-- 🎉 <@42>")).toBe("HAPPY");
+    });
+    it("judges a run inside text by the same rules as a whole message", () => {
+        // ANDI is four letters and not a common word, so this run is not claimed.
+        expect(decodeMessage("You can tell him this .- -. -.. ..")).toBeNull();
+        expect(textOf("You can tell him this -- . . - / -- . / - --- -.. .- -.--")).toBe("MEET ME TODAY");
+    });
+    it("joins several runs", () => {
+        expect(textOf("first ... --- ... then .... . .-.. .-.. --- ok")).toBe("SOS / HELLO");
+    });
+    it("hands the translator the message with the code decoded in it", () => {
+        expect(translatableText("dile esto: --. .-. .- -.-. .. .- ...")).toBe("dile esto: gracias");
+    });
+    it("finds binary inside a message too", () => {
+        const d = decodeMessage("hey 01101000 01101001 00100000 01111001 01101111 01110101 ok")!;
+        expect(d.kind).toBe("binary");
+        expect(d.text).toBe("hi you");
+        expect(d.inPlace).toBe("hey hi you ok");
+    });
+    it("never reads dashes and ellipses in prose as a code", () => {
+        for (const s of ["wait... - what - no", "so ... - ... yeah", "a - b - c - d", "me: --- -.-",
+            "the score was 10101010 to 01010101", "I think - - maybe"]) {
+            expect(decodeMessage(s), s).toBeNull();
+        }
     });
 });
 

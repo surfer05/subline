@@ -16,7 +16,7 @@ import { createBatcher, type Batcher } from "./batcher";
 import { renderDiscordMarkup, type MarkupResolvers } from "./discordMarkup";
 import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel, toggleChannelOptOut } from "./channels";
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
-import { decodedPrefix, decodeMessage, DECODED_TITLE, translatableText } from "./decode";
+import { DECODED_TITLE, DECODED_WORD, decodedPrefix, decodeMessage, translatableText } from "./decode";
 import { isConfidentlyTargetLanguage } from "./detectLang";
 import {
     __resetFreePlan, announceableTrialEnd, freeMode, isNewEnding, noteServerNow,
@@ -26,6 +26,7 @@ import {
     acquireSlot, loadRateGateTuning, rateGateAvailable, rateGateSettings, rateGateWaitMs,
     resetRateGate, tryAcquireIdleSlot, tuneRateGateToObservedLimit, tuneRateGateToProviderBudget
 } from "./rateGate";
+import { languageLabel } from "./langLabel";
 import { isRomanizedGuess } from "./romanized";
 import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
@@ -3455,14 +3456,16 @@ function translationLines(message: Message) {
     // above rates this Google line unreliable, never to make ≈ look worse
     // than it is. A paid install keeps the "?" it always had.
     const rough = unsure && isTasteInstall();
-    const langName = languageName(entry.lang);
+    // No label at all for "und", "zxx" or anything that names no language.
+    const label = languageLabel(entry.lang);
+    const langName = label === null ? null : languageName(label);
     const title = !unsure
-        ? `Translated by ${provenance.label} · ${langName}`
+        ? `Translated by ${provenance.label}${langName === null ? "" : ` · ${langName}`}`
         : romanized
-            ? `Translated by ${provenance.label}. This looks like ${langName} `
+            ? `Translated by ${provenance.label}. This looks like ${langName ?? "a language"} `
               + "written in Latin letters, which Google translates badly, "
               + "often confidently and wrongly. Wait for the ✦ line."
-            : `Translated by ${provenance.label}. ${langName} detected, but only `
+            : `Translated by ${provenance.label}. ${langName ?? "The language"} detected, but only `
               + `${Math.round(entry.conf! * 100)}% confidently. Short messages are `
               + "often misread, so this may be wrong.";
 
@@ -3480,7 +3483,7 @@ function translationLines(message: Message) {
     return (
         <div style={{ fontSize: "0.95rem", color: TEXT_COLOUR, fontStyle: "italic" }}>
             <span style={{ color: "var(--text-muted)" }} title={title}>
-                {rough ? "≈ rough" : provenance.glyph} {entry.lang}{unsure && !rough ? "?" : ""} ·{" "}
+                {rough ? "≈ rough" : provenance.glyph}{label === null ? "" : ` ${label}`}{unsure && !rough ? "?" : ""} ·{" "}
             </span>
             {/*
               * LINE BREAKS SHOW. A two-line message came back as two lines and
@@ -4150,12 +4153,17 @@ function ReplyQuoteImpl({ original, referenced }: { original: unknown; reference
     const channelId = quoted?.channel_id;
     if (typeof quoted?.id !== "string" || typeof channelId !== "string" || content.trim() === "") return fallback;
     const markup = markupFor(content, channelId);
+    // A quoted message with a code in it shows decoded, in place, the way a
+    // translation does (original on hover). Decoding is local and free, so
+    // this is on every plan, wherever the message's own decoded line shows.
+    const decoded = channelActive(channelId) ? decodedInPlace(content, channelId) : null;
+    if (!isPaidSurfaceUser()) return decoded ?? fallback;
     // Discord's markdown parser renders the translation, so mentions, links
     // and emoji look as they do in the original.
     const render = (translation: string) =>
         renderWithMarkup(translation, markup.tokens, text => Parser.parse(text, true, { channelId }));
     const existing = getTranslation(makeKey(quoted.id, settings.store.targetLang));
-    if (existing !== undefined && "skipped" in existing) return fallback;
+    if (existing !== undefined && "skipped" in existing) return decoded ?? fallback;
     if (isRealTranslation(existing)) {
         const shown = render(existing.text.trim());
         if (shown === null || shown === undefined) return fallback;
@@ -4166,10 +4174,40 @@ function ReplyQuoteImpl({ original, referenced }: { original: unknown; reference
             </span>
         );
     }
+    if (decoded !== null) return decoded;
     if (!channelActive(channelId) || isLoadedInChannel(channelId, quoted.id)) return fallback;
     return <TightSwap original={original} text={markup.readable} tooltip={markup.readable} render={render} />;
 }
 const ReplyQuote = safe("reply quote", ReplyQuoteImpl, surfaceDebug);
+
+/**
+ * The quoted text with its code decoded in place ("decoded · HAPPY BIRTHDAY
+ * @Gojer"), the readable original as its tooltip. Null when it has no code.
+ */
+function decodedInPlace(content: string, channelId: string) {
+    const d = decodeMessage(content);
+    if (d === null) return null;
+    // The code as written (mentions made readable), not the decoded text the
+    // translation pipeline judges.
+    let readable = content;
+    try {
+        readable = renderDiscordMarkup(content, markupResolversFor(channelId));
+    } catch {
+        readable = content;
+    }
+    const text = d.inPlace ?? d.text;
+    let shown: unknown = text;
+    try {
+        shown = Parser.parse(text, true, { channelId }) ?? text;
+    } catch {
+        shown = text;
+    }
+    return (
+        <span title={readable} data-subline-surface="in-place">
+            <span style={{ opacity: 0.75 }}>{DECODED_WORD} · </span>{shown as any}
+        </span>
+    );
+}
 
 /** Discord's MessageFlags.HIDDEN_SUSPENDED_USER (1 << 17), checked the way Discord checks it. */
 const HIDDEN_SUSPENDED_USER = 1 << 17;
@@ -4281,9 +4319,12 @@ export default definePlugin({
     // suspended author: Discord's own line, and nothing is sent.
     replyQuoteChildren: (original: unknown, props: any) => {
         try {
-            if (original == null || !isPaidSurfaceUser()) return original;
+            if (original == null) return original;
             if (props?.isReplyAuthorBlocked === true || props?.isReplyAuthorIgnored === true) return original;
             if (isHiddenSuspended(props?.referencedMessage?.message)) return original;
+            // Free installs see only a decoded code here (local, free); anything
+            // else is Discord's own value, untouched.
+            if (!isPaidSurfaceUser() && decodeMessage(props?.referencedMessage?.message?.content) === null) return original;
             return <ReplyQuote original={original} referenced={props?.referencedMessage} />;
         } catch {
             return original;
