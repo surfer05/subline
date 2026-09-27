@@ -34,12 +34,12 @@ export const CODE_SCREEN_COPY = {
 /**
  * The Dodo Payments business id, which the customer portal login URL needs.
  *
- * UNKNOWN AT THE TIME OF WRITING, so empty, and while it is empty the "Find my
- * code" link is not drawn at all (a portal link without it is a dead page).
- * The owner finds it in the Dodo dashboard: Customer Portal, Share Invite,
- * Static Link, the last path segment. Set it here and nowhere else.
+ * Set to the owner's business. If it is ever emptied, the "Find my code" link
+ * is not drawn at all (a portal link without it is a dead page). It is found
+ * in the Dodo dashboard: Customer Portal, Share Invite, Static Link, the last
+ * path segment. Set it here and nowhere else.
  */
-export const DODO_BUSINESS_ID = "";
+export const DODO_BUSINESS_ID = "bus_0Nn5xovcpJlT15uPLKQ8M";
 
 /**
  * The customer portal login page for a business, or null without an id.

@@ -62,10 +62,10 @@ describe("Find my code", () => {
         expect(codeScreenView({ revealed: true, businessId: "" }).findCodeUrl).toBeNull();
     });
 
-    it("the shipped default is unknown, so the shipped screen draws no link", () => {
-        // Flip this when DODO_BUSINESS_ID is set in codeScreen.ts.
-        expect(DODO_BUSINESS_ID).toBe("");
-        expect(codeScreenView({ revealed: true }).findCodeUrl).toBeNull();
+    it("the shipped screen links Find my code to this business's customer portal", () => {
+        expect(DODO_BUSINESS_ID).toBe("bus_0Nn5xovcpJlT15uPLKQ8M");
+        expect(codeScreenView({ revealed: true }).findCodeUrl)
+            .toBe("https://customer.dodopayments.com/login/bus_0Nn5xovcpJlT15uPLKQ8M");
     });
 
     it("is not drawn before the field is revealed", () => {
