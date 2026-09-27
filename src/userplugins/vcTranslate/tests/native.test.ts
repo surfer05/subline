@@ -24,15 +24,16 @@ vi.mock("../engines/groq", async importOriginal => ({
 }));
 vi.mock("../engines/relay", async importOriginal => ({
     ...(await importOriginal() as typeof import("../engines/relay")),
-    fetchRelayStatus: vi.fn()
+    fetchRelayStatus: vi.fn(),
+    fetchRelayCheckout: vi.fn()
 }));
 
 import { translateWithClaude, TRUNCATED_ERROR } from "../engines/claude";
 import { translateWithGemini } from "../engines/gemini";
 import { translateWithGoogle } from "../engines/google";
 import { translateWithGroq } from "../engines/groq";
-import { fetchRelayStatus } from "../engines/relay";
-import { relayStatus, translateBatch } from "../native";
+import { fetchRelayCheckout, fetchRelayStatus } from "../engines/relay";
+import { relayCheckout, relayStatus, translateBatch } from "../native";
 import type { BatchRequest, Result } from "../types";
 
 const google = vi.mocked(translateWithGoogle);
@@ -629,5 +630,36 @@ describe("relayStatus — today's taste count, read without spending one", () =>
 
         expect(res.ok).toBe(false);
         expect((res as { error: string }).error).not.toContain(id);
+    });
+});
+
+describe("relayCheckout: a checkout URL for this install", () => {
+    const checkoutFetch = vi.mocked(fetchRelayCheckout);
+
+    it("returns the URL the relay gave", async () => {
+        checkoutFetch.mockResolvedValue("https://checkout.dodopayments.com/session/cks_1");
+        expect(await relayCheckout(EV, "free_abc", "monthly")).toEqual({ ok: true, url: "https://checkout.dodopayments.com/session/cks_1" });
+        expect(checkoutFetch).toHaveBeenCalledWith("free_abc", "monthly", fetch);
+    });
+
+    it("never throws, and never returns the install id", async () => {
+        const id = `free_${"a".repeat(32)}`;
+        checkoutFetch.mockRejectedValue(new Error(`relay checkout: HTTP 503 for ${id}`));
+        const res = await relayCheckout(EV, id, "annual");
+        expect(res.ok).toBe(false);
+        expect((res as { error: string }).error).not.toContain(id);
+    });
+
+    it("refuses an unknown plan without a request", async () => {
+        checkoutFetch.mockReset();
+        expect((await relayCheckout(EV, "free_abc", "lifetime")).ok).toBe(false);
+        expect(checkoutFetch).not.toHaveBeenCalled();
+    });
+
+    it("passes a linked purchase through relayStatus", async () => {
+        relayStatusFetch.mockResolvedValue({ plan: "trial", used: 0, cap: 300, purchase: { code: "LK-1", plan: "monthly" } });
+        expect(await relayStatus(EV, "free_abc")).toEqual({
+            ok: true, plan: "trial", used: 0, cap: 300, purchase: { code: "LK-1", plan: "monthly" }
+        });
     });
 });

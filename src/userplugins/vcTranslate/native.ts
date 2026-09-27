@@ -4,7 +4,7 @@ import { translateWithClaude, TRUNCATED_ERROR } from "./engines/claude";
 import { translateWithGemini } from "./engines/gemini";
 import { translateWithGoogle } from "./engines/google";
 import { translateWithGroq } from "./engines/groq";
-import { fetchRelayStatus, translateWithRelayDetailed } from "./engines/relay";
+import { fetchRelayCheckout, fetchRelayStatus, translateWithRelayDetailed } from "./engines/relay";
 import type { ProviderRateLimit } from "./rateHint";
 import { withRetry } from "./retry";
 import { readStagedBuildIdSync } from "./stagedBuild";
@@ -283,8 +283,32 @@ export async function translateBatch(
 }
 
 export type RelayStatusResponse =
-    | { ok: true; plan: string; used: number; cap: number; trialEndsAt?: number; serverNow?: number; trialProvisional?: boolean }
+    | {
+        ok: true; plan: string; used: number; cap: number; trialEndsAt?: number; serverNow?: number; trialProvisional?: boolean;
+        purchase?: { code: string; plan: string };
+    }
     | { ok: false; error: string };
+
+export type RelayCheckoutResponse = { ok: true; url: string } | { ok: false; error: string };
+
+/**
+ * Ask the relay for a checkout URL for this install (see checkout.ts). Same
+ * channel and same scrubbing as relayStatus. Never throws: any failure is
+ * { ok: false } and the renderer opens the static checkout link instead.
+ */
+export async function relayCheckout(
+    _: IpcMainInvokeEvent,
+    code: string,
+    plan: string
+): Promise<RelayCheckoutResponse> {
+    if (plan !== "monthly" && plan !== "annual") return { ok: false, error: "unknown plan" };
+    try {
+        return { ok: true, url: await fetchRelayCheckout(code, plan, fetch) };
+    } catch (err) {
+        const raw = err instanceof Error ? err.message : "unknown error";
+        return { ok: false, error: scrubKey(raw, code) };
+    }
+}
 
 /**
  * Today's taste count for one credential, read without spending one.
@@ -310,6 +334,7 @@ export async function relayStatus(
         if (status.trialEndsAt !== undefined) out.trialEndsAt = status.trialEndsAt;
         if (status.serverNow !== undefined) out.serverNow = status.serverNow;
         if (status.trialProvisional === true) out.trialProvisional = true;
+        if (status.purchase !== undefined) out.purchase = status.purchase;
         return out;
     } catch (err) {
         const raw = err instanceof Error ? err.message : "unknown error";

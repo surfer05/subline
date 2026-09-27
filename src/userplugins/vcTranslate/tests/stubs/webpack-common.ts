@@ -41,6 +41,20 @@ export const Toasts = {
     show(toast: StubToast): void { shownToasts.push(toast); }
 };
 
+/* ---------------------------------------------------------------- Modals -- */
+
+/**
+ * Vencord's `Modal` + `openModal` (@webpack/common). `openModal` records the
+ * render function, so a test can render the modal with fake props and press
+ * one of its actions.
+ */
+export const Modal = "Modal";
+export const openedModals: ((props: { transitionState: number; onClose: () => void }) => any)[] = [];
+export function openModal(render: (props: { transitionState: number; onClose: () => void }) => any): string {
+    openedModals.push(render);
+    return `modal-${openedModals.length}`;
+}
+
 /* ------------------------------------------------------------- UserStore -- */
 
 export const stubCurrentUser: { id: string } | undefined = { id: "me" };
@@ -219,6 +233,7 @@ export function __resetWebpackCommon(): void {
     stubRoles.clear();
     selectedChannelId = null;
     shownToasts.length = 0;
+    openedModals.length = 0;
     stubMessages.clear();
     handlers.clear();
     LocaleStore.locale = "en-US";

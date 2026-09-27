@@ -313,6 +313,27 @@ export function invalidateMessage(messageId: string): void {
     for (const fn of listeners) fn();
 }
 
+/**
+ * Drop every translation into `lang`, in memory and on disk. Used when the
+ * reader switches reading language: those lines are no longer shown (keys
+ * carry the language), and keeping them would only crowd the caps.
+ */
+export function clearLanguage(lang: string): void {
+    const suffix = ` ${lang}`;
+    for (const key of [...cache.keys()]) {
+        if (key.endsWith(suffix)) cache.delete(key);
+    }
+    let removedFromDisk = false;
+    for (const key of [...persisted.keys()]) {
+        if (key.endsWith(suffix)) {
+            persisted.delete(key);
+            removedFromDisk = true;
+        }
+    }
+    if (removedFromDisk) schedulePersist();
+    for (const fn of listeners) fn();
+}
+
 export function subscribe(fn: () => void): () => void {
     listeners.add(fn);
     return () => listeners.delete(fn);

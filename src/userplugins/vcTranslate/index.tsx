@@ -38,7 +38,7 @@ import {
 } from "./statusBeacon";
 import { BUILD_ID, type BeaconErrorCode } from "./statusShape";
 import {
-    clearStore, getTranslation, invalidateMessage, loadPersistedTranslations, makeKey,
+    clearLanguage, clearStore, getTranslation, invalidateMessage, loadPersistedTranslations, makeKey,
     setTranslation, subscribe, type StoredTranslation
 } from "./store";
 import {
@@ -47,6 +47,11 @@ import {
     type BatchRequest, type EngineId, type PendingMessage
 } from "./types";
 import { ENGINE_RANK, isRealTranslation, mayReplace } from "./upgrade";
+import { createCheckoutFlow, type CheckoutFlow, type Purchase } from "./checkout";
+import { normalizeTargetLang } from "./languages";
+import { openUpgrade, registerUpgradeOpener } from "./upgradeBridge";
+import { UPGRADE_COPY } from "./upgradeCopy";
+import { openUpgradePanel } from "./upgradePanel";
 import { createUpdateWatch, UPDATE_CHECK_INTERVAL_MS, type UpdateWatch } from "./updateNotice";
 import { SurfaceBudget } from "./surfaces/budget";
 import { SurfaceCache } from "./surfaces/cache";
@@ -611,12 +616,109 @@ function maybeAnnounceTrialEnded(): void {
     const announced = settings.store.freeTrialEndNoticeFor;
     if (!isNewEnding(end, typeof announced === "number" ? announced : 0)) return;
     settings.store.freeTrialEndNoticeFor = end;
-    Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message: trialEndedMessage() });
+    // A notice, not a toast: a toast cannot carry a button, and this is the
+    // one moment the reader most needs a way to upgrade.
+    showNotice(trialEndedMessage(), UPGRADE_COPY.noticeButton, openUpgrade);
 }
 
-/** Open the pricing page in the browser. */
-function openPricing(): void {
-    (globalThis as any).VencordNative?.native?.openExternal?.(PRICING_URL);
+/* --------------------------------------------------- reading language -- */
+
+/** The reading language this session last translated into. */
+let activeTargetLang: string | null = null;
+
+/**
+ * Earlier builds had a free-text language field, so the stored value can be
+ * "pt-BR" or "English". The dropdown stores bare codes; turn an old value into
+ * one when it maps cleanly, and drop what was cached under the old value.
+ * Anything that does not map is left alone (the dropdown shows it as is).
+ */
+function normaliseTargetLangSetting(): void {
+    const raw = settings.store.targetLang;
+    const code = normalizeTargetLang(raw);
+    if (code === null || code === raw) return;
+    settings.store.targetLang = code;
+    if (typeof raw === "string") clearLanguage(raw);
+}
+
+/**
+ * The reading language changed under a running session. New translations use
+ * the new language as soon as the batcher is rebuilt (the settings handler does
+ * that right after this). What was cached in the old language is dropped, in
+ * memory and on disk, so the store stops holding lines nobody can see, and the
+ * channel on screen is caught up in the new language.
+ */
+function onTargetLangMaybeChanged(): void {
+    const next = settings.store.targetLang;
+    const prev = activeTargetLang;
+    activeTargetLang = next;
+    if (prev === null || prev === next) return;
+    clearLanguage(prev);
+    for (const k of [...qualityPhrases.keys()]) {
+        if (k.startsWith(`${prev}\u0000`)) qualityPhrases.delete(k);
+    }
+    queueMicrotask(() => {
+        if (fastBatcher === null) return;
+        const open = SelectedChannelStore.getChannelId();
+        if (open) catchUp(open);
+    });
+}
+
+/* ------------------------------------------------------------ upgrade -- */
+
+/**
+ * The checkout the Upgrade panel started, if any (checkout.ts). One flow per
+ * session: choosing a plan again restarts it, stop() stops it.
+ */
+let checkoutFlow: CheckoutFlow | null = null;
+
+function getCheckoutFlow(): CheckoutFlow {
+    if (checkoutFlow !== null) return checkoutFlow;
+    checkoutFlow = createCheckoutFlow({
+        bearer: async () => tasteBearer(await installIdOnce()),
+        createCheckout: async (bearer, plan) => {
+            const res = await Native.relayCheckout(bearer, plan);
+            return res.ok ? { ok: true, url: res.url } : { ok: false, error: res.error };
+        },
+        status: async bearer => {
+            const res = await Native.relayStatus(bearer);
+            return res.ok ? { ok: true, purchase: res.purchase } : { ok: false };
+        },
+        openExternal: url => (globalThis as any).VencordNative?.native?.openExternal?.(url),
+        onPurchase: onPurchaseLinked,
+        log: tasteLog
+    });
+    return checkoutFlow;
+}
+
+/**
+ * The relay linked a purchase to this install. Save the key as the Subline
+ * code, which switches the engine to the relay (settings.ts
+ * syncEngineToCode), and make the running session paid right away: the
+ * batcher is rebuilt for the relay under the new code, the free plan's click
+ * mode ends (isTasteInstall is false once a code is set), and the channel on
+ * screen is caught up.
+ */
+function onPurchaseLinked(purchase: Purchase): void {
+    if (!isTasteInstall()) return;   // a code arrived some other way meanwhile
+    settings.store.sublineCode = purchase.code;
+    if (settings.store.engine !== "relay") settings.store.engine = "relay";
+    trialBearer = null;
+    clearStatusRetry();
+    Toasts.show({ id: Toasts.genId(), type: Toasts.Type.SUCCESS, message: UPGRADE_COPY.purchasedToast });
+    onFreePlanChanged();
+}
+
+/**
+ * What every Upgrade link and button does: the Upgrade panel, for a free
+ * install only. A paid install has nothing to buy and is shown nothing.
+ */
+function openUpgradeForFreeInstall(): void {
+    if (!isTasteInstall()) return;
+    openUpgradePanel(plan => {
+        void getCheckoutFlow().start(plan).then(() => {
+            Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message: UPGRADE_COPY.checkoutOpenedToast });
+        });
+    });
 }
 
 /**
@@ -3100,9 +3202,9 @@ function previewLine(messageId: string) {
                 href={PRICING_URL}
                 target="_blank"
                 rel="noreferrer"
-                onClick={(e: any) => { e?.preventDefault?.(); openPricing(); }}
+                onClick={(e: any) => { e?.preventDefault?.(); openUpgrade(); }}
             >
-                Upgrade
+                {UPGRADE_COPY.previewLink}
             </a>
         </div>
     );
@@ -3412,6 +3514,21 @@ function forceQualityPopoverRender(message: Message) {
 
     const key = makeKey(message.id, settings.store.targetLang);
     if (hasQualityVerdict(key)) return null;
+
+    // A new UTC day is a new three, here as on a press (tasteTranslate), so
+    // yesterday's "used up" never outlives midnight on the button.
+    if (taste && rolloverTasteIfNewUtcDay()) void refreshTasteQuota();
+    if (taste && tasteExhausted()) {
+        // Today's three are used, so a press would send nothing. Offer the
+        // one thing that does help: the Upgrade panel.
+        return {
+            label: `${UPGRADE_COPY.popoverUpgrade} (${tasteLabel()})`,
+            icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
+            message,
+            channel,
+            onClick: () => openUpgrade()
+        };
+    }
 
     if (taste && isClickMode()) {
         // After the trial ⚡ is a ✦ PREVIEW, from the same three a day as the
@@ -4186,6 +4303,11 @@ export default definePlugin({
     },
 
     async start() {
+        // Every Upgrade link opens the Upgrade panel while the plugin runs.
+        registerUpgradeOpener(openUpgradeForFreeInstall);
+        normaliseTargetLangSetting();
+        activeTargetLang = settings.store.targetLang;
+
         // Text outside messages (paid only). Registered first so a slow read
         // below delays nothing; the service sends nothing for a free install.
         startSurfaces();
@@ -4241,7 +4363,7 @@ export default definePlugin({
         //
         // (The old once-ever "Subline is translating with free Google" notice
         // is gone: during the trial it is not true, and afterwards the one
-        // trial-ended toast says what changed.)
+        // trial-ended notice says what changed.)
         if (isTasteInstall()) {
             ensureTrialStarted();
             void refreshTasteQuota();
@@ -4283,6 +4405,7 @@ export default definePlugin({
             // Order matters: lift a stale pin BEFORE rebuilding, so the new
             // batcher is built for the engine the user now has credentials for.
             releaseFallbackIfCredentialChanged();
+            onTargetLangMaybeChanged();
             // A code cleared mid-session is a free install from now on: its
             // trial starts (or resumes) exactly as it would at start().
             if (isTasteInstall()) {
@@ -4342,6 +4465,10 @@ export default definePlugin({
         updateWatch?.stop();
         updateWatch = null;
         onSettingsChanged(null);
+        registerUpgradeOpener(null);
+        checkoutFlow?.stop();
+        checkoutFlow = null;
+        activeTargetLang = null;
         FluxDispatcher.unsubscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onMessageUpdate);
         FluxDispatcher.unsubscribe("CHANNEL_SELECT", onChannelSelect);

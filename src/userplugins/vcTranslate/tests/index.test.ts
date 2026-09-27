@@ -34,7 +34,7 @@ import { __getPopoverButton, __reset as __resetMessagePopover } from "./stubs/ap
 import { calls as loggedCalls, __resetLogCalls } from "./stubs/utils-logger";
 import {
     __resetWebpackCommon, __stubMarkAsDm, __stubSetSelectedChannel,
-    FluxDispatcher, LocaleStore, shownToasts, stubMessages
+    FluxDispatcher, LocaleStore, openedModals, shownToasts, stubMessages
 } from "./stubs/webpack-common";
 
 const CHANNEL = "c1";
@@ -4201,7 +4201,7 @@ describe("the debugLogging setting", () => {
         // Google install and never looked at a log line at all. A free install
         // now gets the button (see taste.ts), so that state no longer exists
         // for it, and the decision worth logging is the taste tier's own.
-        it("reports a taste press refused because today's three are already used", async () => {
+        it("offers the Upgrade panel, and sends nothing, once today's three are used", async () => {
             // engine is "google" (the beforeEach default) — a free install.
             native.translateBatch.mockImplementation(async (engine: string) =>
                 engine === "relay"
@@ -4216,10 +4216,16 @@ describe("the debugLogging setting", () => {
             for (let i = 0; i < 20; i++) await Promise.resolve();
             __resetLogCalls();
 
-            forceButton(discordMessage("2", "que tal"))!.onClick!(undefined as any);
+            // Once today's three are used, ⚡ offers the Upgrade panel instead
+            // of a press that would send nothing (upgradeCopy.ts).
+            const sentBefore = native.translateBatch.mock.calls.length;
+            const btn = forceButton(discordMessage("2", "que tal"))!;
+            expect(btn.label).toBe("Upgrade Subline ✦ (0 of 3 left today)");
+            btn.onClick!(undefined as any);
             for (let i = 0; i < 20; i++) await Promise.resolve();
 
-            expect(flatten()).toMatch(/\[taste\] 2: press ignored — today's 3 are used, nothing sent/);
+            expect(native.translateBatch.mock.calls.length).toBe(sentBefore);
+            expect(openedModals).toHaveLength(1);
         });
 
         it("reports the in-flight guard blocking a duplicate force-quality click", async () => {

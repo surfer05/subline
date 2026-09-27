@@ -3,6 +3,9 @@ import { OptionType } from "@utils/types";
 import { LocaleStore, React } from "@webpack/common";
 
 import { freeMode, freePlanLine, PRICING_URL } from "./freePlan";
+import { targetLanguageOptions } from "./languages";
+import { openUpgrade } from "./upgradeBridge";
+import { UPGRADE_COPY } from "./upgradeCopy";
 import { notifySettingsChanged } from "./settingsBridge";
 import { DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_MODEL } from "./types";
 
@@ -112,17 +115,17 @@ export const settings = definePluginSettings({
             if (line === null) return null;
             const style = { color: "var(--text-muted)", fontSize: "0.9rem" };
             if (freeMode(start) !== "click") return React.createElement("div", { style }, line);
-            // After the trial the line carries the one clickable upgrade link
-            // (the trial-ended toast cannot).
+            // After the trial the line carries an Upgrade link, which opens the
+            // Upgrade panel (upgradePanel.tsx) through upgradeBridge.ts.
             return React.createElement("div", { style }, line, " ", React.createElement("a", {
                 href: PRICING_URL,
                 target: "_blank",
                 rel: "noreferrer",
                 onClick: (e: any) => {
                     e?.preventDefault?.();
-                    (globalThis as any).VencordNative?.native?.openExternal?.(PRICING_URL);
+                    openUpgrade();
                 }
-            }, "Upgrade"));
+            }, UPGRADE_COPY.settingsLink));
         }
     },
     // When this install's free trial began (epoch ms), 0 until the first
@@ -201,8 +204,16 @@ export const settings = definePluginSettings({
         onChange: notifySettingsChanged
     },
     targetLang: {
-        type: OptionType.STRING,
-        description: "Target language code",
+        // A dropdown of language names (languages.ts, the same list the
+        // installer's language screen offers). The value stays a bare code.
+        type: OptionType.SELECT,
+        description: "Reading language. Messages are translated into this language.",
+        // A getter, so the list always includes the value actually set: a
+        // Discord locale we do not list, or an old free-text value that could
+        // not be normalised (see index.tsx's normaliseTargetLangSetting). Vencord
+        // reads `options` when it renders the dropdown (SelectSetting.tsx at the
+        // pinned commit), never at definition time.
+        get options() { return targetLanguageOptions(settings.store.targetLang); },
         // A getter, not a literal. Vencord resolves a setting's `default`
         // LAZILY — getDefaultValue() in src/api/Settings.ts reads
         // `setting.default` the first time the value is actually needed, and

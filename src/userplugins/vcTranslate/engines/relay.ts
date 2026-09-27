@@ -81,6 +81,60 @@ export interface RelayStatus {
     serverNow?: number;
     /** The relay has not started a trial for this id yet: `trialEndsAt` is only "now + 7 days". */
     trialProvisional?: boolean;
+    /**
+     * A purchase made from this install (a checkout the plugin opened), once the
+     * relay has linked it: the license key to save as the Subline code. Only
+     * ever sent to the holder of the free id the checkout was opened with.
+     */
+    purchase?: { code: string; plan: string };
+}
+
+/**
+ * Create a Dodo checkout session through the relay, tagged with this install
+ * (see checkout.ts). A compiled constant for the same reason RELAY_URL is.
+ */
+export const RELAY_CHECKOUT_URL = "https://subline-relay.rahul05alok.workers.dev/v1/checkout";
+
+/** How long a checkout request may take before the static link is used instead. */
+export const CHECKOUT_TIMEOUT_MS = 10_000;
+
+/**
+ * POST /v1/checkout. Returns the checkout URL, or throws an HttpError that
+ * the caller treats as "use the static link".
+ */
+export async function fetchRelayCheckout(
+    code: string,
+    plan: string,
+    fetchImpl: typeof fetch = fetch,
+    timeoutMs: number = CHECKOUT_TIMEOUT_MS
+): Promise<string> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetchImpl(RELAY_CHECKOUT_URL, {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${code}`, [CLIENT_HEADER]: CLIENT_ID },
+            body: JSON.stringify({ plan }),
+            signal: controller.signal
+        });
+        let body: any = null;
+        try { body = await res.json(); } catch { /* fall through */ }
+        if (!res.ok || !body || body.ok !== true || typeof body.url !== "string") {
+            const detail = body && typeof body.error === "string" ? ` ${body.error}` : "";
+            throw new HttpError(`relay checkout: HTTP ${res.status}${detail}`, res.status);
+        }
+        return body.url;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/** A well-formed `purchase` from a status body, or undefined. */
+function purchaseFrom(value: unknown): { code: string; plan: string } | undefined {
+    if (!value || typeof value !== "object") return undefined;
+    const { code, plan } = value as { code?: unknown; plan?: unknown };
+    if (typeof code !== "string" || code.trim() === "" || code.length > 200) return undefined;
+    return { code: code.trim(), plan: typeof plan === "string" ? plan : "" };
 }
 
 /** A non-negative, finite integer the relay stated, or undefined. */
@@ -132,7 +186,8 @@ export async function fetchRelayStatus(
     const serverNow = typeof body.now === "number" && Number.isFinite(body.now) && body.now > 0 ? body.now : undefined;
     return {
         plan: typeof body.plan === "string" ? body.plan : "", used, cap, trialEndsAt, serverNow,
-        trialProvisional: body.trialProvisional === true ? true : undefined
+        trialProvisional: body.trialProvisional === true ? true : undefined,
+        purchase: purchaseFrom(body.purchase)
     };
 }
 
