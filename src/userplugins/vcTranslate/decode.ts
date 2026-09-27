@@ -139,11 +139,11 @@ function isKnownWord(w: string): boolean {
 function morseReads(text: string, letters: number): boolean {
     const words = text.toLowerCase().match(/[a-z0-9']+/g) ?? [];
     if (words.length === 0) return false;
-    if (words.every(isKnownWord) && (letters >= 3 || words.length >= 2 || CHAT_WORDS.has(words[0]))) return true;
+    if (words.every(isKnownWord) && (letters >= 3 || words.length >= 2 || CHAT_WORDS.has(words[0]!))) return true;
     if (letters < 5 || !looksLikeWriting(text, 0.6)) return false;
     if (words.some(isKnownWord)) return true;
     if (words.length >= 2) return words.every(w => /[aeiouy]/.test(w));
-    const w = words[0];
+    const w = words[0]!;
     const vowels = (w.match(/[aeiouy]/g) ?? []).length;
     return w.length >= 6 && vowels / w.length >= 0.3 && !/[^aeiouy0-9']{4}/.test(w);
 }
