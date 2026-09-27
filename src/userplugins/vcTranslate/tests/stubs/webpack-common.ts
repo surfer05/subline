@@ -175,6 +175,13 @@ export const FluxDispatcher = {
 /** Mutable so a test can check the target-language default follows it. */
 export const LocaleStore = { locale: "en-US" };
 
+/* ---------------------------------------------------------------- Parser -- */
+
+/** Discord's markdown parser, reduced to a marker a test can read. */
+export const Parser = {
+    parse: (text: string, _inline?: boolean, state?: { channelId?: string }) => [`<md:${text}|${state?.channelId ?? ""}>`]
+};
+
 /* ------------------------------------------ Presence / profile / events -- */
 
 /** userId -> activities, for custom statuses. */

@@ -127,25 +127,34 @@ export function tightTranslation(text: string): { lang: string; text: string; } 
 const PREFIX_STYLE = { opacity: 0.75 } as const;
 
 /** "✦ translation", with the original text as its tooltip. */
-export function TranslatedInPlace({ original, translation }: { original: string; translation: string; }) {
+export function TranslatedInPlace({ original, translation }: { original: string; translation: unknown; }) {
     return (
         <span title={original} data-subline-surface="in-place">
-            <span style={PREFIX_STYLE}>✦ </span>{translation}
+            <span style={PREFIX_STYLE}>✦ </span>{translation as any}
         </span>
     );
 }
 
 /**
  * Tight: the translation IN PLACE of `original` once ✦ has it, prefixed
- * "✦ ", the original text in the tooltip. Until then (and when skipped or
- * failed) Discord's `original`, untouched.
+ * "✦ ", with `tooltip` (the readable original) as its tooltip. Until then,
+ * and when skipped or failed, Discord's `original`, untouched.
+ *
+ * `render` turns the translated text into what is shown (Discord's own
+ * markdown parser, so links, mentions and emoji render). When it returns
+ * null (the translation is unsafe to render, or parsing threw), Discord's
+ * original stays.
  */
-export function TightSwap({ original, text }: { original: unknown; text: string; }) {
+export function TightSwap({ original, text, tooltip, render }: {
+    original: unknown; text: string; tooltip?: string; render?: (translation: string) => unknown;
+}) {
     useSurfaceUpdates();
     try {
         const t = typeof text === "string" ? tightTranslation(text) : null;
         if (t === null) return (original ?? null) as any;
-        const swapped = <TranslatedInPlace original={text} translation={t.text} />;
+        const shown = render ? render(t.text) : t.text;
+        if (shown === null || shown === undefined) return (original ?? null) as any;
+        const swapped = <TranslatedInPlace original={tooltip ?? text} translation={shown} />;
         // Discord's text sometimes carries a leading space (after an emoji).
         const lead = typeof original === "string" ? /^\s*/.exec(original)![0] : "";
         return lead === "" ? swapped : <>{lead}{swapped}</>;

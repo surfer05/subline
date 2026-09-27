@@ -71,14 +71,16 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
         find: "__invalid_threadMainContent",
         replacement: [
             {
-                // The stage row's subtitle text; Discord's element untouched.
-                match: /(renderSubtitle=\(\)=>\{let (\i)=this\.props\.stageInstance\?\.topic;return null==\2\?null:\(0,\i\.jsx\)\(\i\.\i,\{children:)\2\}/,
-                replace: "$1$self.stageTopicChildren($2,this.props.channel)}"
+                // The stage row's subtitle: the props of Discord's own
+                // OverflowTooltip, exactly { children } for anyone not paid.
+                match: /(renderSubtitle=\(\)=>\{let (\i)=this\.props\.stageInstance\?\.topic;return null==\2\?null:\(0,\i\.jsx\)\(\i\.\i,\{)children:\2\}/,
+                replace: "$1...$self.stageTopicProps($2,this.props.channel)}"
             },
             {
-                // The thread row's name text, inside Discord's own elements.
-                match: /(__invalid_threadMainContent\),children:\[\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-sm\/medium",color:"none",className:\i\.\i,children:\(0,\i\.jsx\)\(\i\.\i,\{"aria-hidden":!0,children:)(\i)\}/,
-                replace: "$1$self.threadTitleChildren($2,arguments[0]?.thread)}"
+                // The thread row's name: the props of Discord's own
+                // OverflowTooltip, exactly { children } for anyone not paid.
+                match: /(__invalid_threadMainContent\),children:\[\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-sm\/medium",color:"none",className:\i\.\i,children:\(0,\i\.jsx\)\(\i\.\i,\{"aria-hidden":!0,)children:(\i)\}/,
+                replace: "$1...$self.threadTitleProps($2,arguments[0]?.thread)}"
             }
         ]
     },

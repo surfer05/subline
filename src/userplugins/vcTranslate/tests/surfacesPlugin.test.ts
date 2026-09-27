@@ -24,7 +24,7 @@ import { accessories } from "./stubs/api-messageaccessories";
 import { __reset as __resetMessagePopover } from "./stubs/api-messagepopover";
 import { __resetSettings } from "./stubs/api-settings";
 import {
-    __resetWebpackCommon, __stubMarkAsDm, __stubSetChannel, __stubSetSelectedChannel, FluxDispatcher, stubMessages, shownToasts, stubActivities, stubMessageById, stubProfiles
+    __resetWebpackCommon, __stubMarkAsDm, __stubSetChannel, __stubSetChannelName, __stubSetSelectedChannel, __stubSetUser, FluxDispatcher, stubMessages, shownToasts, stubActivities, stubMessageById, stubProfiles
 } from "./stubs/webpack-common";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -99,8 +99,10 @@ const bioLine = (props: any) => deep(P.renderBioLine(props));
 const GUILD_CHANNEL = { id: "c1", guild_id: "g1" };
 /** Discord's own child, which a non-paid install must get back as the SAME value. */
 const ORIGINAL = { type: "discord-original", props: {}, children: [] };
-const thread = (title: unknown, channel: unknown = GUILD_CHANNEL) => deep(P.threadTitleChildren(title, channel));
-const stage = (topic: unknown, channel: unknown = GUILD_CHANNEL) => deep(P.stageTopicChildren(topic, channel));
+const threadProps = (title: unknown, channel: unknown = GUILD_CHANNEL) => P.threadTitleProps(title, channel);
+const stageProps = (topic: unknown, channel: unknown = GUILD_CHANNEL) => P.stageTopicProps(topic, channel);
+const thread = (title: unknown, channel: unknown = GUILD_CHANNEL) => deep(threadProps(title, channel).children);
+const stage = (topic: unknown, channel: unknown = GUILD_CHANNEL) => deep(stageProps(topic, channel).children);
 const forumTitle = (channel: unknown) => deep(P.forumTitleChildren(ORIGINAL, channel));
 /** A tag pill's name, in the forum being viewed (a server channel by default). */
 const tag = (name: unknown, viewing = "f1") => { __stubSetSelectedChannel(viewing); return deep(P.forumTagChildren(name)); };
@@ -185,8 +187,9 @@ describe("free and trial installs see no change", () => {
     /** Patches that wrap Discord's own child hand back that very child. */
     function childrenUntouched() {
         const title = "Wie repariere ich mein Fahrrad?";
-        expect(P.threadTitleChildren(title, GUILD_CHANNEL)).toBe(title);
-        expect(P.stageTopicChildren(title, GUILD_CHANNEL)).toBe(title);
+        // Exactly Discord's own props for its OverflowTooltip: { children }.
+        expect(P.threadTitleProps(title, GUILD_CHANNEL)).toEqual({ children: title });
+        expect(P.stageTopicProps(title, GUILD_CHANNEL)).toEqual({ children: title });
         expect(P.forumTitleChildren(ORIGINAL, { ...GUILD_CHANNEL, name: "Hilfe beim Kochen" })).toBe(ORIGINAL);
         expect(P.onboardingHeading(ORIGINAL, { title: "Was spielst du gern?", options: [] })).toBe(ORIGINAL);
         expect(P.statusTextChildren(ORIGINAL, "Bin gleich zurück")).toBe(ORIGINAL);
@@ -296,11 +299,12 @@ describe("a paid install", () => {
         // Pending: Discord's own parsed topic.
         expect(parsed("topic-truncated", topic)).toEqual([`<${topic}>`]);
         await settle();
-        expectInPlace(parsed("topic-truncated", topic), topic, `sharp: ${topic}`);
+        // Rendered through the same parser, same state.
+        expectInPlace(parsed("topic-truncated", topic), topic, `<sharp: ${topic}>`);
 
         expect(parsed("voice-status", "Wir spielen gerade Minecraft")).toEqual(["<Wir spielen gerade Minecraft>"]);
         await settle();
-        expectInPlace(parsed("voice-status", "Wir spielen gerade Minecraft"), "Wir spielen gerade Minecraft", "sharp: Wir spielen gerade Minecraft");
+        expectInPlace(parsed("voice-status", "Wir spielen gerade Minecraft"), "Wir spielen gerade Minecraft", "<sharp: Wir spielen gerade Minecraft>");
 
         for (const p of ["topic", "rule", "guidelines", "event"]) {
             const text = `Bitte seid nett zueinander, Regel ${p}`;
@@ -388,8 +392,8 @@ describe("a paid install", () => {
 
     it("fails safe: a store that throws, or junk props from a moved patch, render nothing", () => {
         expect(accessory(null)).toBeNull();
-        expect(P.threadTitleChildren(undefined, GUILD_CHANNEL)).toBeUndefined();
-        expect(P.stageTopicChildren("Wir reden", undefined)).toBe("Wir reden");
+        expect(P.threadTitleProps(undefined, GUILD_CHANNEL)).toEqual({ children: undefined });
+        expect(P.stageTopicProps("Wir reden", undefined)).toEqual({ children: "Wir reden" });
         expect(P.statusTextChildren(ORIGINAL, undefined)).toBe(ORIGINAL);
         expect(P.forumTagChildren(undefined)).toBeUndefined();
         expect(P.replyQuoteChildren(null, {})).toBeNull();
@@ -456,8 +460,8 @@ describe("privacy: surfaces follow the same channel rules as messages", () => {
             expect(parsed(p, "Hier wird geplaudert", { channelId: "d1" })).toEqual(["<Hier wird geplaudert>"]);
         }
         const dm = { id: "d1" };
-        expect(P.threadTitleChildren("Wie repariere ich mein Fahrrad?", dm)).toBe("Wie repariere ich mein Fahrrad?");
-        expect(P.stageTopicChildren("Wir reden über Bücher", dm)).toBe("Wir reden über Bücher");
+        expect(P.threadTitleProps("Wie repariere ich mein Fahrrad?", dm)).toEqual({ children: "Wie repariere ich mein Fahrrad?" });
+        expect(P.stageTopicProps("Wir reden über Bücher", dm)).toEqual({ children: "Wir reden über Bücher" });
         expect(P.forumTitleChildren(ORIGINAL, { ...dm, name: "Hilfe beim Kochen" })).toBe(ORIGINAL);
         expect(tag("Hilfe gesucht", "d1")).toBe("Hilfe gesucht");
         await settle();
@@ -474,8 +478,8 @@ describe("channel-level text follows the message rules of its channel", () => {
         return {
             parsers: ["topic", "topic-truncated", "voice-status", "guidelines", "event"]
                 .map(p => parsed(p, "Hier wird geplaudert", { channelId })),
-            thread: P.threadTitleChildren("Wie repariere ich mein Fahrrad?", channel),
-            stage: P.stageTopicChildren("Wir reden über Bücher", channel),
+            thread: P.threadTitleProps("Wie repariere ich mein Fahrrad?", channel).children,
+            stage: P.stageTopicProps("Wir reden über Bücher", channel).children,
             forum: P.forumTitleChildren(ORIGINAL, { ...channel, name: "Hilfe beim Kochen" }),
             tags: tag("Hilfe gesucht", channelId)
         };
@@ -664,7 +668,7 @@ describe("the reply bar", () => {
     it("reuses the quoted message's translation, in place of the quoted line, original in the tooltip; nothing sent", async () => {
         paid();
         setTranslation(makeKey("q1", "en"), { lang: "de", text: "Are you coming to dinner tonight?", via: "relay" });
-        expectInPlace(bar(quoted("q1")), "Kommst du heute Abend zum Essen?", "Are you coming to dinner tonight?");
+        expectInPlace(bar(quoted("q1")), "Kommst du heute Abend zum Essen?", "<md:Are you coming to dinner tonight?|c1>");
         await settle();
         expect(surfaceCalls()).toEqual([]);
     });
@@ -674,7 +678,7 @@ describe("the reply bar", () => {
         expect(bar(quoted("q2"))).toEqual(ORIGINAL);
         await settle();
         expect(surfaceCalls("google")).toEqual([]);
-        expectInPlace(bar(quoted("q2")), "Kommst du heute Abend zum Essen?", "sharp: Kommst du heute Abend zum Essen?");
+        expectInPlace(bar(quoted("q2")), "Kommst du heute Abend zum Essen?", "<md:sharp: Kommst du heute Abend zum Essen?|c1>");
     });
 
     it("never asks for a quoted message from a DM that is not turned on, or a switched-off channel", async () => {
@@ -703,7 +707,7 @@ describe("the reply bar", () => {
         await settle();
         expect(surfaceCalls()).toEqual([]);
         // The same message without the flag is translated.
-        expectInPlace(bar(quoted("q1", "c1", "Kommst du heute Abend zum Essen?", { hasFlag: () => false })), "Kommst du heute Abend zum Essen?", "Are you coming to dinner tonight?");
+        expectInPlace(bar(quoted("q1", "c1", "Kommst du heute Abend zum Essen?", { hasFlag: () => false })), "Kommst du heute Abend zum Essen?", "<md:Are you coming to dinner tonight?|c1>");
     });
 
     it("a quoted message in the loaded message list is left to the message pipeline: no surface request", async () => {
@@ -713,7 +717,7 @@ describe("the reply bar", () => {
         await settle();
         expect(surfaceCalls()).toEqual([]);
         setTranslation(makeKey("q8", "en"), { lang: "de", text: "Where do we meet tomorrow morning?", via: "relay" });
-        expectInPlace(bar(quoted("q8", "c1", "Wo treffen wir uns morgen früh?")), "Wo treffen wir uns morgen früh?", "Where do we meet tomorrow morning?");
+        expectInPlace(bar(quoted("q8", "c1", "Wo treffen wir uns morgen früh?")), "Wo treffen wir uns morgen früh?", "<md:Where do we meet tomorrow morning?|c1>");
     });
 });
 
@@ -746,3 +750,97 @@ describe("the custom status bubble", () => {
         expect(typeof P.useSurfaceVersion()).toBe("number");
     });
 });
+
+describe("markup in tight swaps: readable text out, Discord's parser in", () => {
+    beforeEach(() => {
+        paid();
+        __stubSetUser("900000000000000009", { username: "deniz" });
+        __stubSetChannelName("700000000000000007", "allgemein");
+    });
+
+    /** The relay echoes the German text back in "translation", keeping names and :emoji: as sent. */
+    function echoTranslation(prefix = "EN ") {
+        native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => ({
+            ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "de", text: prefix + m.text, skip: false }))
+        }));
+    }
+    const sentTexts = () => surfaceCalls("relay").flatMap(c => JSON.parse(c[2]).messages.map((m: any) => m.text as string));
+    /** The wrapped parser: records what it was asked to render, and with which state. */
+    const rendered: string[] = [];
+    const parseWith = (parser: string, source: string, state: unknown = { channelId: "c1" }) =>
+        deep(P.wrapParser(parser, (t: string, _i: unknown, st: any) => { rendered.push(`${t}|${st?.channelId}`); return [`<p:${t}>`]; })(source, true, state));
+
+    it("a header topic with a link, a channel mention and a custom emoji: readable text goes out, the translation is rendered by the same parser with its tokens back", async () => {
+        echoTranslation();
+        const topic = "Regeln lesen in <#700000000000000007> und https://example.com/regeln <:blobwave:123456789012345678>";
+        expect(parseWith("topic-truncated", topic)).toEqual([`<p:${topic}>`]);
+        await settle();
+        expect(sentTexts()).toEqual(["Regeln lesen in #allgemein und https://example.com/regeln :blobwave:"]);
+        rendered.length = 0;
+        const out = parseWith("topic-truncated", topic);
+        expect(out.props.title).toBe("Regeln lesen in #allgemein und https://example.com/regeln :blobwave:");
+        // Discord's parser gets the translation with the raw tokens restored, and the same state.
+        expect(rendered).toContain(`EN Regeln lesen in <#700000000000000007> und https://example.com/regeln <:blobwave:123456789012345678>|c1`);
+        expect(text(out)).toBe(`✦ <p:EN Regeln lesen in <#700000000000000007> und https://example.com/regeln <:blobwave:123456789012345678>>`);
+    });
+
+    it("a voice status with a custom emoji and a user mention renders the same way", async () => {
+        echoTranslation();
+        const status = "Zocken mit <@900000000000000009> <a:party:223456789012345678>";
+        parseWith("voice-status", status);
+        await settle();
+        expect(sentTexts()).toContain("Zocken mit @deniz :party:");
+        const out = parseWith("voice-status", status);
+        expect(text(out)).toBe("✦ <p:EN Zocken mit <@900000000000000009> <a:party:223456789012345678>>");
+        expect(out.props.title).toBe("Zocken mit @deniz :party:");
+    });
+
+    it("a model that answers with raw Discord tokens: Discord's original stays", async () => {
+        native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => ({
+            ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "de", text: "Read the rules in <#999> <@&42>", skip: false }))
+        }));
+        const topic = "Lies die Regeln im Kanal <#700000000000000007>";
+        parseWith("topic-truncated", topic);
+        await settle();
+        expect(parseWith("topic-truncated", topic)).toEqual([`<p:${topic}>`]);
+    });
+
+    it("a parser that throws on the translation: Discord's original stays", async () => {
+        echoTranslation();
+        const source = "Heute Abend gemütliche Runde";
+        let calls = 0;
+        const wrapped = P.wrapParser("voice-status", (t: string) => { calls++; if (calls > 1) throw new Error("bad"); return [`<p:${t}>`]; });
+        wrapped(source, true, { channelId: "c1" });
+        await settle();
+        calls = 0;
+        expect(deep(wrapped(source, true, { channelId: "c1" }))).toEqual([`<p:${source}>`]);
+    });
+
+    it("the reply bar renders the translation with Discord's markdown parser, readable text out and as the tooltip", async () => {
+        echoTranslation();
+        const q = { id: "q20", channel_id: "c1", content: "Frag <@900000000000000009> in <#700000000000000007> <:blobwave:123456789012345678>" };
+        const props = { referencedMessage: { state: 0, message: q } };
+        expect(deep(P.replyQuoteChildren(ORIGINAL, props))).toEqual(ORIGINAL);
+        await settle();
+        expect(sentTexts()).toContain("Frag @deniz in #allgemein :blobwave:");
+        const out = deep(P.replyQuoteChildren(ORIGINAL, props));
+        expect(out.props.title).toBe("Frag @deniz in #allgemein :blobwave:");
+        expect(text(out)).toBe("✦ <md:EN Frag <@900000000000000009> in <#700000000000000007> <:blobwave:123456789012345678>|c1>");
+    });
+
+    it("a reply whose cached translation carries raw tokens keeps Discord's line", () => {
+        setTranslation(makeKey("q21", "en"), { lang: "de", text: "Ask <@12345> about it", via: "relay" });
+        const q = { id: "q21", channel_id: "c1", content: "Frag ihn danach" };
+        expect(deep(P.replyQuoteChildren(ORIGINAL, { referencedMessage: { state: 0, message: q } }))).toEqual(ORIGINAL);
+    });
+
+    it("the thread title and stage topic keep a real aria-label: the translation once known, else the original", async () => {
+        const title = "Wie repariere ich mein Fahrrad?";
+        expect(threadProps(title)["aria-label"]).toBe(title);
+        await settle();
+        const props = threadProps(title);
+        expect(props["aria-label"]).toBe(`EN ${title}`.replace("EN ", "sharp: "));
+        expect(typeof stageProps("Wir reden über Bücher")["aria-label"]).toBe("string");
+    });
+});
+

@@ -8,7 +8,7 @@ import definePlugin, { PluginNative } from "@utils/types";
 import { relaunch } from "@utils/native";
 import {
     ChannelStore, FluxDispatcher, GuildMemberStore, GuildRoleStore, LocaleStore, MessageStore,
-    React, SelectedChannelStore, Toasts, UserStore
+    Parser, React, SelectedChannelStore, Toasts, UserStore
 } from "@webpack/common";
 import type { Message } from "@vencord/discord-types";
 
@@ -57,7 +57,7 @@ import {
 import { SURFACE_PATCHES } from "./surfaces/patches";
 import { SurfaceService, type SurfaceOutcome, type SurfaceTier } from "./surfaces/service";
 import {
-    safe, setSurfaceService, SurfaceLines, tightTranslation, TightSwap, TranslatedInPlace, useSurfaceVersion
+    safe, setSurfaceService, SurfaceLines, tightTranslation, TightSwap, useSurfaceVersion
 } from "./surfaces/ui";
 import { __resetWeeklyStats, closeWeekIfDue, countShown, loadWeeklyStats } from "./weeklyNote";
 
@@ -3864,19 +3864,68 @@ function parserStateAllowed(parser: string, state: unknown): boolean {
  * (tight: the header topic, voice status). Anything else returns Discord's
  * output exactly as made.
  */
-export function decorateParsed(parser: string, args: unknown[], out: unknown): unknown {
+export function decorateParsed(parser: string, args: unknown[], out: unknown, reparse?: (text: string) => unknown): unknown {
     try {
         const source = args[0];
         if (!isPaidSurfaceUser() || typeof source !== "string" || source.trim() === "") return out;
         const spec = PARSER_SURFACES[parser];
         if (spec === undefined) return out;
         if (spec.guildOnly && !parserStateAllowed(parser, args[2])) return out;
-        const texts: SurfaceText[] = [{ kind: spec.kind, label: spec.label, text: source }];
-        return spec.tight
-            ? <TightSwap key="subline-surface" original={out} text={source} />
-            : [out, <SurfaceLines key="subline-surface" texts={texts} />];
+        // What goes to the relay is the READABLE text: mentions as names,
+        // custom emoji as :name:. Never raw <#id>, <@id> or <:name:id> tokens.
+        const channelId = (args[2] as { channelId?: unknown } | null | undefined)?.channelId;
+        const markup = markupFor(source, typeof channelId === "string" ? channelId : null);
+        const texts: SurfaceText[] = [{ kind: spec.kind, label: spec.label, text: markup.readable }];
+        if (!spec.tight) return [out, <SurfaceLines key="subline-surface" texts={texts} />];
+        return (
+            <TightSwap
+                key="subline-surface"
+                original={out}
+                text={markup.readable}
+                tooltip={markup.readable}
+                render={translation => renderWithMarkup(translation, markup.tokens, reparse)}
+            />
+        );
     } catch {
         return out;
+    }
+}
+
+/** Raw Discord tokens: a custom emoji, a channel, role or user mention. */
+const RAW_TOKEN = /<a?:\w+:\d+>|<#\d+>|<@&\d+>|<@!?\d+>/;
+const RAW_TOKENS = /<a?:\w+:\d+>|<#\d+>|<@&\d+>|<@!?\d+>/g;
+
+/**
+ * A text's readable form (what is sent), plus each raw token paired with its
+ * readable form, so the translation can have its mentions and emoji put back
+ * before Discord's own parser renders it.
+ */
+function markupFor(source: string, channelId: string | null): { readable: string; tokens: Array<[string, string]>; } {
+    const resolve = (text: string) => channelId === null ? text : readableContent(text, channelId);
+    const tokens: Array<[string, string]> = [];
+    for (const raw of new Set(source.match(RAW_TOKENS) ?? [])) {
+        const readable = resolve(raw);
+        if (readable !== raw && readable !== "") tokens.push([readable, raw]);
+    }
+    // Longest first, so "@Ann" never eats part of "@Anna".
+    tokens.sort((a, b) => b[0].length - a[0].length);
+    return { readable: resolve(source), tokens };
+}
+
+/**
+ * The translated text as Discord renders it: readable mentions and emoji
+ * turned back into Discord's tokens, then Discord's own parser. Null (keep
+ * Discord's original) when the model answered with raw tokens of its own,
+ * or when anything throws.
+ */
+function renderWithMarkup(translation: string, tokens: Array<[string, string]>, parse?: (text: string) => unknown): unknown {
+    try {
+        if (RAW_TOKEN.test(translation)) return null;
+        let restored = translation;
+        for (const [readable, raw] of tokens) restored = restored.split(readable).join(raw);
+        return parse ? parse(restored) : restored;
+    } catch {
+        return null;
     }
 }
 
@@ -3888,8 +3937,23 @@ function wrapParser(parser: string, fn: unknown): unknown {
     if (typeof fn !== "function") return fn;
     const original = fn as (...args: unknown[]) => unknown;
     return function (this: unknown, ...args: unknown[]) {
-        return decorateParsed(parser, args, original.apply(this, args));
+        const self = this;
+        return decorateParsed(
+            parser, args, original.apply(self, args),
+            // The same parser, with the same state, for the translation.
+            text => original.apply(self, [text, ...args.slice(1)])
+        );
     };
+}
+
+function overflowProps(text: unknown, channel: unknown): Record<string, unknown> {
+    try {
+        const children = tightChildren(text, text, channel);
+        if (children === text || typeof text !== "string") return { children: text };
+        return { children, "aria-label": tightTranslation(text)?.text ?? text };
+    } catch {
+        return { children: text };
+    }
 }
 
 /**
@@ -3924,18 +3988,25 @@ function ReplyQuoteImpl({ original, referenced }: { original: unknown; reference
     const content = typeof quoted?.content === "string" ? quoted.content : "";
     const channelId = quoted?.channel_id;
     if (typeof quoted?.id !== "string" || typeof channelId !== "string" || content.trim() === "") return fallback;
+    const markup = markupFor(content, channelId);
+    // Discord's markdown parser renders the translation, so mentions, links
+    // and emoji look as they do in the original.
+    const render = (translation: string) =>
+        renderWithMarkup(translation, markup.tokens, text => Parser.parse(text, true, { channelId }));
     const existing = getTranslation(makeKey(quoted.id, settings.store.targetLang));
     if (existing !== undefined && "skipped" in existing) return fallback;
     if (isRealTranslation(existing)) {
+        const shown = render(existing.text.trim());
+        if (shown === null || shown === undefined) return fallback;
         const glyph = ENGINE_PROVENANCE[existing.via].glyph;
         return (
-            <span title={content} data-subline-surface="in-place">
-                <span style={{ opacity: 0.75 }}>{glyph} </span>{existing.text.trim()}
+            <span title={markup.readable} data-subline-surface="in-place">
+                <span style={{ opacity: 0.75 }}>{glyph} </span>{shown as any}
             </span>
         );
     }
     if (!channelActive(channelId) || isLoadedInChannel(channelId, quoted.id)) return fallback;
-    return <TightSwap original={original} text={readableContent(content, channelId)} />;
+    return <TightSwap original={original} text={markup.readable} tooltip={markup.readable} render={render} />;
 }
 const ReplyQuote = safe("reply quote", ReplyQuoteImpl, surfaceDebug);
 
@@ -4001,8 +4072,13 @@ export default definePlugin({
     // would have had there: null where the patch appends a child, and the
     // original child where it wraps one.
     renderBioLine: (props: any) => isPaidSurfaceUser() ? <BioLine {...(props ?? {})} /> : null,
-    stageTopicChildren: (topic: unknown, channel: unknown) => tightChildren(topic, topic, channel),
-    threadTitleChildren: (title: unknown, thread: unknown) => tightChildren(title, title, thread),
+    // Props for Discord's OverflowTooltip around a stage topic or a thread
+    // title: exactly { children } as Discord had it for anyone not paid.
+    // Paid: the in-place translation, and an aria-label that is always a
+    // real string (the translation once known, else the original), since
+    // the tooltip derives its label from string children only.
+    stageTopicProps: (topic: unknown, channel: unknown) => overflowProps(topic, channel),
+    threadTitleProps: (title: unknown, thread: unknown) => overflowProps(title, thread),
     forumTitleChildren: (original: unknown, channel: any) => tightChildren(original, channel?.name, channel),
     // A tag pill knows its tag, not its channel: it follows the rule of the
     // channel being viewed (the forum, or a post in it).
