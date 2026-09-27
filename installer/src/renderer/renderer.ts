@@ -13,6 +13,7 @@
  */
 
 import { ACTION_LABELS, IS_PRIMARY } from "../app/actions.js";
+import { CODE_SCREEN_COPY, codeScreenView } from "../app/codeScreen.js";
 import type { FlowAction, FlowActionType, FlowState } from "../app/flow.js";
 import type { LanguageOption } from "../app/language.js";
 import type { UninstallReport } from "../app/uninstall.js";
@@ -93,6 +94,8 @@ const STEP_TITLES: Record<FlowState["step"], string> = {
 
 let chosenLanguage: string | null = null;
 let typedCode = "";
+/** Whether "I have a code" was pressed on the current code screen. Local: it sends nothing. */
+let codeRevealed = false;
 
 /**
  * The heading, with one override.
@@ -214,18 +217,23 @@ function renderExtra(state: FlowState): void {
     }
 
     if (state.step === "choose-code") {
+        // A choice first: the trial, or "I have a code". The field is drawn
+        // only once revealed, or when a save came back refused (so the reason
+        // and the field are on screen together). codeScreenView decides.
+        const view = codeScreenView({ revealed: codeRevealed, hasError: state.error !== null });
+        if (!view.showField) return;
         typedCode = "";
         const field = document.createElement("div");
         field.className = "fld";
 
         const label = document.createElement("label");
         label.className = "lbl";
-        label.textContent = "Subline code";
+        label.textContent = CODE_SCREEN_COPY.fieldLabel;
 
         const input = document.createElement("input");
         input.className = "txt";
         input.type = "text";
-        input.placeholder = "Paste your code here";
+        input.placeholder = CODE_SCREEN_COPY.placeholder;
         // Not type="password": this is pasted once, and a masked field makes a
         // mis-paste impossible to spot — which is exactly the failure that had
         // a valid key reported as rejected.
@@ -238,9 +246,20 @@ function renderExtra(state: FlowState): void {
 
         const hint = document.createElement("p");
         hint.className = "note";
-        hint.textContent = "A code can be pasted any time later, in Subline's settings inside Discord.";
+        setDetail(hint, CODE_SCREEN_COPY.whereFrom);
 
         field.append(label, input, hint);
+        if (view.findCodeUrl !== null) {
+            // Through the main process (shell:open), never by navigating this
+            // window: the installer page must stay the installer page.
+            const url = view.findCodeUrl;
+            const find = document.createElement("a");
+            find.className = "note";
+            find.href = url;
+            find.textContent = CODE_SCREEN_COPY.findCode;
+            find.onclick = event => { event.preventDefault(); void api.openUrl(url); };
+            field.append(find);
+        }
         extra.append(field);
         // Focus so a paste works without hunting for the field.
         setTimeout(() => input.focus(), 0);
@@ -383,6 +402,11 @@ function verdictBlock(spec: {
 
 function renderActions(state: FlowState): void {
     actionBar.replaceChildren();
+    if (state.step === "choose-code") {
+        renderCodeActions(state);
+        return;
+    }
+    codeRevealed = false;
     // One primary per screen, enforced HERE rather than hoped for: the visual
     // sweep caught the old permission-blocked screen offering two teal buttons because two
     // actions are each primary somewhere. The first primary in the array wins;
@@ -403,6 +427,31 @@ function renderActions(state: FlowState): void {
         // A state that should offer nothing offers an empty actions array;
         // one that offers an action means it.
         button.onclick = () => void onAction(action);
+        actionBar.append(button);
+    }
+}
+
+/**
+ * The code screen's buttons, from codeScreenView. "I have a code" is local: it
+ * reveals the field and re-renders, and sends nothing to the flow.
+ */
+function renderCodeActions(state: FlowState): void {
+    const view = codeScreenView({ revealed: codeRevealed, hasError: state.error !== null });
+    for (const spec of view.buttons) {
+        // Still only what the flow offered: the view orders and labels them.
+        if (spec.kind !== "reveal" && !state.actions.includes(spec.kind)) continue;
+        const button = document.createElement("button");
+        button.textContent = spec.label;
+        button.className = spec.primary ? "btn btn-primary" : "btn btn-secondary";
+        if (spec.kind === "reveal") {
+            button.onclick = () => {
+                codeRevealed = true;
+                render(state);
+            };
+        } else {
+            const action = spec.kind;
+            button.onclick = () => void onAction(action);
+        }
         actionBar.append(button);
     }
 }

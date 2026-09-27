@@ -12,6 +12,7 @@
  * Here, a test can import them and walk every state the flow can reach.
  */
 
+import { CODE_SCREEN_COPY } from "./codeScreen.js";
 import type { FlowActionType } from "./flow.js";
 
 export const ACTION_LABELS: Record<FlowActionType, string> = {
@@ -27,10 +28,12 @@ export const ACTION_LABELS: Record<FlowActionType, string> = {
     "force-quit-discord": "Close Discord anyway",
     recheck: "Check again",
     "set-language": "Continue",
-    "set-code": "Save code",
-    // Says what is being declined: a code, not ✦. A free install still gets
-    // ≈ and ✦ automatically for 7 days, so "Use free Google only" was false.
-    "skip-code": "Continue without a code",
+    // Both come from the code screen's one copy object (codeScreen.ts), which
+    // is also what the renderer draws that screen from.
+    "set-code": CODE_SCREEN_COPY.save,
+    // The free trial is the default path: no code, ≈ and ✦ automatic for 7
+    // days. "Use free Google only" was false, and so was leading with a form.
+    "skip-code": CODE_SCREEN_COPY.startTrial,
     // Secondary: Subline already opened the pane itself. This is for someone
     // who closed it or lost it behind another window.
     "open-permission-settings": "Open it again",
@@ -63,8 +66,10 @@ const IS_PRIMARY: Record<FlowActionType, boolean> = {
     "force-quit-discord": true,
     recheck: false,
     "set-language": true,
-    "set-code": true,
-    "skip-code": false,
+    // The trial is the filled button on the code screen. Save is drawn
+    // primary only once the field is revealed (codeScreen.ts decides that).
+    "set-code": false,
+    "skip-code": true,
     "open-permission-settings": false,
     retry: true,
     "skip-helper": false,

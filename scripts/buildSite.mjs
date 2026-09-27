@@ -27,7 +27,20 @@ const DESIGN = join(ROOT, "design");
 const OUT = join(ROOT, "site", "index.html");
 
 /** Order on the page. Not alphabetical — this is the argument the page makes. */
-const SECTIONS = ["hero", "pricing", "downloads", "security-warning", "privacy"];
+const SECTIONS = ["thanks", "hero", "pricing", "downloads", "security-warning", "privacy"];
+
+/**
+ * Sections that ship HIDDEN and are shown by the page script. "thanks" is the
+ * return from checkout: it only makes sense when Dodo sent the buyer back
+ * (or the address ends in #thanks), so it is first on the page and hidden.
+ */
+const HIDDEN_SECTIONS = new Set(["thanks"]);
+
+/**
+ * The pure checkout-return parser, inlined into the page script. It lives in
+ * its own file so tests can run the exact same text in node.
+ */
+const THANKS_JS = readFileSync(join(DESIGN, "site", "thanks", "thanks.js"), "utf8").trim();
 
 const REPO = "surfer05/subline";
 
@@ -136,13 +149,68 @@ ${mergeStyles(parts.map(p => p.style))}
 </head>
 <body>
 
-${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}">\n<div class="wrap">\n${p.body}\n</div>\n</section>`).join("\n\n")}
+${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}"${HIDDEN_SECTIONS.has(p.name) ? " hidden" : ""}>\n<div class="wrap">\n${p.body}\n</div>\n</section>`).join("\n\n")}
 
 <script>
 (function () {
   "use strict";
 
   var REPO = ${JSON.stringify(REPO)};
+
+  ${THANKS_JS.split("\n").join("\n  ")}
+
+  // Back from checkout: show the thanks view first. The key is written with
+  // textContent only and never sent anywhere (no fetch, no analytics).
+  // Then the address is cut back to "#thanks" with history.replaceState, so
+  // the key does not sit in the address bar, the history list, or a link
+  // someone copies to share the page. A refresh then shows the thanks view
+  // without the key; it is also in the receipt email.
+  (function () {
+    var ret = parseCheckoutReturn(location.search, location.hash);
+    var section = document.getElementById("thanks");
+    if (!ret || !section) return;
+    section.hidden = false;
+    function part(name) { return section.querySelector("[data-thanks-" + name + "]"); }
+    var ok = part("ok"), pending = part("pending"), failed = part("failed");
+    if (ok) ok.hidden = ret.state !== "ok";
+    if (pending) pending.hidden = ret.state !== "pending";
+    if (failed) failed.hidden = ret.state !== "failed";
+    var keysBox = part("keys"), row = part("key");
+    if (keysBox && row) {
+      keysBox.hidden = ret.keys.length === 0;
+      var list = row.parentNode, last = row;
+      ret.keys.forEach(function (key, i) {
+        var r = i === 0 ? row : row.cloneNode(true);
+        if (i > 0) { list.insertBefore(r, last.nextSibling); last = r; }
+        r.querySelector("[data-thanks-code]").textContent = key;
+        var btn = r.querySelector("[data-thanks-copy]");
+        btn.addEventListener("click", function () { copyText(key, r.querySelector("[data-thanks-code]"), btn); });
+      });
+    }
+    try {
+      if (location.search && history.replaceState) history.replaceState(null, "", location.pathname + "#thanks");
+    } catch (e) { /* the view still shows */ }
+  })();
+
+  function copyText(text, node, btn) {
+    function done() { btn.textContent = "Copied"; setTimeout(function () { btn.textContent = "Copy"; }, 2000); }
+    function fallback() {
+      // Select the code so Cmd/Ctrl+C works, and try the old copy command.
+      try {
+        var range = document.createRange();
+        range.selectNodeContents(node);
+        var sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        if (document.execCommand("copy")) done();
+      } catch (e) { /* the code stays selected */ }
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, fallback);
+    } else {
+      fallback();
+    }
+  }
   var RELEASES = "https://github.com/" + REPO + "/releases/latest";
   document.documentElement.classList.add("js");
 

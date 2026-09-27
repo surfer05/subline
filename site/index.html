@@ -145,6 +145,10 @@ a:hover{color:var(--fg)}
 .wm-sm{font-family:var(--font-serif);font-size:17px;font-weight:400;letter-spacing:-.01em;display:inline-block;
   padding-bottom:3px;border-bottom:1.5px solid var(--accent);line-height:1}
 @media (max-width:640px){.wrap{padding:44px 20px}h2.sec{font-size:25px}}
+.keyrow{display:flex;align-items:center;gap:12px;padding:12px 14px;margin-top:10px;max-width:560px;flex-wrap:wrap}
+.keyrow code{flex:1 1 240px;min-width:0;overflow-wrap:anywhere;user-select:all}
+.keyrow .btn{font-size:14px;padding:8px 16px}
+.thanks-cta{display:flex;gap:12px;flex-wrap:wrap;margin-top:22px}
 .hero h1{font-family:var(--font-serif);font-size:50px;line-height:1.04;letter-spacing:-.02em;font-weight:400;margin:22px 0 0;max-width:17ch}
 .cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-top:30px}
 .chat{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
@@ -170,6 +174,7 @@ a:hover{color:var(--fg)}
 .anchor{font-family:var(--font-serif);font-size:19px;line-height:1.42;font-weight:400;margin:26px 0 0;max-width:44ch;
   padding-left:14px;border-left:3px solid var(--accent)}
 .anchor b{font-weight:600}
+.free-cta{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:22px}
 .plans{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:26px}
 @media (max-width:700px){.plans{grid-template-columns:1fr}}
 .plans .card{min-width:0;overflow-wrap:anywhere}
@@ -231,6 +236,36 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 </head>
 <body>
 
+<!-- thanks -->
+<section id="thanks" hidden>
+<div class="wrap">
+<div data-thanks-ok>
+  <p class="kicker">Thanks</p>
+  <h2 class="sec">You're all set.</h2>
+  <p class="lead">If you started from Discord, it is already on. Nothing to paste.</p>
+  <div data-thanks-keys>
+    <p class="lead">Your code:</p>
+    <div class="panel keyrow" data-thanks-key><code class="mono" data-thanks-code>ABCD-1234-EFGH-5678</code><button class="btn btn-secondary" type="button" data-thanks-copy>Copy</button></div>
+    <p class="fine">Starting on a new computer? Paste it in the installer, or in Discord under Plugins, VcTranslate, Subline Code. It is also in your receipt email.</p>
+  </div>
+  <div class="thanks-cta">
+    <a data-dl="mac" class="btn btn-primary" href="https://github.com/surfer05/subline/releases/latest">Download for Mac</a>
+    <a data-dl="win" class="btn btn-secondary" href="https://github.com/surfer05/subline/releases/latest">Download for Windows</a>
+  </div>
+</div>
+<div data-thanks-pending hidden>
+  <p class="kicker">Thanks</p>
+  <h2 class="sec">Your payment is processing.</h2>
+  <p class="lead">This can take a few minutes. Your code will arrive by email from <b>Dodo Payments</b>. <b>Check spam.</b></p>
+</div>
+<div data-thanks-failed hidden>
+  <p class="kicker">Checkout</p>
+  <h2 class="sec">The payment did not go through.</h2>
+  <p class="lead">Nothing was bought. <a href="#pricing">Try again</a>, or keep using the free plan.</p>
+</div>
+</div>
+</section>
+
 <!-- hero -->
 <section id="hero">
 <div class="wrap">
@@ -261,24 +296,28 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 <section id="pricing">
 <div class="wrap">
 <p class="kicker">Pricing</p>
-<h2 class="sec">Keep it automatic</h2>
-<p class="lead">Free: 7 days fully automatic. After that, click a message to translate it. Paid: <span class="gl-inline">≈</span> and <span class="gl-inline">✦</span> on every message, plus profiles, statuses and embeds.</p>
+<h2 class="sec">Free to start</h2>
+<p class="lead">Download it and try everything free for 7 days. After that, click a message to translate it. Paid: <span class="gl-inline">≈</span> and <span class="gl-inline">✦</span> on every message, plus profiles, statuses and embeds.</p>
+<div class="free-cta">
+  <a class="btn btn-primary" href="#downloads">Download free</a>
+  <span class="fine">No card. No account.</span>
+</div>
 <div class="plans">
   <div class="panel card">
     <h3>Monthly</h3>
     <div class="price">$2.49<span class="per">/mo</span></div>
     <p>Cancel anytime.</p>
-    <a class="btn btn-secondary" href="https://checkout.dodopayments.com/buy/pdt_0No1xmbcAqHdYAvt1RNPR?quantity=1">Buy</a>
+    <a class="btn btn-secondary" data-buy="monthly" href="https://checkout.dodopayments.com/buy/pdt_0No1xmbcAqHdYAvt1RNPR?quantity=1&amp;redirect_url=https%3A%2F%2Fsurfer05.github.io%2Fsubline%2F">Buy</a>
   </div>
   <div class="panel card">
     <span class="badge">4 months free</span>
     <h3>Annual</h3>
     <div class="price">$19.99<span class="per">/yr</span></div>
     <p>Billed yearly.</p>
-    <a class="btn btn-primary" href="https://checkout.dodopayments.com/buy/pdt_0No1yAve1ozdxryVGZvf6?quantity=1">Buy</a>
+    <a class="btn btn-secondary" data-buy="annual" href="https://checkout.dodopayments.com/buy/pdt_0No1yAve1ozdxryVGZvf6?quantity=1&amp;redirect_url=https%3A%2F%2Fsurfer05.github.io%2Fsubline%2F">Buy</a>
   </div>
 </div>
-<p class="lead">Your code arrives by email from <b>Dodo Payments</b>. <b>Check spam.</b> Paste it in the installer, or in Discord under Plugins, VcTranslate, Subline Code.</p>
+<p class="lead">Buying from inside Discord turns it on by itself. Buying here? Your code shows after checkout and arrives by email from <b>Dodo Payments</b>. <b>Check spam.</b></p>
 <p class="fine">Up to 2,000 <span class="gl-inline">✦</span> a day. Checkout adds local tax. No code, or want to cancel? <a href="https://github.com/surfer05/subline/issues" rel="noopener">Open an issue</a>, but never post your code there.</p>
 </div>
 </section>
@@ -373,6 +412,94 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
   "use strict";
 
   var REPO = "surfer05/subline";
+
+  // What the page should say after checkout, from the address alone. Pure: no
+  // DOM, no network, so the build inlines it into the page and a node test runs
+  // the very same text.
+  //
+  // Dodo sends the buyer back to the site root and appends
+  // payment_id or subscription_id, status, and license_key when the product
+  // issues keys (comma separated when there are several), plus email.
+  // https://docs.dodopayments.com/developer-resources/checkout-session (Handle the return)
+  // https://docs.dodopayments.com/developer-resources/integration-guide#static-payment-links
+  // "#thanks" alone also shows the view, with no key.
+  //
+  // Returns null when this is not a return from checkout. Otherwise
+  // { state: "ok" | "pending" | "failed", keys: [...] }. The email is never read.
+  function parseCheckoutReturn(search, hash) {
+    var params;
+    try { params = new URLSearchParams(search || ""); } catch (e) { params = null; }
+    var status = params ? (params.get("status") || "").toLowerCase() : "";
+    var isReturn = !!params && status !== "" && !!(params.get("payment_id") || params.get("subscription_id"));
+    if (!isReturn) return hash === "#thanks" ? { state: "ok", keys: [] } : null;
+  
+    var OK = ["succeeded", "active"];
+    var FAILED = ["failed", "cancelled", "canceled", "expired", "requires_payment_method"];
+    var state = OK.indexOf(status) >= 0 ? "ok" : FAILED.indexOf(status) >= 0 ? "failed" : "pending";
+  
+    // Only key-shaped values: this text lands on the page, and a crafted link
+    // should not be able to put a sentence there.
+    var keys = [];
+    var raw = params.get("license_key") || "";
+    raw.split(",").forEach(function (k) {
+      k = k.trim();
+      if (/^[A-Za-z0-9_-]{4,128}$/.test(k) && keys.indexOf(k) < 0) keys.push(k);
+    });
+    return { state: state, keys: state === "failed" ? [] : keys };
+  }
+
+  // Back from checkout: show the thanks view first. The key is written with
+  // textContent only and never sent anywhere (no fetch, no analytics).
+  // Then the address is cut back to "#thanks" with history.replaceState, so
+  // the key does not sit in the address bar, the history list, or a link
+  // someone copies to share the page. A refresh then shows the thanks view
+  // without the key; it is also in the receipt email.
+  (function () {
+    var ret = parseCheckoutReturn(location.search, location.hash);
+    var section = document.getElementById("thanks");
+    if (!ret || !section) return;
+    section.hidden = false;
+    function part(name) { return section.querySelector("[data-thanks-" + name + "]"); }
+    var ok = part("ok"), pending = part("pending"), failed = part("failed");
+    if (ok) ok.hidden = ret.state !== "ok";
+    if (pending) pending.hidden = ret.state !== "pending";
+    if (failed) failed.hidden = ret.state !== "failed";
+    var keysBox = part("keys"), row = part("key");
+    if (keysBox && row) {
+      keysBox.hidden = ret.keys.length === 0;
+      var list = row.parentNode, last = row;
+      ret.keys.forEach(function (key, i) {
+        var r = i === 0 ? row : row.cloneNode(true);
+        if (i > 0) { list.insertBefore(r, last.nextSibling); last = r; }
+        r.querySelector("[data-thanks-code]").textContent = key;
+        var btn = r.querySelector("[data-thanks-copy]");
+        btn.addEventListener("click", function () { copyText(key, r.querySelector("[data-thanks-code]"), btn); });
+      });
+    }
+    try {
+      if (location.search && history.replaceState) history.replaceState(null, "", location.pathname + "#thanks");
+    } catch (e) { /* the view still shows */ }
+  })();
+
+  function copyText(text, node, btn) {
+    function done() { btn.textContent = "Copied"; setTimeout(function () { btn.textContent = "Copy"; }, 2000); }
+    function fallback() {
+      // Select the code so Cmd/Ctrl+C works, and try the old copy command.
+      try {
+        var range = document.createRange();
+        range.selectNodeContents(node);
+        var sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        if (document.execCommand("copy")) done();
+      } catch (e) { /* the code stays selected */ }
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, fallback);
+    } else {
+      fallback();
+    }
+  }
   var RELEASES = "https://github.com/" + REPO + "/releases/latest";
   document.documentElement.classList.add("js");
 
