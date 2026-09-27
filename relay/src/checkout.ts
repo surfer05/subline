@@ -26,7 +26,7 @@
  *     subscription_cycles, usage_limit, restricted_to):
  *     /api-reference/discounts/create-discount
  */
-import { ipBucket, isTasteBearer, variantConfig, type CodeRecord, type Env } from "./codes";
+import { ipBucket, isNewClient, isTasteBearer, variantConfig, type CodeRecord, type Env } from "./codes";
 
 export const DEFAULT_DODO_API_BASE = "https://live.dodopayments.com";
 export const DEFAULT_CHECKOUT_RETURN_URL = "https://surfer05.github.io/subline/";
@@ -86,12 +86,15 @@ function cause(e: unknown): string {
 /** POST /v1/checkout. */
 export async function handleCheckout(req: Request, env: Env, now: number = Date.now()): Promise<Response> {
     if (req.method !== "POST") return fail("method not allowed", 405);
-    const h = req.headers.get("authorization");
-    let bearer: string | null = null;
-    if (h !== null && h.trim() !== "") {
-        bearer = h.startsWith("Bearer ") ? h.slice(7).trim() : "";
-        if (!isTasteBearer(bearer)) return fail("bad request", 400);
-    }
+    // Only a v0.1.10+ plugin buys through here, as the free install it is:
+    // a well-formed free_ bearer AND the client header, both checked before
+    // any KV read or write and before Dodo is called. The site sells through
+    // static links, so there is no anonymous checkout.
+    const h = (req.headers.get("authorization") || "").trim();
+    if (h === "") return fail("unauthorized", 401);
+    const bearer = h.startsWith("Bearer ") ? h.slice(7).trim() : "";
+    if (!isTasteBearer(bearer)) return fail("bad request", 400);
+    if (!isNewClient(req.headers.get("x-subline-client"))) return fail("bad request", 400);
     let body: any;
     try { body = JSON.parse(await req.text()); } catch { return fail("bad request", 400); }
     const plan = body?.plan;
@@ -105,14 +108,14 @@ export async function handleCheckout(req: Request, env: Env, now: number = Date.
         return fail("checkout unavailable", 503);
     }
 
-    const hash = bearer ? await installHash(bearer) : null;
+    const hash = await installHash(bearer);
     const hour = Math.floor(now / HOUR_MS);
     const ip = req.headers.get("cf-connecting-ip");
     try {
         if (ip && !(await underHourly(env, `rl:coip:${ipBucket(ip)}:${hour}`, CHECKOUT_IP_PER_HOUR))) {
             return fail("slow down", 429, HOUR_MS - (now % HOUR_MS));
         }
-        if (hash && !(await underHourly(env, `rl:co:${hash}:${hour}`, CHECKOUT_INSTALL_PER_HOUR))) {
+        if (!(await underHourly(env, `rl:co:${hash}:${hour}`, CHECKOUT_INSTALL_PER_HOUR))) {
             return fail("slow down", 429, HOUR_MS - (now % HOUR_MS));
         }
     } catch (e) {
@@ -123,9 +126,9 @@ export async function handleCheckout(req: Request, env: Env, now: number = Date.
     const payload: Record<string, unknown> = {
         product_cart: [{ product_id: productId, quantity: 1 }],
         return_url: env.CHECKOUT_RETURN_URL || DEFAULT_CHECKOUT_RETURN_URL,
-        feature_flags: { redirect_immediately: true }
+        feature_flags: { redirect_immediately: true },
+        metadata: { install: hash }
     };
-    if (hash) payload.metadata = { install: hash };
 
     let res: Response;
     try {
@@ -151,7 +154,7 @@ export async function handleCheckout(req: Request, env: Env, now: number = Date.
         console.warn("checkout: dodo returned no checkout_url", { status: res.status });
         return fail("checkout unavailable", 503);
     }
-    if (hash && sessionId) {
+    if (sessionId) {
         try {
             await env.CODES.put(`checkout:${sessionId}`, hash, { expirationTtl: CHECKOUT_TTL_S });
         } catch (e) {
@@ -181,9 +184,16 @@ export async function linkFromLifecycle(env: Env, name: string, data: any): Prom
         const ids = [data?.payment_id, data?.subscription_id]
             .filter((x: unknown): x is string => typeof x === "string" && x !== "");
         for (const id of ids) await env.CODES.put(`inst:${id}`, hash, { expirationTtl: INST_TTL_S });
-        for (const id of ids) {
-            const key = await env.CODES.get(`order:${id}`);
-            if (key) { await env.CODES.put(`paid:${hash}`, key, { expirationTtl: PAID_TTL_S }); return; }
+        // Look for the key, then once more: license_key.created may be running
+        // at the same moment, have read inst: before we wrote it, and written
+        // order: after our first look. The same double-check as the pending
+        // fold in applyLifecycle. (KV lag can still hide it for a while; the
+        // other side's own re-read covers the reverse order.)
+        for (let pass = 0; pass < 2; pass++) {
+            for (const id of ids) {
+                const key = await env.CODES.get(`order:${id}`);
+                if (key) { await env.CODES.put(`paid:${hash}`, key, { expirationTtl: PAID_TTL_S }); return; }
+            }
         }
     } catch (e) {
         console.warn("purchase link (lifecycle) failed", { error: cause(e) });
@@ -193,11 +203,16 @@ export async function linkFromLifecycle(env: Env, name: string, data: any): Prom
 /** license_key.created: if an install is already known for this purchase, hand it the key. Never throws. */
 export async function linkFromKey(env: Env, key: string, joinIds: string[]): Promise<void> {
     try {
-        for (const id of joinIds) {
-            const hash = await env.CODES.get(`inst:${id}`);
-            if (hash && HASH_RE.test(hash)) {
-                await env.CODES.put(`paid:${hash}`, key, { expirationTtl: PAID_TTL_S });
-                return;
+        // Called after the order: rows are written. Look for the install, then
+        // once more, in case a concurrent payment/subscription event wrote
+        // inst: just after our first look (and missed our order: row).
+        for (let pass = 0; pass < 2; pass++) {
+            for (const id of joinIds) {
+                const hash = await env.CODES.get(`inst:${id}`);
+                if (hash && HASH_RE.test(hash)) {
+                    await env.CODES.put(`paid:${hash}`, key, { expirationTtl: PAID_TTL_S });
+                    return;
+                }
             }
         }
     } catch (e) {
@@ -228,11 +243,40 @@ export async function purchaseFor(env: Env, bearer: string, now: number): Promis
 
 /* --------------------------------------------------------------- coupons -- */
 
-/** A personal coupon code from a name: uppercase letters and digits, at most 16. */
-export function couponCode(name: unknown): string | null {
+/** The random suffix alphabet: no 0/O/1/I, so a code read aloud or typed is unambiguous. */
+export const COUPON_SUFFIX_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+export const COUPON_SUFFIX_LEN = 3;
+/** Dodo's DiscountResponse documents codes of up to 16 characters. */
+export const COUPON_MAX_LEN = 16;
+
+/** `n` characters from COUPON_SUFFIX_ALPHABET, crypto RNG, unbiased (rejection sampling). */
+export function randomSuffix(n: number = COUPON_SUFFIX_LEN): string {
+    const A = COUPON_SUFFIX_ALPHABET;
+    const limit = 256 - (256 % A.length); // bytes at or above this would bias the modulo
+    let out = "";
+    const buf = new Uint8Array(16);
+    while (out.length < n) {
+        crypto.getRandomValues(buf);
+        for (const b of buf) {
+            if (b >= limit) continue;
+            out += A[b % A.length];
+            if (out.length === n) break;
+        }
+    }
+    return out;
+}
+
+/**
+ * A personal coupon code: the name (uppercase letters and digits, cut to fit)
+ * plus a random 3-character suffix, at most 16 in all, e.g. RAHUL05K7Q. The
+ * name keeps it personal; the suffix stops anyone guessing a friend's code from
+ * their name. The name part must still be at least 3 characters (null
+ * otherwise, which the endpoint answers with 400).
+ */
+export function couponCode(name: unknown, suffix: string = randomSuffix()): string | null {
     if (typeof name !== "string") return null;
-    const code = name.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 16);
-    return code.length >= 3 ? code : null;
+    const base = name.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, COUPON_MAX_LEN - COUPON_SUFFIX_LEN);
+    return base.length >= 3 ? base + suffix : null;
 }
 
 /** POST /admin/coupon body handler (auth already checked by the router). */

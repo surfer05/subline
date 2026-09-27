@@ -5,8 +5,10 @@
  *
  *     ADMIN_TOKEN="$(pbpaste)" node scripts/coupon.mjs alex
  *
- * Prints only the code (the name uppercased, letters and digits only, at most
- * 16 characters), which the friend types into the discount box at checkout.
+ * Prints only the code: the name uppercased, letters and digits only, plus 3
+ * random characters (no 0/O/1/I), at most 16 in all, e.g. RAHUL05K7Q. The
+ * suffix stops anyone guessing a friend's code from their name. The friend
+ * types it into the discount box at checkout.
  * The token is read from the environment only and never printed. The relay
  * needs the DODO_API_KEY secret for this to work.
  */

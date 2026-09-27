@@ -23,7 +23,7 @@ translation** to Subline clients presenting an opaque per-user **code**.
 | `POST /admin/codes` | `Bearer <ADMIN_TOKEN>` | mint / revoke codes |
 | `GET /admin/stats?days=14` | `Bearer <ADMIN_TOKEN>` | approximate daily owner counts (see below) |
 | `POST /webhook/mor` | Dodo Standard-Webhooks signature | issue/revoke on purchase/refund (inert until configured) |
-| `POST /v1/checkout` | optional `Bearer free_<id>` | `{plan:"monthly"\|"annual"}` → `{ok,url}`: a Dodo checkout session tied to this install (503 without `DODO_API_KEY`) |
+| `POST /v1/checkout` | `Bearer free_<id>` + `x-subline-client` | `{plan:"monthly"\|"annual"}` → `{ok,url}`: a Dodo checkout session tied to this install (503 without `DODO_API_KEY`) |
 | `POST /admin/coupon` | `Bearer <ADMIN_TOKEN>` | `{name}` → a single-use 100%-off code for 3 monthly cycles |
 
 Responses use the plugin's exact `NativeResponse` shape, so the client `relay`
@@ -163,7 +163,10 @@ Needs the `DODO_API_KEY` secret (`npm run secret:dodo`) and the `DODO_API_BASE`
 var (live or test, matching the key). Without the key `/v1/checkout` and
 `/admin/coupon` answer 503 and nothing else changes.
 
-1. The plugin calls `POST /v1/checkout {plan}` with its `free_` id. The relay
+1. The plugin calls `POST /v1/checkout {plan}` with its `free_` id and the
+   `x-subline-client` header, both required: no bearer is 401, a malformed
+   bearer or a missing/invalid header is 400, all answered before any KV
+   access or Dodo call. There is no anonymous checkout. The relay
    creates a Dodo checkout session (`POST /checkouts`) for the VARIANTS product
    of that plan, with `metadata.install` = first 16 hex of SHA-256 of the
    bearer (never the raw id), `return_url` = `CHECKOUT_RETURN_URL`, and
@@ -173,22 +176,27 @@ var (live or test, matching the key). Without the key `/v1/checkout` and
    metadata (a payment also carries `checkout_session_id`, the fallback join):
    the relay writes `inst:<payment_id|subscription_id>` → hash (3 days).
    `license_key.created` carries the key and the same ids. Whichever lands
-   second writes `paid:<hash>` → key (30 days).
+   second writes `paid:<hash>` → key (30 days). Each side re-reads the other's
+   row once after writing, so two events processed at the same moment still
+   complete the link.
 3. `GET /v1/status` from a header'd client holding that `free_` id adds
    `purchase:{code,plan}` while the code is active. Nobody else can get it.
 
-A site purchase (no bearer) sends no metadata; the buyer sees the key on the
-thanks page (Dodo appends `license_key` to the return URL) and in the receipt
-email.
+The site does not use this endpoint: it sells through Dodo's static links, and
+the buyer sees the key on the thanks page (Dodo appends `license_key` to the
+return URL) and in the receipt email.
 
 ## Personal coupons
 
 ```sh
-ADMIN_TOKEN=... node scripts/coupon.mjs alex     # prints ALEX
+ADMIN_TOKEN=... node scripts/coupon.mjs alex     # prints e.g. ALEXK7Q
 ```
 
 Creates a Dodo discount: code = the name uppercased with everything but A-Z
-and 0-9 removed, cut to 16 (Dodo requires at least 3), 100% off, restricted
+and 0-9 removed (at least 3 left, else 400), cut to 13, plus 3 random
+characters from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (crypto RNG, unbiased), so
+at most 16 (Dodo's documented maximum) and not guessable from the name alone.
+100% off, restricted
 to the monthly product, `subscription_cycles: 3`, `usage_limit: 1`.
 
 ## Mint a code for a friend

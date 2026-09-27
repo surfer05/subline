@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyMorEvent, type Env } from "../src/codes";
-import { couponCode, installHash } from "../src/checkout";
+import { COUPON_SUFFIX_ALPHABET, couponCode, installHash, linkFromKey, linkFromLifecycle, randomSuffix } from "../src/checkout";
 import { codeRec, fakeBudget, fakeKV } from "./kv-mock";
 import worker from "../src/index";
 
@@ -35,12 +35,13 @@ function mockFetch(status = 200, body: any = { session_id: SESSION, checkout_url
 beforeEach(() => mockFetch());
 afterEach(() => vi.unstubAllGlobals());
 
-const checkoutReq = (plan: unknown, bearer?: string, ip?: string) => new Request("https://relay/v1/checkout", {
+const checkoutReq = (plan: unknown, bearer?: string, ip?: string, client: string | null = CLIENT) => new Request("https://relay/v1/checkout", {
     method: "POST",
     headers: {
         "content-type": "application/json",
         ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
-        ...(ip ? { "cf-connecting-ip": ip } : {})
+        ...(ip ? { "cf-connecting-ip": ip } : {}),
+        ...(client !== null ? { "x-subline-client": client } : {})
     },
     body: JSON.stringify({ plan })
 });
@@ -87,12 +88,27 @@ describe("POST /v1/checkout", () => {
         expect(sent.return_url).toBe("https://x.test/");
     });
 
-    it("a site purchase (no bearer) sends no metadata and stores no session row", async () => {
-        const kv = fakeKV();
-        const res = await worker.fetch(checkoutReq("monthly"), env(kv), ctx);
-        expect(res.status).toBe(200);
-        expect(JSON.parse(calls[0]!.init.body).metadata).toBeUndefined();
-        expect(Object.keys(kv._dump()).filter(k => k.startsWith("checkout:"))).toEqual([]);
+    it("refuses anonymous or header-less checkout before any KV access or Dodo call", async () => {
+        const cases: [Request, number, string][] = [
+            [checkoutReq("monthly", undefined, "1.2.3.4"), 401, "unauthorized"],   // no bearer: no anonymous checkout
+            [checkoutReq("monthly", "free_nothex", "1.2.3.4"), 400, "bad request"],
+            [checkoutReq("monthly", FREE, "1.2.3.4", null), 400, "bad request"],    // no client header
+            [checkoutReq("monthly", FREE, "1.2.3.4", "bad header!"), 400, "bad request"]
+        ];
+        for (const [req, status, error] of cases) {
+            let touched = 0;
+            const kv = fakeKV();
+            const spy = {
+                get: async (k: string) => { touched++; return kv.get(k); },
+                put: async (k: string, v: string, o?: any) => { touched++; return kv.put(k, v, o); },
+                delete: async (k: string) => { touched++; return kv.delete(k); }
+            } as unknown as KVNamespace;
+            const res = await worker.fetch(req, env(spy), ctx);
+            expect(res.status).toBe(status);
+            expect(await res.json()).toEqual({ ok: false, error });
+            expect(touched).toBe(0);
+        }
+        expect(calls).toHaveLength(0);
     });
 
     it("rejects a bad plan, a non-free bearer, and GET", async () => {
@@ -141,7 +157,7 @@ describe("POST /v1/checkout", () => {
         const res = await worker.fetch(checkoutReq("monthly", "free_" + "f".repeat(32), "9.9.9.9"), env(kv), ctx);
         expect(res.status).toBe(429);
         expect(calls).toHaveLength(20);
-        expect((await worker.fetch(checkoutReq("monthly", undefined, "8.8.8.8"), env(kv), ctx)).status).toBe(200);
+        expect((await worker.fetch(checkoutReq("monthly", "free_" + "e".repeat(32), "8.8.8.8"), env(kv), ctx)).status).toBe(200);
     });
 });
 
@@ -228,6 +244,28 @@ describe("webhook linking: purchase → install", () => {
         expect(Object.keys(kv._dump()).filter(k => k.startsWith("code:"))).toEqual([`code:${KEY}`]);
     });
 
+    // A KV whose `key` reads null the first time and `value` afterwards: the
+    // counterpart row written by a concurrent webhook just after our first look.
+    const lateRow = (key: string, value: string) => {
+        const kv = fakeKV();
+        const get = kv.get.bind(kv);
+        let seen = 0;
+        (kv as any).get = async (k: string) => (k === key ? (seen++ === 0 ? null : value) : get(k));
+        return kv;
+    };
+
+    it("lifecycle side re-reads once and completes the link when the key appears late", async () => {
+        const kv = lateRow(`order:${PAY}`, KEY);
+        await linkFromLifecycle(env(kv), "payment.succeeded", { payment_id: PAY, metadata: { install: hash } });
+        expect(kv._dump()[`paid:${hash}`]).toBe(KEY);
+    });
+
+    it("key side re-reads once and completes the link when the install appears late", async () => {
+        const kv = lateRow(`inst:${PAY}`, hash);
+        await linkFromKey(env(kv), KEY, [PAY]);
+        expect(kv._dump()[`paid:${hash}`]).toBe(KEY);
+    });
+
     it("a KV failure while linking never breaks minting", async () => {
         const kv = fakeKV({ [`inst:${PAY}`]: hash });
         const put = kv.put.bind(kv);
@@ -309,25 +347,59 @@ const couponReq = (body: any, token = "admintok") => new Request("https://relay/
 });
 
 describe("POST /admin/coupon", () => {
-    it("normalises names to Dodo codes", () => {
-        expect(couponCode("alex")).toBe("ALEX");
-        expect(couponCode("Zehra K.")).toBe("ZEHRAK");
-        expect(couponCode("jo-2")).toBe("JO2");
-        expect(couponCode("a very long friend name here")).toBe("AVERYLONGFRIENDN");
+    it("normalises names and appends the suffix, at most 16 in all", () => {
+        expect(couponCode("alex", "K7Q")).toBe("ALEXK7Q");
+        expect(couponCode("Zehra K.", "K7Q")).toBe("ZEHRAKK7Q");
+        expect(couponCode("jo-2", "K7Q")).toBe("JO2K7Q");
+        expect(couponCode("rahul05", "K7Q")).toBe("RAHUL05K7Q");
+        expect(couponCode("a very long friend name here", "K7Q")).toBe("AVERYLONGFRIEK7Q");
+        expect(couponCode("a very long friend name here")!.length).toBe(16);
         expect(couponCode("ab")).toBeNull();
         expect(couponCode("é!")).toBeNull();
         expect(couponCode(5)).toBeNull();
     });
 
-    it("creates a 100% off, 3-cycle, single-use monthly discount", async () => {
-        mockFetch(200, { discount_id: "dsc_1", business_id: "bus_1", type: "percentage", code: "ALEX", amount: 10000, times_used: 0 });
+    it("the suffix is 3 characters from the unambiguous alphabet, from the crypto RNG", () => {
+        expect(COUPON_SUFFIX_ALPHABET).not.toMatch(/[0O1I]/);
+        const seen = new Set<string>();
+        for (let i = 0; i < 300; i++) {
+            const code = couponCode("rahul05")!;
+            expect(code).toMatch(/^RAHUL05[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{3}$/);
+            seen.add(code);
+        }
+        // 32^3 = 32768 possibilities; 300 draws are all but certain to vary widely.
+        expect(seen.size).toBeGreaterThan(250);
+        // Deterministic RNG: bytes at or above 256 (a multiple of 32) never occur,
+        // so byte b maps to alphabet[b % 32]; 0 → A, 31 → 9, 32 → A.
+        const spy = vi.spyOn(crypto, "getRandomValues").mockImplementation(((a: Uint8Array) => {
+            a.set([0, 31, 33, ...new Array(13).fill(0)]); return a;
+        }) as any);
+        expect(randomSuffix()).toBe("A9B");
+        spy.mockRestore();
+    });
+
+    it("two coupons for the same name get different codes", async () => {
+        const codes: string[] = [];
+        for (let i = 0; i < 2; i++) {
+            mockFetch(200, { discount_id: "dsc_" + i, code: "echo" });
+            await worker.fetch(couponReq({ name: "alex" }), env(fakeKV()), ctx);
+            codes.push(JSON.parse(calls[0]!.init.body).code);
+        }
+        for (const c of codes) expect(c).toMatch(/^ALEX[A-HJ-NP-Z2-9]{3}$/);
+        expect(codes[0]).not.toBe(codes[1]);
+    });
+
+    it("creates a 100% off, 3-cycle, single-use monthly discount with the suffixed code", async () => {
+        mockFetch(200, { discount_id: "dsc_1", business_id: "bus_1", type: "percentage", code: "ALEXK7Q", amount: 10000, times_used: 0 });
         const res = await worker.fetch(couponReq({ name: "alex" }), env(fakeKV()), ctx);
         expect(res.status).toBe(200);
-        expect(await res.json()).toEqual({ ok: true, code: "ALEX", discount_id: "dsc_1" });
+        expect(await res.json()).toEqual({ ok: true, code: "ALEXK7Q", discount_id: "dsc_1" });
         expect(calls[0]!.url).toBe("https://live.dodopayments.com/discounts");
         expect(calls[0]!.init.headers.authorization).toBe("Bearer dodo_secret");
-        expect(JSON.parse(calls[0]!.init.body)).toEqual({
-            type: "percentage", amount: 10000, code: "ALEX", name: "alex",
+        const sent = JSON.parse(calls[0]!.init.body);
+        expect(sent.code).toMatch(/^ALEX[A-HJ-NP-Z2-9]{3}$/);
+        expect(sent).toEqual({
+            type: "percentage", amount: 10000, code: sent.code, name: "alex",
             restricted_to: ["pdt_month"], subscription_cycles: 3, usage_limit: 1
         });
     });
