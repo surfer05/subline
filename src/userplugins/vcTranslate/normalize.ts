@@ -2,7 +2,7 @@
  * NORMALISATION: fancy Unicode text back to plain letters, before anything
  * judges or translates it.
  *
- * "𝓱𝓸𝓵𝓪 𝓪𝓶𝓲𝓰𝓸", "ｈｏｌａ", "ⓗⓞⓛⓐ", "ʜᴏʟᴀ", "ɐloɥ" and Zalgo "h̸̢o̵͝l̴a̷" are all
+ * "𝓱𝓸𝓵𝓪 𝓪𝓶𝓲𝓰𝓸", "ｈｏｌａ", "ⓗⓞⓛⓐ", "ʜᴏʟᴀ", "ɐloɥ" and Zalgo "h̸̢̛o̵̧͝l̴̨̛a̷̢͠" are all
  * the word "hola". Language detection and both translators read those code
  * points as symbols, so without this the message is either skipped as
  * "nothing translatable" or sent to Google and echoed back unchanged. This is
@@ -44,6 +44,28 @@ function mapUnprotected(text: string, fn: (s: string) => string): string {
  * styled Latin: Mathematical Alphanumeric Symbols (𝐀 𝓐 𝔄 𝕬 𝖠 𝙰 …), fullwidth
  * ASCII (Ａ ａ ！), enclosed alphanumerics (Ⓐ ⓐ ①), squared Latin (🄰).
  */
+/**
+ * Letterlike Symbols (U+2100 to U+214F) hold the capitals and a few small
+ * letters that the math alphanumerics block leaves out as "holes": Fraktur
+ * ℌ ℑ ℜ ℭ ℨ, script ℬ ℰ ℱ ℋ ℐ ℒ ℳ ℛ ℯ ℊ ℴ ℓ, double-struck ℂ ℍ ℕ ℙ ℚ ℝ ℤ, and
+ * the italic ℎ. A "𝔣𝔞𝔫𝔠𝔶" generator writes "ℌ𝔢𝔩𝔩𝔬" for "Hello".
+ */
+const LETTERLIKE = "ℌℑℜℭℨℬℰℱℋℐℒℳℛℯℊℴℓℂℍℕℙℚℝℤℎ";
+const LETTERLIKE_RE = new RegExp(`[${LETTERLIKE}]`, "gu");
+const MATH_LETTER_RE = /[\u{1D400}-\u{1D6A5}]/u;
+
+/**
+ * Letterlike letters map only when the text is clearly styled: it also has
+ * math alphanumeric letters, or two or more letterlike letters. A lone ℝ or
+ * ℕ in "x ∈ ℝ" is maths, not a font, and stays.
+ */
+function mapLetterlike(s: string): string {
+    const hits = s.match(LETTERLIKE_RE);
+    if (!hits) return s;
+    if (hits.length < 2 && !MATH_LETTER_RE.test(s)) return s;
+    return s.replace(LETTERLIKE_RE, c => c.normalize("NFKC"));
+}
+
 function styledToAscii(cp: number, ch: string): string | null {
     const inBlock =
         (cp >= 0x1D400 && cp <= 0x1D7FF) ||   // mathematical alphanumerics
@@ -131,19 +153,34 @@ function mapUpsideDown(s: string): string {
 
 /* --------------------------------------------------------------- Zalgo -- */
 
-const COMBINING = /[̀-ͯ᪰-᫿᷀-᷿⃐-⃿︠-︯]/gu;
-const STACK = /[̀-ͯ᪰-᫿᷀-᷿⃐-⃿︠-︯]{3,}/u;
+/**
+ * A run of three or more marks from the generic combining blocks on one base
+ * character: Combining Diacritical Marks (U+0300 to U+036F) and their
+ * extensions and supplement, marks for symbols, and half marks.
+ *
+ * Deliberately NOT \p{M}: Devanagari, Arabic, Thai, Hebrew and every other
+ * script keep their own vowel signs in their own blocks, and those stack
+ * legitimately. They are never touched.
+ */
+const ZALGO_STACK = /(\P{M})([̀-ͯ᪰-᫿᷀-᷿⃐-⃿︠-︯])[̀-ͯ᪰-᫿᷀-᷿⃐-⃿︠-︯]{2,}/gu;
 
 /**
  * Zalgo is a letter buried under a stack of combining marks. Real writing
  * never stacks three: Vietnamese, the heaviest user of these marks, uses at
- * most two on one letter. So a stack of three or more anywhere means the
- * whole text is Zalgo, and every mark in these blocks is removed. Accents
- * that were typed precomposed (é, ñ, ệ) are separate code points and stay.
+ * most two on one letter. So on each base character that carries three or
+ * more, every mark after the first is removed. The first is kept only when it
+ * is a real accent on that letter, meaning the pair composes to one letter
+ * (e + ́ is é). A Zalgo stroke or ring never composes (h + ̸), so it goes
+ * too, and the word reads as plain letters. A base with one or two marks is
+ * left exactly as written, so é, ñ and ệ (precomposed or typed as letter plus
+ * accent) never change, even in a message that is Zalgo elsewhere.
  */
 function stripZalgo(s: string): string {
-    if (!STACK.test(s)) return s;
-    return s.replace(COMBINING, "").normalize("NFC");
+    const out = s.replace(ZALGO_STACK, (_all, base: string, first: string) => {
+        const composed = (base + first).normalize("NFC");
+        return [...composed].length === 1 ? composed : base;
+    });
+    return out === s ? s : out.normalize("NFC");
 }
 
 /**
@@ -154,6 +191,6 @@ export function normalizeText(text: string): string {
     if (typeof text !== "string" || text === "") return text;
     // Fast exit: plain ASCII has nothing to map.
     if (/^[\x00-\x7F]*$/.test(text)) return text;
-    const out = mapUnprotected(text, s => mapUpsideDown(mapSmallCaps(mapStyled(stripZalgo(s)))));
+    const out = mapUnprotected(text, s => mapUpsideDown(mapSmallCaps(mapStyled(mapLetterlike(stripZalgo(s))))));
     return out === text ? text : out;
 }

@@ -2,7 +2,7 @@
  * LOCAL DECODERS: Morse, binary, Braille, Base64, ROT13 and letter emoji.
  *
  * A message written entirely in one of these is shown decoded, on its own
- * line, under the message: "≈ morse · HAPPY BIRTHDAY". Decoding runs on this
+ * line, under the message: "decoded · morse · HAPPY BIRTHDAY". Decoding runs on this
  * computer with no network and no account, so it is free on every plan, in
  * the trial, after it, and offline.
  *
@@ -31,6 +31,14 @@ export const DECODER_LABELS = {
     rot13: "rot13",
     emoji: "emoji letters"
 } as const;
+
+/** The first word of the decoded line: "decoded · morse · HAPPY BIRTHDAY". */
+export const DECODED_WORD = "decoded";
+
+/** Everything before the decoded text, trailing space included. */
+export function decodedPrefix(kind: DecoderKind): string {
+    return `${DECODED_WORD} · ${DECODER_LABELS[kind]} · `;
+}
 
 /** Hover text on the decoded line. */
 export const DECODED_TITLE = "Decoded on your computer. Nothing was sent anywhere.";
@@ -80,9 +88,37 @@ function decodeMorse(input: string): Decoded | null {
         out.push(word);
     }
     // "..." is S and "-" is T; "... ... ..." is an ellipsis, not "SSS".
-    if (letters < 3 || codes.size < 2) return null;
+    if (codes.size < 2) return null;
     const text = out.join(" ");
+    if (!morseReads(text, letters)) return null;
     return { kind: "morse", text, translatable: text.toLowerCase() };
+}
+
+/**
+ * Short runs of dots and dashes are everywhere ("- . -", "-- - -- - --"), and
+ * almost any of them spells SOME letters. So Morse is claimed only when:
+ *  - the whole text is one of MORSE_WORDS ("... --- ..." is SOS), or
+ *  - it has at least 5 letters, reads as writing, and reads as words: at
+ *    least one common word, or two or more words that each have a vowel, or
+ *    one word of 6+ letters that is pronounceable (a third vowels, no run of
+ *    4 consonants), so a foreign word like GRACIAS still decodes.
+ * These rules are what turn away "--- -.- .-.. --- .-.." (OKLOL): five
+ * letters of real writing, but one short run-together word nobody wrote.
+ */
+/** Words sent on their own in Morse. A subset of COMMON_WORDS, and short on
+ *  purpose: "IS", "TO" and "AT" are common words too, but ".. ..." or "- ---"
+ *  is far more often punctuation than a message. */
+const MORSE_WORDS = new Set(["sos", "hi", "hey", "lol", "ok", "hello", "yes", "no", "bye", "help", "love"]);
+
+function morseReads(text: string, letters: number): boolean {
+    const words = text.toLowerCase().match(/[a-z0-9']+/g) ?? [];
+    if (words.length === 1 && MORSE_WORDS.has(words[0])) return true;
+    if (letters < 5 || !looksLikeWriting(text, 0.6)) return false;
+    if (words.some(w => COMMON_WORDS.has(w))) return true;
+    if (words.length >= 2) return words.every(w => /[aeiouy]/.test(w));
+    const w = words[0] ?? "";
+    const vowels = (w.match(/[aeiouy]/g) ?? []).length;
+    return w.length >= 6 && vowels / w.length >= 0.3 && !/[^aeiouy0-9']{4}/.test(w);
 }
 
 /* ---------------------------------------------------------------- binary -- */
@@ -94,7 +130,9 @@ function looksLikeWriting(text: string, minRatio: number): boolean {
     const chars = [...text];
     const wordy = chars.filter(c => /[\p{L}\p{N}\s]/u.test(c)).length;
     const letters = chars.filter(c => /\p{L}/u.test(c)).length;
-    return letters >= 2 && wordy / chars.length >= minRatio;
+    // One character over and over ("aaaa", "AAAAAA") is not writing.
+    const distinct = new Set(chars.filter(c => !/\s/u.test(c)).map(c => c.toLowerCase()));
+    return letters >= 2 && distinct.size >= 2 && wordy / chars.length >= minRatio;
 }
 
 function utf8(bytes: Uint8Array): string | null {
@@ -198,7 +236,9 @@ const COMMON_WORDS = new Set([
     "our", "work", "first", "well", "way", "even", "new", "want", "because", "any", "these",
     "give", "day", "most", "us", "is", "are", "was", "were", "am", "hello", "hi", "secret",
     "message", "love", "happy", "birthday", "here", "where", "why", "yes", "thanks", "thank",
-    "please", "friend", "friends", "never", "gonna", "you", "up", "down", "let", "said"
+    "please", "friend", "friends", "never", "gonna", "you", "up", "down", "let", "said",
+    // Short words people send on their own in Morse.
+    "sos", "hey", "lol", "ok", "bye", "help"
 ]);
 
 function rot13(s: string): string {

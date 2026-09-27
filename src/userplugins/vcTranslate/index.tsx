@@ -16,7 +16,7 @@ import { createBatcher, type Batcher } from "./batcher";
 import { renderDiscordMarkup, type MarkupResolvers } from "./discordMarkup";
 import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel, toggleChannelOptOut } from "./channels";
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
-import { decodeMessage, DECODED_TITLE, DECODER_LABELS, translatableText } from "./decode";
+import { decodedPrefix, decodeMessage, DECODED_TITLE, translatableText } from "./decode";
 import { isConfidentlyTargetLanguage } from "./detectLang";
 import {
     __resetFreePlan, announceableTrialEnd, freeMode, isNewEnding, noteServerNow,
@@ -818,6 +818,13 @@ async function refreshTasteQuota(): Promise<void> {
             // the local clock in charge (and ✦ off: see trialAutoActive).
             answered = true;
             clearStatusRetry();
+            // A purchase started from this install is already linked: Discord
+            // was restarted (or the checkout poll timed out) before it landed.
+            // Switch on exactly as the checkout flow would, so it is not lost.
+            if (res.purchase && session === statusSession) {
+                onPurchaseLinked(res.purchase);
+                return;
+            }
             const wasAuto = trialAutoActive();
             const wasClick = isClickMode();
             noteServerTrialEnd(res.trialEndsAt, res.serverNow, Date.now(), res.trialProvisional === true);
@@ -3245,10 +3252,11 @@ function TranslationAccessory({ message }: { message: Message; }) {
 }
 
 /**
- * "≈ morse · HAPPY BIRTHDAY": a message written entirely in a code, decoded on
+ * "decoded · morse · HAPPY BIRTHDAY": a message written entirely in a code, decoded on
  * this computer (decode.ts). Free on every plan and never sent anywhere. Any
  * translation of the decoded text (when it is foreign) renders under it as the
- * normal subtitle line.
+ * normal subtitle line. No ≈ or ✦ glyph: those name a translator, and nothing
+ * translated this.
  */
 function decodedLine(message: Message) {
     const decoded = decodeMessage(message.content);
@@ -3256,7 +3264,7 @@ function decodedLine(message: Message) {
     return (
         <div style={{ fontSize: "0.95rem", color: TEXT_COLOUR, fontStyle: "italic" }}>
             <span style={{ color: "var(--text-muted)" }} title={DECODED_TITLE}>
-                ≈ {DECODER_LABELS[decoded.kind]} ·{" "}
+                {decodedPrefix(decoded.kind)}
             </span>
             <span style={TRANSLATION_TEXT_STYLE}>{decoded.text}</span>
         </div>
