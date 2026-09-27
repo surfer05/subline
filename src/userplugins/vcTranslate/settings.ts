@@ -114,9 +114,9 @@ export const settings = definePluginSettings({
             const line = freePlanLine(isFreeBySettings(), start);
             if (line === null) return null;
             const style = { color: "var(--text-muted)", fontSize: "0.9rem" };
-            if (freeMode(start) !== "click") return React.createElement("div", { style }, line);
-            // After the trial the line carries an Upgrade link, which opens the
-            // Upgrade panel (upgradePanel.tsx) through upgradeBridge.ts.
+            // During the trial and after it, the line carries an Upgrade link, which
+            // opens the Upgrade panel (upgradePanel.tsx) through upgradeBridge.ts.
+            // A trial user who already wants to buy must not have to wait 7 days.
             return React.createElement("div", { style }, line, " ", React.createElement("a", {
                 href: PRICING_URL,
                 target: "_blank",

@@ -93,7 +93,9 @@ describe("the settings line under the Subline code", () => {
         expect(def.hidden()).toBe(false);
         settings.store.freeTrialStartedAt = Date.now();
         const el: any = def.component();
-        expect(el.children.join("")).toBe("Free trial: 7 days left.");
+        // During the trial the line also carries the Upgrade link.
+        expect(el.children[0]).toBe("Free trial: 7 days left.");
+        expect(el.children[2].children).toEqual(["Upgrade"]);
 
         settings.store.freeTrialStartedAt = Date.now() - TRIAL_MS - 1;
         const after: any = def.component();
