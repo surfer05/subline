@@ -14,6 +14,7 @@
  */
 
 import { bumpStat } from "./stats";
+import { linkFromKey, linkFromLifecycle } from "./checkout";
 
 export interface Env {
     CODES: KVNamespace;
@@ -54,6 +55,15 @@ export interface Env {
      *  the free/default cap, never to an unbounded one). May also arrive as a
      *  JSON string, so variantConfig() tolerates both. */
     VARIANTS?: unknown;
+    /** Dodo Payments API key (a secret). Enables POST /v1/checkout and
+     *  POST /admin/coupon; both answer 503 without it. */
+    DODO_API_KEY?: string;
+    /** Dodo API base URL: https://live.dodopayments.com (default) or
+     *  https://test.dodopayments.com. Must match the key's mode. */
+    DODO_API_BASE?: string;
+    /** Where Dodo sends the buyer after paying (it appends payment_id or
+     *  subscription_id, status, license_key, email). Default: the site root. */
+    CHECKOUT_RETURN_URL?: string;
 }
 
 export interface CodeRecord {
@@ -937,6 +947,9 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
         await drainPending(env, rec, joinIds);
         await env.CODES.put(`code:${key}`, JSON.stringify(rec));
         for (const id of joinIds) await env.CODES.put(`order:${id}`, key); // reverse index (both join ids)
+        // Hand the key to the install that bought it, if a payment/subscription
+        // event already said which one (see checkout.ts). Never throws.
+        await linkFromKey(env, key, joinIds);
         // POST-WRITE RE-CHECK: a lifecycle event running concurrently may have
         // missed our order: index and staged AFTER the drain above. Look once
         // more now that the index is written. (KV lag can still hide the row;
@@ -950,6 +963,12 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
             try { await bumpStat(env, now, `conv:${cfg.plan}`); } catch { /* approximate metrics only */ }
         }
         return { action: cfg.mapped ? "created" : "created_unmapped_variant" };
+    }
+
+    // ---- Which install bought this (checkout.ts). Runs before the state
+    // machine, never throws, and never changes the code record itself.
+    if (name.startsWith("payment.") || name.startsWith("subscription.")) {
+        await linkFromLifecycle(env, name, data);
     }
 
     // ---- SUBSCRIPTION lifecycle (join via data.subscription_id) -----------

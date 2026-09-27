@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "secret:groq": "wrangler secret put GROQ_KEY",
     "secret:admin": "wrangler secret put ADMIN_TOKEN",
+    "secret:dodo": "wrangler secret put DODO_API_KEY",
     "tail": "wrangler tail"
   },
   "devDependencies": {

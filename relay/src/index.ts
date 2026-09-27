@@ -25,6 +25,7 @@ import {
 import { translateWithFallback, toPreview, type BatchRequest, type TranslateError, type Provider } from "./translate";
 import { record, type Outcome } from "./metrics";
 import { bumpStat, markActive, safely, clampDays, readStats } from "./stats";
+import { createCoupon, handleCheckout, purchaseFor } from "./checkout";
 export { Budget } from "./budget";
 
 const MAX_MESSAGES = 40;     // client's QUALITY_MAX_BATCH is 25; headroom, not unbounded
@@ -365,7 +366,14 @@ export default {
             // translate.
             const { record: rec, free, newClient } = await keylessPlan(env, req, code, auth.record, now);
             const u = await usage(env, code!, rec, now);
-            const base = { ok: true, plan: rec.plan ?? "free", ...u };
+            const base: Record<string, unknown> = { ok: true, plan: rec.plan ?? "free", ...u };
+            // A purchase made from this install (POST /v1/checkout → webhooks,
+            // see checkout.ts): the key goes back to the holder of this free_
+            // id only, and only to a header'd client. Read-only, never throws.
+            if (newClient && isTasteBearer(code)) {
+                const purchase = await purchaseFor(env, code!, now);
+                if (purchase) base.purchase = purchase;
+            }
             // Legacy clients (no header) get exactly the pre-trial shape; a
             // header'd one also gets the server clock (`now`, epoch ms).
             // `trialProvisional: true` marks an id the relay has never started a
@@ -374,6 +382,22 @@ export default {
             return json(free
                 ? { ...base, trialEndsAt: free.trialEndsAt, ...(free.provisional ? { trialProvisional: true } : {}), now }
                 : newClient ? { ...base, now } : base);
+        }
+
+        // ---- POST /v1/checkout — buy without handling a key (checkout.ts) --
+        if (url.pathname === "/v1/checkout") {
+            return handleCheckout(req, env);
+        }
+
+        // ---- POST /admin/coupon — a personal 100%-off code (ADMIN_TOKEN) ---
+        if (url.pathname === "/admin/coupon") {
+            if (req.method !== "POST") return fail("method not allowed", 405);
+            const token = bearer(req);
+            if (!env.ADMIN_TOKEN) return fail("admin disabled", 503);
+            if (!token || !(await timingSafeEqual(token, env.ADMIN_TOKEN))) return fail("unauthorized", 401);
+            const body = await readBody(req);
+            if (!body) return fail("bad request", 400);
+            return createCoupon(env, body);
         }
 
         // ---- GET /admin/stats — approximate owner counts (ADMIN_TOKEN) ----

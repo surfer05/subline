@@ -23,6 +23,8 @@ translation** to Subline clients presenting an opaque per-user **code**.
 | `POST /admin/codes` | `Bearer <ADMIN_TOKEN>` | mint / revoke codes |
 | `GET /admin/stats?days=14` | `Bearer <ADMIN_TOKEN>` | approximate daily owner counts (see below) |
 | `POST /webhook/mor` | Dodo Standard-Webhooks signature | issue/revoke on purchase/refund (inert until configured) |
+| `POST /v1/checkout` | optional `Bearer free_<id>` | `{plan:"monthly"\|"annual"}` → `{ok,url}`: a Dodo checkout session tied to this install (503 without `DODO_API_KEY`) |
+| `POST /admin/coupon` | `Bearer <ADMIN_TOKEN>` | `{name}` → a single-use 100%-off code for 3 monthly cycles |
 
 Responses use the plugin's exact `NativeResponse` shape, so the client `relay`
 engine needs no reshaping.
@@ -144,6 +146,7 @@ npx wrangler secret put GEMINI_KEY       # billing-enabled Google Gemini key —
 npx wrangler secret put GROQ_KEY         # a Groq key — the automatic FALLBACK when Gemini fails
 npx wrangler secret put ADMIN_TOKEN      # a long random string: openssl rand -hex 32
 # npx wrangler secret put MOR_WEBHOOK_SECRET   # only when payments go live
+npx wrangler secret put DODO_API_KEY     # Dodo API key (same mode as DODO_API_BASE): enables /v1/checkout and /admin/coupon
 # Provider routing: MODEL=gemini* + GEMINI_KEY → Gemini primary, Groq fallback.
 # Drop GEMINI_KEY (or set MODEL to a Groq id) to run Groq-only.
 
@@ -153,6 +156,40 @@ npx wrangler deploy                      # prints the https://subline-relay.<you
 ```
 
 Put that URL into the plugin build as the `RELAY_URL` constant.
+
+## Buying without a key (`/v1/checkout`)
+
+Needs the `DODO_API_KEY` secret (`npm run secret:dodo`) and the `DODO_API_BASE`
+var (live or test, matching the key). Without the key `/v1/checkout` and
+`/admin/coupon` answer 503 and nothing else changes.
+
+1. The plugin calls `POST /v1/checkout {plan}` with its `free_` id. The relay
+   creates a Dodo checkout session (`POST /checkouts`) for the VARIANTS product
+   of that plan, with `metadata.install` = first 16 hex of SHA-256 of the
+   bearer (never the raw id), `return_url` = `CHECKOUT_RETURN_URL`, and
+   `redirect_immediately`. It stores `checkout:<session_id>` → hash (2 days).
+   Rate limits: 6 an hour per install, 20 an hour per IP.
+2. Webhooks, any order. `payment.*` / `subscription.*` carry the session
+   metadata (a payment also carries `checkout_session_id`, the fallback join):
+   the relay writes `inst:<payment_id|subscription_id>` → hash (3 days).
+   `license_key.created` carries the key and the same ids. Whichever lands
+   second writes `paid:<hash>` → key (30 days).
+3. `GET /v1/status` from a header'd client holding that `free_` id adds
+   `purchase:{code,plan}` while the code is active. Nobody else can get it.
+
+A site purchase (no bearer) sends no metadata; the buyer sees the key on the
+thanks page (Dodo appends `license_key` to the return URL) and in the receipt
+email.
+
+## Personal coupons
+
+```sh
+ADMIN_TOKEN=... node scripts/coupon.mjs alex     # prints ALEX
+```
+
+Creates a Dodo discount: code = the name uppercased with everything but A-Z
+and 0-9 removed, cut to 16 (Dodo requires at least 3), 100% off, restricted
+to the monthly product, `subscription_cycles: 3`, `usage_limit: 1`.
 
 ## Mint a code for a friend
 

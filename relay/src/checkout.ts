@@ -1,0 +1,271 @@
+/**
+ * Buying without handling a key.
+ *
+ * THE FLOW. A free install asks the relay for a checkout (`POST /v1/checkout`,
+ * bearer = its free_ id). The relay creates a Dodo Payments checkout session
+ * whose metadata carries the INSTALL HASH (first 16 hex of SHA-256 of the free_
+ * bearer, never the raw id), and remembers `checkout:<session_id>` → hash. The
+ * buyer pays in their browser. Dodo's webhooks then arrive in any order:
+ *   • payment.* / subscription.* carry the session metadata (and a payment
+ *     carries checkout_session_id), so they name the install hash and the
+ *     payment/subscription ids: stored as `inst:<id>` → hash.
+ *   • license_key.created carries the key and the same payment/subscription
+ *     ids, but no metadata.
+ * Whichever lands second writes `paid:<hash>` → key. The plugin, still holding
+ * its free_ id, polls `GET /v1/status`, which hands the key back ONLY to the
+ * holder of the id whose hash it is. Nobody types or pastes a key.
+ *
+ * DOCS (docs.dodopayments.com):
+ *   • POST /checkouts, Bearer API key, live/test base URLs:
+ *     /api-reference/checkout-sessions/create, /api-reference/introduction
+ *   • session metadata is "additional metadata associated with the payment",
+ *     and webhook payloads include the object's metadata: /api-reference/metadata
+ *   • a checkout's first payment has checkout_session_id set (DataFast
+ *     integration page), the join used when metadata is missing
+ *   • POST /discounts (basis points, code >= 3 chars uppercased, up to 16 chars,
+ *     subscription_cycles, usage_limit, restricted_to):
+ *     /api-reference/discounts/create-discount
+ */
+import { ipBucket, isTasteBearer, variantConfig, type CodeRecord, type Env } from "./codes";
+
+export const DEFAULT_DODO_API_BASE = "https://live.dodopayments.com";
+export const DEFAULT_CHECKOUT_RETURN_URL = "https://surfer05.github.io/subline/";
+
+/** Session rows only need to outlive the session itself (24 h by default). */
+export const CHECKOUT_TTL_S = 2 * 86_400;
+/** Same lifetime as the webhook pending rows: bridges out-of-order delivery. */
+export const INST_TTL_S = 3 * 86_400;
+/** Long enough for an install that was offline when the purchase landed. */
+export const PAID_TTL_S = 30 * 86_400;
+
+export const CHECKOUT_INSTALL_PER_HOUR = 6;
+export const CHECKOUT_IP_PER_HOUR = 20;
+const HOUR_MS = 3_600_000;
+
+const HASH_RE = /^[0-9a-f]{16}$/;
+
+/** First 16 hex of SHA-256(bearer). Identical to stats.ts fingerprint16. */
+export async function installHash(bearer: string): Promise<string> {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(bearer));
+    return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
+}
+
+function apiBase(env: Env): string {
+    return (env.DODO_API_BASE || DEFAULT_DODO_API_BASE).replace(/\/+$/, "");
+}
+
+/** The Dodo product id sold as `plan`, from the same VARIANTS table the webhook reads. */
+export function productFor(env: Env, plan: string): string | null {
+    let table: any = env.VARIANTS;
+    if (typeof table === "string") { try { table = JSON.parse(table); } catch { table = undefined; } }
+    if (!table || typeof table !== "object") return null;
+    for (const id of Object.keys(table)) {
+        if (variantConfig(env, id).plan === plan) return id;
+    }
+    return null;
+}
+
+const json = (body: unknown, status = 200): Response =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+const fail = (error: string, status: number, retryAfterMs?: number): Response =>
+    json(retryAfterMs === undefined ? { ok: false, error } : { ok: false, error, retryAfterMs }, status);
+
+/** Count one attempt against an hourly counter. False when the ceiling is reached. */
+async function underHourly(env: Env, key: string, cap: number): Promise<boolean> {
+    const raw = await env.CODES.get(key);
+    const n = Number(raw ?? 0) || 0;
+    if (n >= cap) return false;
+    await env.CODES.put(key, String(n + 1), { expirationTtl: 2 * 3600 });
+    return true;
+}
+
+function cause(e: unknown): string {
+    return String((e as any)?.message ?? e).slice(0, 200);
+}
+
+/** POST /v1/checkout. */
+export async function handleCheckout(req: Request, env: Env, now: number = Date.now()): Promise<Response> {
+    if (req.method !== "POST") return fail("method not allowed", 405);
+    const h = req.headers.get("authorization");
+    let bearer: string | null = null;
+    if (h !== null && h.trim() !== "") {
+        bearer = h.startsWith("Bearer ") ? h.slice(7).trim() : "";
+        if (!isTasteBearer(bearer)) return fail("bad request", 400);
+    }
+    let body: any;
+    try { body = JSON.parse(await req.text()); } catch { return fail("bad request", 400); }
+    const plan = body?.plan;
+    if (plan !== "monthly" && plan !== "annual") return fail("bad request", 400);
+
+    // No key: the feature is off, and nothing is written.
+    if (!env.DODO_API_KEY) return fail("checkout unavailable", 503);
+    const productId = productFor(env, plan);
+    if (!productId) {
+        console.warn("checkout: no VARIANTS entry for plan", { plan });
+        return fail("checkout unavailable", 503);
+    }
+
+    const hash = bearer ? await installHash(bearer) : null;
+    const hour = Math.floor(now / HOUR_MS);
+    const ip = req.headers.get("cf-connecting-ip");
+    try {
+        if (ip && !(await underHourly(env, `rl:coip:${ipBucket(ip)}:${hour}`, CHECKOUT_IP_PER_HOUR))) {
+            return fail("slow down", 429, HOUR_MS - (now % HOUR_MS));
+        }
+        if (hash && !(await underHourly(env, `rl:co:${hash}:${hour}`, CHECKOUT_INSTALL_PER_HOUR))) {
+            return fail("slow down", 429, HOUR_MS - (now % HOUR_MS));
+        }
+    } catch (e) {
+        console.warn("checkout: rate counter failed", { error: cause(e) });
+        return fail("checkout unavailable", 503);
+    }
+
+    const payload: Record<string, unknown> = {
+        product_cart: [{ product_id: productId, quantity: 1 }],
+        return_url: env.CHECKOUT_RETURN_URL || DEFAULT_CHECKOUT_RETURN_URL,
+        feature_flags: { redirect_immediately: true }
+    };
+    if (hash) payload.metadata = { install: hash };
+
+    let res: Response;
+    try {
+        res = await fetch(`${apiBase(env)}/checkouts`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${env.DODO_API_KEY}`, "content-type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+    } catch (e) {
+        console.warn("checkout: dodo request failed", { error: cause(e) });
+        return fail("checkout unavailable", 503);
+    }
+    const text = await res.text().catch(() => "");
+    if (!res.ok) {
+        console.warn("checkout: dodo refused", { status: res.status, body: text.slice(0, 200) });
+        return fail("checkout unavailable", 503);
+    }
+    let out: any;
+    try { out = JSON.parse(text); } catch { out = null; }
+    const url = typeof out?.checkout_url === "string" ? out.checkout_url : "";
+    const sessionId = typeof out?.session_id === "string" ? out.session_id : "";
+    if (!/^https:\/\//.test(url)) {
+        console.warn("checkout: dodo returned no checkout_url", { status: res.status });
+        return fail("checkout unavailable", 503);
+    }
+    if (hash && sessionId) {
+        try {
+            await env.CODES.put(`checkout:${sessionId}`, hash, { expirationTtl: CHECKOUT_TTL_S });
+        } catch (e) {
+            // Metadata still carries the hash; the session row is only the fallback join.
+            console.warn("checkout: session row write failed", { error: cause(e) });
+        }
+    }
+    return json({ ok: true, url });
+}
+
+/* --------------------------------------------------------------- linking -- */
+
+/**
+ * A payment.* or subscription.* event: record which install it belongs to and,
+ * if the key already exists, hand it to that install. Never throws.
+ */
+export async function linkFromLifecycle(env: Env, name: string, data: any): Promise<void> {
+    try {
+        let hash: string | null = null;
+        const meta = data?.metadata?.install;
+        if (typeof meta === "string" && HASH_RE.test(meta)) hash = meta;
+        else if (name.startsWith("payment.") && typeof data?.checkout_session_id === "string" && data.checkout_session_id) {
+            const row = await env.CODES.get(`checkout:${data.checkout_session_id}`);
+            if (row && HASH_RE.test(row)) hash = row;
+        }
+        if (!hash) return;
+        const ids = [data?.payment_id, data?.subscription_id]
+            .filter((x: unknown): x is string => typeof x === "string" && x !== "");
+        for (const id of ids) await env.CODES.put(`inst:${id}`, hash, { expirationTtl: INST_TTL_S });
+        for (const id of ids) {
+            const key = await env.CODES.get(`order:${id}`);
+            if (key) { await env.CODES.put(`paid:${hash}`, key, { expirationTtl: PAID_TTL_S }); return; }
+        }
+    } catch (e) {
+        console.warn("purchase link (lifecycle) failed", { error: cause(e) });
+    }
+}
+
+/** license_key.created: if an install is already known for this purchase, hand it the key. Never throws. */
+export async function linkFromKey(env: Env, key: string, joinIds: string[]): Promise<void> {
+    try {
+        for (const id of joinIds) {
+            const hash = await env.CODES.get(`inst:${id}`);
+            if (hash && HASH_RE.test(hash)) {
+                await env.CODES.put(`paid:${hash}`, key, { expirationTtl: PAID_TTL_S });
+                return;
+            }
+        }
+    } catch (e) {
+        console.warn("purchase link (key) failed", { error: cause(e) });
+    }
+}
+
+/**
+ * The purchase waiting for this free_ bearer, if any: the key and its plan,
+ * only while that code is live. Read-only, and never throws (status must not
+ * fail because of it).
+ */
+export async function purchaseFor(env: Env, bearer: string, now: number): Promise<{ code: string; plan: CodeRecord["plan"] } | null> {
+    try {
+        const key = await env.CODES.get(`paid:${await installHash(bearer)}`);
+        if (!key) return null;
+        const raw = await env.CODES.get(`code:${key}`);
+        if (!raw) return null;
+        const rec = JSON.parse(raw) as CodeRecord;
+        if (rec.status !== "active" || rec.terminal) return null;
+        if (rec.expiresAt && now > rec.expiresAt) return null;
+        return { code: key, plan: rec.plan ?? "free" };
+    } catch (e) {
+        console.warn("purchase lookup failed", { error: cause(e) });
+        return null;
+    }
+}
+
+/* --------------------------------------------------------------- coupons -- */
+
+/** A personal coupon code from a name: uppercase letters and digits, at most 16. */
+export function couponCode(name: unknown): string | null {
+    if (typeof name !== "string") return null;
+    const code = name.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 16);
+    return code.length >= 3 ? code : null;
+}
+
+/** POST /admin/coupon body handler (auth already checked by the router). */
+export async function createCoupon(env: Env, body: any): Promise<Response> {
+    const code = couponCode(body?.name);
+    if (!code) return fail("bad request", 400);
+    if (!env.DODO_API_KEY) return fail("coupons unavailable", 503);
+    const monthly = productFor(env, "monthly");
+    if (!monthly) return fail("coupons unavailable", 503);
+    let res: Response;
+    try {
+        res = await fetch(`${apiBase(env)}/discounts`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${env.DODO_API_KEY}`, "content-type": "application/json" },
+            body: JSON.stringify({
+                type: "percentage",
+                amount: 10_000,             // basis points: 100% off
+                code,
+                name: String(body.name).slice(0, 100),
+                restricted_to: [monthly],
+                subscription_cycles: 3,
+                usage_limit: 1
+            })
+        });
+    } catch (e) {
+        return fail(`dodo request failed: ${cause(e)}`, 502);
+    }
+    const text = await res.text().catch(() => "");
+    let out: any;
+    try { out = JSON.parse(text); } catch { out = null; }
+    if (!res.ok) {
+        const msg = typeof out?.message === "string" ? out.message : text;
+        return fail(`dodo ${res.status}: ${msg.slice(0, 200)}`, 502);
+    }
+    return json({ ok: true, code: typeof out?.code === "string" ? out.code : code, discount_id: out?.discount_id });
+}

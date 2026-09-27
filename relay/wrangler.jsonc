@@ -66,7 +66,18 @@
     "VARIANTS": {
       "pdt_0No1xmbcAqHdYAvt1RNPR": { "plan": "monthly", "dailyCap": 2000 },
       "pdt_0No1yAve1ozdxryVGZvf6": { "plan": "annual", "dailyCap": 2000 }
-    }
+    },
+    // Dodo Payments API base for POST /v1/checkout and POST /admin/coupon
+    // (src/checkout.ts). Live: https://live.dodopayments.com, test:
+    // https://test.dodopayments.com. It must match the mode of the DODO_API_KEY
+    // secret (`wrangler secret put DODO_API_KEY`); without that secret both
+    // endpoints answer 503 and nothing else changes. VARIANTS above must hold
+    // product ids from the same mode.
+    "DODO_API_BASE": "https://live.dodopayments.com",
+    // Where Dodo sends the buyer after paying. Dodo appends payment_id or
+    // subscription_id, status, license_key and email as query parameters, and
+    // the site shows its thanks view when it sees them.
+    "CHECKOUT_RETURN_URL": "https://surfer05.github.io/subline/"
   },
   "durable_objects": { "bindings": [{ "name": "BUDGET", "class_name": "Budget" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Budget"] }],
