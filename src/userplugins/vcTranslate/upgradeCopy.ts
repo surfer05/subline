@@ -16,7 +16,9 @@ export const UPGRADE_COPY = {
     annualButton: "Annual $19.99",
     panelFootnote: "Pay in your browser. Subline switches on here by itself.",
     checkoutOpenedToast: "Finish checkout in your browser.",
-    purchasedToast: "You're on. Every message translates by itself now.",
+    /** A notice that stays until dismissed: the buyer is often still in the browser when it lands. */
+    purchasedNotice: "You're on. Every message translates by itself now.",
+    purchasedNoticeButton: "OK",
     noticeButton: "Upgrade",
     /** Followed by today's count, e.g. "(0 of 3 left today)". */
     popoverUpgrade: "Go automatic ✦",

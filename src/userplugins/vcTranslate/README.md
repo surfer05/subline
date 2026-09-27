@@ -79,7 +79,7 @@ to turn a channel back off.
 
 If you'd rather manage translation per channel instead of having every
 server channel translated automatically, Settings → VcTranslate has an
-**"Auto-translate every server channel you read"** (`globalAuto`) toggle —
+**"All servers"** (`globalAuto`) toggle —
 turn it off and use the 🌐 button to opt individual channels in, the same way
 DMs already work.
 
@@ -738,7 +738,7 @@ guessed 30-second pause applies only when none of the three is available.
 **Nothing translates at all.**
 1. Confirm the plugin is enabled: Settings → Plugins → VcTranslate.
 2. Confirm the *channel* is turned on. Server channels are covered by
-   default ("Auto-translate every server channel you read" / `globalAuto` is
+   default ("All servers" / `globalAuto` is
    checked in the plugin's own settings page out of the box); if that's been
    turned off, or the conversation is a DM or group DM (never covered by
    `globalAuto`), it needs the 🌐 popover button on a message in that

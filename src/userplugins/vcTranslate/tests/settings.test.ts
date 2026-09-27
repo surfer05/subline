@@ -87,3 +87,68 @@ describe("the Subline code field drives the engine", () => {
         }
     });
 });
+
+/**
+ * The settings page as the reader sees it. Vencord titles a setting from its
+ * `displayName`, falling back to a title built from the key ("Target Lang"),
+ * so every visible setting carries its own sentence-case title.
+ */
+describe("the settings page copy", () => {
+    const def = (settings as any).def;
+
+    it("titles and describes every visible setting exactly", () => {
+        const expected: Record<string, [string, string]> = {
+            sublineCode: ["Subline code", "From your purchase email. Keeps everything automatic."],
+            targetLang: ["Reading language", "Messages are translated into this language."],
+            catchUpCount: ["Earlier messages", "How many recent messages to translate when you open a channel."],
+            globalAuto: ["All servers", "Off: only channels you turn on with the globe button. DMs stay off unless you turn one on."],
+            translateSurfaces: ["Profiles, embeds and more", "Also translate statuses, bios, embeds, polls, topics and titles."],
+            debugLogging: ["Debug log", "Writes details to Discord's console for troubleshooting. Stays on your computer."]
+        };
+        for (const [key, [title, description]] of Object.entries(expected)) {
+            expect(def[key].displayName, key).toBe(title);
+            expect(def[key].description, key).toBe(description);
+        }
+    });
+
+    it("hides the engine, which follows the code by itself, but keeps it working", () => {
+        __resetSettings();
+        expect(def.engine.hidden()).toBe(true);
+        settings.store.sublineCode = "SUBLINE-TEST-CODE";
+        expect(def.engine.hidden()).toBe(true);
+        expect(settings.store.engine).toBe(RELAY_ENGINE);
+    });
+
+    it("keeps the setting keys the installer writes, so no stored value is stranded", () => {
+        for (const key of ["engine", "sublineCode", "targetLang"]) expect(def[key], key).toBeDefined();
+    });
+
+    it("says nothing with an em dash", () => {
+        for (const d of Object.values(def) as any[]) {
+            if (d.hidden?.() === true) continue;
+            expect(String(d.displayName ?? "") + String(d.description ?? "")).not.toContain("—");
+        }
+    });
+});
+
+/**
+ * Clearing the code turns the install free at once: the engine is Google
+ * again, and the free-plan line under the code field is there on the very
+ * next render, without reopening settings. (The settings panes re-render on
+ * every plugin setting change; the line and its hidden check read the store.)
+ */
+describe("clearing the code", () => {
+    beforeEach(() => __resetSettings());
+
+    it("switches the engine back and shows the free-plan line straight away", () => {
+        settings.store.sublineCode = "SUBLINE-TEST-CODE";
+        const line = (settings as any).def.freePlanStatus;
+        expect(line.hidden()).toBe(true);
+        expect(line.component()).toBeNull();
+        settings.store.freeTrialStartedAt = Date.now();
+        settings.store.sublineCode = "";
+        expect(settings.store.engine).toBe(FREE_ENGINE);
+        expect(line.hidden()).toBe(false);
+        expect(line.component().children[0]).toBe("Free trial: 7 days left.");
+    });
+});

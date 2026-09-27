@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
     CHECKOUT_RETURN_URL, createCheckoutFlow, installHash, isDodoCheckoutUrl, PLAN_PRODUCTS, POLL_EVERY_MS,
-    POLL_FOR_MS, staticCheckoutUrl, type CheckoutDeps
+    POLL_FOR_MS, SLOW_POLL_EVERY_MS, SLOW_POLL_FOR_MS, staticCheckoutUrl, type CheckoutDeps
 } from "../checkout";
 
 const BEARER = "free_" + "0".repeat(32);
@@ -39,7 +39,9 @@ describe("the static checkout link", () => {
         expect(url.searchParams.get("quantity")).toBe("1");
         expect(url.searchParams.get("metadata_install")).toBe(HASH);
         expect(url.searchParams.get("redirect_url")).toBe(CHECKOUT_RETURN_URL);
-        expect(CHECKOUT_RETURN_URL).toBe("https://surfer05.github.io/subline/");
+        // Marked as started from Discord, so the site says "go back to Discord".
+        expect(CHECKOUT_RETURN_URL).toBe("https://surfer05.github.io/subline/?from=discord");
+        expect(staticCheckoutUrl("monthly", HASH)).toContain(`redirect_url=${encodeURIComponent("https://surfer05.github.io/subline/?from=discord")}`);
     });
 
     it("uses the live product ids", () => {
@@ -124,15 +126,42 @@ describe("the checkout flow", () => {
         flow.stop();
     });
 
-    it("gives up after 30 minutes", async () => {
+    it("slows to every 5 minutes after 30 minutes, for a purchase still pending", async () => {
         const d = deps();
         const flow = createCheckoutFlow(d);
         await flow.start("monthly");
-        await vi.advanceTimersByTimeAsync(POLL_FOR_MS + 5 * POLL_EVERY_MS);
+        await vi.advanceTimersByTimeAsync(POLL_FOR_MS);
         const n = d.status.mock.calls.length;
         expect(n).toBe(POLL_FOR_MS / POLL_EVERY_MS);
+        expect(flow.isPolling()).toBe(true);
+        await vi.advanceTimersByTimeAsync(SLOW_POLL_EVERY_MS - 1);
+        expect(d.status.mock.calls.length).toBe(n);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(d.status.mock.calls.length).toBe(n + 1);
+        flow.stop();
+    });
+
+    it("still saves a purchase that lands an hour later, in the slow phase", async () => {
+        let linked = false;
+        const d = deps({ status: vi.fn(async () => linked ? { ok: true, purchase: { code: "LK-LATE", plan: "monthly" } } : { ok: true }) });
+        const flow = createCheckoutFlow(d);
+        await flow.start("monthly");
+        await vi.advanceTimersByTimeAsync(60 * 60_000);
+        expect(d.onPurchase).not.toHaveBeenCalled();
+        linked = true;
+        await vi.advanceTimersByTimeAsync(SLOW_POLL_EVERY_MS);
+        expect(d.onPurchase).toHaveBeenCalledWith({ code: "LK-LATE", plan: "monthly" });
         expect(flow.isPolling()).toBe(false);
-        await vi.advanceTimersByTimeAsync(10 * POLL_EVERY_MS);
+    });
+
+    it("gives up after 48 hours", async () => {
+        const d = deps();
+        const flow = createCheckoutFlow(d);
+        await flow.start("monthly");
+        await vi.advanceTimersByTimeAsync(SLOW_POLL_FOR_MS + SLOW_POLL_EVERY_MS);
+        const n = d.status.mock.calls.length;
+        expect(flow.isPolling()).toBe(false);
+        await vi.advanceTimersByTimeAsync(10 * SLOW_POLL_EVERY_MS);
         expect(d.status.mock.calls.length).toBe(n);
     });
 

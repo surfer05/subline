@@ -26,7 +26,7 @@ import { __resetTaste } from "../taste";
 import { openUpgrade } from "../upgradeBridge";
 import * as DataStore from "./stubs/api-datastore";
 import { __reset as __resetMessagePopover } from "./stubs/api-messagepopover";
-import { __resetNotices } from "./stubs/api-notices";
+import { __resetNotices, shownNotices } from "./stubs/api-notices";
 import { __resetSettings } from "./stubs/api-settings";
 import {
     __resetWebpackCommon, __stubSetSelectedChannel, FluxDispatcher, openedModals, shownToasts, stubMessages
@@ -58,6 +58,15 @@ function pressPlan(index: 0 | 1) {
     el.props.actions[index].onClick();
     expect(onClose).toHaveBeenCalled();
     return el;
+}
+
+const ON = "You're on. Every message translates by itself now.";
+/** Exactly one "You're on." notice, which stays until dismissed; no toast. */
+function expectOnNotice() {
+    const on = shownNotices.filter(n => n.message === ON);
+    expect(on).toHaveLength(1);
+    expect(on[0]!.buttonText).toBe("OK");
+    expect(shownToasts.map(t => t.message)).not.toContain(ON);
 }
 
 async function restart(setup: () => void = () => { }) {
@@ -157,7 +166,7 @@ describe("buying from the panel", () => {
         const url = new URL(native.openExternal.mock.calls[0][0]);
         expect(url.pathname).toBe("/buy/pdt_0No1xmbcAqHdYAvt1RNPR");
         expect(url.searchParams.get("metadata_install")).toMatch(/^[0-9a-f]{16}$/);
-        expect(url.searchParams.get("redirect_url")).toBe("https://surfer05.github.io/subline/");
+        expect(url.searchParams.get("redirect_url")).toBe("https://surfer05.github.io/subline/?from=discord");
     });
 
     it("saves the key, switches to the relay and translates automatically once the purchase is linked", async () => {
@@ -179,7 +188,7 @@ describe("buying from the panel", () => {
         expect(native.relayStatus).toHaveBeenCalledWith(bearer);
         expect(settings.store.sublineCode).toBe("LK-BOUGHT");
         expect(settings.store.engine).toBe("relay");
-        expect(shownToasts.map(t => t.message)).toContain("You're on. Every message translates by itself now.");
+        expectOnNotice();
 
         // The running session is paid now: a new message goes out on its own,
         // and the ✦ tier uses the saved key.
@@ -214,7 +223,7 @@ describe("a purchase linked while Discord was closed", () => {
         expect(native.relayCheckout).not.toHaveBeenCalled();
         expect(settings.store.sublineCode).toBe("LK-LATE");
         expect(settings.store.engine).toBe("relay");
-        expect(shownToasts.map(t => t.message)).toContain("You're on. Every message translates by itself now.");
+        expectOnNotice();
     });
 
     it("does nothing when the reply has no purchase", async () => {
@@ -226,6 +235,32 @@ describe("a purchase linked while Discord was closed", () => {
         expect(settings.store.engine).toBe("google");
     });
 
+    it("switches on from a later status check, after the one at start failed", async () => {
+        await restart(() => {
+            settings.store.sublineCode = "";
+            native.relayStatus.mockResolvedValue({ ok: false, error: "status unavailable" });
+        });
+        expect(settings.store.sublineCode).toBe("");
+        native.relayStatus.mockResolvedValue(linked);
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flush();
+        expect(settings.store.sublineCode).toBe("LK-LATE");
+        expectOnNotice();
+    });
+
+    it("says it once, however many paths deliver the same purchase", async () => {
+        openUpgrade();
+        pressPlan(0);
+        await flush();
+        native.relayStatus.mockResolvedValue(linked);
+        await vi.advanceTimersByTimeAsync(POLL_EVERY_MS);
+        await flush();
+        // A second delivery (the retry, a restart) finds the code already saved.
+        await restart();
+        expect(settings.store.sublineCode).toBe("LK-LATE");
+        expect(shownNotices.filter(n => n.message === ON)).toHaveLength(1);
+    });
+
     it("never replaces the code of an install that already has one", async () => {
         await restart(() => {
             settings.store.sublineCode = "LK-MINE";
@@ -233,6 +268,69 @@ describe("a purchase linked while Discord was closed", () => {
             native.relayStatus.mockResolvedValue(linked);
         });
         expect(settings.store.sublineCode).toBe("LK-MINE");
+    });
+});
+
+describe("clearing the code in settings", () => {
+    it("turns the running session free at once, and does not bring the cleared code back", async () => {
+        await restart(() => {
+            settings.store.sublineCode = "LK-PAID";
+            settings.store.engine = "relay";
+        });
+        // The relay still links that purchase to this install (it keeps the link for 30 days).
+        native.relayStatus.mockResolvedValue({ ok: true, plan: "taste", used: 0, cap: 3, purchase: { code: "LK-PAID", plan: "monthly" } });
+        const asked = native.relayStatus.mock.calls.length;
+        settings.store.sublineCode = "";
+        await flush();
+        expect(settings.store.engine).toBe("google");
+        // The free plan is asked again straight away...
+        expect(native.relayStatus.mock.calls.length).toBeGreaterThan(asked);
+        // ...and its answer does not re-save the code the reader just cleared.
+        expect(settings.store.sublineCode).toBe("");
+        // Click mode now: a new message is not translated automatically.
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("9", "hola que tal") });
+        await vi.advanceTimersByTimeAsync(25_000);
+        expect(native.translateBatch.mock.calls.filter(c => c[0] === "relay")).toHaveLength(0);
+    });
+
+    it("asks the relay again after a purchase made this session is cleared", async () => {
+        openUpgrade();
+        pressPlan(0);
+        await flush();
+        native.relayStatus.mockResolvedValue({ ok: true, plan: "taste", used: 0, cap: 3, purchase: { code: "LK-THIS", plan: "monthly" } });
+        await vi.advanceTimersByTimeAsync(POLL_EVERY_MS);
+        await flush();
+        expect(settings.store.sublineCode).toBe("LK-THIS");
+        native.relayStatus.mockResolvedValue({ ok: true, plan: "taste", used: 1, cap: 3 });
+        const asked = native.relayStatus.mock.calls.length;
+        settings.store.sublineCode = "";
+        await flush();
+        expect(native.relayStatus.mock.calls.length).toBe(asked + 1);
+        expect(settings.store.sublineCode).toBe("");
+    });
+
+    it("translates what is on screen the moment a code is pasted", async () => {
+        stubMessages.set(CHANNEL, [msg("1", "hola que tal")]);
+        await vi.advanceTimersByTimeAsync(25_000);
+        await flush();
+        expect(native.translateBatch).not.toHaveBeenCalled();   // click mode
+        settings.store.sublineCode = "LK-PASTED";
+        await flush();
+        await vi.advanceTimersByTimeAsync(25_000);
+        await flush();
+        expect(native.translateBatch.mock.calls.length).toBeGreaterThan(0);
+    });
+
+    it("still saves a different purchase later", async () => {
+        await restart(() => {
+            settings.store.sublineCode = "LK-OLD";
+            settings.store.engine = "relay";
+        });
+        settings.store.sublineCode = "";
+        await flush();
+        native.relayStatus.mockResolvedValue({ ok: true, plan: "taste", used: 0, cap: 3, purchase: { code: "LK-NEW", plan: "annual" } });
+        await restart();
+        expect(settings.store.sublineCode).toBe("LK-NEW");
     });
 });
 

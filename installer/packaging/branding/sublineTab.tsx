@@ -39,6 +39,8 @@ import { OptionComponentMap } from "../plugins/components";
 // time, so a support conversation that starts "which build are you on" is one
 // screenshot long.
 import { BUILD_ID, PLUGIN_VERSION } from "../../../../userplugins/vcTranslate/buildStamp";
+// The settings page's copy lives with the plugin's, in one place.
+import { SETTINGS_COPY } from "../../../../userplugins/vcTranslate/settingsCopy";
 
 const PLUGIN_NAME = "VcTranslate";
 
@@ -119,7 +121,7 @@ function SublineSettings() {
     return (
         <SettingsTab>
             <Forms.FormText className={Margins.bottom16}>
-                Subline translates incoming messages and shows them as subtitles underneath.
+                {SETTINGS_COPY.top}
             </Forms.FormText>
 
             <div className="vc-plugins-settings">

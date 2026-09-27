@@ -7,6 +7,7 @@ import { targetLanguageOptions } from "./languages";
 import { openUpgrade } from "./upgradeBridge";
 import { UPGRADE_COPY } from "./upgradeCopy";
 import { notifySettingsChanged } from "./settingsBridge";
+import { SETTINGS_COPY } from "./settingsCopy";
 import { DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_MODEL } from "./types";
 
 /**
@@ -97,7 +98,8 @@ export const settings = definePluginSettings({
         type: OptionType.STRING,
         // Says where the code CAME FROM, not what it looks like: a bought code is
         // the store's license key and does not start with slp_.
-        description: "Subline code. It arrived by email when you bought Subline, or from the friend who set you up. Keeps ≈ and ✦ AI translation automatic.",
+        displayName: SETTINGS_COPY.sublineCode.title,
+        description: SETTINGS_COPY.sublineCode.description,
         default: "",
         placeholder: "Paste your code",
         // Same immediacy requirement as the API keys: effectiveEngine() must
@@ -135,6 +137,13 @@ export const settings = definePluginSettings({
     freeTrialStartedAt: {
         type: OptionType.CUSTOM,
         default: 0
+    },
+    // The Subline code the reader last cleared by hand, "" for none. A
+    // purchase the relay still links to this install is not saved again when
+    // it is this code: clearing it was a choice. CUSTOM, never shown.
+    clearedPurchaseCode: {
+        type: OptionType.CUSTOM,
+        default: ""
     },
     // The trial end (epoch ms) the "your trial ended" toast was shown for, 0
     // for none: the toast fires once per actual ending (freePlan.ts).
@@ -207,7 +216,8 @@ export const settings = definePluginSettings({
         // A dropdown of language names (languages.ts, the same list the
         // installer's language screen offers). The value stays a bare code.
         type: OptionType.SELECT,
-        description: "Reading language. Messages are translated into this language.",
+        displayName: SETTINGS_COPY.targetLang.title,
+        description: SETTINGS_COPY.targetLang.description,
         // A getter, so the list always includes the value actually set: a
         // Discord locale we do not list, or an old free-text value that could
         // not be normalised (see index.tsx's normaliseTargetLangSetting). Vencord
@@ -229,7 +239,8 @@ export const settings = definePluginSettings({
     },
     catchUpCount: {
         type: OptionType.SLIDER,
-        description: "How many recent messages to translate when opening an enabled channel",
+        displayName: SETTINGS_COPY.catchUpCount.title,
+        description: SETTINGS_COPY.catchUpCount.description,
         markers: [0, 10, 20, 30, 50],
         default: 20,
         stickToMarkers: true
@@ -240,7 +251,8 @@ export const settings = definePluginSettings({
         // channel to find, no button to discover. Only ever covers channels
         // with a guild_id; DMs and group DMs stay opt-in via the per-channel
         // globe button regardless of this setting (see channelActive).
-        description: "Auto-translate every server channel you read. Turn off to require the per-channel globe button instead. DMs always stay opt-in, whatever this is set to.",
+        displayName: SETTINGS_COPY.globalAuto.title,
+        description: SETTINGS_COPY.globalAuto.description,
         default: true
     },
     translateSurfaces: {
@@ -248,7 +260,8 @@ export const settings = definePluginSettings({
         // Paid only (hidden without a code, and the plugin checks the plan
         // itself too). Statuses, bios, embeds, polls, reply and forward
         // previews, and the open channel's topic, title, tags and live event.
-        description: "Translate profiles, embeds and more",
+        displayName: SETTINGS_COPY.translateSurfaces.title,
+        description: SETTINGS_COPY.translateSurfaces.description,
         default: true
     },
     debugLogging: {
@@ -260,16 +273,17 @@ export const settings = definePluginSettings({
         // same DevTools console every other plugin already logs to. Off by
         // default because most sessions do not need it and it is a
         // deliberate, informed opt-in when one does.
-        description:
-            "Log detailed per-message translation decisions to your own local " +
-            "Discord console (which tier a message went to or which rule " +
-            "skipped it, rate-gate/cooldown blocks, what each engine returned, " +
-            "and store writes). Message text is included in these logs. " +
-            "Nothing leaves your machine; this only affects what is printed " +
-            "to the console. Off by default.",
+        displayName: SETTINGS_COPY.debugLogging.title,
+        description: SETTINGS_COPY.debugLogging.description,
         default: false
     }
 }, {
+    engine: {
+        // Hidden: the engine follows the code by itself (syncEngineToCode). A
+        // code turns the relay on and clearing it turns Google back on, so there
+        // is nothing for the reader to choose. The value stays for the plugin.
+        hidden: () => true
+    },
     freePlanStatus: {
         hidden: () => !isFreeBySettings()
     },

@@ -4,7 +4,10 @@
  * The reader picks a plan in the Upgrade panel. The relay creates a Dodo
  * checkout session tagged with a hash of this install's free id and returns its
  * URL, which opens in the browser. While that checkout is open this module asks
- * the relay's /v1/status every 5 seconds, for up to 30 minutes. Once the
+ * the relay's /v1/status every 5 seconds, for up to 30 minutes, then every 5
+ * minutes for up to 48 hours: a subscription can sit in Pending while the bank
+ * sets up the mandate (minutes in practice; Dodo documents up to 48 hours for
+ * Indian mandates), and the key must still land without a restart. Once the
  * purchase is linked to the install, status carries the license key
  * (`purchase.code`), and the caller saves it as the Subline code. Nobody types
  * or pastes anything.
@@ -27,11 +30,18 @@ export const PLAN_PRODUCTS: Record<Plan, string> = {
     annual: "pdt_0No1yAve1ozdxryVGZvf6"
 };
 
-/** Where Dodo sends the buyer after paying: the site root, which shows the thanks view. */
-export const CHECKOUT_RETURN_URL = "https://surfer05.github.io/subline/";
+/**
+ * Where Dodo sends the buyer after paying: the site root, marked as a checkout
+ * started from Discord, so the thanks view says "go back to Discord" rather
+ * than showing a code to paste.
+ */
+export const CHECKOUT_RETURN_URL = "https://surfer05.github.io/subline/?from=discord";
 
 export const POLL_EVERY_MS = 5_000;
 export const POLL_FOR_MS = 30 * 60_000;
+/** After the first 30 minutes, a slower check for a purchase still pending. */
+export const SLOW_POLL_EVERY_MS = 5 * 60_000;
+export const SLOW_POLL_FOR_MS = 48 * 60 * 60_000;
 
 /**
  * The install hash the relay files a purchase under: the first 16 hex of
@@ -92,6 +102,7 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
     const log = deps.log ?? (() => { });
     let timer: ReturnType<typeof setTimeout> | null = null;
     let deadline = 0;
+    let slowDeadline = 0;
     let generation = 0;
 
     const stop = () => {
@@ -102,11 +113,12 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
 
     const schedule = (gen: number, bearer: string) => {
         if (gen !== generation) return;
-        if (now() >= deadline) {
-            log("checkout: stopped waiting after 30 minutes");
+        if (now() >= slowDeadline) {
+            log("checkout: stopped waiting after 48 hours");
             timer = null;
             return;
         }
+        const every = now() < deadline ? POLL_EVERY_MS : SLOW_POLL_EVERY_MS;
         timer = setTimeout(async () => {
             timer = null;
             if (gen !== generation) return;
@@ -124,7 +136,7 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
                 return;
             }
             schedule(gen, bearer);
-        }, POLL_EVERY_MS);
+        }, every);
     };
 
     const start = async (plan: Plan) => {
@@ -147,6 +159,7 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
         if (gen !== generation) return;
         deps.openExternal(url);
         deadline = now() + POLL_FOR_MS;
+        slowDeadline = now() + SLOW_POLL_FOR_MS;
         schedule(gen, bearer);
     };
 
