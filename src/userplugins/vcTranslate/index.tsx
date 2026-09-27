@@ -16,6 +16,7 @@ import { createBatcher, type Batcher } from "./batcher";
 import { renderDiscordMarkup, type MarkupResolvers } from "./discordMarkup";
 import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel, toggleChannelOptOut } from "./channels";
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
+import { decodeMessage, DECODED_TITLE, DECODER_LABELS, translatableText } from "./decode";
 import { isConfidentlyTargetLanguage } from "./detectLang";
 import {
     __resetFreePlan, announceableTrialEnd, freeMode, isNewEnding, noteServerNow,
@@ -2056,7 +2057,7 @@ async function forceQualityTranslate(message: Message): Promise<void> {
         messages: [{
             id: message.id,
             author: message.author?.username ?? "unknown",
-            text: message.content ?? "",
+            text: translatableText(message.content ?? ""),
             replyToId: replyParentId(message)
         }],
         // The messages immediately BEFORE this one, read from the store.
@@ -2157,7 +2158,7 @@ async function tasteTranslate(message: Message): Promise<void> {
         messages: [{
             id: message.id,
             author: message.author?.username ?? "unknown",
-            text: message.content ?? "",
+            text: translatableText(message.content ?? ""),
             replyToId: replyParentId(message)
         }],
         // The same conversation context a paid ⚡ press sends — see
@@ -2280,7 +2281,7 @@ async function clickTranslate(message: Message): Promise<void> {
         return;
     }
     if (entry.via !== "google") return;
-    if (!googleUnsure(entry, message.content ?? "").unsure) return;
+    if (!googleUnsure(entry, translatableText(message.content ?? "")).unsure) return;
     await requestPreview(message, pending.text, entry.text);
 }
 
@@ -2492,7 +2493,8 @@ function markupResolversFor(channelId: string): MarkupResolvers {
  * resolve-before-translate rather than mask-and-restore.
  */
 function readableContent(text: string, channelId: string): string {
-    return renderDiscordMarkup(text, markupResolversFor(channelId));
+    // Decoded / normalised first (decode.ts), so the translator reads letters.
+    return renderDiscordMarkup(translatableText(text), markupResolversFor(channelId));
 }
 
 /**
@@ -2636,6 +2638,9 @@ type LocalSkipReason = "shouldSkip" | "isConfidentlyTargetLanguage";
  * from the console.
  */
 function localSkipReason(text: string, isOwn: boolean): LocalSkipReason | null {
+    // Judge what the reader will actually get translated: a decoded code, or
+    // fancy text normalised (decode.ts, normalize.ts).
+    text = translatableText(text);
     if (shouldSkip(text, isOwn)) return "shouldSkip";
     if (isConfidentlyTargetLanguage(text, settings.store.targetLang)) return "isConfidentlyTargetLanguage";
     return null;
@@ -3236,7 +3241,38 @@ function TranslationAccessory({ message }: { message: Message; }) {
     }, []);
 
     if (!channelActive(message.channel_id)) return null;
+    return withDecodedLine(message, translationLines(message));
+}
 
+/**
+ * "≈ morse · HAPPY BIRTHDAY": a message written entirely in a code, decoded on
+ * this computer (decode.ts). Free on every plan and never sent anywhere. Any
+ * translation of the decoded text (when it is foreign) renders under it as the
+ * normal subtitle line.
+ */
+function decodedLine(message: Message) {
+    const decoded = decodeMessage(message.content);
+    if (decoded === null) return null;
+    return (
+        <div style={{ fontSize: "0.95rem", color: TEXT_COLOUR, fontStyle: "italic" }}>
+            <span style={{ color: "var(--text-muted)" }} title={DECODED_TITLE}>
+                ≈ {DECODER_LABELS[decoded.kind]} ·{" "}
+            </span>
+            <span style={TRANSLATION_TEXT_STYLE}>{decoded.text}</span>
+        </div>
+    );
+}
+
+/** The decoded line (if any) above whatever the translation lines are. */
+function withDecodedLine(message: Message, lines: any) {
+    const decoded = decodedLine(message);
+    if (decoded === null) return lines;
+    if (lines === null) return decoded;
+    return <div>{decoded}{lines}</div>;
+}
+
+/** Everything under a message except the decoded line. Hook-free; see TranslationAccessory. */
+function translationLines(message: Message) {
     // No engine component: whatever engine produced this line, this is where
     // it is read from. That is what makes a Google-produced translation
     // visible while an LLM engine is selected.
@@ -3405,7 +3441,7 @@ function TranslationAccessory({ message }: { message: Message; }) {
     // Latin-only text — is an independent signal that catches exactly that,
     // regardless of what confidence was reported. Only Google's own lines are
     // a script GUESS in the first place; an LLM result is never checked here.
-    const { unsure, romanized } = googleUnsure(entry, message.content ?? "");
+    const { unsure, romanized } = googleUnsure(entry, translatableText(message.content ?? ""));
     // THE FREE PLAN SAYS IT IN WORDS. The same judgement as the "?" mark, and
     // only that judgement: "≈ rough" appears exactly when the confidence logic
     // above rates this Google line unreliable, never to make ≈ look worse
