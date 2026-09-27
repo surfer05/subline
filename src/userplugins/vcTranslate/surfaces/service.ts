@@ -20,7 +20,12 @@
  * caller builds the request.
  */
 
+import type { RelayTextKind } from "../types";
 import { normalizeSurfaceText, type SurfaceCache, type SurfaceEntry, surfaceKey } from "./cache";
+import type { SurfaceKind } from "./extract";
+
+/** A text waiting to be sent, with what kind of text it is when known. */
+interface PendingText { text: string; kind?: RelayTextKind; }
 
 export type SurfaceTier = "fast" | "quality";
 
@@ -39,7 +44,11 @@ export interface SurfaceDeps {
     targetLang(): string;
     /** The plugin's own local rules: nothing translatable, or already the target language. */
     locallySkipped(text: string): boolean;
-    translate(tier: SurfaceTier, texts: string[]): Promise<SurfaceOutcome>;
+    /**
+     * One batch. `kinds[i]` is what kind of text `texts[i]` is, for the relay
+     * (undefined when the asker did not say); Google ignores it.
+     */
+    translate(tier: SurfaceTier, texts: string[], kinds: Array<RelayTextKind | undefined>): Promise<SurfaceOutcome>;
     cache: SurfaceCache;
     now(): number;
     schedule(fn: () => void, ms: number): unknown;
@@ -89,12 +98,31 @@ export interface WantOptions {
      * ✦ only: Google is never asked, so a long list costs no ≈ fan-out.
      */
     tight?: boolean;
+    /** What kind of text this is (see extract.ts), so ✦ can read it in the right register. */
+    kind?: SurfaceKind;
+}
+
+/**
+ * The relay's coarse kind for a surface kind. Reply and forward previews are
+ * quoted CHAT messages, so they carry no kind and read as chat.
+ */
+export function relayKind(kind: SurfaceKind | undefined): RelayTextKind | undefined {
+    switch (kind) {
+        case "status": case "voice-status": return "status";
+        case "bio": return "bio";
+        case "embed-title": case "embed-description": case "embed-field": return "embed";
+        case "poll-question": case "poll-answer": return "poll";
+        case "topic": case "stage-topic": case "rule": case "guidelines": case "onboarding": return "topic";
+        case "thread-title": case "forum-tag": return "title";
+        case "event": return "event";
+        default: return undefined;
+    }
 }
 
 const TIERS: SurfaceTier[] = ["fast", "quality"];
 
 export class SurfaceService {
-    private readonly pending: Record<SurfaceTier, Map<string, string>> = { fast: new Map(), quality: new Map() };
+    private readonly pending: Record<SurfaceTier, Map<string, PendingText>> = { fast: new Map(), quality: new Map() };
     private readonly inFlight: Record<SurfaceTier, Set<string>> = { fast: new Set(), quality: new Set() };
     private readonly retryAt: Record<SurfaceTier, Map<string, number>> = { fast: new Map(), quality: new Map() };
     private readonly timers: Record<SurfaceTier, unknown> = { fast: null, quality: null };
@@ -119,8 +147,9 @@ export class SurfaceService {
         const entry = this.deps.cache.get(key);
         if (entry?.skip) return null;
         if (entry?.quality) return entry;
-        if (!options.tight && !entry?.fast) this.queue("fast", key, norm);
-        if (this.budgetLeft() > 0) this.queue("quality", key, norm);
+        const kind = relayKind(options.kind);
+        if (!options.tight && !entry?.fast) this.queue("fast", key, norm, kind);
+        if (this.budgetLeft() > 0) this.queue("quality", key, norm, kind);
         return entry ?? null;
     }
 
@@ -147,11 +176,17 @@ export class SurfaceService {
         this.qualitySends = [];
     }
 
-    private queue(tier: SurfaceTier, key: string, text: string): void {
-        if (this.inFlight[tier].has(key) || this.pending[tier].has(key)) return;
+    private queue(tier: SurfaceTier, key: string, text: string, kind?: RelayTextKind): void {
+        if (this.inFlight[tier].has(key)) return;
+        const queued = this.pending[tier].get(key);
+        if (queued !== undefined) {
+            // The same text asked for again, now with a kind: keep the kind.
+            if (queued.kind === undefined && kind !== undefined) this.pending[tier].set(key, { text, kind });
+            return;
+        }
         const retry = this.retryAt[tier].get(key);
         if (retry !== undefined && this.deps.now() < retry) return;
-        this.pending[tier].set(key, text);
+        this.pending[tier].set(key, { text, kind });
         this.arm(tier);
     }
 
@@ -197,10 +232,11 @@ export class SurfaceService {
         // Pack by count, by size, and (for ✦) by what today's budget still
         // allows. A text the budget can no longer afford is dropped from the
         // ✦ queue; a roomy line keeps its ≈.
-        const batch: Array<[string, string]> = [];
+        const batch: Array<[string, PendingText]> = [];
         let bytes = 0;
         let units = 0;
-        for (const [key, text] of [...queue.entries()]) {
+        for (const [key, item] of [...queue.entries()]) {
+            const text = item.text;
             if (batch.length >= max) break;
             const size = byteLength(text);
             if (batch.length > 0 && bytes + size > maxBytes) break;
@@ -209,7 +245,7 @@ export class SurfaceService {
                 if (batch.length === 0) { queue.delete(key); continue; }
                 break;
             }
-            batch.push([key, text]);
+            batch.push([key, item]);
             bytes += size;
             units += cost;
         }
@@ -223,12 +259,13 @@ export class SurfaceService {
         if (queue.size > 0) this.arm(tier);
 
         const generation = this.generation;
-        const texts = batch.map(([, text]) => text);
+        const texts = batch.map(([, item]) => item.text);
+        const kinds = batch.map(([, item]) => item.kind);
         this.sent[tier]++;
         this.deps.debug?.(`[surface] ${tier}: ${texts.length} text(s) in one request`);
         let outcome: SurfaceOutcome;
         try {
-            outcome = await this.deps.translate(tier, texts);
+            outcome = await this.deps.translate(tier, texts, kinds);
         } catch {
             outcome = null;
         }

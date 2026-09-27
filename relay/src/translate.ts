@@ -13,7 +13,20 @@
  * the system rules, or the key. That is what makes a keyless relay safe.
  */
 
-export interface Message { id: string; author?: string; text: string }
+export interface Message {
+    id: string;
+    author?: string;
+    text: string;
+    /**
+     * What kind of text this is, when it is not a chat message: a profile
+     * status, a bio, an embed... (see TEXT_KINDS). Sent by v0.1.9+ clients for
+     * the texts around messages, which arrive with no author and no
+     * conversation, so the model would otherwise read a status as a chat line.
+     * UNTRUSTED: only a key of TEXT_KINDS is ever used; anything else is
+     * ignored, and the client's string is never put in the prompt.
+     */
+    kind?: unknown;
+}
 export interface BatchRequest {
     messages: Message[];
     context: { author: string; text: string }[];
@@ -75,14 +88,42 @@ const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 const LINE_SEPS = new RegExp("[" + String.fromCharCode(0x2028) + String.fromCharCode(0x2029) + "]", "gu");
 const enc = (s: string): string => JSON.stringify((s ?? "").replace(LINE_SEPS, " "));
 
+/**
+ * The kinds of non-chat text a client may mark, each with the one general line
+ * the model is told about it. GENERAL ON PURPOSE: what the text is and the
+ * register it is usually written in, never an example phrase (a phrase-level
+ * rule fixes one line and breaks others).
+ */
+export const TEXT_KINDS = {
+    status: "a short custom status a person set on their own profile, shown to anyone who looks at them",
+    bio: "a profile bio a person wrote about themselves",
+    embed: "text from a link preview or a bot's message card",
+    poll: "a poll question or answer",
+    topic: "a channel topic, rule or notice written for a server's members",
+    title: "the title or tag of a thread or forum post",
+    event: "the name or description of a scheduled server event"
+} as const;
+export type TextKind = keyof typeof TEXT_KINDS;
+
+/** The kind a message is marked with, if it is one we know; null otherwise. */
+export function textKind(v: unknown): TextKind | null {
+    return typeof v === "string" && Object.prototype.hasOwnProperty.call(TEXT_KINDS, v) ? v as TextKind : null;
+}
+
 export function buildPrompt(req: BatchRequest): string {
     // The target language is untrusted input like everything else: enc() it so
     // a crafted "targetLang" cannot inject instructions into the system prompt.
     // Length/charset are ALSO capped upstream in validBatch (index.ts).
     const tgt = enc(req.targetLang);
+    // Kinds present in this batch, in TEXT_KINDS order. None (every legacy
+    // client, and every chat batch) leaves the prompt exactly as it was.
+    const kinds = (Object.keys(TEXT_KINDS) as TextKind[]).filter(k => req.messages.some(m => textKind(m.kind) === k));
+    const allKinded = kinds.length > 0 && req.messages.every(m => textKind(m.kind) !== null);
     const parts: string[] = [];
     parts.push(
-        `You are translating a live group chat between friends into ${tgt}.`,
+        allKinded
+            ? `You are translating short texts people see around a group chat (profiles, previews, titles and the like) into ${tgt}.`
+            : `You are translating a live group chat between friends into ${tgt}.`,
         "",
         "Rules:",
         `- Translate each message into ${tgt}.`,
@@ -96,7 +137,15 @@ export function buildPrompt(req: BatchRequest): string {
         + "translated. Use your own knowledge of the language, not a fixed word list: for an English "
         + "reader, things like \"og\", \"gng\", \"less go\" are English and should skip; for a reader "
         + "whose language is not English, English text should still be translated.",
-        "- Write what a native speaker would actually say in " + tgt + ", not a word-by-word rendering.",
+        "- Translate what the person means, not the individual words: write it the way a native speaker of "
+        + tgt + " would naturally say it. Set phrases and idioms become their natural equivalent in "
+        + tgt + ", never a word-by-word rendering.",
+        ...(kinds.length === 0 ? [] : [
+            "- Some items are not chat messages. An item marked [kind=...] is that kind of text: "
+            + kinds.map(k => `${k} is ${TEXT_KINDS[k]}`).join("; ") + ". "
+            + "Read it in the register that kind of text is normally written in, and translate what the person "
+            + "means the way a native speaker would write that kind of text, not word by word."
+        ]),
         "- Everyday address terms are the most common mistake. A word that literally means "
         + "'children', 'sacrifice', 'my eyes', 'my soul' is usually just 'guys', 'mate', 'dude' "
         + "or an affectionate filler. Translate the intent.",
@@ -128,7 +177,10 @@ export function buildPrompt(req: BatchRequest): string {
     }
     parts.push(
         "Messages to translate:",
-        ...req.messages.map(m => `[id=${enc(m.id)}] ${enc(m.author ?? "")}: ${enc(m.text)}`),
+        ...req.messages.map(m => {
+            const k = textKind(m.kind);
+            return `[id=${enc(m.id)}] ${k === null ? "" : `[kind=${k}] `}${enc(m.author ?? "")}: ${enc(m.text)}`;
+        }),
         "",
         'Reply with JSON only: {"translations":[{"id":"<id>","lang":"<bcp47>","text":"<translation>","skip":false}]}'
     );

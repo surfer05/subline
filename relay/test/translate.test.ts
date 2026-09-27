@@ -26,6 +26,7 @@ describe("buildPrompt — drift guard", () => {
             "'children', 'sacrifice'", "guys', 'mate', 'dude'",
             "3 for ع, 7 for ح", "Keep slang as slang and profanity as profanity",
             "Return exactly one entry per message id given",
+            "Translate what the person means, not the individual words", "Set phrases and idioms become their natural equivalent",
             "JSON-encoded strings", "BCP-47",
             // Line breaks (field report, 0.1.6): a two-line message came back
             // as one line. The model must keep them, written as \n.

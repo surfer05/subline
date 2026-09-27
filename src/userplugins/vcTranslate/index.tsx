@@ -45,7 +45,7 @@ import {
 import {
     ENGINE_CAPS, FAST_DEBOUNCE_MS, GOOGLE_COOLDOWN_MS, FAST_MAX_BATCH, MIN_DETECT_CONFIDENCE,
     QUALITY_DEBOUNCE_MS, QUALITY_MAX_BATCH, SHORT_TEXT_MAX,
-    type BatchRequest, type EngineId, type PendingMessage
+    type BatchRequest, type EngineId, type PendingMessage, type RelayTextKind
 } from "./types";
 import { ENGINE_RANK, isRealTranslation, mayReplace } from "./upgrade";
 import { createCheckoutFlow, type CheckoutFlow, type Purchase } from "./checkout";
@@ -3847,7 +3847,7 @@ function surfaceDebug(message: string): void {
  * requests). Any refusal is quiet: `null` ("not now") and the cooldown the
  * message pipeline would also have recorded. Never a toast.
  */
-async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promise<SurfaceOutcome> {
+async function translateSurfaceBatch(tier: SurfaceTier, texts: string[], kinds: Array<RelayTextKind | undefined> = []): Promise<SurfaceOutcome> {
     const engine: EngineId = tier === "fast" ? "google" : "relay";
     // Surfaces pause entirely while EITHER engine is cooling down: whatever
     // capacity is left then belongs to the conversation.
@@ -3860,7 +3860,12 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
         if (inFlightQuality.size > 0 || !tryAcquireIdleSlot(2)) return null;
     }
     const req: BatchRequest = {
-        messages: texts.map((text, i) => ({ id: `s${i}`, author: "", text })),
+        // The relay is told what kind of text each one is (a status, a bio...)
+        // so it reads it in that register; Google is sent the text alone.
+        messages: texts.map((text, i) => {
+            const kind = engine === "relay" ? kinds[i] : undefined;
+            return kind === undefined ? { id: `s${i}`, author: "", text } : { id: `s${i}`, author: "", text, kind };
+        }),
         context: [],
         targetLang: settings.store.targetLang,
         ...(engine === "google" ? { maxConcurrency: 1 } : {})
@@ -4044,6 +4049,7 @@ export function decorateParsed(parser: string, args: unknown[], out: unknown, re
                 original={out}
                 text={markup.readable}
                 tooltip={markup.readable}
+                kind={spec.kind}
                 render={translation => renderWithMarkup(translation, markup.tokens, reparse)}
             />
         );
@@ -4107,11 +4113,11 @@ function wrapParser(parser: string, fn: unknown): unknown {
     };
 }
 
-function overflowProps(text: unknown, channel: unknown): Record<string, unknown> {
+function overflowProps(text: unknown, channel: unknown, kind?: SurfaceKind): Record<string, unknown> {
     try {
-        const children = tightChildren(text, text, channel);
+        const children = tightChildren(text, text, channel, kind);
         if (children === text || typeof text !== "string") return { children: text };
-        return { children, "aria-label": tightTranslation(text)?.text ?? text };
+        return { children, "aria-label": tightTranslation(text, kind)?.text ?? text };
     } catch {
         return { children: text };
     }
@@ -4124,10 +4130,10 @@ function overflowProps(text: unknown, channel: unknown): Record<string, unknown>
  * tooltip). It sits inside Discord's own element, so it keeps Discord's
  * styling and truncation.
  */
-function tightChildren(original: unknown, text: unknown, channel: unknown): unknown {
+function tightChildren(original: unknown, text: unknown, channel: unknown, kind?: SurfaceKind): unknown {
     try {
         if (!isPaidSurfaceUser() || !channelTextAllowed(channel) || typeof text !== "string" || text.trim() === "") return original;
-        return <TightSwap key="subline-surface" original={original} text={text} />;
+        return <TightSwap key="subline-surface" original={original} text={text} kind={kind} />;
     } catch {
         return original;
     }
@@ -4238,19 +4244,19 @@ export default definePlugin({
     // Paid: the in-place translation, and an aria-label that is always a
     // real string (the translation once known, else the original), since
     // the tooltip derives its label from string children only.
-    stageTopicProps: (topic: unknown, channel: unknown) => overflowProps(topic, channel),
-    threadTitleProps: (title: unknown, thread: unknown) => overflowProps(title, thread),
-    forumTitleChildren: (original: unknown, channel: any) => tightChildren(original, channel?.name, channel),
+    stageTopicProps: (topic: unknown, channel: unknown) => overflowProps(topic, channel, "stage-topic"),
+    threadTitleProps: (title: unknown, thread: unknown) => overflowProps(title, thread, "thread-title"),
+    forumTitleChildren: (original: unknown, channel: any) => tightChildren(original, channel?.name, channel, "thread-title"),
     // A tag pill knows its tag, not its channel: it follows the rule of the
     // channel being viewed (the forum, or a post in it).
     forumTagChildren: (name: unknown) =>
-        tightChildren(name, name, ChannelStore.getChannel(SelectedChannelStore.getChannelId() ?? "")),
+        tightChildren(name, name, ChannelStore.getChannel(SelectedChannelStore.getChannelId() ?? ""), "forum-tag"),
     // Member list and DM list: the custom status text (user-level, allowed
     // wherever it is shown).
     statusTextChildren: (original: unknown, text: unknown) => {
         try {
             if (!isPaidSurfaceUser() || typeof text !== "string" || text.trim() === "") return original;
-            return <TightSwap key="subline-surface" original={original} text={text} />;
+            return <TightSwap key="subline-surface" original={original} text={text} kind="status" />;
         } catch {
             return original;
         }
@@ -4269,7 +4275,7 @@ export default definePlugin({
     statusBubbleChildren: (text: unknown) => {
         try {
             if (!isPaidSurfaceUser() || typeof text !== "string" || text.trim() === "") return text;
-            const t = tightTranslation(text);
+            const t = tightTranslation(text, "status");
             if (t === null) return text;
             return [text, <div key="subline-surface" style={BUBBLE_LINE_STYLE} data-subline-surface="status-bubble">✦ {t.text}</div>];
         } catch {

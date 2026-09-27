@@ -103,6 +103,9 @@ export interface PendingMessage {
     replyToId?: string;
 }
 
+/** The non-chat text kinds the relay knows (relay/src/translate.ts TEXT_KINDS). */
+export type RelayTextKind = "status" | "bio" | "embed" | "poll" | "topic" | "title" | "event";
+
 export interface BatchRequest {
     /**
      * True when Google is the reader's ONLY translator (no LLM configured).
@@ -131,6 +134,14 @@ export interface BatchRequest {
          * than one language code could.
          */
         sourceLang?: string;
+        /**
+         * Relay only: what kind of non-chat text this is (a profile status, a
+         * bio, an embed...), so the relay can tell the model to read it in that
+         * register. One of the relay's TEXT_KINDS; set only by surface
+         * requests (see surfaces/service.ts relayKind). Chat messages never
+         * carry it, and Google ignores it.
+         */
+        kind?: RelayTextKind;
     }[];
     context: { author: string; text: string }[];
     targetLang: string;

@@ -27,7 +27,7 @@ import { React } from "@webpack/common";
 import { isRomanizedGuess } from "../romanized";
 import { MIN_DETECT_CONFIDENCE } from "../types";
 import type { SurfaceEntry } from "./cache";
-import type { SurfaceText } from "./extract";
+import type { SurfaceKind, SurfaceText } from "./extract";
 import type { SurfaceService } from "./service";
 
 let service: SurfaceService | null = null;
@@ -100,7 +100,7 @@ export function SurfaceLines({ texts }: { texts: SurfaceText[]; }) {
         for (const t of texts) {
             if (seen.has(t.text)) continue;
             seen.add(t.text);
-            const shown = displayFor(service.want(t.text), t.text);
+            const shown = displayFor(service.want(t.text, { kind: t.kind }), t.text);
             if (shown === null) continue;
             lines.push(
                 <div key={`${t.kind}:${t.text}`} style={LINE_STYLE} data-subline-surface={t.kind}>
@@ -116,9 +116,9 @@ export function SurfaceLines({ texts }: { texts: SurfaceText[]; }) {
 }
 
 /** The ✦ translation of a tight text, or null while pending, skipped or failed. */
-export function tightTranslation(text: string): { lang: string; text: string; } | null {
+export function tightTranslation(text: string, kind?: SurfaceKind): { lang: string; text: string; } | null {
     if (service === null) return null;
-    const entry = service.want(text, { tight: true });
+    const entry = service.want(text, { tight: true, kind });
     const q = entry?.quality;
     if (!q || q.text.trim() === "") return null;
     return { lang: q.lang, text: q.text.trim() };
@@ -145,12 +145,14 @@ export function TranslatedInPlace({ original, translation }: { original: string;
  * null (the translation is unsafe to render, or parsing threw), Discord's
  * original stays.
  */
-export function TightSwap({ original, text, tooltip, render }: {
+export function TightSwap({ original, text, tooltip, render, kind }: {
     original: unknown; text: string; tooltip?: string; render?: (translation: string) => unknown;
+    /** What kind of text this is (see extract.ts), sent to the relay with it. */
+    kind?: SurfaceKind;
 }) {
     useSurfaceUpdates();
     try {
-        const t = typeof text === "string" ? tightTranslation(text) : null;
+        const t = typeof text === "string" ? tightTranslation(text, kind) : null;
         if (t === null) return (original ?? null) as any;
         const shown = render ? render(t.text) : t.text;
         if (shown === null || shown === undefined) return (original ?? null) as any;

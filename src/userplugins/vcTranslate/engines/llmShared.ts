@@ -96,7 +96,9 @@ export function buildPrompt(req: BatchRequest): string {
         // alone produced "hello kids" for a Persian greeting whose colloquial
         // sense is "hey guys" — a literally defensible reading that no speaker
         // would ever use. Naming the failure beats naming the goal.
-        "- Write what a native speaker would actually say in " + req.targetLang + ", not a word-by-word rendering.",
+        "- Translate what the person means, not the individual words: write it the way a native speaker of "
+        + req.targetLang + " would naturally say it. Set phrases and idioms become their natural equivalent in "
+        + req.targetLang + ", never a word-by-word rendering.",
         "- Everyday address terms are the most common mistake. A word that literally means "
         + "'children', 'sacrifice', 'my eyes', 'my soul' is usually just 'guys', 'mate', 'dude' "
         + "or an affectionate filler. Translate the intent.",

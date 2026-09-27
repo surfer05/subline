@@ -7,7 +7,7 @@ import {
     appliedTagNames, customStatusText, embedTexts, forwardTexts, messageSurfaceTexts, onboardingPromptTexts, pollTexts,
     replyReference
 } from "../surfaces/extract";
-import { SurfaceService, type SurfaceOutcome, type SurfaceTier } from "../surfaces/service";
+import { relayKind, SurfaceService, type SurfaceOutcome, type SurfaceTier } from "../surfaces/service";
 import { displayFor, safe, setSurfaceService, SurfaceLines, TightSwap } from "../surfaces/ui";
 
 /* ------------------------------------------------------------ harness --- */
@@ -49,14 +49,14 @@ function setup(opts: { paid?: () => boolean; translate?: (tier: SurfaceTier, tex
     const c = clock();
     const { storage, writes, mem } = memoryStorage();
     const cache = new SurfaceCache({ storage, now: c.now, schedule: c.schedule, cancel: c.cancel });
-    const calls: Array<{ tier: SurfaceTier; texts: string[]; }> = [];
+    const calls: Array<{ tier: SurfaceTier; texts: string[]; kinds?: unknown[]; }> = [];
     const translate = opts.translate ?? (async (tier: SurfaceTier, texts: string[]) =>
         texts.map(t => ({ lang: "de", text: `${tier === "quality" ? "Q" : "F"}:${t}`, conf: 0.99 })));
     const service = new SurfaceService({
         isPaid: opts.paid ?? (() => true),
         targetLang: () => "en",
         locallySkipped: t => /^hello\b/i.test(t),
-        translate: async (tier, texts) => { calls.push({ tier, texts }); return translate(tier, texts); },
+        translate: async (tier, texts, kinds) => { calls.push({ tier, texts, kinds }); return translate(tier, texts); },
         cache,
         now: c.now,
         schedule: c.schedule,
@@ -366,5 +366,37 @@ describe("surface cost units", () => {
         expect(surfaceCost("x".repeat(1000))).toBe(2);
         expect(surfaceCost("x".repeat(1001))).toBe(3);
         expect(surfaceCost("x".repeat(2000))).toBe(3);
+    });
+});
+
+/* -------------------------------------------------------------- kinds --- */
+
+describe("what kind of text each surface text is", () => {
+    it("maps every surface kind to the relay's coarse kind; quoted chat carries none", () => {
+        expect(relayKind("status")).toBe("status");
+        expect(relayKind("voice-status")).toBe("status");
+        expect(relayKind("bio")).toBe("bio");
+        for (const k of ["embed-title", "embed-description", "embed-field"] as const) expect(relayKind(k)).toBe("embed");
+        for (const k of ["poll-question", "poll-answer"] as const) expect(relayKind(k)).toBe("poll");
+        for (const k of ["topic", "stage-topic", "rule", "guidelines", "onboarding"] as const) expect(relayKind(k)).toBe("topic");
+        for (const k of ["thread-title", "forum-tag"] as const) expect(relayKind(k)).toBe("title");
+        expect(relayKind("event")).toBe("event");
+        expect(relayKind("reply")).toBeUndefined();
+        expect(relayKind("forward")).toBeUndefined();
+        expect(relayKind(undefined)).toBeUndefined();
+    });
+
+    it("sends each text's kind with it, in order, and keeps a kind learned after the text was first asked for", async () => {
+        const { c, service, calls } = setup();
+        service.want("Heute bin ich müde", { kind: "status" });
+        service.want("Neue Pizzeria", { kind: "embed-title" });
+        service.want("Schau dir das an");
+        service.want("Schau dir das an", { kind: "forward" });
+        service.want("Wir reden über Bücher");
+        service.want("Wir reden über Bücher", { tight: true, kind: "stage-topic" });
+        await c.advance(5_000);
+        const quality = calls.find(x => x.tier === "quality")!;
+        expect(quality.texts).toEqual(["Heute bin ich müde", "Neue Pizzeria", "Schau dir das an", "Wir reden über Bücher"]);
+        expect(quality.kinds).toEqual(["status", "embed", undefined, "topic"]);
     });
 });

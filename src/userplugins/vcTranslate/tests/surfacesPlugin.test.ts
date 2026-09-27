@@ -844,3 +844,68 @@ describe("markup in tight swaps: readable text out, Discord's parser in", () => 
     });
 });
 
+
+describe("each surface tells the relay what kind of text it is", () => {
+    beforeEach(() => paid());
+
+    /** text → the kind it was sent with, over every surface request to `engine`. */
+    function kindsSent(engine: string): Map<string, unknown> {
+        const out = new Map<string, unknown>();
+        for (const c of native.translateBatch.mock.calls) {
+            if (c[0] !== engine) continue;
+            for (const m of JSON.parse(c[2]).messages) if (/^s\d+$/.test(m.id)) out.set(m.text, m.kind);
+        }
+        return out;
+    }
+
+    it("embeds, polls and forwards: embed and poll are marked, a forwarded chat message is not; Google gets no kind", async () => {
+        const message = {
+            ...embedMessage("m9"),
+            poll: { question: { text: "Pizza oder Pasta heute?" }, answers: [{ poll_media: { text: "Lieber Pasta" } }] },
+            messageSnapshots: [{ message: { content: "Schau dir das an", embeds: [] } }]
+        };
+        accessory(message);
+        await settle();
+        const relay = kindsSent("relay");
+        expect(relay.get("Neue Pizzeria in der Stadt")).toBe("embed");
+        expect(relay.get("Die beste Pizza weit und breit")).toBe("embed");
+        expect(relay.get("Pizza oder Pasta heute?")).toBe("poll");
+        expect(relay.get("Lieber Pasta")).toBe("poll");
+        expect(relay.has("Schau dir das an")).toBe(true);
+        expect(relay.get("Schau dir das an")).toBeUndefined();
+        const google = kindsSent("google");
+        expect(google.size).toBeGreaterThan(0);
+        for (const kind of google.values()) expect(kind).toBeUndefined();
+    });
+
+    it("member-list statuses and the profile status bubble are statuses; a bio is a bio", async () => {
+        stubActivities.set("u1", [{ type: 4, state: "Heute bin ich müde" }]);
+        decorator("u1");
+        P.statusBubbleChildren("Bin gleich zurück, muss kochen");
+        bioLine({ userId: "u2", userBio: "Ich liebe Pizza und lange Spaziergänge" });
+        await settle();
+        const relay = kindsSent("relay");
+        expect(relay.get("Heute bin ich müde")).toBe("status");
+        expect(relay.get("Bin gleich zurück, muss kochen")).toBe("status");
+        expect(relay.get("Ich liebe Pizza und lange Spaziergänge")).toBe("bio");
+    });
+
+    it("thread and forum titles and tags are titles; stage and channel topics are topics; events are events", async () => {
+        thread("Wie repariere ich mein Fahrrad?");
+        forumTitle({ ...GUILD_CHANNEL, name: "Hilfe beim Kochen gesucht" });
+        tag("Hilfe gesucht");
+        stage("Wir reden über Bücher");
+        await settle();
+        parsed("topic-truncated", "Hier plaudern wir über alles Mögliche");
+        await settle(61_000);
+        parsed("event", "Gemeinsamer Spieleabend am Freitag");
+        await settle(61_000);
+        const relay = kindsSent("relay");
+        expect(relay.get("Wie repariere ich mein Fahrrad?")).toBe("title");
+        expect(relay.get("Hilfe beim Kochen gesucht")).toBe("title");
+        expect(relay.get("Hilfe gesucht")).toBe("title");
+        expect(relay.get("Wir reden über Bücher")).toBe("topic");
+        expect(relay.get("Hier plaudern wir über alles Mögliche")).toBe("topic");
+        expect(relay.get("Gemeinsamer Spieleabend am Freitag")).toBe("event");
+    });
+});
