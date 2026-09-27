@@ -203,6 +203,39 @@ describe("buying from the panel", () => {
     });
 });
 
+describe("a purchase linked while Discord was closed", () => {
+    const linked = { ok: true, plan: "taste", used: 0, cap: 3, purchase: { code: "LK-LATE", plan: "annual" } };
+
+    it("switches on at start when the normal status reply carries it", async () => {
+        await restart(() => {
+            settings.store.sublineCode = "";
+            native.relayStatus.mockResolvedValue(linked);
+        });
+        expect(native.relayCheckout).not.toHaveBeenCalled();
+        expect(settings.store.sublineCode).toBe("LK-LATE");
+        expect(settings.store.engine).toBe("relay");
+        expect(shownToasts.map(t => t.message)).toContain("You're on. Every message translates by itself now.");
+    });
+
+    it("does nothing when the reply has no purchase", async () => {
+        await restart(() => {
+            settings.store.sublineCode = "";
+            native.relayStatus.mockResolvedValue({ ok: true, plan: "taste", used: 0, cap: 3 });
+        });
+        expect(settings.store.sublineCode).toBe("");
+        expect(settings.store.engine).toBe("google");
+    });
+
+    it("never replaces the code of an install that already has one", async () => {
+        await restart(() => {
+            settings.store.sublineCode = "LK-MINE";
+            settings.store.engine = "relay";
+            native.relayStatus.mockResolvedValue(linked);
+        });
+        expect(settings.store.sublineCode).toBe("LK-MINE");
+    });
+});
+
 describe("changing the reading language", () => {
     it("drops what was cached in the old language and translates into the new one", async () => {
         await restart(() => { settings.store.sublineCode = "LK-PAID"; });

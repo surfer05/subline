@@ -17,8 +17,27 @@ describe("Morse", () => {
     it("lowercases what it hands the translator", () => {
         expect(decodeMessage("... --- ...")!.translatable).toBe("sos");
     });
-    it("rejects fewer than three letters", () => {
-        expect(decodeMessage(".... ..")).toBeNull();
+    it("rejects short codes that spell no known word", () => {
+        expect(decodeMessage("-. ..-.")).toBeNull();      // NF
+        expect(decodeMessage(".. ...")).toBeNull();       // IS: common, but not a Morse word
+    });
+    it("decodes a known short word on its own", () => {
+        expect(textOf("... --- ...")).toBe("SOS");
+        expect(textOf(".... ..")).toBe("HI");
+        expect(textOf(".... . .-.. .-.. ---")).toBe("HELLO");
+        expect(textOf("-.-- . ...")).toBe("YES");
+    });
+    it("rejects short dot and dash runs that happen to spell letters", () => {
+        for (const s of ["- . -", ". - .", "-- - -- - --", "... .. ...", "--- -.- .-.. --- .-.."]) {
+            expect(decodeMessage(s), s).toBeNull();
+        }
+    });
+    it("decodes five or more letters only when they read as words", () => {
+        expect(textOf("-- . . - / -- . / - --- -.. .- -.--")).toBe("MEET ME TODAY");
+        expect(textOf("-... --- -. .--- --- ..- .-. / .- -- ..")).toBe("BONJOUR AMI");
+        expect(textOf("--. .-. .- -.-. .. .- ...")).toBe("GRACIAS");
+        expect(decodeMessage("-... -.-. -.. ..-. --.")).toBeNull(); // BCDFG
+        expect(decodeMessage("-- - ... - .-. -. -..")).toBeNull(); // MTSTRND: no vowels
     });
     it("rejects any unknown code", () => {
         expect(decodeMessage(".... ...... .-..")).toBeNull();
@@ -44,6 +63,10 @@ describe("binary", () => {
     });
     it("rejects fewer than three groups", () => {
         expect(decodeMessage("01101000 01101001")).toBeNull();
+    });
+    it("rejects one character repeated", () => {
+        expect(decodeMessage("01100001 01100001 01100001 01100001")).toBeNull(); // "aaaa"
+        expect(decodeMessage("01000001 00100000 01000001 00100000 01000001")).toBeNull(); // "A A A"
     });
 });
 
@@ -170,8 +193,40 @@ describe("normalisation", () => {
     });
     it("strips Zalgo marks but keeps real accents", () => {
         expect(normalizeText("h̸̢̛o̵̧͝l̴̨̛a̷̢͠")).toBe("hola");
-        expect(normalizeText("n\u0300\u0338\u0322a\u0335\u0327\u035Do\u0334\u031B\u0308")).toBe("nao");
+        // n's first mark is a real grave accent (it composes to ǹ), so it stays.
+        expect(normalizeText("n\u0300\u0338\u0322a\u0335\u0327\u035Do\u0334\u031B\u0308")).toBe("\u01F9ao");
         expect(normalizeText("café niño việt")).toBe("café niño việt");
+    });
+    it("strips Zalgo per letter, so a real accent elsewhere in the message stays", () => {
+        // The stacked letters are cleaned; the typed accents (é, ñ as letter plus mark) are not.
+        expect(normalizeText("h\u0338\u0322\u031Bola cafe\u0301 nin\u0303o")).toBe("hola café niño");
+        // A real accent under a Zalgo stack is kept: e + acute + noise is é.
+        expect(normalizeText("e\u0301\u0338\u0322\u035D")).toBe("é");
+        // Two marks on one letter is Vietnamese, not Zalgo.
+        expect(normalizeText("vie\u0323\u0302t")).toBe("vie\u0323\u0302t");
+    });
+    it("never touches other scripts' vowel signs", () => {
+        for (const s of [
+            "नमस्ते, आप कैसे हैं? मैं ठीक हूँ।",
+            "مَرْحَبًا بِكُمْ فِي الْمَدْرَسَةِ",
+            "สวัสดีครับ ยินดีที่ได้รู้จัก",
+            "שָׁלוֹם עֲלֵיכֶם"
+        ]) {
+            expect(normalizeText(s)).toBe(s);
+        }
+        // Styled Latin next to Hindi: only the Latin changes.
+        expect(normalizeText("𝔥𝔦 नमस्ते")).toBe("hi नमस्ते");
+    });
+    it("maps Fraktur, script and double-struck letterlike capitals", () => {
+        expect(normalizeText("ℌ𝔢𝔩𝔩𝔬 𝔣𝔯𝔦𝔢𝔫𝔡")).toBe("Hello friend");
+        expect(normalizeText("ℭ𝔞𝔣𝔢 ℜ𝔬𝔪𝔞")).toBe("Cafe Roma");
+        expect(normalizeText("ℍ𝕠𝕝𝕒 ℂ𝕒𝕣𝕝𝕠𝕤")).toBe("Hola Carlos");
+        expect(normalizeText("ℋℯ𝓁𝓁ℴ")).toBe("Hello");
+        expect(normalizeText("ℑℨℤ")).toBe("IZZ");
+    });
+    it("keeps a lone letterlike symbol in maths", () => {
+        expect(normalizeText("for every x in ℝ")).toBe("for every x in ℝ");
+        expect(normalizeText("n ∈ ℕ")).toBe("n ∈ ℕ");
     });
     it("never touches code, links or Discord markup", () => {
         const s = "𝓱𝓲 `𝓬𝓸𝓭𝓮` https://x.com/𝓪 <:𝓮:123> <@456>";

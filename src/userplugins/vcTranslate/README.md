@@ -303,16 +303,21 @@ code at start.
 
 A message written entirely in Morse, 8-bit binary, grade 1 Braille, Base64,
 ROT13 or spaced letter emoji (🇭 🇪 🇾) gets a line under it such as
-`≈ morse · HAPPY BIRTHDAY`. This runs on your computer with no network, on
+`decoded · morse · HAPPY BIRTHDAY` (no ≈: nothing translated it). This runs on your computer with no network, on
 every plan. If the decoded text is in another language, the decoded text (not
 the code) goes through the normal translators and its translation appears
 under the decoded line. The rules are strict on purpose: "...", "ok.", links,
-code blocks, hashes, tokens and country flags (🇯🇵) never decode. See
+code blocks, hashes, tokens and country flags (🇯🇵) never decode. Morse needs
+five or more letters that read as words, or one short word on its own (SOS, HI,
+HELLO). See
 `decode.ts`; the labels are in `DECODER_LABELS`.
 
 Fancy fonts (𝓱𝓸𝓵𝓪, ｈｏｌａ, ⓗⓞⓛⓐ, ʜᴏʟᴀ), upside-down text and Zalgo marks are
 turned back into plain letters before language detection and translation, so
-they translate like any other message. Code, links and Discord markup are left
+they translate like any other message. Letterlike capitals (ℌ ℜ ℂ ℝ) count as
+a font only beside other styled letters, so "x in ℝ" stays. Zalgo is cleaned
+per letter (3 or more stacked marks); real accents and other scripts' vowel
+signs are never touched. Code, links and Discord markup are left
 exactly as written, and usernames are never touched. See `normalize.ts`.
 
 ## Engines

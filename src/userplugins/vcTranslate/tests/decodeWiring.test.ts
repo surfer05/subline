@@ -81,7 +81,9 @@ afterEach(() => {
 describe("decoded line under a message", () => {
     it("shows a Morse message decoded, with no request needed", () => {
         const text = rendered(discordMessage("1", ".... .- .--. .--. -.-- / -... .. .-. - .... -.. .- -.--"));
-        expect(text).toContain("≈ morse · HAPPY BIRTHDAY");
+        expect(text).toContain("decoded · morse · HAPPY BIRTHDAY");
+        // ≈ means Google translated it. Nothing translated this line.
+        expect(text).not.toContain("≈");
     });
 
     it("shows nothing extra for an ordinary message", () => {
@@ -91,7 +93,7 @@ describe("decoded line under a message", () => {
     it("keeps the decoded line above the translation of the decoded text", () => {
         setTranslation(makeKey("1", "en"), { lang: "es", text: "hello friend", via: "google" });
         const text = rendered(discordMessage("1", "aG9sYSBhbWlnbw=="));
-        expect(text).toContain("≈ base64 · hola amigo");
+        expect(text).toContain("decoded · base64 · hola amigo");
         expect(text).toContain("hello friend");
         expect(text.indexOf("hola amigo")).toBeLessThan(text.indexOf("hello friend"));
     });
@@ -102,7 +104,7 @@ describe("decoded line under a message", () => {
         await settle();
         expect(native.translateBatch).not.toHaveBeenCalled();
         const text = rendered(discordMessage("1", "aG9sYSBhbWlnbw=="));
-        expect(text).toContain("≈ base64 · hola amigo");
+        expect(text).toContain("decoded · base64 · hola amigo");
         expect(text).toContain("≈ Translate");
     });
 });
