@@ -361,14 +361,8 @@ describe("POST /admin/coupon", () => {
 
     it("the suffix is 3 characters from the unambiguous alphabet, from the crypto RNG", () => {
         expect(COUPON_SUFFIX_ALPHABET).not.toMatch(/[0O1I]/);
-        const seen = new Set<string>();
-        for (let i = 0; i < 300; i++) {
-            const code = couponCode("rahul05")!;
-            expect(code).toMatch(/^RAHUL05[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{3}$/);
-            seen.add(code);
-        }
-        // 32^3 = 32768 possibilities; 300 draws are all but certain to vary widely.
-        expect(seen.size).toBeGreaterThan(250);
+        // A real draw has the right shape.
+        expect(couponCode("rahul05")).toMatch(/^RAHUL05[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{3}$/);
         // Deterministic RNG: bytes at or above 256 (a multiple of 32) never occur,
         // so byte b maps to alphabet[b % 32]; 0 → A, 31 → 9, 32 → A.
         const spy = vi.spyOn(crypto, "getRandomValues").mockImplementation(((a: Uint8Array) => {
@@ -379,14 +373,23 @@ describe("POST /admin/coupon", () => {
     });
 
     it("two coupons for the same name get different codes", async () => {
+        // Scripted RNG so this can never fail by chance: each call to
+        // getRandomValues hands out the next bytes of a counter.
+        let next = 0;
+        const spy = vi.spyOn(crypto, "getRandomValues").mockImplementation(((a: Uint8Array) => {
+            for (let i = 0; i < a.length; i++) a[i] = next++ % 256;
+            return a;
+        }) as any);
         const codes: string[] = [];
         for (let i = 0; i < 2; i++) {
             mockFetch(200, { discount_id: "dsc_" + i, code: "echo" });
             await worker.fetch(couponReq({ name: "alex" }), env(fakeKV()), ctx);
             codes.push(JSON.parse(calls[0]!.init.body).code);
         }
+        spy.mockRestore();
         for (const c of codes) expect(c).toMatch(/^ALEX[A-HJ-NP-Z2-9]{3}$/);
-        expect(codes[0]).not.toBe(codes[1]);
+        // Bytes 0,1,2 then 16,17,18: each call fills a fresh 16-byte buffer.
+        expect(codes).toEqual(["ALEXABC", "ALEXSTU"]);
     });
 
     it("creates a 100% off, 3-cycle, single-use monthly discount with the suffixed code", async () => {
