@@ -1,6 +1,6 @@
 /**
  * The smallest pieces of Discord's public web client (discord.com/assets,
- * fetched with no login on 2026-09-25) each surface patch match needs: for
+ * fetched with no login on 2026-09-27) each surface patch match needs: for
  * each replacement, per site, just the matched text plus any context its
  * lookbehind or lookahead reads. Regression fixtures for
  * tests/surfacePatches.test.ts; the full-bundle check (every find in exactly
@@ -76,7 +76,7 @@ export const BUNDLE_SITES: Array<{ patch: number; replacement: number; module: s
         "replacement": 1,
         "module": "542308",
         "sites": [
-            "__invalid_threadMainContent),children:[(0,s.jsx)(e5.E,{variant:\"text-sm/medium\",color:\"none\",className:n$.UU,children:(0,s.jsx)(tX.A,{\"aria-hidden\":!0,children:A})"
+            "__invalid_threadMainContent),children:[(0,s.jsx)(e6.E,{variant:\"text-sm/medium\",color:\"none\",className:n$.UU,children:(0,s.jsx)(tX.A,{\"aria-hidden\":!0,children:A})"
         ]
     },
     {
@@ -110,6 +110,22 @@ export const BUNDLE_SITES: Array<{ patch: number; replacement: number; module: s
         "sites": [
             "(0,i.jsx)(c.D,{className:et.DD,variant:\"heading-xl/semibold\",color:\"text-strong\",id:t,children:a.title})",
             "(0,i.jsx)(c.D,{className:et.DD,variant:\"heading-xl/semibold\",color:\"text-strong\",id:t,children:a.title})"
+        ]
+    },
+    {
+        "patch": 8,
+        "replacement": 0,
+        "module": "983495",
+        "sites": [
+            "es=null!=a?(0,l.jsx)(f.E,{variant:\"text-sm/normal\",className:eu.qS,children:a}):null,eo=void 0!=="
+        ]
+    },
+    {
+        "patch": 9,
+        "replacement": 0,
+        "module": "448368",
+        "sites": [
+            ".onClickReply,onMouseEnter:O,onMouseLeave:O}),R,k,H]})"
         ]
     }
 ];

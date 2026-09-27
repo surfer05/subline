@@ -56,7 +56,7 @@ import {
 } from "./surfaces/extract";
 import { SURFACE_PATCHES } from "./surfaces/patches";
 import { SurfaceService, type SurfaceOutcome, type SurfaceTier } from "./surfaces/service";
-import { safe, setSurfaceService, SurfaceHint, SurfaceLines } from "./surfaces/ui";
+import { currentSurfaceService, hintTitle, safe, setSurfaceService, SurfaceHint, SurfaceLines } from "./surfaces/ui";
 import { __resetWeeklyStats, closeWeekIfDue, countShown, loadWeeklyStats } from "./weeklyNote";
 
 const Native = VencordNative.pluginHelpers.VcTranslate as PluginNative<typeof import("./native")>;
@@ -3771,11 +3771,7 @@ export function __surfaceService(): SurfaceService | null {
     return surfaceService;
 }
 
-/**
- * Embeds, polls, forwards and the reply preview of one message, as small
- * lines under it. A reply whose quoted message already has a translation in
- * the message store reuses it: the same text is never bought twice.
- */
+/** Embeds, polls and forwards of one message, as small lines under it. */
 function SurfaceAccessoryImpl({ message }: { message: Message; }) {
     if (!isPaidSurfaceUser() || message == null) return null;
     const channelId = (message as any).channel_id as string;
@@ -3786,34 +3782,11 @@ function SurfaceAccessoryImpl({ message }: { message: Message; }) {
     const texts: SurfaceText[] = messageSurfaceTexts(message)
         .map(t => ({ ...t, text: readableContent(t.text, channelId) }));
 
-    let storedReply: any = null;
-    const ref = replyReference(message);
-    // A quoted message from another channel follows that channel's rule.
-    if (ref !== null && channelActive(ref.channelId)) {
-        const quoted = (MessageStore as any).getMessage?.(ref.channelId, ref.messageId);
-        const content = typeof quoted?.content === "string" ? quoted.content : "";
-        if (content.trim() !== "") {
-            const existing = getTranslation(makeKey(ref.messageId, settings.store.targetLang));
-            if (isRealTranslation(existing) && ENGINE_RANK[existing.via] > 0) {
-                storedReply = (
-                    <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic", whiteSpace: "pre-wrap" }}
-                        data-subline-surface="reply">
-                        <span>Reply · {ENGINE_PROVENANCE[existing.via].glyph} {existing.lang} · </span>
-                        <span>{existing.text.trim()}</span>
-                    </div>
-                );
-            } else {
-                texts.unshift({ kind: "reply", label: "Reply", text: readableContent(content, ref.channelId) });
-            }
-        }
-    }
-    if (storedReply === null && texts.length === 0) return null;
-    return (
-        <div>
-            {storedReply}
-            {texts.length > 0 && <SurfaceLines texts={texts} />}
-        </div>
-    );
+    // Reply previews are NOT here: a "Reply" line above the message's own
+    // line read as the message's translation. The quoted message's
+    // translation is a ✦ on Discord's reply bar instead (renderReplyBarMark).
+    if (texts.length === 0) return null;
+    return <SurfaceLines texts={texts} />;
 }
 const SurfaceAccessory = safe("message accessory", SurfaceAccessoryImpl, surfaceDebug);
 
@@ -3987,6 +3960,55 @@ function withLeadingMark<T>(original: T, kind: SurfaceKind, text: unknown, chann
 const LEADING_ROW_STYLE = { display: "flex", alignItems: "center", minWidth: 0, gap: 4 } as const;
 const LEADING_ORIGINAL_STYLE = { flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } as const;
 
+/**
+ * The quoted message's translation, as a tight ✦ at the end of Discord's
+ * reply bar. The message store's translation is reused when there is one
+ * (never bought twice, never re-sent). Only when there is none, and the
+ * quoted message's channel is one whose messages are translated, is it asked
+ * for, as a ✦-only surface.
+ */
+function ReplyBarMarkImpl({ referenced }: { referenced: any; }) {
+    const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
+    React.useEffect(() => subscribe(forceUpdate), []);
+    if (!isPaidSurfaceUser()) return null;
+    const quoted = referenced?.message;
+    const content = typeof quoted?.content === "string" ? quoted.content : "";
+    const channelId = quoted?.channel_id;
+    if (typeof quoted?.id !== "string" || typeof channelId !== "string" || content.trim() === "") return null;
+    const existing = getTranslation(makeKey(quoted.id, settings.store.targetLang));
+    if (existing !== undefined && "skipped" in existing) return null;
+    if (isRealTranslation(existing)) {
+        const glyph = ENGINE_PROVENANCE[existing.via].glyph;
+        const title = `Reply (${glyph} ${existing.lang}): ${existing.text.trim()}`;
+        return (
+            <span style={REPLY_MARK_STYLE} title={title} aria-label={title} data-subline-surface="reply">{glyph}</span>
+        );
+    }
+    if (!channelActive(channelId)) return null;
+    return <SurfaceHint texts={[{ kind: "reply", label: "Reply", text: readableContent(content, channelId) }]} />;
+}
+const ReplyBarMark = safe("reply bar mark", ReplyBarMarkImpl, surfaceDebug);
+const REPLY_MARK_STYLE = { fontSize: "0.75rem", color: "var(--text-muted)", marginLeft: "4px", cursor: "default", lineHeight: 1, flex: "0 0 auto" } as const;
+
+/**
+ * A custom status bubble's text, plus a small ✦ after it, with the
+ * translation as the hover tooltip over the whole text. Shows whether or not
+ * the user has a bio.
+ */
+function StatusBubbleTextImpl({ text }: { text: string; }) {
+    const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
+    React.useEffect(() => currentSurfaceService()?.subscribe(forceUpdate), []);
+    const title = hintTitle([{ kind: "status", label: "Status", text }]);
+    if (title === null) return text;
+    return (
+        <span title={title} data-subline-surface="status-bubble">
+            {text}
+            <span style={REPLY_MARK_STYLE} aria-label={title}>✦</span>
+        </span>
+    );
+}
+const StatusBubbleText = safe("status bubble", StatusBubbleTextImpl, surfaceDebug);
+
 /** A tight ✦ at the end of a forum post's tag row, for its tags' names. */
 function ForumTagsMarkImpl({ channel }: { channel: any; }) {
     if (!isPaidSurfaceUser() || !channelTextAllowed(channel)) return null;
@@ -4050,6 +4072,16 @@ export default definePlugin({
             return heading;
         }
     },
+    // Paid only; Discord's own string otherwise.
+    statusBubbleChildren: (text: unknown) => {
+        try {
+            if (!isPaidSurfaceUser() || typeof text !== "string" || text.trim() === "") return text;
+            return <StatusBubbleText key="subline-surface" text={text} />;
+        } catch {
+            return text;
+        }
+    },
+    renderReplyBarMark: (props: any) => isPaidSurfaceUser() ? <ReplyBarMark referenced={props?.referencedMessage} /> : null,
     wrapParser,
 
     // Declarative — unlike the force-quality popover above, this is the ONLY

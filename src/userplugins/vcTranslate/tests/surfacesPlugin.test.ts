@@ -251,22 +251,13 @@ describe("a paid install", () => {
         expect(out).toContain("Forwarded · ✦ de · sharp: Schau dir das an");
     });
 
-    it("a reply preview reuses the quoted message's translation instead of buying it again", async () => {
-        stubMessageById.set("c1:q1", { id: "q1", content: "Kommst du heute Abend?" });
+    it("a reply gets no \"Reply\" line under it: only its own embeds, polls and forwards", async () => {
+        stubMessageById.set("c1:q1", { id: "q1", channel_id: "c1", content: "Kommst du heute Abend?" });
         setTranslation(makeKey("q1", "en"), { lang: "de", text: "Are you coming tonight?", via: "relay" });
         const reply = { ...embedMessage("m3"), embeds: [], type: 19, messageReference: { channel_id: "c1", message_id: "q1" } };
-        const out = text(accessory(reply));
-        expect(out).toContain("Reply · ✦ de · Are you coming tonight?");
+        expect(accessory(reply)).toBeNull();
         await settle();
         expect(surfaceCalls()).toEqual([]);
-    });
-
-    it("a reply preview with no translation yet is translated as a surface", async () => {
-        stubMessageById.set("c1:q2", { id: "q2", content: "Wo treffen wir uns morgen?" });
-        const reply = { ...embedMessage("m4"), embeds: [], type: 19, messageReference: { channel_id: "c1", message_id: "q2" } };
-        accessory(reply);
-        await settle();
-        expect(text(accessory(reply))).toContain("Reply · ✦ de · sharp: Wo treffen wir uns morgen?");
     });
 
     it("fifty statuses in the member list make two relay requests, and rows get only an inline mark", async () => {
@@ -452,15 +443,6 @@ describe("privacy: surfaces follow the same channel rules as messages", () => {
         accessory({ ...embedMessage("dm2"), channel_id: "d2" });
         await settle();
         expect(surfaceCalls("relay")).toHaveLength(1);
-    });
-
-    it("a reply quoting a DM message is not translated from a server channel", async () => {
-        __stubMarkAsDm("d1");
-        stubMessageById.set("d1:q9", { id: "q9", content: "Das ist privat, bitte nicht weitersagen" });
-        const reply = { ...embedMessage("m9"), embeds: [], type: 19, messageReference: { channel_id: "d1", message_id: "q9" } };
-        expect(accessory(reply)).toBeNull();
-        await settle();
-        expect(surfaceCalls()).toEqual([]);
     });
 
     it("channel-level text in a DM (topic, voice status, titles) is never translated", async () => {
@@ -658,3 +640,73 @@ describe("budget and priority: messages always come first", () => {
         void times;
     });
 });
+
+describe("the reply bar", () => {
+    const bar = (quoted: any) => deep(P.renderReplyBarMark({ referencedMessage: { state: 0, message: quoted }, baseMessage: { id: "b1" } }));
+    const quoted = (id: string, channelId = "c1", content = "Kommst du heute Abend zum Essen?") => ({ id, channel_id: channelId, content });
+
+    it("a non-paid install gets nothing added to Discord's reply bar", async () => {
+        expect(P.renderReplyBarMark({ referencedMessage: { message: quoted("q1") } })).toBeNull();
+        await settle();
+        expect(surfaceCalls()).toEqual([]);
+    });
+
+    it("reuses the quoted message's translation: a ✦ at the end of the bar, the translation in its tooltip, nothing sent", async () => {
+        paid();
+        setTranslation(makeKey("q1", "en"), { lang: "de", text: "Are you coming to dinner tonight?", via: "relay" });
+        const mark = bar(quoted("q1"));
+        expect(mark.type).toBe("span");
+        expect(text(mark)).toBe("✦");
+        expect(findTitle(mark)).toBe("Reply (✦ de): Are you coming to dinner tonight?");
+        await settle();
+        expect(surfaceCalls()).toEqual([]);
+    });
+
+    it("with no cached translation, asks for one (✦ only) when the quoted channel translates messages", async () => {
+        paid();
+        expect(bar(quoted("q2"))).toBeNull();
+        await settle();
+        expect(surfaceCalls("google")).toEqual([]);
+        expect(findTitle(bar(quoted("q2")))).toBe("Reply (✦ de): sharp: Kommst du heute Abend zum Essen?");
+    });
+
+    it("never asks for a quoted message from a DM that is not turned on, or a switched-off channel", async () => {
+        paid();
+        __stubMarkAsDm("d1");
+        await toggleChannelOptOut("off9");
+        expect(bar(quoted("q3", "d1"))).toBeNull();
+        expect(bar(quoted("q4", "off9"))).toBeNull();
+        await settle();
+        expect(surfaceCalls()).toEqual([]);
+    });
+
+    it("shows nothing for a quoted message already in the reader's language", () => {
+        paid();
+        setTranslation(makeKey("q5", "en"), { skipped: true, via: "relay" });
+        expect(bar(quoted("q5"))).toBeNull();
+    });
+});
+
+describe("the custom status bubble", () => {
+    const status = "Só sei que nada sei, mas gosto de aprender";
+
+    it("a non-paid install gets Discord's own text back, the same string", () => {
+        expect(P.statusBubbleChildren(status)).toBe(status);
+        expect(P.statusBubbleChildren(undefined)).toBeUndefined();
+    });
+
+    it("paid: the text keeps its place, with a small ✦ after it and the translation as its tooltip, bio or not", async () => {
+        paid();
+        stubProfiles.set("u1", { bio: "Ich liebe Pizza" });
+        expect(deep(P.statusBubbleChildren(status))).toBe(status);
+        await settle();
+        const out = deep(P.statusBubbleChildren(status));
+        expect(out.type).toBe("span");
+        expect(out.props.title).toBe(`Status (✦ de): sharp: ${status}`);
+        expect(out.children[0]).toBe(status);
+        expect(text(out.children[1])).toBe("✦");
+        // ✦ only: no ≈ request for the bubble.
+        expect(surfaceCalls("google")).toEqual([]);
+    });
+});
+

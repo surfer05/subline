@@ -126,5 +126,23 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
             match: /(\(0,\i\.jsx\)\(\i\.\i,\{className:\i\.\i,variant:"heading-xl\/semibold",color:"text-strong",id:\i,children:(\i)\.title\}\))/g,
             replace: "$self.onboardingHeading($1,$2)"
         }]
+    },
+    {
+        surface: "custom status bubble in the profile header (✦ after the text, translation as the text's tooltip)",
+        source: "written against the current bundle (the profile custom status bubble)",
+        find: "action:\"HOVER_CUSTOM_STATUS\"",
+        replacement: [{
+            match: /(\i=null!=(\i)\?\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-sm\/normal",className:\i\.\i,children:)\2\}\):null,(?=\i=void 0!==)/,
+            replace: "$1$self.statusBubbleChildren($2)}):null,"
+        }]
+    },
+    {
+        surface: "reply bar (✦ at the end, the quoted message's translation in its tooltip)",
+        source: "find from Vencord src/plugins/replyTimestamp/index.tsx; match written against the current bundle",
+        find: "#{intl::REPLY_QUOTE_MESSAGE_NOT_LOADED}",
+        replacement: [{
+            match: /(\.onClickReply,onMouseEnter:\i,onMouseLeave:\i\}\),\i,\i,\i)(?=\]\}\))/,
+            replace: "$1,$self.renderReplyBarMark(arguments[0])"
+        }]
     }
 ];
