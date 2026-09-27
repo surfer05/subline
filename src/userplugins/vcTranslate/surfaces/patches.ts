@@ -30,16 +30,7 @@ const PARSER_ARROW = String.raw`\(\i,\i,\i,\i\)=>\i\(\)\(\i,\i,\{[^{}]*\},\i\)`;
 
 export const SURFACE_PATCHES: SurfacePatch[] = [
     {
-        surface: "profile name row: custom status (tight)",
-        source: "Vencord src/plugins/userVoiceShow/index.tsx (same find and match)",
-        find: "#{intl::USER_PROFILE_PRONOUNS}",
-        replacement: [{
-            match: /(?<=children:\[\i," ",\i)(?=\])/,
-            replace: ",$self.renderProfileSurface(arguments[0])"
-        }]
-    },
-    {
-        surface: "channel topic (header: tight; topic popout and welcome header: line), voice channel status (tight), server rules (line), forum guidelines (line)",
+        surface: "channel topic (header: translated in place; topic popout and welcome header: line), voice channel status (in place), server rules (line), forum guidelines (line)",
         source: "Discord's markup parser module, the object Vencord exposes as `Parser` (webpack/common, findByProps(\"parseTopic\"))",
         find: "parseVoiceChannelStatus:function",
         replacement: [
@@ -75,24 +66,24 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
         }]
     },
     {
-        surface: "stage topic in the channel list (tight), thread titles in the channel list (tight)",
+        surface: "stage topic in the channel list (in place), thread titles in the channel list (in place)",
         source: "find from Equicord src/equicordplugins/dragify/index.tsx (\"__invalid_threadMainContent\"); matches written against the current bundle",
         find: "__invalid_threadMainContent",
         replacement: [
             {
-                // Wraps Discord's own subtitle element; it and its children
-                // are untouched for everyone but a paid install.
-                match: /(renderSubtitle=\(\)=>\{let (\i)=this\.props\.stageInstance\?\.topic;return null==\2\?null:)(\(0,\i\.jsx\)\(\i\.\i,\{children:\2\}\))/,
-                replace: "$1$self.stageTopicChildren($3,$2,this.props.channel)"
+                // The stage row's subtitle text; Discord's element untouched.
+                match: /(renderSubtitle=\(\)=>\{let (\i)=this\.props\.stageInstance\?\.topic;return null==\2\?null:\(0,\i\.jsx\)\(\i\.\i,\{children:)\2\}/,
+                replace: "$1$self.stageTopicChildren($2,this.props.channel)}"
             },
             {
-                match: /(__invalid_threadMainContent\),children:\[\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-sm\/medium",color:"none",className:\i\.\i,children:)(\(0,\i\.jsx\)\(\i\.\i,\{"aria-hidden":!0,children:(\i)\}\))/,
-                replace: "$1$self.threadTitleChildren($2,$3,arguments[0]?.thread)"
+                // The thread row's name text, inside Discord's own elements.
+                match: /(__invalid_threadMainContent\),children:\[\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-sm\/medium",color:"none",className:\i\.\i,children:\(0,\i\.jsx\)\(\i\.\i,\{"aria-hidden":!0,children:)(\i)\}/,
+                replace: "$1$self.threadTitleChildren($2,arguments[0]?.thread)}"
             }
         ]
     },
     {
-        surface: "forum post card title (tight)",
+        surface: "forum post card title (in place)",
         source: "written against the current bundle (the forum post card)",
         find: "postTitleRef:",
         replacement: [{
@@ -101,12 +92,21 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
         }]
     },
     {
-        surface: "forum post tags (tight)",
-        source: "written against the current bundle (the forum post tags row)",
-        find: "\"forum-post-tags\"",
+        surface: "forum tag names (in place, in every tag pill)",
+        source: "written against the current bundle (the forum tag pill)",
+        find: "forum-tag-",
         replacement: [{
-            match: /(?<=useManaTagGroup:\i\}\):null)(?=\]\}\):null)/,
-            replace: ",$self.renderForumTagsMark(arguments[0]?.channel)"
+            match: /(lineClamp:1,color:"currentColor",children:)(\i)(?=\}\)\]\}\),\i=\{key:\i\.id)/,
+            replace: "$1$self.forumTagChildren($2)"
+        }]
+    },
+    {
+        surface: "custom status in the member list and DM list (in place)",
+        source: "written against the current bundle (Discord's ActivityStatus, the custom status text)",
+        find: "location:\"CustomStatusVoiceDare\"",
+        replacement: [{
+            match: /(?<=let \i=\i&&)(\(null!=\i\?` \$\{(\i)\}`:\2\))/,
+            replace: "$self.statusTextChildren($1,$2)"
         }]
     },
     {
@@ -128,21 +128,30 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
         }]
     },
     {
-        surface: "custom status bubble in the profile header (✦ after the text, translation as the text's tooltip)",
+        surface: "custom status bubble in the profile header (a second, smaller ✦ line inside the bubble)",
         source: "written against the current bundle (the profile custom status bubble)",
         find: "action:\"HOVER_CUSTOM_STATUS\"",
-        replacement: [{
-            match: /(\i=null!=(\i)\?\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-sm\/normal",className:\i\.\i,children:)\2\}\):null,(?=\i=void 0!==)/,
-            replace: "$1$self.statusBubbleChildren($2)}):null,"
-        }]
+        replacement: [
+            {
+                match: /(\i=null!=(\i)\?\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-sm\/normal",className:\i\.\i,children:)\2\}\):null,(?=\i=void 0!==)/,
+                replace: "$1$self.statusBubbleChildren($2)}):null,"
+            },
+            {
+                // The bubble measures its height once per change of its own
+                // inputs. This adds "a surface translation landed" to those
+                // inputs, so the new line is measured and never clipped.
+                match: /(maxHeight:`\$\{\i\?Math\.min\(\i\.current,\i\):\i\}px`\}\)\},\[\i,\i,\i,\i,\i,\i,\i)\]/,
+                replace: "$1,$self.useSurfaceVersion()]"
+            }
+        ]
     },
     {
-        surface: "reply bar (✦ at the end, the quoted message's translation in its tooltip)",
+        surface: "reply bar: the quoted line, translated in place",
         source: "find from Vencord src/plugins/replyTimestamp/index.tsx; match written against the current bundle",
         find: "#{intl::REPLY_QUOTE_MESSAGE_NOT_LOADED}",
         replacement: [{
-            match: /(\.onClickReply,onMouseEnter:\i,onMouseLeave:\i\}\),\i,\i,\i)(?=\]\}\))/,
-            replace: "$1,$self.renderReplyBarMark(arguments[0])"
+            match: /(?<=\(0,\i\.jsx\)\(\i\.R,\{children:)(\i)(?=\?\?\(0,\i\.jsx\)\("span",\{className:\i\.\i,children:\i\}\))/,
+            replace: "$self.replyQuoteChildren($1,arguments[0])"
         }]
     }
 ];

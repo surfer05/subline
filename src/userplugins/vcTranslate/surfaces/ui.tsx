@@ -1,13 +1,16 @@
 /**
  * How surface translations look.
  *
- * NEVER REPLACES THE ORIGINAL. Every component here only ADDS: a small line
- * under the original where there is room, or a tiny ✦ with a hover tooltip
- * where there is not (list rows, titles, tags, the channel header). The tight
- * form is inline and one character tall, so no list row changes height.
+ * THE TRANSLATION IS ALWAYS VISIBLE. Nobody hovers, so nothing here is a
+ * hover-only mark. Where there is room, a small line goes under the original.
+ * Where there is not (list rows, titles, tags, the channel header, the reply
+ * bar), the TRANSLATED text takes the original's place, prefixed "✦ ", with
+ * the original one hover away in the tooltip. It inherits Discord's own
+ * styling, so it truncates the same way and no row changes height.
  *
- * TIGHT MARKS ARE ✦ ONLY. They never ask Google, so a long list costs no ≈
- * fan-out, and they show nothing until ✦ has the text.
+ * TIGHT PLACES ARE ✦ ONLY. They never ask Google, so a long list costs no ≈
+ * fan-out. Until ✦ has the text, or when it is skipped (already the reader's
+ * language) or failed, Discord's original shows, untouched.
  *
  * LINES: ≈ FIRST, THEN ✦, as under messages. A ≈ line Google itself was unsure of
  * (the same confidence and romanization rules the message subtitle uses) is
@@ -79,7 +82,6 @@ export function safe<P>(name: string, render: (props: P) => any, log?: (message:
 }
 
 const LINE_STYLE = { fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic", whiteSpace: "pre-wrap" } as const;
-const MARK_STYLE = { fontSize: "0.75rem", color: "var(--text-muted)", marginLeft: "4px", cursor: "default", lineHeight: 1 } as const;
 
 /** Lines that sit away from what they translate say what they are. */
 const LABELLED_KINDS = new Set(["reply", "forward", "status", "onboarding"]);
@@ -113,36 +115,58 @@ export function SurfaceLines({ texts }: { texts: SurfaceText[]; }) {
     }
 }
 
-/** The tooltip text for a tight marker: "Label: translation" per foreign text. */
-export function hintTitle(texts: SurfaceText[]): string | null {
+/** The ✦ translation of a tight text, or null while pending, skipped or failed. */
+export function tightTranslation(text: string): { lang: string; text: string; } | null {
     if (service === null) return null;
-    const parts: string[] = [];
-    for (const t of texts) {
-        // Tight marks are ✦ only: never a ≈ line, never a Google request.
-        const entry = service.want(t.text, { tight: true });
-        const shown = entry?.quality ? displayFor({ at: entry.at, quality: entry.quality }, t.text) : null;
-        if (shown !== null) parts.push(`${t.label} (${shown.glyph} ${shown.lang}): ${shown.text}`);
-    }
-    return parts.length === 0 ? null : parts.join("\n\n");
+    const entry = service.want(text, { tight: true });
+    const q = entry?.quality;
+    if (!q || q.text.trim() === "") return null;
+    return { lang: q.lang, text: q.text.trim() };
+}
+
+const PREFIX_STYLE = { opacity: 0.75 } as const;
+
+/** "✦ translation", with the original text as its tooltip. */
+export function TranslatedInPlace({ original, translation }: { original: string; translation: string; }) {
+    return (
+        <span title={original} data-subline-surface="in-place">
+            <span style={PREFIX_STYLE}>✦ </span>{translation}
+        </span>
+    );
 }
 
 /**
- * Tight: a tiny ✦ with the translation in its hover tooltip, once ✦ has it.
- * Inline, one character, so a list row keeps its height.
+ * Tight: the translation IN PLACE of `original` once ✦ has it, prefixed
+ * "✦ ", the original text in the tooltip. Until then (and when skipped or
+ * failed) Discord's `original`, untouched.
  */
-export function SurfaceHint({ texts, before }: { texts: SurfaceText[]; before?: boolean; }) {
+export function TightSwap({ original, text }: { original: unknown; text: string; }) {
     useSurfaceUpdates();
     try {
-        const title = Array.isArray(texts) ? hintTitle(texts) : null;
-        if (title === null) return null;
-        const glyph = "✦";
-        const style = before ? { ...MARK_STYLE, marginLeft: 0, marginRight: "4px" } : MARK_STYLE;
-        return (
-            <span style={style} title={title} aria-label={title} data-subline-surface="hint">
-                {glyph}
-            </span>
-        );
+        const t = typeof text === "string" ? tightTranslation(text) : null;
+        if (t === null) return (original ?? null) as any;
+        const swapped = <TranslatedInPlace original={text} translation={t.text} />;
+        // Discord's text sometimes carries a leading space (after an emoji).
+        const lead = typeof original === "string" ? /^\s*/.exec(original)![0] : "";
+        return lead === "" ? swapped : <>{lead}{swapped}</>;
     } catch {
-        return null;
+        return (original ?? null) as any;
     }
+}
+
+/**
+ * A hook Discord's own component can call (see the status bubble patch): it
+ * re-renders that component when any surface translation lands, so layout
+ * that Discord measures once (the bubble's height) is measured again.
+ */
+export function useSurfaceVersion(): number {
+    const [version, bump] = React.useReducer((n: number) => n + 1, 0);
+    React.useEffect(() => {
+        try {
+            return service?.subscribe(bump);
+        } catch {
+            return undefined;
+        }
+    }, []);
+    return version;
 }

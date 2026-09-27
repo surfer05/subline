@@ -10,21 +10,13 @@ export const BUNDLE_SITES: Array<{ patch: number; replacement: number; module: s
     {
         "patch": 0,
         "replacement": 0,
-        "module": "465829",
-        "sites": [
-            "children:[l,\" \",c]"
-        ]
-    },
-    {
-        "patch": 1,
-        "replacement": 0,
         "module": "46054",
         "sites": [
             "parseTopic:(e,t,n,l)=>T()(e,t,{allowLinks:!0,allowGameMentions:!0,...n},l),parseTruncatedTopic:"
         ]
     },
     {
-        "patch": 1,
+        "patch": 0,
         "replacement": 1,
         "module": "46054",
         "sites": [
@@ -32,7 +24,7 @@ export const BUNDLE_SITES: Array<{ patch: number; replacement: number; module: s
         ]
     },
     {
-        "patch": 1,
+        "patch": 0,
         "replacement": 2,
         "module": "46054",
         "sites": [
@@ -40,7 +32,7 @@ export const BUNDLE_SITES: Array<{ patch: number; replacement: number; module: s
         ]
     },
     {
-        "patch": 1,
+        "patch": 0,
         "replacement": 3,
         "module": "46054",
         "sites": [
@@ -48,7 +40,7 @@ export const BUNDLE_SITES: Array<{ patch: number; replacement: number; module: s
         ]
     },
     {
-        "patch": 1,
+        "patch": 0,
         "replacement": 4,
         "module": "46054",
         "sites": [
@@ -56,7 +48,7 @@ export const BUNDLE_SITES: Array<{ patch: number; replacement: number; module: s
         ]
     },
     {
-        "patch": 2,
+        "patch": 1,
         "replacement": 0,
         "module": "435328",
         "sites": [
@@ -64,23 +56,23 @@ export const BUNDLE_SITES: Array<{ patch: number; replacement: number; module: s
         ]
     },
     {
-        "patch": 3,
+        "patch": 2,
         "replacement": 0,
         "module": "542308",
         "sites": [
-            "renderSubtitle=()=>{let e=this.props.stageInstance?.topic;return null==e?null:(0,s.jsx)(tX.A,{children:e})"
+            "renderSubtitle=()=>{let e=this.props.stageInstance?.topic;return null==e?null:(0,s.jsx)(tX.A,{children:e}"
+        ]
+    },
+    {
+        "patch": 2,
+        "replacement": 1,
+        "module": "542308",
+        "sites": [
+            "__invalid_threadMainContent),children:[(0,s.jsx)(e6.E,{variant:\"text-sm/medium\",color:\"none\",className:n$.UU,children:(0,s.jsx)(tX.A,{\"aria-hidden\":!0,children:A}"
         ]
     },
     {
         "patch": 3,
-        "replacement": 1,
-        "module": "542308",
-        "sites": [
-            "__invalid_threadMainContent),children:[(0,s.jsx)(e6.E,{variant:\"text-sm/medium\",color:\"none\",className:n$.UU,children:(0,s.jsx)(tX.A,{\"aria-hidden\":!0,children:A})"
-        ]
-    },
-    {
-        "patch": 4,
         "replacement": 0,
         "module": "350527",
         "sites": [
@@ -88,11 +80,19 @@ export const BUNDLE_SITES: Array<{ patch: number; replacement: number; module: s
         ]
     },
     {
+        "patch": 4,
+        "replacement": 0,
+        "module": "376310",
+        "sites": [
+            "lineClamp:1,color:\"currentColor\",children:v})]}),F={key:l.id"
+        ]
+    },
+    {
         "patch": 5,
         "replacement": 0,
-        "module": "52933",
+        "module": "394871",
         "sites": [
-            "useManaTagGroup:y}):null]}):null"
+            "let C=g&&(null!=x?` ${m}`:m)"
         ]
     },
     {
@@ -121,11 +121,19 @@ export const BUNDLE_SITES: Array<{ patch: number; replacement: number; module: s
         ]
     },
     {
+        "patch": 8,
+        "replacement": 1,
+        "module": "983495",
+        "sites": [
+            "maxHeight:`${B?Math.min(V.current,_):n}px`})},[X,a,n,er,B,_,Z]"
+        ]
+    },
+    {
         "patch": 9,
         "replacement": 0,
         "module": "448368",
         "sites": [
-            ".onClickReply,onMouseEnter:O,onMouseLeave:O}),R,k,H]})"
+            "(0,l.jsx)(g.R,{children:h??(0,l.jsx)(\"span\",{className:F.MK,children:u})"
         ]
     }
 ];

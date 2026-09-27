@@ -24,7 +24,7 @@ import { accessories } from "./stubs/api-messageaccessories";
 import { __reset as __resetMessagePopover } from "./stubs/api-messagepopover";
 import { __resetSettings } from "./stubs/api-settings";
 import {
-    __resetWebpackCommon, __stubMarkAsDm, __stubSetChannel, __stubSetSelectedChannel, FluxDispatcher, stubMessages, PresenceStore, shownToasts, stubActivities, stubMessageById, stubProfiles
+    __resetWebpackCommon, __stubMarkAsDm, __stubSetChannel, __stubSetSelectedChannel, FluxDispatcher, stubMessages, shownToasts, stubActivities, stubMessageById, stubProfiles
 } from "./stubs/webpack-common";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -90,17 +90,26 @@ function paid() {
 }
 
 const accessory = (message: any) => deep(accessories.get(SURFACE_ACCESSORY_ID)!.render({ message }));
-const decorator = (userId: string) => deep((plugin as any).renderMemberListDecorator({ user: { id: userId }, type: "guild" }));
-const profile = (props: any) => deep((plugin as any).renderProfileSurface(props));
 const P = plugin as any;
+const statusOf = (userId: string): string =>
+    ((stubActivities.get(userId) ?? []) as any[]).find(a => a?.type === 4)?.state ?? "";
+/** Discord's member-list / DM-list custom status text for a user, as the patch hands it over. */
+const decorator = (userId: string) => { const st = statusOf(userId); return deep(P.statusTextChildren(st, st)); };
 const bioLine = (props: any) => deep(P.renderBioLine(props));
 const GUILD_CHANNEL = { id: "c1", guild_id: "g1" };
 /** Discord's own child, which a non-paid install must get back as the SAME value. */
 const ORIGINAL = { type: "discord-original", props: {}, children: [] };
-const thread = (title: unknown, channel: unknown = GUILD_CHANNEL) => deep(P.threadTitleChildren(ORIGINAL, title, channel));
-const stage = (topic: unknown, channel: unknown = GUILD_CHANNEL) => deep(P.stageTopicChildren(ORIGINAL, topic, channel));
+const thread = (title: unknown, channel: unknown = GUILD_CHANNEL) => deep(P.threadTitleChildren(title, channel));
+const stage = (topic: unknown, channel: unknown = GUILD_CHANNEL) => deep(P.stageTopicChildren(topic, channel));
 const forumTitle = (channel: unknown) => deep(P.forumTitleChildren(ORIGINAL, channel));
-const tagsMark = (channel: any) => deep(P.renderForumTagsMark(channel));
+/** A tag pill's name, in the forum being viewed (a server channel by default). */
+const tag = (name: unknown, viewing = "f1") => { __stubSetSelectedChannel(viewing); return deep(P.forumTagChildren(name)); };
+/** A translated-in-place text: "✦ translation", the original as its tooltip. */
+function expectInPlace(node: any, original: string, translation: string) {
+    expect(node.type).toBe("span");
+    expect(node.props.title).toBe(original);
+    expect(text(node)).toBe(`✦ ${translation}`);
+}
 const onboarding = (prompt: any) => deep(P.onboardingHeading(ORIGINAL, prompt));
 /** One of Discord's parser functions, wrapped as the patch wraps it, in a server channel by default. */
 const parsed = (parser: string, text: string, state: unknown = { channelId: "c1" }) =>
@@ -138,12 +147,11 @@ afterEach(() => {
 });
 
 describe("surface hooks", () => {
-    it("registers the message accessory, the member-list decorator and the profile patch", () => {
+    it("registers the message accessory and no hover-only marks: no member-list decorator, no name-row patch", () => {
         expect(accessories.has(SURFACE_ACCESSORY_ID)).toBe(true);
-        expect(typeof (plugin as any).renderMemberListDecorator).toBe("function");
-        const patch = (plugin as any).patches[0];
-        expect(patch.find).toBe("#{intl::USER_PROFILE_PRONOUNS}");
-        expect(patch.replacement[0].replace).toContain("$self.renderProfileSurface(arguments[0])");
+        expect(P.renderMemberListDecorator).toBeUndefined();
+        expect(P.renderProfileSurface).toBeUndefined();
+        expect(P.patches.map((p: any) => p.find)).not.toContain("#{intl::USER_PROFILE_PRONOUNS}");
     });
 
     it("removes its accessory on stop", () => {
@@ -169,18 +177,22 @@ describe("free and trial installs see no change", () => {
         return [
             accessory(embedMessage()),
             decorator("u1"),
-            profile({ user: { id: "u1" } }),
             bioLine({ userId: "u1", userBio: "Ich liebe Pizza" }),
-            tagsMark({ guild_id: "g1", parent_id: "f1", appliedTags: ["t1"] })
+            tag("Hilfe gesucht")
         ];
     }
 
     /** Patches that wrap Discord's own child hand back that very child. */
     function childrenUntouched() {
-        expect(P.threadTitleChildren(ORIGINAL, "Wie repariere ich mein Fahrrad?", GUILD_CHANNEL)).toBe(ORIGINAL);
-        expect(P.stageTopicChildren(ORIGINAL, "Wir reden über Bücher", GUILD_CHANNEL)).toBe(ORIGINAL);
+        const title = "Wie repariere ich mein Fahrrad?";
+        expect(P.threadTitleChildren(title, GUILD_CHANNEL)).toBe(title);
+        expect(P.stageTopicChildren(title, GUILD_CHANNEL)).toBe(title);
         expect(P.forumTitleChildren(ORIGINAL, { ...GUILD_CHANNEL, name: "Hilfe beim Kochen" })).toBe(ORIGINAL);
         expect(P.onboardingHeading(ORIGINAL, { title: "Was spielst du gern?", options: [] })).toBe(ORIGINAL);
+        expect(P.statusTextChildren(ORIGINAL, "Bin gleich zurück")).toBe(ORIGINAL);
+        expect(P.forumTagChildren("Hilfe gesucht")).toBe("Hilfe gesucht");
+        expect(P.statusBubbleChildren("Bin gleich zurück")).toBe("Bin gleich zurück");
+        expect(P.replyQuoteChildren(ORIGINAL, { referencedMessage: { message: { id: "q1", channel_id: "c1", content: "Kommst du?" } } })).toBe(ORIGINAL);
     }
 
     /** Discord's own parser output, which must come back untouched. */
@@ -191,7 +203,7 @@ describe("free and trial installs see no change", () => {
     }
 
     it("a free install renders nothing extra and sends zero surface requests", async () => {
-        expect(renderEverything()).toEqual([null, null, null, null, null]);
+        expect(renderEverything()).toEqual([null, "Bin gleich zurück", null, "Hilfe gesucht"]);
         parsersUntouched();
         childrenUntouched();
         await settle();
@@ -202,7 +214,7 @@ describe("free and trial installs see no change", () => {
         native.relayStatus.mockResolvedValue({ ok: true, plan: "trial", used: 0, cap: 300, trialEndsAt: Date.now() + 5 * DAY_MS });
         await restart();
         await settle(100);
-        expect(renderEverything()).toEqual([null, null, null, null, null]);
+        expect(renderEverything()).toEqual([null, "Bin gleich zurück", null, "Hilfe gesucht"]);
         parsersUntouched();
         childrenUntouched();
         await settle();
@@ -212,7 +224,7 @@ describe("free and trial installs see no change", () => {
     it("a paid install with the setting off sends zero surface requests", async () => {
         paid();
         settings.store.translateSurfaces = false;
-        expect(renderEverything()).toEqual([null, null, null, null, null]);
+        expect(renderEverything()).toEqual([null, "Bin gleich zurück", null, "Hilfe gesucht"]);
         parsersUntouched();
         childrenUntouched();
         await settle();
@@ -260,37 +272,35 @@ describe("a paid install", () => {
         expect(surfaceCalls()).toEqual([]);
     });
 
-    it("fifty statuses in the member list make two relay requests, and rows get only an inline mark", async () => {
+    it("fifty statuses in the member list make two relay requests; each row shows its translation in place of the status", async () => {
         for (let i = 0; i < 50; i++) stubActivities.set(`u${i}`, [{ type: 4, state: `Heute bin ich müde, Nummer ${i}` }]);
-        for (let i = 0; i < 50; i++) expect(decorator(`u${i}`)).toBeNull();
+        // Until ✦ lands: Discord's own status text, untouched.
+        for (let i = 0; i < 50; i++) expect(decorator(`u${i}`)).toBe(statusOf(`u${i}`));
         await settle();
         expect(surfaceCalls("relay")).toHaveLength(2);
-        const mark = decorator("u7");
-        expect(mark.type).toBe("span");
-        expect(text(mark)).toBe("✦");
-        expect(findTitle(mark)).toBe("Status (✦ de): sharp: Heute bin ich müde, Nummer 7");
+        expectInPlace(decorator("u7"), "Heute bin ich müde, Nummer 7", "sharp: Heute bin ich müde, Nummer 7");
     });
 
-    it("the profile name row marks the status when there is no bio", async () => {
-        stubActivities.set("u1", [{ type: 4, state: "Bin gleich zurück" }]);
-        profile({ user: { id: "u1" } });
+    it("a status after an emoji keeps Discord's leading space", async () => {
+        const original = " Bin gleich zurück, muss kochen";
+        expect(deep(P.statusTextChildren(original, "Bin gleich zurück, muss kochen"))).toBe(original);
         await settle();
-        expect(findTitle(profile({ user: { id: "u1" } }))).toBe("Status (✦ de): sharp: Bin gleich zurück");
+        const out = deep(P.statusTextChildren(original, "Bin gleich zurück, muss kochen"));
+        expect(out.type).toBe("Fragment");
+        expect(out.children[0]).toBe(" ");
+        expectInPlace(out.children[1], "Bin gleich zurück, muss kochen", "sharp: Bin gleich zurück, muss kochen");
     });
 
-    it("the header topic and voice channel status get a ✦ before them; the topic popout, rules, guidelines and events a line after", async () => {
+    it("the header topic and voice channel status show their translation in place; the topic popout, rules, guidelines and events a line after", async () => {
         const topic = "Hier plaudern wir über alles Mögliche";
-        parsed("topic-truncated", topic);
+        // Pending: Discord's own parsed topic.
+        expect(parsed("topic-truncated", topic)).toEqual([`<${topic}>`]);
         await settle();
-        const tight = parsed("topic-truncated", topic);
-        expect(tight[1]).toEqual([`<${topic}>`]);
-        expect(tight[0].type).toBe("span");
-        expect(findTitle(tight[0])).toBe(`Description (✦ de): sharp: ${topic}`);
+        expectInPlace(parsed("topic-truncated", topic), topic, `sharp: ${topic}`);
 
-        const voice = parsed("voice-status", "Wir spielen gerade Minecraft");
+        expect(parsed("voice-status", "Wir spielen gerade Minecraft")).toEqual(["<Wir spielen gerade Minecraft>"]);
         await settle();
-        expect(findTitle(parsed("voice-status", "Wir spielen gerade Minecraft"))).toContain("Voice status (✦ de): sharp: Wir spielen gerade Minecraft");
-        void voice;
+        expectInPlace(parsed("voice-status", "Wir spielen gerade Minecraft"), "Wir spielen gerade Minecraft", "sharp: Wir spielen gerade Minecraft");
 
         for (const p of ["topic", "rule", "guidelines", "event"]) {
             const text = `Bitte seid nett zueinander, Regel ${p}`;
@@ -303,42 +313,44 @@ describe("a paid install", () => {
         }
     });
 
-    it("thread titles, stage topics and forum titles get a ✦ beside Discord's own element, which is untouched", async () => {
+    it("thread titles, stage topics and forum titles show their translation in place, Discord's text until then", async () => {
+        expect(thread("Wie repariere ich mein Fahrrad?")).toBe("Wie repariere ich mein Fahrrad?");
+        expect(stage("Wir reden über Bücher")).toBe("Wir reden über Bücher");
+        expect(forumTitle({ ...GUILD_CHANNEL, name: "Hilfe beim Kochen gesucht" })).toEqual(ORIGINAL);
+        await settle();
+        expectInPlace(thread("Wie repariere ich mein Fahrrad?"), "Wie repariere ich mein Fahrrad?", "sharp: Wie repariere ich mein Fahrrad?");
+        expectInPlace(stage("Wir reden über Bücher"), "Wir reden über Bücher", "sharp: Wir reden über Bücher");
+        expectInPlace(forumTitle({ ...GUILD_CHANNEL, name: "Hilfe beim Kochen gesucht" }), "Hilfe beim Kochen gesucht", "sharp: Hilfe beim Kochen gesucht");
+        // Tight places never ask Google.
+        expect(surfaceCalls("google")).toEqual([]);
+    });
+
+    it("forum tag pills show the tag's translation in place", async () => {
+        expect(tag("Hilfe gesucht")).toBe("Hilfe gesucht");
+        await settle();
+        expectInPlace(tag("Hilfe gesucht"), "Hilfe gesucht", "sharp: Hilfe gesucht");
+    });
+
+    it("a tight text that is skipped or fails keeps Discord's original", async () => {
+        native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => ({
+            ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, skip: true }))
+        }));
         thread("Wie repariere ich mein Fahrrad?");
-        stage("Wir reden über Bücher");
-        forumTitle({ ...GUILD_CHANNEL, name: "Hilfe beim Kochen gesucht" });
         await settle();
-        // One flex row: the mark, then Discord's element in a shrinkable cell.
-        const t = thread("Wie repariere ich mein Fahrrad?");
-        expect(t.type).toBe("span");
-        expect(t.props.style).toEqual({ display: "flex", alignItems: "center", minWidth: 0, gap: 4 });
-        const [markCell, originalCell] = t.children;
-        expect(findTitle(markCell)).toBe("Title (✦ de): sharp: Wie repariere ich mein Fahrrad?");
-        expect(originalCell.props.style).toMatchObject({ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" });
-        expect(originalCell.children).toEqual([ORIGINAL]);
-        expect(findTitle(stage("Wir reden über Bücher"))).toBe("Stage topic (✦ de): sharp: Wir reden über Bücher");
-        expect(findTitle(forumTitle({ ...GUILD_CHANNEL, name: "Hilfe beim Kochen gesucht" }))).toBe("Title (✦ de): sharp: Hilfe beim Kochen gesucht");
+        expect(thread("Wie repariere ich mein Fahrrad?")).toBe("Wie repariere ich mein Fahrrad?");
+        native.translateBatch.mockResolvedValue({ ok: false, error: "relay: HTTP 500 upstream" });
+        stage("Wir reden heute über Bücher");
+        await settle();
+        expect(stage("Wir reden heute über Bücher")).toBe("Wir reden heute über Bücher");
     });
 
-    it("forum tags get a tight ✦ at the end of the tag row", async () => {
-        __stubSetChannel("f1", { id: "f1", availableTags: [{ id: "t1", name: "Hilfe gesucht" }, { id: "t2", name: "Gelöst" }] });
-        const post = { id: "p1", guild_id: "g1", parent_id: "f1", appliedTags: ["t1", "t2"] };
-        tagsMark(post);
-        await settle();
-        const tags = findTitle(tagsMark(post));
-        expect(tags).toContain("Tag (✦ de): sharp: Hilfe gesucht");
-        expect(tags).toContain("Tag (✦ de): sharp: Gelöst");
-    });
-
-    it("the bio gets a line under it with the status; the name row then stays quiet", async () => {
+    it("the bio gets its line under it (the status has its own, in its bubble)", async () => {
         stubActivities.set("u1", [{ type: 4, state: "Bin gleich zurück" }]);
-        stubProfiles.set("u1", { bio: "Ich liebe Pizza und lange Spaziergänge" });
         bioLine({ userId: "u1", userBio: "Ich liebe Pizza und lange Spaziergänge" });
         await settle();
         const out = text(bioLine({ userId: "u1", userBio: "Ich liebe Pizza und lange Spaziergänge" }));
         expect(out).toContain("✦ de · sharp: Ich liebe Pizza und lange Spaziergänge");
-        expect(out).toContain("Status · ✦ de · sharp: Bin gleich zurück");
-        expect(profile({ user: { id: "u1" } })).toBeNull();
+        expect(out).not.toContain("Bin gleich zurück");
     });
 
     it("an onboarding question gets lines for itself and its options", async () => {
@@ -375,20 +387,13 @@ describe("a paid install", () => {
     });
 
     it("fails safe: a store that throws, or junk props from a moved patch, render nothing", () => {
-        const original = PresenceStore.getActivities;
-        PresenceStore.getActivities = () => { throw new Error("Discord changed"); };
-        try {
-            expect(decorator("u1")).toBeNull();
-            expect(profile({ user: { id: "u1" } })).toBeNull();
-        } finally {
-            PresenceStore.getActivities = original;
-        }
-        expect(profile(undefined)).toBeNull();
-        expect(profile({ user: null })).toBeNull();
         expect(accessory(null)).toBeNull();
-        expect(P.threadTitleChildren(ORIGINAL, undefined, GUILD_CHANNEL)).toBe(ORIGINAL);
-        expect(P.stageTopicChildren(ORIGINAL, "Wir reden", undefined)).toBe(ORIGINAL);
-        expect(tagsMark(undefined)).toBeNull();
+        expect(P.threadTitleChildren(undefined, GUILD_CHANNEL)).toBeUndefined();
+        expect(P.stageTopicChildren("Wir reden", undefined)).toBe("Wir reden");
+        expect(P.statusTextChildren(ORIGINAL, undefined)).toBe(ORIGINAL);
+        expect(P.forumTagChildren(undefined)).toBeUndefined();
+        expect(P.replyQuoteChildren(null, {})).toBeNull();
+        expect(deep(P.replyQuoteChildren(ORIGINAL, undefined))).toEqual(ORIGINAL);
         expect(bioLine(undefined)).toBeNull();
         expect(deep(P.onboardingHeading(ORIGINAL, 42))[1]).toBeNull();
         expect(parsed("topic", 42 as any)).toEqual(["<42>"]);
@@ -451,10 +456,10 @@ describe("privacy: surfaces follow the same channel rules as messages", () => {
             expect(parsed(p, "Hier wird geplaudert", { channelId: "d1" })).toEqual(["<Hier wird geplaudert>"]);
         }
         const dm = { id: "d1" };
-        expect(P.threadTitleChildren(ORIGINAL, "Wie repariere ich mein Fahrrad?", dm)).toBe(ORIGINAL);
-        expect(P.stageTopicChildren(ORIGINAL, "Wir reden über Bücher", dm)).toBe(ORIGINAL);
+        expect(P.threadTitleChildren("Wie repariere ich mein Fahrrad?", dm)).toBe("Wie repariere ich mein Fahrrad?");
+        expect(P.stageTopicChildren("Wir reden über Bücher", dm)).toBe("Wir reden über Bücher");
         expect(P.forumTitleChildren(ORIGINAL, { ...dm, name: "Hilfe beim Kochen" })).toBe(ORIGINAL);
-        expect(tagsMark({ ...dm, parent_id: "f1", appliedTags: ["t1"] })).toBeNull();
+        expect(tag("Hilfe gesucht", "d1")).toBe("Hilfe gesucht");
         await settle();
         expect(surfaceCalls()).toEqual([]);
     });
@@ -469,19 +474,19 @@ describe("channel-level text follows the message rules of its channel", () => {
         return {
             parsers: ["topic", "topic-truncated", "voice-status", "guidelines", "event"]
                 .map(p => parsed(p, "Hier wird geplaudert", { channelId })),
-            thread: P.threadTitleChildren(ORIGINAL, "Wie repariere ich mein Fahrrad?", channel),
-            stage: P.stageTopicChildren(ORIGINAL, "Wir reden über Bücher", channel),
+            thread: P.threadTitleChildren("Wie repariere ich mein Fahrrad?", channel),
+            stage: P.stageTopicChildren("Wir reden über Bücher", channel),
             forum: P.forumTitleChildren(ORIGINAL, { ...channel, name: "Hilfe beim Kochen" }),
-            tags: tagsMark(channel)
+            tags: tag("Hilfe gesucht", channelId)
         };
     }
 
     function expectUntouched(r: ReturnType<typeof channelLevel>) {
         for (const out of r.parsers) expect(out).toEqual(["<Hier wird geplaudert>"]);
-        expect(r.thread).toBe(ORIGINAL);
-        expect(r.stage).toBe(ORIGINAL);
+        expect(r.thread).toBe("Wie repariere ich mein Fahrrad?");
+        expect(r.stage).toBe("Wir reden über Bücher");
         expect(r.forum).toBe(ORIGINAL);
-        expect(r.tags).toBeNull();
+        expect(r.tags).toBe("Hilfe gesucht");
     }
 
     it("a server channel switched off here gets no topic, status, title or tag translation", async () => {
@@ -496,8 +501,10 @@ describe("channel-level text follows the message rules of its channel", () => {
         expectUntouched(channelLevel("plain1"));
         await toggleChannel("on1");
         const on = channelLevel("on1");
-        expect(on.parsers[1]).not.toEqual(["<Hier wird geplaudert>"]);
-        expect(on.thread).not.toBe(ORIGINAL);
+        // Allowed: the patch hands back our in-place component (Discord's
+        // text shows until ✦ lands), not Discord's value itself.
+        expect(on.thread).not.toBe("Wie repariere ich mein Fahrrad?");
+        expect(on.parsers[0]).not.toEqual(["<Hier wird geplaudert>"]);
     });
 
     it("an event with no channel follows the server rule; one with a channel follows that channel", async () => {
@@ -600,9 +607,9 @@ describe("budget and priority: messages always come first", () => {
         accessory(embedMessage());
         await settle();
         expect(times.filter(t => t.surface && t.engine === "relay")).toEqual([]);
-        // Roomy lines fall back to ≈; tight marks show nothing.
+        // Roomy lines fall back to ≈; tight places keep Discord's original.
         expect(text(accessory(embedMessage()))).toContain("≈ de · google: Neue Pizzeria in der Stadt");
-        expect(decorator("u1")).toBeNull();
+        expect(decorator("u1")).toBe("Bin gleich zurück, muss kochen");
 
         __stubSetSelectedChannel("c1");
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: { id: "live2", channel_id: "c1", content: "hola, ¿qué tal estáis todos?", author: { id: "u2", username: "ana" } } });
@@ -642,94 +649,71 @@ describe("budget and priority: messages always come first", () => {
 });
 
 describe("the reply bar", () => {
-    const bar = (quoted: any, extra: Record<string, unknown> = {}) =>
-        deep(P.renderReplyBarMark({ referencedMessage: { state: 0, message: quoted }, baseMessage: { id: "b1" }, ...extra }));
-    const quoted = (id: string, channelId = "c1", content = "Kommst du heute Abend zum Essen?") => ({ id, channel_id: channelId, content });
+    const props = (quoted: any, extra: Record<string, unknown> = {}) =>
+        ({ referencedMessage: { state: 0, message: quoted }, baseMessage: { id: "b1" }, ...extra });
+    const bar = (quoted: any, extra: Record<string, unknown> = {}) => deep(P.replyQuoteChildren(ORIGINAL, props(quoted, extra)));
+    const quoted = (id: string, channelId = "c1", content = "Kommst du heute Abend zum Essen?", more: Record<string, unknown> = {}) =>
+        ({ id, channel_id: channelId, content, ...more });
 
-    it("a non-paid install gets nothing added to Discord's reply bar", async () => {
-        expect(P.renderReplyBarMark({ referencedMessage: { message: quoted("q1") } })).toBeNull();
+    it("a non-paid install gets Discord's quoted line back, the very same value", async () => {
+        expect(P.replyQuoteChildren(ORIGINAL, props(quoted("q1")))).toBe(ORIGINAL);
         await settle();
         expect(surfaceCalls()).toEqual([]);
     });
 
-    it("reuses the quoted message's translation: a ✦ at the end of the bar, the translation in its tooltip, nothing sent", async () => {
+    it("reuses the quoted message's translation, in place of the quoted line, original in the tooltip; nothing sent", async () => {
         paid();
         setTranslation(makeKey("q1", "en"), { lang: "de", text: "Are you coming to dinner tonight?", via: "relay" });
-        const mark = bar(quoted("q1"));
-        expect(mark.type).toBe("span");
-        expect(text(mark)).toBe("✦");
-        expect(findTitle(mark)).toBe("Reply (✦ de): Are you coming to dinner tonight?");
+        expectInPlace(bar(quoted("q1")), "Kommst du heute Abend zum Essen?", "Are you coming to dinner tonight?");
         await settle();
         expect(surfaceCalls()).toEqual([]);
     });
 
-    it("with no cached translation, asks for one (✦ only) when the quoted channel translates messages", async () => {
+    it("with no cached translation, shows Discord's line and asks (✦ only) when the quoted channel translates messages", async () => {
         paid();
-        expect(bar(quoted("q2"))).toBeNull();
+        expect(bar(quoted("q2"))).toEqual(ORIGINAL);
         await settle();
         expect(surfaceCalls("google")).toEqual([]);
-        expect(findTitle(bar(quoted("q2")))).toBe("Reply (✦ de): sharp: Kommst du heute Abend zum Essen?");
+        expectInPlace(bar(quoted("q2")), "Kommst du heute Abend zum Essen?", "sharp: Kommst du heute Abend zum Essen?");
     });
 
     it("never asks for a quoted message from a DM that is not turned on, or a switched-off channel", async () => {
         paid();
         __stubMarkAsDm("d1");
         await toggleChannelOptOut("off9");
-        expect(bar(quoted("q3", "d1"))).toBeNull();
-        expect(bar(quoted("q4", "off9"))).toBeNull();
+        expect(bar(quoted("q3", "d1"))).toEqual(ORIGINAL);
+        expect(bar(quoted("q4", "off9"))).toEqual(ORIGINAL);
         await settle();
         expect(surfaceCalls()).toEqual([]);
     });
 
-    it("shows nothing for a quoted message already in the reader's language", () => {
+    it("keeps Discord's line for a quoted message already in the reader's language", () => {
         paid();
         setTranslation(makeKey("q5", "en"), { skipped: true, via: "relay" });
-        expect(bar(quoted("q5"))).toBeNull();
+        expect(bar(quoted("q5"))).toEqual(ORIGINAL);
     });
-});
 
-describe("the reply bar hides what Discord hides", () => {
-    const bar = (quoted: any, extra: Record<string, unknown> = {}) =>
-        deep(P.renderReplyBarMark({ referencedMessage: { state: 0, message: quoted }, baseMessage: { id: "b1" }, ...extra }));
-    const quoted = (id: string, more: Record<string, unknown> = {}) =>
-        ({ id, channel_id: "c1", content: "Kommst du heute Abend zum Essen?", ...more });
-
-    beforeEach(() => {
+    it("blocked, ignored and suspended authors: Discord's own line, the same value, and nothing sent", async () => {
         paid();
         setTranslation(makeKey("q1", "en"), { lang: "de", text: "Are you coming to dinner tonight?", via: "relay" });
-    });
-
-    it("a blocked author: nothing shown, nothing sent", async () => {
-        expect(bar(quoted("q1"), { isReplyAuthorBlocked: true })).toBeNull();
-        expect(bar(quoted("q7"), { isReplyAuthorBlocked: true })).toBeNull();
+        expect(P.replyQuoteChildren(ORIGINAL, props(quoted("q1"), { isReplyAuthorBlocked: true }))).toBe(ORIGINAL);
+        expect(P.replyQuoteChildren(ORIGINAL, props(quoted("q7"), { isReplyAuthorIgnored: true }))).toBe(ORIGINAL);
+        expect(P.replyQuoteChildren(ORIGINAL, props(quoted("q1", "c1", "Kommst du?", { hasFlag: (f: number) => f === 1 << 17 })))).toBe(ORIGINAL);
+        expect(P.replyQuoteChildren(ORIGINAL, props(quoted("q7", "c1", "Kommst du?", { flags: (1 << 17) | 4 })))).toBe(ORIGINAL);
         await settle();
         expect(surfaceCalls()).toEqual([]);
-    });
-
-    it("an ignored author: nothing shown, nothing sent", async () => {
-        expect(bar(quoted("q1"), { isReplyAuthorIgnored: true })).toBeNull();
-        expect(bar(quoted("q7"), { isReplyAuthorIgnored: true })).toBeNull();
-        await settle();
-        expect(surfaceCalls()).toEqual([]);
-    });
-
-    it("a suspended user's hidden message (flag 1 << 17, by hasFlag or by flags): nothing shown, nothing sent", async () => {
-        expect(bar(quoted("q1", { hasFlag: (f: number) => f === 1 << 17 }))).toBeNull();
-        expect(bar(quoted("q7", { flags: (1 << 17) | 4 }))).toBeNull();
-        await settle();
-        expect(surfaceCalls()).toEqual([]);
-        // The same message without the flag does show.
-        expect(findTitle(bar(quoted("q1", { hasFlag: () => false })))).toBe("Reply (✦ de): Are you coming to dinner tonight?");
+        // The same message without the flag is translated.
+        expectInPlace(bar(quoted("q1", "c1", "Kommst du heute Abend zum Essen?", { hasFlag: () => false })), "Kommst du heute Abend zum Essen?", "Are you coming to dinner tonight?");
     });
 
     it("a quoted message in the loaded message list is left to the message pipeline: no surface request", async () => {
+        paid();
         stubMessages.set("c1", [{ id: "q8", channel_id: "c1", content: "Wo treffen wir uns morgen früh?" }]);
-        expect(bar({ id: "q8", channel_id: "c1", content: "Wo treffen wir uns morgen früh?" })).toBeNull();
+        expect(bar(quoted("q8", "c1", "Wo treffen wir uns morgen früh?"))).toEqual(ORIGINAL);
         await settle();
         expect(surfaceCalls()).toEqual([]);
-        // Its translation shows once the pipeline has one.
         setTranslation(makeKey("q8", "en"), { lang: "de", text: "Where do we meet tomorrow morning?", via: "relay" });
-        expect(findTitle(bar({ id: "q8", channel_id: "c1", content: "Wo treffen wir uns morgen früh?" }))).toBe("Reply (✦ de): Where do we meet tomorrow morning?");
+        expectInPlace(bar(quoted("q8", "c1", "Wo treffen wir uns morgen früh?")), "Wo treffen wir uns morgen früh?", "Where do we meet tomorrow morning?");
     });
 });
 
@@ -741,17 +725,24 @@ describe("the custom status bubble", () => {
         expect(P.statusBubbleChildren(undefined)).toBeUndefined();
     });
 
-    it("paid: the text keeps its place, with a small ✦ after it and the translation as its tooltip, bio or not", async () => {
+    it("paid: the original text, then a second smaller line \"✦ translation\" inside the bubble, bio or not", async () => {
         paid();
         stubProfiles.set("u1", { bio: "Ich liebe Pizza" });
-        expect(deep(P.statusBubbleChildren(status))).toBe(status);
+        expect(P.statusBubbleChildren(status)).toBe(status);
         await settle();
-        const out = deep(P.statusBubbleChildren(status));
-        expect(out.type).toBe("span");
-        expect(out.props.title).toBe(`Status (✦ de): sharp: ${status}`);
-        expect(out.children[0]).toBe(status);
-        expect(text(out.children[1])).toBe("✦");
+        const out = P.statusBubbleChildren(status);
+        expect(out[0]).toBe(status);
+        const line = out[1];
+        expect(line.type).toBe("div");
+        expect(line.props.style).toMatchObject({ whiteSpace: "normal", overflowWrap: "anywhere" });
+        expect(text(line)).toBe("✦ sharp: " + status);
         // ✦ only: no ≈ request for the bubble.
         expect(surfaceCalls("google")).toEqual([]);
+    });
+
+    it("the bubble's re-measure hook returns a version number and never throws", () => {
+        expect(typeof P.useSurfaceVersion()).toBe("number");
+        plugin.stop!();
+        expect(typeof P.useSurfaceVersion()).toBe("number");
     });
 });

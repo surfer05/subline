@@ -8,7 +8,7 @@ import definePlugin, { PluginNative } from "@utils/types";
 import { relaunch } from "@utils/native";
 import {
     ChannelStore, FluxDispatcher, GuildMemberStore, GuildRoleStore, LocaleStore, MessageStore,
-    PresenceStore, React, SelectedChannelStore, Toasts, UserProfileStore, UserStore
+    React, SelectedChannelStore, Toasts, UserStore
 } from "@webpack/common";
 import type { Message } from "@vencord/discord-types";
 
@@ -51,12 +51,14 @@ import { createUpdateWatch, UPDATE_CHECK_INTERVAL_MS, type UpdateWatch } from ".
 import { SurfaceBudget } from "./surfaces/budget";
 import { SurfaceCache } from "./surfaces/cache";
 import {
-    appliedTagNames, customStatusText, messageSurfaceTexts, onboardingPromptTexts, replyReference,
+    messageSurfaceTexts, onboardingPromptTexts,
     type SurfaceKind, type SurfaceText
 } from "./surfaces/extract";
 import { SURFACE_PATCHES } from "./surfaces/patches";
 import { SurfaceService, type SurfaceOutcome, type SurfaceTier } from "./surfaces/service";
-import { currentSurfaceService, hintTitle, safe, setSurfaceService, SurfaceHint, SurfaceLines } from "./surfaces/ui";
+import {
+    safe, setSurfaceService, SurfaceLines, tightTranslation, TightSwap, TranslatedInPlace, useSurfaceVersion
+} from "./surfaces/ui";
 import { __resetWeeklyStats, closeWeekIfDue, countShown, loadWeeklyStats } from "./weeklyNote";
 
 const Native = VencordNative.pluginHelpers.VcTranslate as PluginNative<typeof import("./native")>;
@@ -3784,57 +3786,22 @@ function SurfaceAccessoryImpl({ message }: { message: Message; }) {
 
     // Reply previews are NOT here: a "Reply" line above the message's own
     // line read as the message's translation. The quoted message's
-    // translation is a ✦ on Discord's reply bar instead (renderReplyBarMark).
+    // translation is shown in place in Discord's reply bar instead
+    // (replyQuoteChildren).
     if (texts.length === 0) return null;
     return <SurfaceLines texts={texts} />;
 }
 const SurfaceAccessory = safe("message accessory", SurfaceAccessoryImpl, surfaceDebug);
 
-/** A user's custom status, as a tight ✦ in a member-list or DM-list row. */
-function StatusHintImpl({ userId }: { userId?: string; }) {
-    if (!isPaidSurfaceUser() || typeof userId !== "string") return null;
-    const status = customStatusText(PresenceStore?.getActivities?.(userId));
-    if (status === "") return null;
-    return <SurfaceHint texts={[{ kind: "status", label: "Status", text: status }]} />;
-}
-const StatusHint = safe("status hint", StatusHintImpl, surfaceDebug);
-
-/** A user's bio, from the guild profile when there is one, else the user profile. */
-function bioOf(userId: string, guildId: string | undefined): string {
-    const bio = (guildId ? UserProfileStore?.getGuildMemberProfile?.(userId, guildId)?.bio : undefined)
-        || UserProfileStore?.getUserProfile?.(userId)?.bio;
-    return typeof bio === "string" ? bio : "";
-}
-
 /**
- * A user's custom status as a tight ✦ in the profile's name row (popout,
- * full profile, DM side profile), but only when they have no bio: with a
- * bio, the status is translated in the line under the bio instead.
+ * The line under a profile's About Me: the bio's translation. (The custom
+ * status has its own line inside its bubble, see statusBubbleChildren.)
  */
-function ProfileHintImpl(props: any) {
-    if (!isPaidSurfaceUser()) return null;
-    const userId = props?.user?.id;
-    if (typeof userId !== "string") return null;
-    const guildId = typeof props?.guildId === "string" ? props.guildId : undefined;
-    if (bioOf(userId, guildId).trim() !== "") return null;
-    const status = customStatusText(PresenceStore?.getActivities?.(userId));
-    if (status === "") return null;
-    return <SurfaceHint texts={[{ kind: "status", label: "Status", text: status }]} />;
-}
-const ProfileHint = safe("profile hint", ProfileHintImpl, surfaceDebug);
-
-/** The line under a profile's About Me: the bio, then the custom status. */
 function BioLineImpl(props: any) {
     if (!isPaidSurfaceUser()) return null;
-    const userId = props?.userId;
     const bio = props?.userBio;
     if (typeof bio !== "string" || bio.trim() === "") return null;
-    const texts: SurfaceText[] = [{ kind: "bio", label: "About me", text: bio }];
-    if (typeof userId === "string") {
-        const status = customStatusText(PresenceStore?.getActivities?.(userId));
-        if (status !== "") texts.push({ kind: "status", label: "Status", text: status });
-    }
-    return <SurfaceLines texts={texts} />;
+    return <SurfaceLines texts={[{ kind: "bio", label: "About me", text: bio }]} />;
 }
 const BioLine = safe("bio line", BioLineImpl, surfaceDebug);
 
@@ -3892,8 +3859,10 @@ function parserStateAllowed(parser: string, state: unknown): boolean {
 
 /**
  * What a wrapped Discord parser returns: its own output untouched, plus, for
- * a paid install and a foreign text in a server, a small line after it or a
- * tight ✦ before it. Anything else returns Discord's output exactly as made.
+ * a paid install and a foreign text in a channel that translates messages, a
+ * small line after it (roomy) or the translation in its place once ✦ has it
+ * (tight: the header topic, voice status). Anything else returns Discord's
+ * output exactly as made.
  */
 export function decorateParsed(parser: string, args: unknown[], out: unknown): unknown {
     try {
@@ -3904,7 +3873,7 @@ export function decorateParsed(parser: string, args: unknown[], out: unknown): u
         if (spec.guildOnly && !parserStateAllowed(parser, args[2])) return out;
         const texts: SurfaceText[] = [{ kind: spec.kind, label: spec.label, text: source }];
         return spec.tight
-            ? [<SurfaceHint key="subline-surface" texts={texts} before />, out]
+            ? <TightSwap key="subline-surface" original={out} text={source} />
             : [out, <SurfaceLines key="subline-surface" texts={texts} />];
     } catch {
         return out;
@@ -3923,77 +3892,52 @@ function wrapParser(parser: string, fn: unknown): unknown {
     };
 }
 
-/** A tight ✦ for one text (a thread title, a stage topic). */
-function SurfaceMarkImpl({ kind, text }: { kind: SurfaceKind; text: unknown; }) {
-    if (!isPaidSurfaceUser() || typeof text !== "string" || text.trim() === "") return null;
-    const label = kind === "stage-topic" ? "Stage topic" : kind === "thread-title" ? "Title" : "Text";
-    return <SurfaceHint texts={[{ kind, label, text }]} before />;
-}
-const SurfaceMark = safe("surface mark", SurfaceMarkImpl, surfaceDebug);
-
 /**
- * THE ORIGINAL CHILD, UNTOUCHED, unless this is a paid install in a server
- * channel. Every patch that sits inside Discord's own element goes through
- * this, so for everyone else the element, its aria-label and its tooltip
- * are exactly Discord's. When it does apply, the mark sits BESIDE Discord's
- * element (never inside it), so Discord's own label and tooltip still read
- * the original text.
+ * THE ORIGINAL CHILD, UNTOUCHED, unless this is a paid install and the text's
+ * channel translates messages. Then Discord's child stays until ✦ has the
+ * text, and the translation takes its place ("✦ ...", the original in the
+ * tooltip). It sits inside Discord's own element, so it keeps Discord's
+ * styling and truncation.
  */
-function withLeadingMark<T>(original: T, kind: SurfaceKind, text: unknown, channel: unknown): T | unknown {
+function tightChildren(original: unknown, text: unknown, channel: unknown): unknown {
     try {
         if (!isPaidSurfaceUser() || !channelTextAllowed(channel) || typeof text !== "string" || text.trim() === "") return original;
-        // One flex row: the mark keeps its size, Discord's element takes the
-        // rest and can still shrink and truncate with its own ellipsis.
-        // (A bare [mark, element] put the mark on a line of its own, above a
-        // block-level element inside a no-wrap row.)
-        return (
-            <span key="subline-surface" style={LEADING_ROW_STYLE}>
-                <span style={{ flex: "0 0 auto", display: "inline-flex" }}><SurfaceMark kind={kind} text={text} /></span>
-                <span style={LEADING_ORIGINAL_STYLE}>{original as any}</span>
-            </span>
-        );
+        return <TightSwap key="subline-surface" original={original} text={text} />;
     } catch {
         return original;
     }
 }
 
-const LEADING_ROW_STYLE = { display: "flex", alignItems: "center", minWidth: 0, gap: 4 } as const;
-const LEADING_ORIGINAL_STYLE = { flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } as const;
-
 /**
- * The quoted message's translation, as a tight ✦ at the end of Discord's
- * reply bar. The message store's translation is reused when there is one
- * (never bought twice, never re-sent). Only when there is none, and the
- * quoted message's channel is one whose messages are translated, is it asked
- * for, as a ✦-only surface.
+ * The reply bar's quoted line, translated in place ("✦ ...", the original in
+ * the tooltip). The message store's translation is reused when there is one
+ * (never bought twice). Only when there is none, the quoted message is not in
+ * its channel's loaded list (the message pipeline has it), and its channel
+ * translates messages, is it asked for, as a ✦-only surface. Until then, and
+ * for anything Discord hides, Discord's own quoted line.
  */
-function ReplyBarMarkImpl({ referenced, blocked, ignored }: { referenced: any; blocked?: unknown; ignored?: unknown; }) {
+function ReplyQuoteImpl({ original, referenced }: { original: unknown; referenced: any; }) {
     const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
     React.useEffect(() => subscribe(forceUpdate), []);
-    if (!isPaidSurfaceUser()) return null;
-    // Discord hides what a blocked or ignored author said, and what a
-    // suspended user said: nothing of it is shown or sent here either.
-    if (blocked === true || ignored === true) return null;
+    const fallback = (original ?? null) as any;
     const quoted = referenced?.message;
-    if (isHiddenSuspended(quoted)) return null;
     const content = typeof quoted?.content === "string" ? quoted.content : "";
     const channelId = quoted?.channel_id;
-    if (typeof quoted?.id !== "string" || typeof channelId !== "string" || content.trim() === "") return null;
+    if (typeof quoted?.id !== "string" || typeof channelId !== "string" || content.trim() === "") return fallback;
     const existing = getTranslation(makeKey(quoted.id, settings.store.targetLang));
-    if (existing !== undefined && "skipped" in existing) return null;
+    if (existing !== undefined && "skipped" in existing) return fallback;
     if (isRealTranslation(existing)) {
         const glyph = ENGINE_PROVENANCE[existing.via].glyph;
-        const title = `Reply (${glyph} ${existing.lang}): ${existing.text.trim()}`;
         return (
-            <span style={REPLY_MARK_STYLE} title={title} aria-label={title} data-subline-surface="reply">{glyph}</span>
+            <span title={content} data-subline-surface="in-place">
+                <span style={{ opacity: 0.75 }}>{glyph} </span>{existing.text.trim()}
+            </span>
         );
     }
-    if (!channelActive(channelId)) return null;
-    // Loaded in its channel's message list: the message pipeline translates
-    // it, and its translation shows here once it lands. Never bought twice.
-    if (isLoadedInChannel(channelId, quoted.id)) return null;
-    return <SurfaceHint texts={[{ kind: "reply", label: "Reply", text: readableContent(content, channelId) }]} />;
+    if (!channelActive(channelId) || isLoadedInChannel(channelId, quoted.id)) return fallback;
+    return <TightSwap original={original} text={readableContent(content, channelId)} />;
 }
+const ReplyQuote = safe("reply quote", ReplyQuoteImpl, surfaceDebug);
 
 /** Discord's MessageFlags.HIDDEN_SUSPENDED_USER (1 << 17), checked the way Discord checks it. */
 const HIDDEN_SUSPENDED_USER = 1 << 17;
@@ -4019,37 +3963,11 @@ function isLoadedInChannel(channelId: string, messageId: string): boolean {
         return false;
     }
 }
-const ReplyBarMark = safe("reply bar mark", ReplyBarMarkImpl, surfaceDebug);
-const REPLY_MARK_STYLE = { fontSize: "0.75rem", color: "var(--text-muted)", marginLeft: "4px", cursor: "default", lineHeight: 1, flex: "0 0 auto" } as const;
 
-/**
- * A custom status bubble's text, plus a small ✦ after it, with the
- * translation as the hover tooltip over the whole text. Shows whether or not
- * the user has a bio.
- */
-function StatusBubbleTextImpl({ text }: { text: string; }) {
-    const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
-    React.useEffect(() => currentSurfaceService()?.subscribe(forceUpdate), []);
-    const title = hintTitle([{ kind: "status", label: "Status", text }]);
-    if (title === null) return text;
-    return (
-        <span title={title} data-subline-surface="status-bubble">
-            {text}
-            <span style={REPLY_MARK_STYLE} aria-label={title}>✦</span>
-        </span>
-    );
-}
-const StatusBubbleText = safe("status bubble", StatusBubbleTextImpl, surfaceDebug);
-
-/** A tight ✦ at the end of a forum post's tag row, for its tags' names. */
-function ForumTagsMarkImpl({ channel }: { channel: any; }) {
-    if (!isPaidSurfaceUser() || !channelTextAllowed(channel)) return null;
-    const parent = channel.parent_id ? ChannelStore.getChannel(channel.parent_id) : null;
-    const names = appliedTagNames(channel, parent);
-    if (names.length === 0) return null;
-    return <SurfaceHint texts={names.map(name => ({ kind: "forum-tag" as const, label: "Tag", text: name }))} />;
-}
-const ForumTagsMark = safe("forum tags mark", ForumTagsMarkImpl, surfaceDebug);
+const BUBBLE_LINE_STYLE = {
+    fontSize: "0.85em", color: "var(--text-muted)", marginTop: 2,
+    whiteSpace: "normal", overflowWrap: "anywhere"
+} as const;
 
 /** Lines under an onboarding question: the question and its options. */
 function OnboardingLinesImpl({ prompt }: { prompt: unknown; }) {
@@ -4071,11 +3989,6 @@ export default definePlugin({
         <TranslationAccessory message={props.message} />
     ),
 
-    // Custom status in the member list and the DM list: a tight ✦ with a
-    // tooltip, next to the name. Vencord's MemberListDecorators API (one
-    // ErrorBoundary per decorator); a missing slot shows nothing.
-    renderMemberListDecorator: props => <StatusHint userId={props?.user?.id} />,
-
     /*
      * Where Discord shows text outside messages. See surfaces/patches.ts:
      * every find and match there was checked against Discord's current
@@ -4087,15 +4000,24 @@ export default definePlugin({
     // For anyone who is not a paid install each returns exactly what Discord
     // would have had there: null where the patch appends a child, and the
     // original child where it wraps one.
-    renderProfileSurface: (props: any) => isPaidSurfaceUser() ? <ProfileHint {...(props ?? {})} /> : null,
     renderBioLine: (props: any) => isPaidSurfaceUser() ? <BioLine {...(props ?? {})} /> : null,
-    renderForumTagsMark: (channel: unknown) => isPaidSurfaceUser() ? <ForumTagsMark channel={channel} /> : null,
-    stageTopicChildren: (original: unknown, topic: unknown, channel: unknown) =>
-        withLeadingMark(original, "stage-topic", topic, channel),
-    threadTitleChildren: (original: unknown, title: unknown, thread: unknown) =>
-        withLeadingMark(original, "thread-title", title, thread),
-    forumTitleChildren: (original: unknown, channel: any) =>
-        withLeadingMark(original, "thread-title", channel?.name, channel),
+    stageTopicChildren: (topic: unknown, channel: unknown) => tightChildren(topic, topic, channel),
+    threadTitleChildren: (title: unknown, thread: unknown) => tightChildren(title, title, thread),
+    forumTitleChildren: (original: unknown, channel: any) => tightChildren(original, channel?.name, channel),
+    // A tag pill knows its tag, not its channel: it follows the rule of the
+    // channel being viewed (the forum, or a post in it).
+    forumTagChildren: (name: unknown) =>
+        tightChildren(name, name, ChannelStore.getChannel(SelectedChannelStore.getChannelId() ?? "")),
+    // Member list and DM list: the custom status text (user-level, allowed
+    // wherever it is shown).
+    statusTextChildren: (original: unknown, text: unknown) => {
+        try {
+            if (!isPaidSurfaceUser() || typeof text !== "string" || text.trim() === "") return original;
+            return <TightSwap key="subline-surface" original={original} text={text} />;
+        } catch {
+            return original;
+        }
+    },
     onboardingHeading: (heading: unknown, prompt: unknown) => {
         try {
             if (!isPaidSurfaceUser()) return heading;
@@ -4104,18 +4026,32 @@ export default definePlugin({
             return heading;
         }
     },
-    // Paid only; Discord's own string otherwise.
+    // The profile's custom status bubble: the original text, then its ✦
+    // translation as a second, smaller line inside the same bubble. The
+    // bubble re-measures its height when it lands (useSurfaceVersion).
     statusBubbleChildren: (text: unknown) => {
         try {
             if (!isPaidSurfaceUser() || typeof text !== "string" || text.trim() === "") return text;
-            return <StatusBubbleText key="subline-surface" text={text} />;
+            const t = tightTranslation(text);
+            if (t === null) return text;
+            return [text, <div key="subline-surface" style={BUBBLE_LINE_STYLE} data-subline-surface="status-bubble">✦ {t.text}</div>];
         } catch {
             return text;
         }
     },
-    renderReplyBarMark: (props: any) => isPaidSurfaceUser()
-        ? <ReplyBarMark referenced={props?.referencedMessage} blocked={props?.isReplyAuthorBlocked} ignored={props?.isReplyAuthorIgnored} />
-        : null,
+    useSurfaceVersion,
+    // The reply bar's quoted line. Nothing for a blocked, ignored or
+    // suspended author: Discord's own line, and nothing is sent.
+    replyQuoteChildren: (original: unknown, props: any) => {
+        try {
+            if (original == null || !isPaidSurfaceUser()) return original;
+            if (props?.isReplyAuthorBlocked === true || props?.isReplyAuthorIgnored === true) return original;
+            if (isHiddenSuspended(props?.referencedMessage?.message)) return original;
+            return <ReplyQuote original={original} referenced={props?.referencedMessage} />;
+        } catch {
+            return original;
+        }
+    },
     wrapParser,
 
     // Declarative — unlike the force-quality popover above, this is the ONLY

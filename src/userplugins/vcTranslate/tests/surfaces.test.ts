@@ -8,7 +8,7 @@ import {
     replyReference
 } from "../surfaces/extract";
 import { SurfaceService, type SurfaceOutcome, type SurfaceTier } from "../surfaces/service";
-import { displayFor, hintTitle, safe, setSurfaceService, SurfaceHint, SurfaceLines } from "../surfaces/ui";
+import { displayFor, safe, setSurfaceService, SurfaceLines, TightSwap } from "../surfaces/ui";
 
 /* ------------------------------------------------------------ harness --- */
 
@@ -321,17 +321,34 @@ describe("surface rendering", () => {
         expect(out).toContain("Q:Titel des Artikels");
     });
 
-    it("the tight form is a single inline mark with the translation in its tooltip", async () => {
-        const { service, c } = setup();
+    it("the tight form shows Discord's original until ✦ lands, then \"✦ translation\" in its place, the original as its tooltip", async () => {
+        const { service, c, calls } = setup();
         setSurfaceService(service);
-        const texts = [{ kind: "status" as const, label: "Status", text: "Bin müde" }];
-        expect(SurfaceHint({ texts })).toBeNull();
+        const original = { type: "discord", props: {}, children: [] };
+        // Pending: Discord's own child, the very same value.
+        expect(TightSwap({ original, text: "Bin müde" })).toBe(original);
         await c.advance(2_000);
-        const el: any = SurfaceHint({ texts });
-        expect(el.type).toBe("span");
-        expect(text(el)).toBe("✦");
-        expect(el.props.title).toBe("Status (✦ de): Q:Bin müde");
-        expect(hintTitle([])).toBeNull();
+        // ✦ only: Google is never asked for a tight place.
+        expect(calls.map(x => x.tier)).toEqual(["quality"]);
+        const el: any = TightSwap({ original, text: "Bin müde" });
+        const shown: any = el.type(el.props);
+        expect(shown.props.title).toBe("Bin müde");
+        expect(text(shown)).toBe("✦ Q:Bin müde");
+    });
+
+    it("a skipped or failed tight text keeps Discord's original", async () => {
+        const skip = setup({ translate: async (_t, texts) => texts.map(() => "skip" as const) });
+        setSurfaceService(skip.service);
+        const original = "Hallo";
+        TightSwap({ original, text: "Wir sehen uns morgen" });
+        await skip.c.advance(5_000);
+        expect(TightSwap({ original, text: "Wir sehen uns morgen" })).toBe(original);
+
+        const fail = setup({ translate: async (_t, texts) => texts.map(() => "fail" as const) });
+        setSurfaceService(fail.service);
+        TightSwap({ original, text: "Wir sehen uns morgen" });
+        await fail.c.advance(5_000);
+        expect(TightSwap({ original, text: "Wir sehen uns morgen" })).toBe(original);
     });
 
     it("a throwing surface renders nothing and never breaks the tree", () => {
