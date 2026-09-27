@@ -24,7 +24,7 @@ import { accessories } from "./stubs/api-messageaccessories";
 import { __reset as __resetMessagePopover } from "./stubs/api-messagepopover";
 import { __resetSettings } from "./stubs/api-settings";
 import {
-    __resetWebpackCommon, __stubMarkAsDm, __stubSetChannel, __stubSetSelectedChannel, FluxDispatcher, PresenceStore, shownToasts, stubActivities, stubMessageById, stubProfiles
+    __resetWebpackCommon, __stubMarkAsDm, __stubSetChannel, __stubSetSelectedChannel, FluxDispatcher, stubMessages, PresenceStore, shownToasts, stubActivities, stubMessageById, stubProfiles
 } from "./stubs/webpack-common";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -642,7 +642,8 @@ describe("budget and priority: messages always come first", () => {
 });
 
 describe("the reply bar", () => {
-    const bar = (quoted: any) => deep(P.renderReplyBarMark({ referencedMessage: { state: 0, message: quoted }, baseMessage: { id: "b1" } }));
+    const bar = (quoted: any, extra: Record<string, unknown> = {}) =>
+        deep(P.renderReplyBarMark({ referencedMessage: { state: 0, message: quoted }, baseMessage: { id: "b1" }, ...extra }));
     const quoted = (id: string, channelId = "c1", content = "Kommst du heute Abend zum Essen?") => ({ id, channel_id: channelId, content });
 
     it("a non-paid install gets nothing added to Discord's reply bar", async () => {
@@ -687,6 +688,51 @@ describe("the reply bar", () => {
     });
 });
 
+describe("the reply bar hides what Discord hides", () => {
+    const bar = (quoted: any, extra: Record<string, unknown> = {}) =>
+        deep(P.renderReplyBarMark({ referencedMessage: { state: 0, message: quoted }, baseMessage: { id: "b1" }, ...extra }));
+    const quoted = (id: string, more: Record<string, unknown> = {}) =>
+        ({ id, channel_id: "c1", content: "Kommst du heute Abend zum Essen?", ...more });
+
+    beforeEach(() => {
+        paid();
+        setTranslation(makeKey("q1", "en"), { lang: "de", text: "Are you coming to dinner tonight?", via: "relay" });
+    });
+
+    it("a blocked author: nothing shown, nothing sent", async () => {
+        expect(bar(quoted("q1"), { isReplyAuthorBlocked: true })).toBeNull();
+        expect(bar(quoted("q7"), { isReplyAuthorBlocked: true })).toBeNull();
+        await settle();
+        expect(surfaceCalls()).toEqual([]);
+    });
+
+    it("an ignored author: nothing shown, nothing sent", async () => {
+        expect(bar(quoted("q1"), { isReplyAuthorIgnored: true })).toBeNull();
+        expect(bar(quoted("q7"), { isReplyAuthorIgnored: true })).toBeNull();
+        await settle();
+        expect(surfaceCalls()).toEqual([]);
+    });
+
+    it("a suspended user's hidden message (flag 1 << 17, by hasFlag or by flags): nothing shown, nothing sent", async () => {
+        expect(bar(quoted("q1", { hasFlag: (f: number) => f === 1 << 17 }))).toBeNull();
+        expect(bar(quoted("q7", { flags: (1 << 17) | 4 }))).toBeNull();
+        await settle();
+        expect(surfaceCalls()).toEqual([]);
+        // The same message without the flag does show.
+        expect(findTitle(bar(quoted("q1", { hasFlag: () => false })))).toBe("Reply (✦ de): Are you coming to dinner tonight?");
+    });
+
+    it("a quoted message in the loaded message list is left to the message pipeline: no surface request", async () => {
+        stubMessages.set("c1", [{ id: "q8", channel_id: "c1", content: "Wo treffen wir uns morgen früh?" }]);
+        expect(bar({ id: "q8", channel_id: "c1", content: "Wo treffen wir uns morgen früh?" })).toBeNull();
+        await settle();
+        expect(surfaceCalls()).toEqual([]);
+        // Its translation shows once the pipeline has one.
+        setTranslation(makeKey("q8", "en"), { lang: "de", text: "Where do we meet tomorrow morning?", via: "relay" });
+        expect(findTitle(bar({ id: "q8", channel_id: "c1", content: "Wo treffen wir uns morgen früh?" }))).toBe("Reply (✦ de): Where do we meet tomorrow morning?");
+    });
+});
+
 describe("the custom status bubble", () => {
     const status = "Só sei que nada sei, mas gosto de aprender";
 
@@ -709,4 +755,3 @@ describe("the custom status bubble", () => {
         expect(surfaceCalls("google")).toEqual([]);
     });
 });
-

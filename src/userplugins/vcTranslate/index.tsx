@@ -3967,11 +3967,15 @@ const LEADING_ORIGINAL_STYLE = { flex: "1 1 auto", minWidth: 0, overflow: "hidde
  * quoted message's channel is one whose messages are translated, is it asked
  * for, as a ✦-only surface.
  */
-function ReplyBarMarkImpl({ referenced }: { referenced: any; }) {
+function ReplyBarMarkImpl({ referenced, blocked, ignored }: { referenced: any; blocked?: unknown; ignored?: unknown; }) {
     const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
     React.useEffect(() => subscribe(forceUpdate), []);
     if (!isPaidSurfaceUser()) return null;
+    // Discord hides what a blocked or ignored author said, and what a
+    // suspended user said: nothing of it is shown or sent here either.
+    if (blocked === true || ignored === true) return null;
     const quoted = referenced?.message;
+    if (isHiddenSuspended(quoted)) return null;
     const content = typeof quoted?.content === "string" ? quoted.content : "";
     const channelId = quoted?.channel_id;
     if (typeof quoted?.id !== "string" || typeof channelId !== "string" || content.trim() === "") return null;
@@ -3985,7 +3989,35 @@ function ReplyBarMarkImpl({ referenced }: { referenced: any; }) {
         );
     }
     if (!channelActive(channelId)) return null;
+    // Loaded in its channel's message list: the message pipeline translates
+    // it, and its translation shows here once it lands. Never bought twice.
+    if (isLoadedInChannel(channelId, quoted.id)) return null;
     return <SurfaceHint texts={[{ kind: "reply", label: "Reply", text: readableContent(content, channelId) }]} />;
+}
+
+/** Discord's MessageFlags.HIDDEN_SUSPENDED_USER (1 << 17), checked the way Discord checks it. */
+const HIDDEN_SUSPENDED_USER = 1 << 17;
+
+function isHiddenSuspended(message: any): boolean {
+    try {
+        if (typeof message?.hasFlag === "function") return message.hasFlag(HIDDEN_SUSPENDED_USER) === true;
+        return typeof message?.flags === "number" && (message.flags & HIDDEN_SUSPENDED_USER) !== 0;
+    } catch {
+        return true;
+    }
+}
+
+/** Is this message in the currently loaded message list of its channel? */
+function isLoadedInChannel(channelId: string, messageId: string): boolean {
+    try {
+        const list: any = MessageStore.getMessages(channelId);
+        if (list == null) return false;
+        if (typeof list.has === "function") return list.has(messageId) === true;
+        const all: any[] = typeof list.toArray === "function" ? list.toArray() : [];
+        return all.some(m => m?.id === messageId);
+    } catch {
+        return false;
+    }
 }
 const ReplyBarMark = safe("reply bar mark", ReplyBarMarkImpl, surfaceDebug);
 const REPLY_MARK_STYLE = { fontSize: "0.75rem", color: "var(--text-muted)", marginLeft: "4px", cursor: "default", lineHeight: 1, flex: "0 0 auto" } as const;
@@ -4081,7 +4113,9 @@ export default definePlugin({
             return text;
         }
     },
-    renderReplyBarMark: (props: any) => isPaidSurfaceUser() ? <ReplyBarMark referenced={props?.referencedMessage} /> : null,
+    renderReplyBarMark: (props: any) => isPaidSurfaceUser()
+        ? <ReplyBarMark referenced={props?.referencedMessage} blocked={props?.isReplyAuthorBlocked} ignored={props?.isReplyAuthorIgnored} />
+        : null,
     wrapParser,
 
     // Declarative — unlike the force-quality popover above, this is the ONLY
