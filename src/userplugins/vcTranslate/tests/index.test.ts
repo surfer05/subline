@@ -4220,7 +4220,7 @@ describe("the debugLogging setting", () => {
             // of a press that would send nothing (upgradeCopy.ts).
             const sentBefore = native.translateBatch.mock.calls.length;
             const btn = forceButton(discordMessage("2", "que tal"))!;
-            expect(btn.label).toBe("Upgrade Subline ✦ (0 of 3 left today)");
+            expect(btn.label).toBe("Go automatic ✦ (0 of 3 left today)");
             btn.onClick!(undefined as any);
             for (let i = 0; i < 20; i++) await Promise.resolve();
 

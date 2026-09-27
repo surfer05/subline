@@ -6,7 +6,7 @@
  */
 export const UPGRADE_COPY = {
     panelTitle: "Upgrade Subline",
-    panelSubtitle: "Keep every message translated automatically, with ✦ AI.",
+    panelSubtitle: "Every message translated the moment it arrives, with ✦.",
     monthlyName: "Monthly",
     monthlyPrice: "$2.49 a month",
     annualName: "Annual",
@@ -14,12 +14,12 @@ export const UPGRADE_COPY = {
     annualNote: "4 months free",
     monthlyButton: "Monthly $2.49",
     annualButton: "Annual $19.99",
-    panelFootnote: "Checkout opens in your browser. Subline turns on here by itself when you finish.",
-    checkoutOpenedToast: "Checkout opened in your browser.",
-    purchasedToast: "Thanks for buying Subline. Automatic translation is on.",
+    panelFootnote: "Pay in your browser. Subline switches on here by itself.",
+    checkoutOpenedToast: "Finish checkout in your browser.",
+    purchasedToast: "You're on. Every message translates by itself now.",
     noticeButton: "Upgrade",
     /** Followed by today's count, e.g. "(0 of 3 left today)". */
-    popoverUpgrade: "Upgrade Subline ✦",
+    popoverUpgrade: "Go automatic ✦",
     settingsLink: "Upgrade",
     previewLink: "Upgrade"
 } as const;

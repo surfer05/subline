@@ -145,7 +145,7 @@ describe("buying from the panel", () => {
         expect(native.relayCheckout.mock.calls[0][0]).toMatch(/^free_[0-9a-f]{32}$/);
         expect(native.relayCheckout.mock.calls[0][1]).toBe("annual");
         expect(native.openExternal).toHaveBeenCalledWith(SESSION_URL);
-        expect(shownToasts.map(t => t.message)).toContain("Checkout opened in your browser.");
+        expect(shownToasts.map(t => t.message)).toContain("Finish checkout in your browser.");
     });
 
     it("opens the static link, tagged with the install hash, when the relay cannot", async () => {
@@ -179,7 +179,7 @@ describe("buying from the panel", () => {
         expect(native.relayStatus).toHaveBeenCalledWith(bearer);
         expect(settings.store.sublineCode).toBe("LK-BOUGHT");
         expect(settings.store.engine).toBe("relay");
-        expect(shownToasts.map(t => t.message)).toContain("Thanks for buying Subline. Automatic translation is on.");
+        expect(shownToasts.map(t => t.message)).toContain("You're on. Every message translates by itself now.");
 
         // The running session is paid now: a new message goes out on its own,
         // and the ✦ tier uses the saved key.

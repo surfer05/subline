@@ -126,7 +126,7 @@ describe("the settings line under the Subline code", () => {
 describe("the copy", () => {
     it("uses the agreed sentences, with no em dash", () => {
         expect(trialEndedMessage()).toBe(
-            "Your 7-day free trial ended. Messages now translate when you click. Upgrade to keep it automatic."
+            "Your free week is over. Messages now translate when you click them."
         );
         expect(PRICING_URL).toBe("https://surfer05.github.io/subline/#pricing");
         for (const s of [

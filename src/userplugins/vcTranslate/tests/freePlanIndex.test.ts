@@ -46,7 +46,7 @@ const msg = (id: string, content: string, authorId = "u1") => ({
 });
 
 /** The trial-ended notices raised (a notice bar with an Upgrade button, not a toast). */
-const endedNotices = () => shownNotices.filter(n => /trial ended/.test(String(n.message)));
+const endedNotices = () => shownNotices.filter(n => /free week is over/.test(String(n.message)));
 
 async function flush() {
     for (let i = 0; i < 30; i++) await Promise.resolve();
@@ -315,14 +315,14 @@ describe("after the trial: translate on click", () => {
         const ended = endedNotices();
         expect(ended).toHaveLength(1);
         expect(ended[0].message).toBe(
-            "Your 7-day free trial ended. Messages now translate when you click. Upgrade to keep it automatic."
+            "Your free week is over. Messages now translate when you click them."
         );
         expect(ended[0].message).not.toContain("http");
         expect(ended[0].buttonText).toBe("Upgrade");
         // Its button opens the Upgrade panel.
         ended[0].onOkClick();
         expect(openedModals).toHaveLength(1);
-        expect(shownToasts.filter(t => /trial ended/.test(t.message))).toHaveLength(0);
+        expect(shownToasts.filter(t => /free week is over/.test(t.message))).toHaveLength(0);
         expect(settings.store.freeTrialEndNoticeFor).toBeGreaterThan(0);
 
         // Never again, not even after a restart.
@@ -520,7 +520,7 @@ describe("the ✦ preview after a click on a rough line", () => {
         answer({ google: { lang: "ar", text: "I want to walk", conf: 1 } });
         await clickOn("1", ROMANIZED);
         expect(calls("relay")).toHaveLength(0);
-        expect(shownToasts.filter(t => !/trial ended/.test(t.message))).toHaveLength(0);
+        expect(shownToasts.filter(t => !/free week is over/.test(t.message))).toHaveLength(0);
         expect(text(render(msg("1", ROMANIZED)))).not.toContain("reads this as");
     });
 
@@ -532,7 +532,7 @@ describe("the ✦ preview after a click on a rough line", () => {
         await clickOn("1", ROMANIZED);
         await clickOn("2", ROMANIZED + " ghda");
         expect(calls("relay")).toHaveLength(1);
-        expect(shownToasts.filter(t => !/trial ended/.test(t.message))).toHaveLength(0);
+        expect(shownToasts.filter(t => !/free week is over/.test(t.message))).toHaveLength(0);
     });
 
     it("shows nothing when ✦ reads it the same as ≈", async () => {

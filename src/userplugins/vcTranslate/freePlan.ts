@@ -174,7 +174,7 @@ export function freePlanLine(isFree: boolean, localStartedAt: number, now: numbe
  * line carries the link instead.
  */
 export function trialEndedMessage(): string {
-    return "Your 7-day free trial ended. Messages now translate when you click. Upgrade to keep it automatic.";
+    return "Your free week is over. Messages now translate when you click them.";
 }
 
 /* ------------------------------------------------------------ preview -- */

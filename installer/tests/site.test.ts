@@ -83,7 +83,7 @@ describe("the built page", () => {
         expect(PAGE.indexOf('<section id="thanks"')).toBeLessThan(PAGE.indexOf('<section id="hero"'));
         const thanks = section("thanks");
         expect(thanks).toContain("data-thanks-copy");
-        expect(thanks).toContain("If you started from Discord, it is already on.");
+        expect(thanks).toContain("Bought from Discord? It's already on.");
         expect(thanks).toContain('data-dl="mac"');
         expect(thanks).toContain('data-dl="win"');
     });

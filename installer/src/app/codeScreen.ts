@@ -16,7 +16,7 @@
 
 export const CODE_SCREEN_COPY = {
     /** The line under the heading, before and after "I have a code". */
-    detail: "Try everything free for 7 days. No code needed.",
+    detail: "Everything is free for 7 days. No code needed.",
     /** The filled button. Same action as the old "Continue without a code". */
     startTrial: "Start free trial",
     /** The secondary button that reveals the paste field. Not a flow action. */
@@ -26,9 +26,7 @@ export const CODE_SCREEN_COPY = {
     fieldLabel: "Subline code",
     placeholder: "Paste your code here",
     /** Under the field, once revealed. Names the sender, because the email lands in spam. */
-    whereFrom: "Bought Subline? Your code is in the email from **Dodo Payments**, "
-        + "subject \"Your License Key is Ready\". **Check spam.** "
-        + "If a friend set you up, they sent it to you.",
+    whereFrom: "It's in your email from **Dodo Payments**. **Check spam.**",
     /** The link to Dodo's customer portal, shown only when the portal URL is known. */
     findCode: "Find my code"
 } as const;
