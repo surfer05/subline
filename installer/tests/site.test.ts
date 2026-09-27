@@ -121,4 +121,15 @@ describe("the built page", () => {
     it("has no em dashes", () => {
         expect(PAGE).not.toContain("—");
     });
+
+    it("says in the privacy table what a purchase from Discord sends and keeps", () => {
+        const rows = section("privacy").replace(/<span class="gl-inline">(.*?)<\/span>/g, "$1");
+        expect(rows).toContain("<tr><td>Free installs</td><td>A random id that times your 7 days. Your IP is counted to stop abuse. "
+            + "If you buy inside Discord, a scrambled form of this id goes to Dodo with the purchase, so Subline can switch on by itself.</td>"
+            + "<td>Daily counts for 2 days. First use for 90 days. The link to your purchase for 30 days.</td></tr>");
+        expect(rows).toContain("<tr><td>Your code</td><td>Unlocks ✦. The relay never sees your name or email.</td>");
+        for (const kept of ["<td>Messages</td>", "<td>Usernames</td>", "<td>Profiles and embeds</td>", "<td>Stats</td>"]) {
+            expect(rows).toContain(kept);
+        }
+    });
 });
