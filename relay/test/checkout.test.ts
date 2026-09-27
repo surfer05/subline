@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyMorEvent, type Env } from "../src/codes";
-import { COUPON_SUFFIX_ALPHABET, couponCode, installHash, linkFromKey, linkFromLifecycle, randomSuffix } from "../src/checkout";
+import { COUPON_SUFFIX_ALPHABET, couponCode, discordReturnUrl, installHash,linkFromKey, linkFromLifecycle, randomSuffix } from "../src/checkout";
 import { codeRec, fakeBudget, fakeKV } from "./kv-mock";
 import worker from "../src/index";
 
@@ -69,7 +69,7 @@ describe("POST /v1/checkout", () => {
         expect(hash).toMatch(/^[0-9a-f]{16}$/);
         expect(sent).toEqual({
             product_cart: [{ product_id: "pdt_year", quantity: 1 }],
-            return_url: "https://surfer05.github.io/subline/",
+            return_url: "https://surfer05.github.io/subline/?from=discord",
             feature_flags: { redirect_immediately: true },
             metadata: { install: hash }
         });
@@ -85,7 +85,14 @@ describe("POST /v1/checkout", () => {
         expect(calls[0]!.url).toBe("https://test.dodopayments.com/checkouts");
         const sent = JSON.parse(calls[0]!.init.body);
         expect(sent.product_cart[0].product_id).toBe("pdt_month");
-        expect(sent.return_url).toBe("https://x.test/");
+        expect(sent.return_url).toBe("https://x.test/?from=discord");
+    });
+
+    it("marks the return as from Discord, keeping any query the configured URL has", () => {
+        expect(discordReturnUrl(undefined)).toBe("https://surfer05.github.io/subline/?from=discord");
+        expect(discordReturnUrl("https://x.test/?a=1")).toBe("https://x.test/?a=1&from=discord");
+        expect(discordReturnUrl("https://x.test/?from=site")).toBe("https://x.test/?from=discord");
+        expect(discordReturnUrl("not a url")).toBe("https://surfer05.github.io/subline/?from=discord");
     });
 
     it("refuses anonymous or header-less checkout before any KV access or Dodo call", async () => {

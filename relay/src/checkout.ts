@@ -31,6 +31,20 @@ import { ipBucket, isNewClient, isTasteBearer, variantConfig, type CodeRecord, t
 export const DEFAULT_DODO_API_BASE = "https://live.dodopayments.com";
 export const DEFAULT_CHECKOUT_RETURN_URL = "https://surfer05.github.io/subline/";
 
+/**
+ * Where Dodo sends the buyer after paying. Every checkout this relay makes is
+ * started from Discord (it needs the install id), so the site is told so with
+ * `from=discord` and shows "go back to Discord" instead of the code and the
+ * downloads. Added with the URL API, so a CHECKOUT_RETURN_URL that already has
+ * a query keeps it. A malformed override falls back to the default.
+ */
+export function discordReturnUrl(configured: string | undefined): string {
+    let u: URL;
+    try { u = new URL(configured || DEFAULT_CHECKOUT_RETURN_URL); } catch { u = new URL(DEFAULT_CHECKOUT_RETURN_URL); }
+    u.searchParams.set("from", "discord");
+    return u.toString();
+}
+
 /** Session rows only need to outlive the session itself (24 h by default). */
 export const CHECKOUT_TTL_S = 2 * 86_400;
 /** Same lifetime as the webhook pending rows: bridges out-of-order delivery. */
@@ -125,7 +139,7 @@ export async function handleCheckout(req: Request, env: Env, now: number = Date.
 
     const payload: Record<string, unknown> = {
         product_cart: [{ product_id: productId, quantity: 1 }],
-        return_url: env.CHECKOUT_RETURN_URL || DEFAULT_CHECKOUT_RETURN_URL,
+        return_url: discordReturnUrl(env.CHECKOUT_RETURN_URL),
         feature_flags: { redirect_immediately: true },
         metadata: { install: hash }
     };

@@ -169,7 +169,7 @@ var (live or test, matching the key). Without the key `/v1/checkout` and
    access or Dodo call. There is no anonymous checkout. The relay
    creates a Dodo checkout session (`POST /checkouts`) for the VARIANTS product
    of that plan, with `metadata.install` = first 16 hex of SHA-256 of the
-   bearer (never the raw id), `return_url` = `CHECKOUT_RETURN_URL`, and
+   bearer (never the raw id), `return_url` = `CHECKOUT_RETURN_URL` plus `?from=discord` (so the site says "go back to Discord"), and
    `redirect_immediately`. It stores `checkout:<session_id>` → hash (2 days).
    Rate limits: 6 an hour per install, 20 an hour per IP.
 2. Webhooks, any order. `payment.*` / `subscription.*` carry the session

@@ -172,8 +172,12 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}"${HIDDEN_SECTIONS.h
     section.hidden = false;
     function part(name) { return section.querySelector("[data-thanks-" + name + "]"); }
     var ok = part("ok"), pending = part("pending"), failed = part("failed");
-    if (ok) ok.hidden = ret.state !== "ok";
-    if (pending) pending.hidden = ret.state !== "pending";
+    var dOk = part("discord"), dPending = part("discord-pending");
+    var d = ret.fromDiscord;
+    if (ok) ok.hidden = d || ret.state !== "ok";
+    if (pending) pending.hidden = d || ret.state !== "pending";
+    if (dOk) dOk.hidden = !d || ret.state !== "ok";
+    if (dPending) dPending.hidden = !d || ret.state !== "pending";
     if (failed) failed.hidden = ret.state !== "failed";
     var keysBox = part("keys"), row = part("key");
     if (keysBox && row) {
@@ -188,7 +192,11 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}"${HIDDEN_SECTIONS.h
       });
     }
     try {
-      if (location.search && history.replaceState) history.replaceState(null, "", location.pathname + "#thanks");
+      // A Discord return keeps "?from=discord" (no key in it), so a refresh
+      // still says "go back to Discord" rather than showing downloads.
+      if (location.search && history.replaceState) {
+        history.replaceState(null, "", location.pathname + (ret.fromDiscord ? "?from=discord" : "") + "#thanks");
+      }
     } catch (e) { /* the view still shows */ }
   })();
 

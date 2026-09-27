@@ -258,6 +258,16 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
   <h2 class="sec">Payment processing.</h2>
   <p class="lead">Your code arrives by email from <b>Dodo Payments</b> in a few minutes. <b>Check spam.</b></p>
 </div>
+<div data-thanks-discord hidden>
+  <p class="kicker">Thanks</p>
+  <h2 class="sec">You're all set.</h2>
+  <p class="lead">Go back to Discord. Subline is already on.</p>
+</div>
+<div data-thanks-discord-pending hidden>
+  <p class="kicker">Thanks</p>
+  <h2 class="sec">Payment is being confirmed.</h2>
+  <p class="lead">Subline switches on in Discord by itself, usually within a few minutes.</p>
+</div>
 <div data-thanks-failed hidden>
   <p class="kicker">Checkout</p>
   <h2 class="sec">Payment didn't go through.</h2>
@@ -417,25 +427,35 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
   // DOM, no network, so the build inlines it into the page and a node test runs
   // the very same text.
   //
-  // Dodo sends the buyer back to the site root and appends
+  // Dodo sends the buyer back to the return URL and appends
   // payment_id or subscription_id, status, and license_key when the product
   // issues keys (comma separated when there are several), plus email.
   // https://docs.dodopayments.com/developer-resources/checkout-session (Handle the return)
   // https://docs.dodopayments.com/developer-resources/integration-guide#static-payment-links
   // "#thanks" alone also shows the view, with no key.
   //
+  // A checkout started from Discord returns to "?from=discord". Discord has
+  // already saved the code by itself, so that view only says to go back there:
+  // no code and no downloads, even when Dodo appended a key.
+  //
   // Returns null when this is not a return from checkout. Otherwise
-  // { state: "ok" | "pending" | "failed", keys: [...] }. The email is never read.
+  // { state: "ok" | "pending" | "failed", keys: [...], fromDiscord: bool }.
+  // The email is never read.
   function parseCheckoutReturn(search, hash) {
     var params;
     try { params = new URLSearchParams(search || ""); } catch (e) { params = null; }
     var status = params ? (params.get("status") || "").toLowerCase() : "";
+    var fromDiscord = !!params && params.get("from") === "discord";
     var isReturn = !!params && status !== "" && !!(params.get("payment_id") || params.get("subscription_id"));
-    if (!isReturn) return hash === "#thanks" ? { state: "ok", keys: [] } : null;
+    if (!isReturn) {
+      if (fromDiscord && (hash === "#thanks" || status === "")) return { state: "ok", keys: [], fromDiscord: true };
+      return hash === "#thanks" ? { state: "ok", keys: [], fromDiscord: false } : null;
+    }
   
     var OK = ["succeeded", "active"];
     var FAILED = ["failed", "cancelled", "canceled", "expired", "requires_payment_method"];
     var state = OK.indexOf(status) >= 0 ? "ok" : FAILED.indexOf(status) >= 0 ? "failed" : "pending";
+    if (fromDiscord) return { state: state, keys: [], fromDiscord: true };
   
     // Only key-shaped values: this text lands on the page, and a crafted link
     // should not be able to put a sentence there.
@@ -445,7 +465,7 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
       k = k.trim();
       if (/^[A-Za-z0-9_-]{4,128}$/.test(k) && keys.indexOf(k) < 0) keys.push(k);
     });
-    return { state: state, keys: state === "failed" ? [] : keys };
+    return { state: state, keys: state === "failed" ? [] : keys, fromDiscord: false };
   }
 
   // Back from checkout: show the thanks view first. The key is written with
@@ -461,8 +481,12 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
     section.hidden = false;
     function part(name) { return section.querySelector("[data-thanks-" + name + "]"); }
     var ok = part("ok"), pending = part("pending"), failed = part("failed");
-    if (ok) ok.hidden = ret.state !== "ok";
-    if (pending) pending.hidden = ret.state !== "pending";
+    var dOk = part("discord"), dPending = part("discord-pending");
+    var d = ret.fromDiscord;
+    if (ok) ok.hidden = d || ret.state !== "ok";
+    if (pending) pending.hidden = d || ret.state !== "pending";
+    if (dOk) dOk.hidden = !d || ret.state !== "ok";
+    if (dPending) dPending.hidden = !d || ret.state !== "pending";
     if (failed) failed.hidden = ret.state !== "failed";
     var keysBox = part("keys"), row = part("key");
     if (keysBox && row) {
@@ -477,7 +501,11 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
       });
     }
     try {
-      if (location.search && history.replaceState) history.replaceState(null, "", location.pathname + "#thanks");
+      // A Discord return keeps "?from=discord" (no key in it), so a refresh
+      // still says "go back to Discord" rather than showing downloads.
+      if (location.search && history.replaceState) {
+        history.replaceState(null, "", location.pathname + (ret.fromDiscord ? "?from=discord" : "") + "#thanks");
+      }
     } catch (e) { /* the view still shows */ }
   })();
 
