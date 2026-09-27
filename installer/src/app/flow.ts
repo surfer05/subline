@@ -40,6 +40,7 @@ import type { AppManagementReport, AppManagementStatus } from "./appManagement.j
 import { awaitAppManagement, isLoggedAttempt } from "./appManagement.js";
 import type { QuitReport, RunningProcess } from "./discordProcess.js";
 import { findDiscordProcesses, quitDiscord } from "./discordProcess.js";
+import { CODE_SCREEN_COPY } from "./codeScreen.js";
 import { defaultLanguage, endonymOf, languageOptions } from "./language.js";
 import type { EnsureRelayEngineReport, LanguageOption, SetSublineCodeReport, SetTargetLanguageReport } from "./language.js";
 import type { ModBundle } from "../bundle/bundle.js";
@@ -992,30 +993,22 @@ export class InstallFlow {
     private codeStep(error: PatcherError | null = null): FlowState {
         return this.set(state({
             step: "choose-code",
-            // The previous screen already said skipping is fine and a code can
-            // be added later; the hint under the field says where. Once each.
-            // WHERE THE CODE COMES FROM is the whole question on this screen.
-            // Two sources, named plainly. No format hint: a bought code is the
-            // store's license key and does not start with slp_; telling a paying
-            // customer their code "should start with slp_" is how they conclude
-            // it is wrong.
-            // The key arrives ONLY by email: Dodo's post-checkout page does not
-            // show it. That email is sent as "Dodo Payments" (not "Subline"),
-            // subject "Your License Key is Ready - ...", and a real purchase
-            // (2026-09-23) landed in Gmail spam. So name the sender and the
-            // subject exactly, and say "check spam" in bold.
-            detail: "Your code came with Subline. If you bought it, it is in the email from **Dodo Payments**, "
-                + "subject \"Your License Key is Ready\". **Check spam.** If a friend set you up, they sent it to you. "
-                + "No code? Choose **Continue without a code**.",
+            // In the normal path nobody pastes anything: the free trial is the
+            // filled button, and buying from inside Discord later saves the
+            // code by itself. The field, and where a code comes from (the
+            // Dodo Payments email, which lands in spam), sit behind "I have a
+            // code". Every string on this screen is in codeScreen.ts.
+            detail: CODE_SCREEN_COPY.detail,
             error,
             // NO CANCEL ON THIS SCREEN. A real friend, on the first field
             // install, pressed Cancel here twice meaning "no key for me" and
             // aborted the whole install both times - the log shows the
             // identical mistake ten minutes apart. On a screen whose subject
             // is an optional extra, Cancel reads as "decline the extra", and
-            // the decline path this screen actually offers is "Continue
-            // without a code". Someone who truly wants out can close the window.
-            actions: ["set-code", "skip-code"]
+            // the decline path this screen actually offers is "Start free
+            // trial". Someone who truly wants out can close the window.
+            // Trial first: it is the default path and the one primary.
+            actions: ["skip-code", "set-code"]
         }));
     }
 

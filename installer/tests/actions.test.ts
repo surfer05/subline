@@ -30,9 +30,9 @@ describe("the action vocabulary", () => {
         // give up self-repair, or force-close Discord, without noticing.
         expect(ACTION_LABELS["skip-helper"]).toMatch(/without background updates/i);
         expect(ACTION_LABELS["force-quit-discord"]).toMatch(/anyway/i);
-        // Names what is declined: a code. "Use free Google only" was false,
-        // because a free install still gets 3 ✦ a day by pressing ⚡.
-        expect(ACTION_LABELS["skip-code"]).toBe("Continue without a code");
+        // The code screen leads with the trial, which is what skipping the
+        // code starts. "Use free Google only" was false.
+        expect(ACTION_LABELS["skip-code"]).toBe("Start free trial");
         expect(ACTION_LABELS["skip-code"]).not.toMatch(/google only/i);
     });
 

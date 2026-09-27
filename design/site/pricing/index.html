@@ -39,6 +39,7 @@ a:hover{color:var(--fg)}
 .anchor{font-family:var(--font-serif);font-size:19px;line-height:1.42;font-weight:400;margin:26px 0 0;max-width:44ch;
   padding-left:14px;border-left:3px solid var(--accent)}
 .anchor b{font-weight:600}
+.free-cta{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:22px}
 .plans{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:26px}
 @media (max-width:700px){.plans{grid-template-columns:1fr}}
 .plans .card{min-width:0;overflow-wrap:anywhere}
@@ -51,24 +52,28 @@ a:hover{color:var(--fg)}
 </head>
 <body>
 <p class="kicker">Pricing</p>
-<h2 class="sec">Keep it automatic</h2>
-<p class="lead">Free: 7 days fully automatic. After that, click a message to translate it. Paid: <span class="gl-inline">≈</span> and <span class="gl-inline">✦</span> on every message, plus profiles, statuses and embeds.</p>
+<h2 class="sec">Free to start</h2>
+<p class="lead">Download it and try everything free for 7 days. After that, click a message to translate it. Paid: <span class="gl-inline">≈</span> and <span class="gl-inline">✦</span> on every message, plus profiles, statuses and embeds.</p>
+<div class="free-cta">
+  <a class="btn btn-primary" href="#downloads">Download free</a>
+  <span class="fine">No card. No account.</span>
+</div>
 <div class="plans">
   <div class="panel card">
     <h3>Monthly</h3>
     <div class="price">$2.49<span class="per">/mo</span></div>
     <p>Cancel anytime.</p>
-    <a class="btn btn-secondary" href="https://checkout.dodopayments.com/buy/pdt_0No1xmbcAqHdYAvt1RNPR?quantity=1">Buy</a>
+    <a class="btn btn-secondary" data-buy="monthly" href="https://checkout.dodopayments.com/buy/pdt_0No1xmbcAqHdYAvt1RNPR?quantity=1&amp;redirect_url=https%3A%2F%2Fsurfer05.github.io%2Fsubline%2F">Buy</a>
   </div>
   <div class="panel card">
     <span class="badge">4 months free</span>
     <h3>Annual</h3>
     <div class="price">$19.99<span class="per">/yr</span></div>
     <p>Billed yearly.</p>
-    <a class="btn btn-primary" href="https://checkout.dodopayments.com/buy/pdt_0No1yAve1ozdxryVGZvf6?quantity=1">Buy</a>
+    <a class="btn btn-secondary" data-buy="annual" href="https://checkout.dodopayments.com/buy/pdt_0No1yAve1ozdxryVGZvf6?quantity=1&amp;redirect_url=https%3A%2F%2Fsurfer05.github.io%2Fsubline%2F">Buy</a>
   </div>
 </div>
-<p class="lead">Your code arrives by email from <b>Dodo Payments</b>. <b>Check spam.</b> Paste it in the installer, or in Discord under Plugins, VcTranslate, Subline Code.</p>
+<p class="lead">Buying from inside Discord turns it on by itself. Buying here? Your code shows after checkout and arrives by email from <b>Dodo Payments</b>. <b>Check spam.</b></p>
 <p class="fine">Up to 2,000 <span class="gl-inline">✦</span> a day. Checkout adds local tax. No code, or want to cancel? <a href="https://github.com/surfer05/subline/issues" rel="noopener">Open an issue</a>, but never post your code there.</p>
 </body>
 </html>

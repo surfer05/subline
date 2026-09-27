@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 
 import type { AppManagementStatus } from "../src/app/appManagement.js";
 import { ACTION_LABELS, IS_PRIMARY } from "../src/app/actions.js";
+import { CODE_SCREEN_COPY } from "../src/app/codeScreen.js";
 import { InstallFlow, isConfirmedSuccess } from "../src/app/flow.js";
 import type { FlowPorts, FlowState, FlowStep, HelperEnsureReport, HelperInstallOutcome } from "../src/app/flow.js";
 import type { InstalledModBundle } from "../src/app/modInstall.js";
@@ -594,7 +595,7 @@ describe("a Discord we already patched", () => {
 
         const offered = await h.flow.start();
         expect(offered.step).toBe("choose-code");
-        expect(offered.actions).toEqual(["set-code", "skip-code"]);
+        expect(offered.actions).toEqual(["skip-code", "set-code"]);
         expect(seen).not.toContain("choose-language");
         expect(h.languageWrites).toEqual([]);
 
@@ -1084,7 +1085,7 @@ describe("the optional Subline-code step", () => {
         // Cancel is deliberately absent: a real friend pressed it here twice
         // meaning "no key", aborting the install both times (field log,
         // 2026-09-03). The decline path is "Continue without a code".
-        expect(state.actions).toEqual(["set-code", "skip-code"]);
+        expect(state.actions).toEqual(["skip-code", "set-code"]);
         // Nothing has been written to Discord yet.
         expect(h.patchCalls).toHaveLength(0);
     });
@@ -1095,11 +1096,15 @@ describe("the optional Subline-code step", () => {
         // No signup link exists yet (codes come from an invite/purchase), so the
         // step must at least say what goes here and that skipping still works —
         // otherwise it is a text box with no way to fill it.
-        expect(state.detail).toMatch(/code/i);
-        // The decline path is the "Continue without a code" button, and the copy
-        // names it rather than saying "skip" and leaving the user to map the two.
-        expect(state.detail).toContain("No code? Choose **Continue without a code**.");
+        // The screen leads with the free trial: in the normal path nobody
+        // pastes anything. Where a code comes from is on the revealed field
+        // (codeScreen.ts), and the trial is the one filled button.
+        expect(state.detail).toBe(CODE_SCREEN_COPY.detail);
+        expect(state.detail).toMatch(/free/i);
         expect(state.detail).not.toMatch(/google only/i);
+        expect(state.actions[0]).toBe("skip-code");
+        expect(IS_PRIMARY["skip-code"]).toBe(true);
+        expect(IS_PRIMARY["set-code"]).toBe(false);
     });
 
     it("saves the key and carries on", async () => {
