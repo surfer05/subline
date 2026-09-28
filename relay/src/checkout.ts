@@ -259,7 +259,7 @@ export async function purchaseFor(env: Env, bearer: string, now: number): Promis
 
 /** The random suffix alphabet: no 0/O/1/I, so a code read aloud or typed is unambiguous. */
 export const COUPON_SUFFIX_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-export const COUPON_SUFFIX_LEN = 3;
+export const COUPON_SUFFIX_LEN = 5;
 /** Dodo's DiscountResponse documents codes of up to 16 characters. */
 export const COUPON_MAX_LEN = 16;
 
@@ -282,7 +282,7 @@ export function randomSuffix(n: number = COUPON_SUFFIX_LEN): string {
 
 /**
  * A personal coupon code: the name (uppercase letters and digits, cut to fit)
- * plus a random 3-character suffix, at most 16 in all, e.g. RAHUL05K7Q. The
+ * plus a random 5-character suffix, at most 16 in all, e.g. RAHUL05K7Q2M. The
  * name keeps it personal; the suffix stops anyone guessing a friend's code from
  * their name. The name part must still be at least 3 characters (null
  * otherwise, which the endpoint answers with 400).

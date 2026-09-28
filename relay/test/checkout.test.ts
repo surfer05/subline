@@ -355,11 +355,11 @@ const couponReq = (body: any, token = "admintok") => new Request("https://relay/
 
 describe("POST /admin/coupon", () => {
     it("normalises names and appends the suffix, at most 16 in all", () => {
-        expect(couponCode("alex", "K7Q")).toBe("ALEXK7Q");
-        expect(couponCode("Zehra K.", "K7Q")).toBe("ZEHRAKK7Q");
-        expect(couponCode("jo-2", "K7Q")).toBe("JO2K7Q");
-        expect(couponCode("rahul05", "K7Q")).toBe("RAHUL05K7Q");
-        expect(couponCode("a very long friend name here", "K7Q")).toBe("AVERYLONGFRIEK7Q");
+        expect(couponCode("alex", "K7Q2M")).toBe("ALEXK7Q2M");
+        expect(couponCode("Zehra K.", "K7Q2M")).toBe("ZEHRAKK7Q2M");
+        expect(couponCode("jo-2", "K7Q2M")).toBe("JO2K7Q2M");
+        expect(couponCode("rahul05", "K7Q2M")).toBe("RAHUL05K7Q2M");
+        expect(couponCode("a very long friend name here", "K7Q2M")).toBe("AVERYLONGFRK7Q2M");
         expect(couponCode("a very long friend name here")!.length).toBe(16);
         expect(couponCode("ab")).toBeNull();
         expect(couponCode("é!")).toBeNull();
@@ -369,13 +369,13 @@ describe("POST /admin/coupon", () => {
     it("the suffix is 3 characters from the unambiguous alphabet, from the crypto RNG", () => {
         expect(COUPON_SUFFIX_ALPHABET).not.toMatch(/[0O1I]/);
         // A real draw has the right shape.
-        expect(couponCode("rahul05")).toMatch(/^RAHUL05[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{3}$/);
+        expect(couponCode("rahul05")).toMatch(/^RAHUL05[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{5}$/);
         // Deterministic RNG: bytes at or above 256 (a multiple of 32) never occur,
         // so byte b maps to alphabet[b % 32]; 0 → A, 31 → 9, 32 → A.
         const spy = vi.spyOn(crypto, "getRandomValues").mockImplementation(((a: Uint8Array) => {
             a.set([0, 31, 33, ...new Array(13).fill(0)]); return a;
         }) as any);
-        expect(randomSuffix()).toBe("A9B");
+        expect(randomSuffix()).toBe("A9BAA");
         spy.mockRestore();
     });
 
@@ -394,20 +394,20 @@ describe("POST /admin/coupon", () => {
             codes.push(JSON.parse(calls[0]!.init.body).code);
         }
         spy.mockRestore();
-        for (const c of codes) expect(c).toMatch(/^ALEX[A-HJ-NP-Z2-9]{3}$/);
-        // Bytes 0,1,2 then 16,17,18: each call fills a fresh 16-byte buffer.
-        expect(codes).toEqual(["ALEXABC", "ALEXSTU"]);
+        for (const c of codes) expect(c).toMatch(/^ALEX[A-HJ-NP-Z2-9]{5}$/);
+        // Bytes 0-4 then 16-20: each call fills a fresh 16-byte buffer.
+        expect(codes).toEqual(["ALEXABCDE", "ALEXSTUVW"]);
     });
 
     it("creates a 100% off, 3-cycle, single-use monthly discount with the suffixed code", async () => {
-        mockFetch(200, { discount_id: "dsc_1", business_id: "bus_1", type: "percentage", code: "ALEXK7Q", amount: 10000, times_used: 0 });
+        mockFetch(200, { discount_id: "dsc_1", business_id: "bus_1", type: "percentage", code: "ALEXK7Q2M", amount: 10000, times_used: 0 });
         const res = await worker.fetch(couponReq({ name: "alex" }), env(fakeKV()), ctx);
         expect(res.status).toBe(200);
-        expect(await res.json()).toEqual({ ok: true, code: "ALEXK7Q", discount_id: "dsc_1" });
+        expect(await res.json()).toEqual({ ok: true, code: "ALEXK7Q2M", discount_id: "dsc_1" });
         expect(calls[0]!.url).toBe("https://live.dodopayments.com/discounts");
         expect(calls[0]!.init.headers.authorization).toBe("Bearer dodo_secret");
         const sent = JSON.parse(calls[0]!.init.body);
-        expect(sent.code).toMatch(/^ALEX[A-HJ-NP-Z2-9]{3}$/);
+        expect(sent.code).toMatch(/^ALEX[A-HJ-NP-Z2-9]{5}$/);
         expect(sent).toEqual({
             type: "percentage", amount: 10000, code: sent.code, name: "alex",
             restricted_to: ["pdt_month"], subscription_cycles: 3, usage_limit: 1

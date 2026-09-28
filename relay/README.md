@@ -189,11 +189,11 @@ return URL) and in the receipt email.
 ## Personal coupons
 
 ```sh
-ADMIN_TOKEN=... node scripts/coupon.mjs alex     # prints e.g. ALEXK7Q
+ADMIN_TOKEN=... node scripts/coupon.mjs alex     # prints e.g. ALEXK7Q2M
 ```
 
 Creates a Dodo discount: code = the name uppercased with everything but A-Z
-and 0-9 removed (at least 3 left, else 400), cut to 13, plus 3 random
+and 0-9 removed (at least 3 left, else 400), cut to 11, plus 5 random
 characters from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (crypto RNG, unbiased), so
 at most 16 (Dodo's documented maximum) and not guessable from the name alone.
 100% off, restricted
