@@ -352,9 +352,8 @@ export function verifyOnce(options: VerifyOptions): VerificationReport {
                     // so a configured code is told what to expect, not that
                     // something is broken.
                     + (options.expectUpgrade === true
-                        ? " Your Subline code is set: the ✦ quality upgrade follows a few seconds behind each ≈ line."
-                        : " Without a code, ≈ and ✦ are automatic for your first 7 days, then messages translate when you click."
-                            + " Paste a Subline code in Discord's Subline settings to keep everything automatic.")
+                        ? " Your AI plan is on: the ✦ line follows a few seconds behind each ≈ line."
+                        : "")
             });
     }
 

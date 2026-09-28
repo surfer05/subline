@@ -433,6 +433,55 @@ function updatePluginSettings(
     return ok({ created, existing });
 }
 
+/* ------------------------------------------------------------------------ *
+ * The install id
+ * ------------------------------------------------------------------------ */
+
+/**
+ * The install id, as the plugin also reads it: `plugins.VcTranslate.installId`,
+ * 32 lowercase hex without the `free_` prefix. The relay ties a purchase, a
+ * promo redemption and the 3-computer limit to it, so the installer and the
+ * plugin must use the same one: the installer writes it, the plugin prefers it.
+ */
+export const INSTALL_ID_KEY = "installId";
+const INSTALL_ID_SHAPE = /^[0-9a-f]{32}$/;
+
+/** The saved install id, or null when there is none or it is malformed. */
+export function readInstallId(settingsPath: string | null): string | null {
+    if (settingsPath === null || !existsSync(settingsPath)) return null;
+    try {
+        const parsed: unknown = JSON.parse(readFileSync(settingsPath, "utf8"));
+        const plugins = (parsed as { plugins?: Record<string, unknown> } | null)?.plugins;
+        const plugin = plugins?.[PLUGIN_SETTINGS_KEY] as Record<string, unknown> | undefined;
+        const value = plugin?.[INSTALL_ID_KEY];
+        return typeof value === "string" && INSTALL_ID_SHAPE.test(value) ? value : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * The saved install id, or a new one written into Vencord's settings first.
+ * Merges like every other write here: nothing else in the file changes, and a
+ * valid id already there is never replaced.
+ */
+export function ensureInstallId(settingsPath: string | null, generate: () => string): Result<string> {
+    const existing = readInstallId(settingsPath);
+    if (existing !== null) return ok(existing);
+    if (settingsPath === null) {
+        return err<string>("IO_ERROR", "Could not work out where Vencord keeps its settings on this platform.");
+    }
+    const id = generate();
+    if (!INSTALL_ID_SHAPE.test(id)) return err<string>("IO_ERROR", "Could not make an install id.");
+    const written = updatePluginSettings(
+        settingsPath,
+        current => ({ ...current, [INSTALL_ID_KEY]: id }),
+        "save the install id into Vencord's settings"
+    );
+    if (!written.ok) return written as Result<string>;
+    return ok(id);
+}
+
 /**
  * Store the Subline code, from the installer, and select the keyless AI relay.
  *
@@ -453,7 +502,7 @@ function updatePluginSettings(
  * selected changes nothing: the plugin would go on using Google (≈) and the
  * user would have pasted a code for no visible result. An empty code is a valid
  * choice (the user skipped) and is handled by the caller NOT calling this — the
- * plugin then simply stays on the free plan (7 days automatic, then on click).
+ * install then activates another way (a purchase or a promo code).
  *
  * NOTHING HERE RETURNS OR LOGS THE CODE. The report carries its LENGTH, enough
  * to tell "pasted" from "pasted half of it" in a log that spec §7 forbids

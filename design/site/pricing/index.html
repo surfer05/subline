@@ -39,8 +39,9 @@ a:hover{color:var(--fg)}
 .anchor{font-family:var(--font-serif);font-size:19px;line-height:1.42;font-weight:400;margin:26px 0 0;max-width:44ch;
   padding-left:14px;border-left:3px solid var(--accent)}
 .anchor b{font-weight:600}
-.free-cta{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:22px}
-.plans{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:26px}
+.dl-cta{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:22px}
+.plans{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:26px}
+@media (max-width:900px){.plans{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:700px){.plans{grid-template-columns:1fr}}
 .plans .card{min-width:0;overflow-wrap:anywhere}
 .badge{align-self:flex-start;font-family:var(--font-mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;
@@ -52,24 +53,32 @@ a:hover{color:var(--fg)}
 </head>
 <body>
 <p class="kicker">Pricing</p>
-<h2 class="sec">Free to start</h2>
-<p class="lead">7 days free, fully automatic. After that, click a message to translate it. Paid: <span class="gl-inline">≈</span> and <span class="gl-inline">✦</span> on every message, plus profiles, statuses and embeds.</p>
-<div class="free-cta">
-  <a class="btn btn-primary" href="#downloads">Download free</a>
-  <span class="fine">No card. No account.</span>
+<h2 class="sec">Two plans</h2>
+<p class="lead"><b>Automatic</b> puts <span class="gl-inline">≈</span> under every message, once and for good. <b>AI</b> adds <span class="gl-inline">✦</span> on top.</p>
+<div class="dl-cta">
+  <a class="btn btn-primary" href="#downloads">Download Subline</a>
+  <span class="fine">You pay in the installer. $4.99, once.</span>
 </div>
 <div class="plans">
+  <!-- The Automatic product id is PENDING from the owner: replace
+       pdt_AUTOMATIC_PENDING below (one place on the site) once it is known. -->
+  <div class="panel card" data-plan="automatic">
+    <h3>Automatic</h3>
+    <div class="price">$4.99<span class="per">once</span></div>
+    <p><span class="gl-inline">≈</span> on every message, plus profiles, embeds and statuses. Decodes Morse, binary and more. 3 <span class="gl-inline">✦</span> previews a day.</p>
+    <a class="btn btn-secondary" data-buy="automatic" href="https://checkout.dodopayments.com/buy/pdt_AUTOMATIC_PENDING?quantity=1&amp;redirect_url=https%3A%2F%2Fsurfer05.github.io%2Fsubline%2F">Buy</a>
+  </div>
   <div class="panel card">
-    <h3>Monthly</h3>
+    <h3>AI monthly</h3>
     <div class="price">$2.49<span class="per">/mo</span></div>
-    <p>Cancel anytime.</p>
+    <p><span class="gl-inline">✦</span> AI on everything. Needs Automatic. Cancel anytime.</p>
     <a class="btn btn-secondary" data-buy="monthly" href="https://checkout.dodopayments.com/buy/pdt_0No1xmbcAqHdYAvt1RNPR?quantity=1&amp;redirect_url=https%3A%2F%2Fsurfer05.github.io%2Fsubline%2F">Buy</a>
   </div>
   <div class="panel card">
-    <span class="badge">4 months free</span>
-    <h3>Annual</h3>
+    <span class="badge">Save 4 months</span>
+    <h3>AI yearly</h3>
     <div class="price">$19.99<span class="per">/yr</span></div>
-    <p>Billed yearly.</p>
+    <p><span class="gl-inline">✦</span> AI on everything. Needs Automatic. Billed yearly.</p>
     <a class="btn btn-secondary" data-buy="annual" href="https://checkout.dodopayments.com/buy/pdt_0No1yAve1ozdxryVGZvf6?quantity=1&amp;redirect_url=https%3A%2F%2Fsurfer05.github.io%2Fsubline%2F">Buy</a>
   </div>
 </div>

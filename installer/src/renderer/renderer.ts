@@ -73,7 +73,9 @@ const STEP_TITLES: Record<FlowState["step"], string> = {
     "discord-running": "Discord is running",
     "quit-blocked": "Discord is still running",
     "choose-language": "Your reading language",
-    "choose-code": "Your Subline code",
+    "choose-code": CODE_SCREEN_COPY.title,
+    "activation-waiting": CODE_SCREEN_COPY.waitingTitle,
+    "activation-check-failed": CODE_SCREEN_COPY.checkTitle,
     "permission-explain": "macOS needs your permission",
     "permission-waiting": "Turn on Subline",
     "permission-failed": "Could not check permission",
@@ -217,7 +219,7 @@ function renderExtra(state: FlowState): void {
     }
 
     if (state.step === "choose-code") {
-        // A choice first: the trial, or "I have a code". The field is drawn
+        // A choice first: buy Automatic, or "I have a code". The field is drawn
         // only once revealed, or when a save came back refused (so the reason
         // and the field are on screen together). codeScreenView decides.
         const view = codeScreenView({ revealed: codeRevealed, hasError: state.error !== null });

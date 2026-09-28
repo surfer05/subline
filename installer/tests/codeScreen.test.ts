@@ -1,6 +1,6 @@
 /**
- * The code screen is a choice: "Start free trial" (the filled button) or
- * "I have a code", which reveals the paste field and Save. The renderer draws
+ * The activation screen is a choice: "Buy Automatic, $4.99" (the filled button)
+ * or "I have a code", which reveals the paste field and Save. There is no skip. The renderer draws
  * it from codeScreenView, which is tested here because the renderer is the one
  * module the suite never executes.
  */
@@ -11,11 +11,11 @@ import { ACTION_LABELS } from "../src/app/actions.js";
 import { CODE_SCREEN_COPY, DODO_BUSINESS_ID, codeScreenView, portalUrl } from "../src/app/codeScreen.js";
 
 describe("the code screen", () => {
-    it("starts as a choice: trial first and filled, the field hidden", () => {
+    it("starts as a choice: buying first and filled, the field hidden", () => {
         const view = codeScreenView({ revealed: false });
         expect(view.showField).toBe(false);
         expect(view.buttons.map(b => [b.kind, b.label, b.primary])).toEqual([
-            ["skip-code", "Start free trial", true],
+            ["buy-automatic", "Buy Automatic, $4.99", true],
             ["reveal", "I have a code", false]
         ]);
     });
@@ -25,7 +25,7 @@ describe("the code screen", () => {
         expect(view.showField).toBe(true);
         expect(view.buttons.map(b => [b.kind, b.label, b.primary])).toEqual([
             ["set-code", "Save code", true],
-            ["skip-code", "Start free trial", false]
+            ["buy-automatic", "Buy Automatic, $4.99", false]
         ]);
     });
 
@@ -40,12 +40,24 @@ describe("the code screen", () => {
     });
 
     it("labels the flow actions from the same copy object", () => {
-        expect(ACTION_LABELS["skip-code"]).toBe(CODE_SCREEN_COPY.startTrial);
+        expect(ACTION_LABELS["buy-automatic"]).toBe(CODE_SCREEN_COPY.buy);
+        expect(ACTION_LABELS.back).toBe(CODE_SCREEN_COPY.back);
         expect(ACTION_LABELS["set-code"]).toBe(CODE_SCREEN_COPY.save);
     });
 
-    it("has no em dashes in its copy", () => {
-        for (const text of Object.values(CODE_SCREEN_COPY)) expect(text).not.toContain("—");
+    it("has no em dashes, and nothing free or trial, in its copy", () => {
+        for (const text of Object.values(CODE_SCREEN_COPY)) {
+            expect(text).not.toContain("—");
+            expect(text).not.toMatch(/\bfree\b|\btrial\b/i);
+        }
+    });
+
+    it("never offers a way past the screen without activation", () => {
+        for (const revealed of [false, true]) {
+            const kinds = codeScreenView({ revealed }).buttons.map(b => b.kind);
+            expect(kinds).not.toContain("skip-code");
+            expect(kinds.every(k => ["buy-automatic", "set-code", "reveal"].includes(k))).toBe(true);
+        }
     });
 });
 

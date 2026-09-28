@@ -7,6 +7,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import type { CheckoutAnswer, RedeemAnswer, StatusAnswer } from "../src/app/activation.js";
 import type { AppManagementStatus } from "../src/app/appManagement.js";
 import { ACTION_LABELS, IS_PRIMARY } from "../src/app/actions.js";
 import { CODE_SCREEN_COPY } from "../src/app/codeScreen.js";
@@ -129,7 +130,21 @@ interface Script {
     hasSublineCode?: boolean;
     ensureRelayEngine?: Result<{ changed: boolean; previous: string | null }>;
     platform?: NodeJS.Platform;
+    /** The saved code, when a test needs its value. Defaults from hasSublineCode. */
+    savedCode?: string | null;
+    /** An install id already in the settings. */
+    savedInstallId?: string | null;
+    ensureInstallId?: Result<string>;
+    /** The relay. Status may be scripted per call (the last entry repeats). */
+    relayStatus?: StatusAnswer | StatusAnswer[];
+    relayCheckout?: CheckoutAnswer;
+    relayRedeem?: RedeemAnswer;
 }
+
+/** A relay that says this install is activated, with ✦. */
+const ACTIVE: StatusAnswer = { kind: "ok", automatic: true, ai: true, code: null };
+const TEST_INSTALL_ID = "0123456789abcdef0123456789abcdef";
+const SESSION_URL = "https://checkout.dodopayments.com/session/cks_test";
 
 interface Harness {
     flow: InstallFlow;
@@ -149,6 +164,11 @@ interface Harness {
     launched: number;
     /** The step names, in order, every transition passed through. */
     steps: FlowStep[];
+    /** Every relay call, in order. */
+    relayCalls: Array<{ kind: "checkout" | "status" | "redeem"; credential?: string; installId: string; code?: string }>;
+    /** URLs opened in the browser. */
+    opened: string[];
+    installIdWrites: number;
 }
 
 function harness(script: Script = {}): Harness {
@@ -171,8 +191,12 @@ function harness(script: Script = {}): Harness {
         helperInstalls: 0,
         helperEnsures: 0,
         launched: 0,
-        steps: []
+        steps: [],
+        relayCalls: [],
+        opened: [],
+        installIdWrites: 0
     } as unknown as Harness;
+    let statusCall = 0;
 
     const record = (level: string) => (event: string, fields: Record<string, unknown> = {}) => {
         h.logged.push({ level, event, fields });
@@ -216,7 +240,34 @@ function harness(script: Script = {}): Harness {
 
         discordLocale: () => (script.discordLocale === undefined ? "tr" : script.discordLocale),
         systemLocale: () => "en-GB",
-        hasSublineCode: () => script.hasSublineCode ?? false,
+        hasSublineCode: () => script.hasSublineCode ?? (script.savedCode != null),
+        savedSublineCode: () => script.savedCode !== undefined ? script.savedCode : (script.hasSublineCode ? "slp_savedcode" : null),
+        savedInstallId: () => script.savedInstallId ?? null,
+        ensureInstallId: () => {
+            h.installIdWrites += 1;
+            return script.ensureInstallId ?? { ok: true, value: script.savedInstallId ?? TEST_INSTALL_ID };
+        },
+        relay: {
+            checkout: async (installId: string) => {
+                h.relayCalls.push({ kind: "checkout", installId });
+                return script.relayCheckout ?? { kind: "ok", url: SESSION_URL };
+            },
+            status: async (credential: string, installId: string) => {
+                // A real macrotask per answer, like a network call: a poll that
+                // never lands must not starve the timers a test waits on.
+                await new Promise(resolve => setImmediate(resolve));
+                h.relayCalls.push({ kind: "status", credential, installId });
+                const scripted = script.relayStatus ?? ACTIVE;
+                if (!Array.isArray(scripted)) return scripted;
+                return scripted[Math.min(statusCall++, scripted.length - 1)] as StatusAnswer;
+            },
+            redeem: async (installId: string, code: string) => {
+                h.relayCalls.push({ kind: "redeem", installId, code });
+                return script.relayRedeem ?? { kind: "ok", code: "slp_promominted" };
+            }
+        },
+        openCheckout: async (url: string) => { h.opened.push(url); },
+        activationPollIntervalMs: 5,
         ensureRelayEngine: () => {
             h.engineReasserts += 1;
             return script.ensureRelayEngine ?? { ok: true, value: { changed: false, previous: "relay" } };
@@ -311,7 +362,9 @@ async function setLanguage(
     code = "tr"
 ): Promise<any> {
     const next = await flow.send({ type: "set-language", code });
-    const after = next.step === "choose-code" ? await flow.send({ type: "skip-code" }) : next;
+    // Paid only: the activation screen is crossed by buying (the scripted
+    // relay confirms the purchase at once).
+    const after = next.step === "choose-code" ? await flow.send({ type: "buy-automatic" }) : next;
     // The last screen shows at once and the confirmation lands in the
     // background, so tests read the SETTLED state: what the user finally sees.
     return after.step === "done" && flow.settled ? flow.settled() : after;
@@ -335,19 +388,18 @@ describe("the happy path", () => {
         expect(h.launched).toBe(1);
     });
 
-    it("explains the free plan on the tiers screen, word for word", async () => {
+    it("explains the two paid plans on the tiers screen, word for word, with no free plan", async () => {
         const h = harness();
         await h.flow.start();
         const tiers = await h.flow.send({ type: "next" });
 
         expect(tiers.step).toBe("tiers");
         expect(tiers.detail).toBe(
-            "≈ is Google Translate: instant and free. ✦ is an AI that reads the conversation around a message, "
-            + "so slang and replies come out right. The first **7 days** are free and fully automatic. After that, "
-            + "messages translate when you click. A Subline code keeps everything automatic."
+            "≈ is Google Translate: instant, under every message. ✦ is an AI that reads the conversation around "
+            + "a message, so slang and replies come out right. **Automatic** is $4.99, once, and gives you ≈ "
+            + "everywhere. **AI** adds ✦ for $2.49 a month."
         );
-        // The old free plan. It must not come back by accident.
-        expect(tiers.detail).not.toMatch(/3 free/);
+        expect(tiers.detail).not.toMatch(/free|trial|7 days/i);
     });
 
     it("patches against the RUNTIME bundle directory, never a path inside the app", async () => {
@@ -582,41 +634,32 @@ describe("a Discord we already patched", () => {
         expect(first.detail).toContain("✦");
     });
 
-    // OBSERVED 2026-09-20: a friend who skipped the code on first install had
-    // nowhere in the installer to add one on the update, so the ✦ tier never
-    // arrived. The language IS saved and stays skipped; the code screen is
-    // offered when the saved settings hold none.
-    it("an update over an install with NO saved code still offers the code screen, and skips only the language", async () => {
+    // PAID ONLY, and an update is not the gate. Discord already runs Subline;
+    // the new mod asks for activation inside Discord, where the relay knows
+    // the plugin's own install id (early users get Automatic there).
+    it("an update over an install with NO saved code is not gated: it patches without asking", async () => {
         const marker = { pluginBuildId: "0000000000000000" } as unknown as InstallState["marker"];
         const st = { ...installState("patched-by-us", "subline"), marker };
         const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: false });
         const seen: string[] = [];
         h.flow.onChange = st => seen.push(st.step);
 
-        const offered = await h.flow.start();
-        expect(offered.step).toBe("choose-code");
-        expect(offered.actions).toEqual(["skip-code", "set-code"]);
+        const after = await h.flow.start();
+        expect(seen).not.toContain("choose-code");
         expect(seen).not.toContain("choose-language");
-        expect(h.languageWrites).toEqual([]);
-
-        // Pasting a code saves it and the update carries on to the patch.
-        const after = await h.flow.send({ type: "set-code", code: "slp_abcdefghijklmnop" });
-        expect(h.codeWrites).toEqual(["slp_abcdefghijklmnop"]);
-        expect(after.step).not.toBe("choose-code");
         expect(h.patchCalls.length).toBeGreaterThan(0);
+        expect(h.relayCalls).toEqual([]);
+        expect(after.step).toBe("done");
     });
 
-    it("an update with no saved code may still skip the code, exactly like a fresh install", async () => {
+    it("an update with a saved code the relay does not confirm stops on the activation screen, unpatched", async () => {
         const marker = { pluginBuildId: "0000000000000000" } as unknown as InstallState["marker"];
         const st = { ...installState("patched-by-us", "subline"), marker };
-        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: false });
-
-        const offered = await h.flow.start();
-        expect(offered.step).toBe("choose-code");
-        const after = await h.flow.send({ type: "skip-code" });
-        expect(h.codeWrites).toEqual([]);
-        expect(after.step).not.toBe("choose-code");
-        expect(h.patchCalls.length).toBeGreaterThan(0);
+        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: true, relayStatus: { kind: "invalid" } });
+        const state = await h.flow.start();
+        expect(state.step).toBe("choose-code");
+        expect(state.error?.message).toBe(CODE_SCREEN_COPY.errNotFound);
+        expect(h.patchCalls).toHaveLength(0);
     });
 
     it("still says already-set-up when the installed build IS the shipped build", async () => {
@@ -1066,170 +1109,246 @@ describe("an update while Discord is running", () => {
  * §4 — App Management
  * ------------------------------------------------------------------------ */
 
-describe("the optional Subline-code step", () => {
-    /**
-     * The step exists because the alternative was Vencord's plugin settings
-     * inside Discord — dozens of plugins a Subline user never installed, by a
-     * path nobody could guess. A setup that ends with the better tier off and
-     * no findable way to switch it on has not finished.
-     */
+describe("the activation screen (paid only)", () => {
     async function toCodeStep(h: Harness) {
         await toDetection(h);
         return h.flow.send({ type: "set-language", code: "tr" });
     }
 
-    it("is offered after the language, before anything is patched", async () => {
+    it("is offered after the language, before anything is patched, with no skip and no cancel", async () => {
         const h = harness();
         const state = await toCodeStep(h);
         expect(state.step).toBe("choose-code");
-        // Cancel is deliberately absent: a real friend pressed it here twice
-        // meaning "no key", aborting the install both times (field log,
-        // 2026-09-03). The decline path is "Continue without a code".
-        expect(state.actions).toEqual(["skip-code", "set-code"]);
-        // Nothing has been written to Discord yet.
+        expect(state.actions).toEqual(["buy-automatic", "set-code"]);
+        expect(state.detail).toBe(CODE_SCREEN_COPY.detail);
+        expect(state.detail).not.toMatch(/free|trial/i);
+        expect(IS_PRIMARY["buy-automatic"]).toBe(true);
+        expect(IS_PRIMARY["set-code"]).toBe(false);
+        expect(h.patchCalls).toHaveLength(0);
+        expect(h.relayCalls).toEqual([]);
+    });
+
+    it("never patches while the purchase has not landed, and stops asking on Back", async () => {
+        const h = harness({ relayStatus: { kind: "ok", automatic: false, ai: false, code: null } });
+        await toCodeStep(h);
+        const pending = h.flow.send({ type: "buy-automatic" });
+        // Let the poll run a few times.
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        await new Promise(r => setTimeout(r, 5));
+        expect(h.flow.state.step).toBe("activation-waiting");
+        expect(h.flow.state.actions).toEqual(["back"]);
+        expect(h.patchCalls).toHaveLength(0);
+        const back = await h.flow.send({ type: "back" });
+        expect(back.step).toBe("choose-code");
+        const ended = await pending;
+        expect(ended.step).toBe("choose-code");
+        const asked = h.relayCalls.length;
+        await new Promise(r => setTimeout(r, 5));
+        expect(h.relayCalls.length).toBe(asked);
         expect(h.patchCalls).toHaveLength(0);
     });
 
-    it("explains what to paste and that skipping is fine", async () => {
-        const h = harness();
-        const state = await toCodeStep(h);
-        // No signup link exists yet (codes come from an invite/purchase), so the
-        // step must at least say what goes here and that skipping still works —
-        // otherwise it is a text box with no way to fill it.
-        // The screen leads with the free trial: in the normal path nobody
-        // pastes anything. Where a code comes from is on the revealed field
-        // (codeScreen.ts), and the trial is the one filled button.
-        expect(state.detail).toBe(CODE_SCREEN_COPY.detail);
-        expect(state.detail).toMatch(/free/i);
-        expect(state.detail).not.toMatch(/google only/i);
-        expect(state.actions[0]).toBe("skip-code");
-        expect(IS_PRIMARY["skip-code"]).toBe(true);
-        expect(IS_PRIMARY["set-code"]).toBe(false);
+    it("Buy Automatic: a relay checkout for this install, opened, then polled until it lands; the code is saved", async () => {
+        const h = harness({
+            relayStatus: [
+                { kind: "ok", automatic: false, ai: false, code: null },
+                { kind: "unreachable", cause: "HTTP 503" },
+                { kind: "ok", automatic: true, ai: false, code: "LICENSE-KEY-1" }
+            ]
+        });
+        await toCodeStep(h);
+        const done = await h.flow.send({ type: "buy-automatic" });
+        expect(h.relayCalls[0]).toEqual({ kind: "checkout", installId: TEST_INSTALL_ID });
+        expect(h.opened).toEqual([SESSION_URL]);
+        const polls = h.relayCalls.filter(c => c.kind === "status");
+        expect(polls).toHaveLength(3);
+        for (const p of polls) {
+            expect(p.credential).toBe(`free_${TEST_INSTALL_ID}`);
+            expect(p.installId).toBe(TEST_INSTALL_ID);
+        }
+        expect(h.steps).toContain("activation-waiting");
+        expect(h.codeWrites).toEqual(["LICENSE-KEY-1"]);
+        expect(h.patchCalls.length).toBeGreaterThan(0);
+        expect((await h.flow.settled()).step).toBe("done");
+        // Automatic without AI: the last screen does not promise ✦.
+        expect(done.detail).not.toContain("✦");
     });
 
-    it("saves the key and carries on", async () => {
+    it("falls back to the static checkout link, tied to this install, when the relay cannot make one", async () => {
+        const h = harness({ relayCheckout: { kind: "failed", cause: "HTTP 503" } });
+        await toCodeStep(h);
+        await h.flow.send({ type: "buy-automatic" });
+        expect(h.opened).toHaveLength(1);
+        const url = new URL(h.opened[0]!);
+        expect(url.origin + url.pathname).toBe("https://checkout.dodopayments.com/buy/pdt_AUTOMATIC_PENDING");
+        expect(url.searchParams.get("metadata_install")).toMatch(/^[0-9a-f]{16}$/);
+        expect(url.searchParams.get("redirect_url")).toBe("https://surfer05.github.io/subline/?from=discord");
+    });
+
+    it("a checkout URL that is not Dodo's is never opened", async () => {
+        const h = harness({ relayCheckout: { kind: "ok", url: "https://evil.example/pay" } });
+        await toCodeStep(h);
+        await h.flow.send({ type: "buy-automatic" });
+        expect(h.opened[0]).toMatch(/^https:\/\/checkout\.dodopayments\.com\/buy\//);
+    });
+
+    it("a promo code is redeemed for this install and the minted code is saved", async () => {
         const h = harness();
         await toCodeStep(h);
-        const state = await h.flow.send({ type: "set-code", code: "slp_abcdefghijklmnop" });
-
-        expect(h.codeWrites).toEqual(["slp_abcdefghijklmnop"]);
+        const state = await h.flow.send({ type: "set-code", code: "  myserver1 " });
+        expect(h.relayCalls).toEqual([{ kind: "redeem", installId: TEST_INSTALL_ID, code: "MYSERVER1" }]);
+        expect(h.codeWrites).toEqual(["slp_promominted"]);
         expect(state.step).toBe("done");
     });
 
-    // FIELD EVIDENCE (0.1.6): a Discord update removed the patch, so the next
-    // run looked like a fresh install (no marker), and it went language →
-    // an empty "Your Subline code" field although settings.json still held
-    // the code and engine "relay". A saved code is never asked for again.
-    it("is skipped on a fresh-looking install when a code is already saved", async () => {
-        const h = harness({ hasSublineCode: true });
-        const seen: string[] = [];
-        h.flow.onChange = st => seen.push(st.step);
-        await toDetection(h);
-        const next = await h.flow.send({ type: "set-language", code: "tr" });
-        expect(seen).not.toContain("choose-code");
-        expect(next.step).not.toBe("choose-code");
-        expect(h.codeWrites).toEqual([]);
-        expect(h.patchCalls.length).toBeGreaterThan(0);
-        // The last screen speaks to a code-holder.
-        expect(next.step).toBe("done");
-        expect(next.detail).toContain("✦");
-        expect(h.logged.some(l => l.event === "flow.code-already-saved")).toBe(true);
+    const redeemErrors: Array<[RedeemAnswer, string]> = [
+        [{ kind: "not_found" }, CODE_SCREEN_COPY.errNotFound],
+        [{ kind: "claimed" }, CODE_SCREEN_COPY.errClaimed],
+        [{ kind: "already" }, CODE_SCREEN_COPY.errAlready],
+        [{ kind: "rate_limited" }, CODE_SCREEN_COPY.errRateLimited],
+        [{ kind: "unreachable", cause: "fetch failed" }, CODE_SCREEN_COPY.errUnreachable]
+    ];
+    for (const [answer, message] of redeemErrors) {
+        it(`a promo code answered "${answer.kind}" stays on the screen with its message, unpatched`, async () => {
+            const h = harness({ relayRedeem: answer });
+            await toCodeStep(h);
+            const state = await h.flow.send({ type: "set-code", code: "MYSERVER" });
+            expect(state.step).toBe("choose-code");
+            expect(state.error?.message).toBe(message);
+            // Read on the screen, not hidden in the diagnostics.
+            expect(state.detail).toBe(message);
+            expect(h.codeWrites).toEqual([]);
+            expect(h.patchCalls).toHaveLength(0);
+        });
+    }
+
+    it("the exact copy for redeem errors is the owner's", () => {
+        expect(CODE_SCREEN_COPY.errClaimed).toBe("This code has been fully claimed.");
+        expect(CODE_SCREEN_COPY.errNotFound).toBe("That code doesn't exist.");
+        expect(CODE_SCREEN_COPY.errAlready).toBe("Already yours.");
+        expect(CODE_SCREEN_COPY.errUnreachable).toBe("Can't reach Subline right now. Try again in a minute.");
+        expect(CODE_SCREEN_COPY.errDeviceLimit).toBe("This code is already used on 3 computers.");
     });
 
-    it("re-selects the relay engine for a saved code, without writing the code", async () => {
-        const h = harness({ hasSublineCode: true, ensureRelayEngine: { ok: true, value: { changed: true, previous: "google" } } });
-        await toDetection(h);
-        const done = await h.flow.send({ type: "set-language", code: "tr" });
-        expect(h.engineReasserts).toBe(1);
-        expect(h.codeWrites).toEqual([]);
-        expect(h.logged.some(l => l.event === "code.engine-reasserted" && l.fields.previous === "google")).toBe(true);
-        expect(done.step).toBe("done");
-    });
-
-    it("an update with a saved code re-selects the relay engine too", async () => {
-        const marker = { pluginBuildId: "0000000000000000" } as unknown as InstallState["marker"];
-        const st = { ...installState("patched-by-us", "subline"), marker };
-        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: true });
-        await h.flow.start();
-        expect(h.engineReasserts).toBe(1);
-        expect(h.codeWrites).toEqual([]);
-    });
-
-    it("a failed engine re-select is logged and the install carries on", async () => {
-        const h = harness({ hasSublineCode: true, ensureRelayEngine: { ok: false, error: fail("IO_ERROR", "read-only") } });
-        await toDetection(h);
-        const done = await h.flow.send({ type: "set-language", code: "tr" });
-        expect(h.logged.some(l => l.event === "code.engine-reassert-failed")).toBe(true);
-        expect(done.step).toBe("done");
-    });
-
-    it("no saved code: the engine is left alone", async () => {
-        const h = harness({ hasSublineCode: false });
-        await toDetection(h);
-        await h.flow.send({ type: "set-language", code: "tr" });
-        expect(h.engineReasserts).toBe(0);
-    });
-
-    it("Continue without a code never writes, so it can never clear a saved code", async () => {
-        const h = harness({ hasSublineCode: false });
+    it("a license key is checked with the relay (bearer = the key) and saved only when it has Automatic", async () => {
+        const h = harness({ relayStatus: { kind: "ok", automatic: true, ai: true, code: null } });
         await toCodeStep(h);
-        // A code appears in the saved settings while the screen is open
-        // (e.g. pasted in Discord). Skipping must leave it alone.
-        h.ports.hasSublineCode = () => true;
-        const state = await h.flow.send({ type: "skip-code" });
-        expect(h.codeWrites).toEqual([]);
+        const state = await h.flow.send({ type: "set-code", code: "slp_abcdefghijklmnop" });
+        expect(h.relayCalls).toEqual([{ kind: "status", credential: "slp_abcdefghijklmnop", installId: TEST_INSTALL_ID }]);
+        expect(h.codeWrites).toEqual(["slp_abcdefghijklmnop"]);
         expect(state.step).toBe("done");
         expect(state.detail).toContain("✦");
     });
 
-    it("skipping is a normal answer, not a failure", async () => {
+    const statusErrors: Array<[StatusAnswer, string]> = [
+        [{ kind: "ok", automatic: false, ai: false, code: null }, CODE_SCREEN_COPY.errNotActive],
+        [{ kind: "invalid" }, CODE_SCREEN_COPY.errNotFound],
+        [{ kind: "device_limit" }, CODE_SCREEN_COPY.errDeviceLimit],
+        [{ kind: "unreachable", cause: "timed out" }, CODE_SCREEN_COPY.errUnreachable]
+    ];
+    for (const [answer, message] of statusErrors) {
+        it(`a license key answered "${answer.kind}${answer.kind === "ok" ? " without Automatic" : ""}" is refused, unpatched`, async () => {
+            const h = harness({ relayStatus: answer });
+            await toCodeStep(h);
+            const state = await h.flow.send({ type: "set-code", code: "ABCD-EFGH-IJKL" });
+            expect(state.step).toBe("choose-code");
+            expect(state.error?.message).toBe(message);
+            // Read on the screen, not hidden in the diagnostics.
+            expect(state.detail).toBe(message);
+            expect(h.codeWrites).toEqual([]);
+            expect(h.patchCalls).toHaveLength(0);
+        });
+    }
+
+    it("an empty code is refused without asking the relay", async () => {
         const h = harness();
         await toCodeStep(h);
-        const state = await h.flow.send({ type: "skip-code" });
+        const state = await h.flow.send({ type: "set-code", code: "   " });
+        expect(state.error?.message).toBe(CODE_SCREEN_COPY.errEmpty);
+        expect(h.relayCalls).toEqual([]);
+    });
 
+    it("a saved code is checked with the relay before it is honoured, never rewritten", async () => {
+        const h = harness({ savedCode: "slp_savedcode" });
+        const seen: string[] = [];
+        h.flow.onChange = st => seen.push(st.step);
+        await toDetection(h);
+        const next = await h.flow.send({ type: "set-language", code: "tr" });
+        expect(h.relayCalls[0]).toEqual({ kind: "status", credential: "slp_savedcode", installId: TEST_INSTALL_ID });
+        expect(seen).not.toContain("choose-code");
         expect(h.codeWrites).toEqual([]);
-        expect(state.step).toBe("done");
-        // A free install is automatic for 7 days, then translates on click, so
-        // this is not an error state.
-        expect(state.error).toBeNull();
-        // And the last screen says so, rather than promising automatic
-        // translation forever.
-        expect(state.detail).toContain(
-            "Without a code, this is automatic for your first 7 days. After that, click ≈ Translate under a message."
-        );
+        expect(h.engineReasserts).toBe(1);
+        expect(next.step).toBe("done");
+        expect(h.logged.some(l => l.event === "flow.code-already-saved")).toBe(true);
     });
 
-    it("tells a code holder the ✦ line is coming, not the free plan", async () => {
-        const h = harness();
-        await toCodeStep(h);
-        const state = await h.flow.send({ type: "set-code", code: "slp_abcdefghijklmnop" });
-
-        expect(state.step).toBe("done");
-        expect(state.detail).toContain("With your code, the ✦ line follows a few seconds after the ≈ line.");
-        expect(state.detail).not.toContain("7 days");
-    });
-
-    it("stays on the step when the key cannot be saved", async () => {
-        const h = harness({ setSublineCode: { ok: false, error: fail("IO_ERROR", "settings are read-only") } });
-        await toCodeStep(h);
-        const state = await h.flow.send({ type: "set-code", code: "slp_x" });
-
-        expect(state.step).toBe("choose-code");
-        expect(state.error?.code).toBe("IO_ERROR");
-        // Still skippable — a failure to store a key must not trap the install.
-        expect(state.actions).toContain("skip-code");
+    it("a saved code the relay rejects lands on the activation screen, unpatched", async () => {
+        const h = harness({ savedCode: "slp_savedcode", relayStatus: { kind: "device_limit" } });
+        await toDetection(h);
+        const next = await h.flow.send({ type: "set-language", code: "tr" });
+        expect(next.step).toBe("choose-code");
+        expect(next.error?.message).toBe(CODE_SCREEN_COPY.errDeviceLimit);
         expect(h.patchCalls).toHaveLength(0);
     });
 
-    it("never puts the key in the log", async () => {
+    it("an unreachable relay while checking a saved code: the retry message, never continue", async () => {
+        const h = harness({ savedCode: "slp_savedcode", relayStatus: [{ kind: "unreachable", cause: "fetch failed" }, ACTIVE] });
+        await toDetection(h);
+        const failed = await h.flow.send({ type: "set-language", code: "tr" });
+        expect(failed.step).toBe("activation-check-failed");
+        expect(failed.detail).toBe(CODE_SCREEN_COPY.errUnreachable);
+        expect(failed.actions).toEqual(["retry", "cancel"]);
+        expect(h.patchCalls).toHaveLength(0);
+        const after = await h.flow.send({ type: "retry" });
+        expect(after.step).toBe("done");
+        expect(h.patchCalls.length).toBeGreaterThan(0);
+    });
+
+    it("an install id already in the settings that the relay knows as activated skips the screen", async () => {
+        const h = harness({ savedInstallId: "fedcba9876543210fedcba9876543210", relayStatus: { kind: "ok", automatic: true, ai: false, code: "slp_early" } });
+        const seen: string[] = [];
+        h.flow.onChange = st => seen.push(st.step);
+        await toDetection(h);
+        const next = await h.flow.send({ type: "set-language", code: "tr" });
+        expect(h.relayCalls[0]).toEqual({ kind: "status", credential: "free_fedcba9876543210fedcba9876543210", installId: "fedcba9876543210fedcba9876543210" });
+        expect(seen).not.toContain("choose-code");
+        expect(h.codeWrites).toEqual(["slp_early"]);
+        expect(next.step).toBe("done");
+    });
+
+    it("an install id the relay does not know as activated gets the activation screen", async () => {
+        const h = harness({ savedInstallId: "fedcba9876543210fedcba9876543210", relayStatus: { kind: "ok", automatic: false, ai: false, code: null } });
+        await toDetection(h);
+        const next = await h.flow.send({ type: "set-language", code: "tr" });
+        expect(next.step).toBe("choose-code");
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("stays on the screen when the code cannot be saved", async () => {
+        const h = harness({ setSublineCode: { ok: false, error: fail("IO_ERROR", "settings are read-only") } });
+        await toCodeStep(h);
+        const state = await h.flow.send({ type: "set-code", code: "slp_x" });
+        expect(state.step).toBe("choose-code");
+        expect(state.error?.code).toBe("IO_ERROR");
+        expect(state.actions).toEqual(["buy-automatic", "set-code"]);
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("an install id that cannot be written stops on the screen, with nothing sent", async () => {
+        const h = harness({ ensureInstallId: { ok: false, error: fail("IO_ERROR", "read-only") } });
+        await toCodeStep(h);
+        const state = await h.flow.send({ type: "buy-automatic" });
+        expect(state.step).toBe("choose-code");
+        expect(h.relayCalls).toEqual([]);
+        expect(h.opened).toEqual([]);
+    });
+
+    it("never puts a code in the log", async () => {
         const h = harness();
         await toCodeStep(h);
         await h.flow.send({ type: "set-code", code: "slp_SUPERSECRETVALUE" });
-
         const logged = JSON.stringify(h.logged);
         expect(logged).not.toContain("slp_SUPERSECRETVALUE");
-        // The LENGTH is recorded, which is what distinguishes "pasted" from
-        // "pasted half of it" without storing a secret.
         expect(logged).toContain("codeLength");
     });
 });

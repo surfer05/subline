@@ -30,10 +30,10 @@ describe("the action vocabulary", () => {
         // give up self-repair, or force-close Discord, without noticing.
         expect(ACTION_LABELS["skip-helper"]).toMatch(/without background updates/i);
         expect(ACTION_LABELS["force-quit-discord"]).toMatch(/anyway/i);
-        // The code screen leads with the trial, which is what skipping the
-        // code starts. "Use free Google only" was false.
-        expect(ACTION_LABELS["skip-code"]).toBe("Start free trial");
-        expect(ACTION_LABELS["skip-code"]).not.toMatch(/google only/i);
+        // Paid only: the activation screen leads with the purchase, and says
+        // the price on the button.
+        expect(ACTION_LABELS["buy-automatic"]).toBe("Buy Automatic, $4.99");
+        for (const label of Object.values(ACTION_LABELS)) expect(label).not.toMatch(/free|trial/i);
     });
 
     it("marks no more than one action per screen as primary", () => {
@@ -42,7 +42,8 @@ describe("the action vocabulary", () => {
         // but still useful property that the obvious pairs are not both filled.
         const bothPrimary = (a: FlowActionType, b: FlowActionType) => IS_PRIMARY[a] && IS_PRIMARY[b];
         expect(bothPrimary("quit-discord", "recheck")).toBe(false);
-        expect(bothPrimary("set-code", "skip-code")).toBe(false);
+        expect(bothPrimary("set-code", "buy-automatic")).toBe(false);
+        expect(bothPrimary("back", "buy-automatic")).toBe(false);
         expect(bothPrimary("retry", "cancel")).toBe(false);
         expect(bothPrimary("proceed-over-mod", "cancel")).toBe(false);
     });

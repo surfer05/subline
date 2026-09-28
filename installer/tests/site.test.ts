@@ -180,33 +180,60 @@ describe("the built page", () => {
         expect(() => new Function(script)).not.toThrow();
     });
 
-    it("leads pricing with the free download and keeps Buy secondary", () => {
+    it("shows two plans: Automatic once, and AI on top of it, with Download as the one filled button", () => {
         const pricing = section("pricing");
         const primaries = pricing.match(/<a class="btn btn-primary"[^>]*>[^<]*<\/a>/g) ?? [];
-        expect(primaries).toEqual(['<a class="btn btn-primary" href="#downloads">Download free</a>']);
+        expect(primaries).toEqual(['<a class="btn btn-primary" href="#downloads">Download Subline</a>']);
         const buys = pricing.match(/<a [^>]*data-buy[^>]*>Buy<\/a>/g) ?? [];
-        expect(buys).toHaveLength(2);
+        expect(buys).toHaveLength(3);
         for (const buy of buys) expect(buy).toContain("btn-secondary");
+        const text = pricing.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+        expect(text).toContain("Automatic $4.99 once");
+        expect(text).toContain("$2.49 /mo");
+        expect(text).toContain("$19.99 /yr");
+        expect(text.match(/Needs Automatic\./g)).toHaveLength(2);
     });
 
     it("sends buyers back to the site root, where the thanks view reads Dodo's params", () => {
         const root = encodeURIComponent("https://surfer05.github.io/subline/");
+        expect(section("pricing")).toContain(
+            `https://checkout.dodopayments.com/buy/pdt_AUTOMATIC_PENDING?quantity=1&amp;redirect_url=${root}`);
         expect(section("pricing")).toContain(
             `https://checkout.dodopayments.com/buy/pdt_0No1xmbcAqHdYAvt1RNPR?quantity=1&amp;redirect_url=${root}`);
         expect(section("pricing")).toContain(
             `https://checkout.dodopayments.com/buy/pdt_0No1yAve1ozdxryVGZvf6?quantity=1&amp;redirect_url=${root}`);
     });
 
+    it("never says free or trial anywhere a visitor can read", () => {
+        // Visible text only: scripts, styles, comments and tags are stripped
+        // (a CSS class or a code comment is not something a visitor reads).
+        const visible = PAGE
+            .replace(/<script[\s\S]*?<\/script>/g, " ")
+            .replace(/<style[\s\S]*?<\/style>/g, " ")
+            .replace(/<!--[\s\S]*?-->/g, " ")
+            .replace(/<[^>]+>/g, " ");
+        expect(visible).not.toMatch(/\b(free|trial)\b/i);
+        expect(visible).not.toMatch(/7 days/i);
+        // Settings live in Discord's own Subline section, never "Plugins".
+        expect(visible).not.toMatch(/Plugins|VcTranslate/);
+    });
+
     it("has no em dashes", () => {
         expect(PAGE).not.toContain("—");
     });
 
-    it("says in the privacy table what a purchase from Discord sends and keeps", () => {
+    it("says in the privacy table what the install id, computers and server codes send and keep", () => {
         const rows = section("privacy").replace(/<span class="gl-inline">(.*?)<\/span>/g, "$1");
-        expect(rows).toContain("<tr><td>Free installs</td><td>A random id that times your 7 days. Your IP is counted to stop abuse. "
-            + "If you buy inside Discord, a scrambled form of this id goes to Dodo with the purchase, so Subline can switch on by itself.</td>"
-            + "<td>Daily counts for 2 days. First use for 90 days. The link to your purchase for 30 days.</td></tr>");
-        expect(rows).toContain("<tr><td>Your code</td><td>Unlocks ✦. The relay never sees your name or email.</td>");
+        expect(rows).toContain("<tr><td>Install id</td><td>A random id made when you install. It ties your purchase or code "
+            + "to this computer. If you buy from Subline, a scrambled form of it goes to Dodo with the purchase, so Subline "
+            + "can switch on by itself. Your IP is counted to stop abuse.</td>"
+            + "<td>Daily counts for 2 days. The link to your purchase for 30 days.</td></tr>");
+        expect(rows).toContain("<tr><td>Computers</td><td>A code works on up to 3 computers. The relay keeps a scrambled id "
+            + "for each one to count them.</td><td>As long as the code works.</td></tr>");
+        expect(rows).toContain("<tr><td>Server codes</td><td>When you use a server code, the relay records that your install "
+            + "used it, to count its claims.</td><td>As long as the code runs.</td></tr>");
+        expect(rows).toContain("<tr><td>Your code</td><td>Unlocks Subline. The relay never sees your name or email.</td>");
+        expect(rows).not.toContain("Free installs");
         for (const kept of ["<td>Messages</td>", "<td>Usernames</td>", "<td>Profiles and embeds</td>", "<td>Stats</td>"]) {
             expect(rows).toContain(kept);
         }
