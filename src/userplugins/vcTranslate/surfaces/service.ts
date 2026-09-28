@@ -36,6 +36,12 @@ export type SurfaceOutcome = SurfaceVerdict[] | null;
 
 export interface SurfaceDeps {
     isPaid(): boolean;
+    /**
+     * Whether ✦ (the relay) may be asked. False for an Automatic owner without
+     * AI: then every surface, tight ones too, is translated by Google (≈), which
+     * costs nothing, and nothing goes to the relay. Absent means true.
+     */
+    qualityAllowed?(): boolean;
     targetLang(): string;
     /** The plugin's own local rules: nothing translatable, or already the target language. */
     locallySkipped(text: string): boolean;
@@ -119,9 +125,16 @@ export class SurfaceService {
         const entry = this.deps.cache.get(key);
         if (entry?.skip) return null;
         if (entry?.quality) return entry;
-        if (!options.tight && !entry?.fast) this.queue("fast", key, norm);
-        if (this.budgetLeft() > 0) this.queue("quality", key, norm);
+        const quality = this.qualityAllowed();
+        // Without ✦, a tight mark is Google's too: ≈ in place.
+        if ((!options.tight || !quality) && !entry?.fast) this.queue("fast", key, norm);
+        if (quality && this.budgetLeft() > 0) this.queue("quality", key, norm);
         return entry ?? null;
+    }
+
+    /** Whether ✦ may be asked right now (see SurfaceDeps.qualityAllowed). */
+    qualityAllowed(): boolean {
+        return this.deps.qualityAllowed ? this.deps.qualityAllowed() : true;
     }
 
     private budgetLeft(): number {
@@ -169,7 +182,7 @@ export class SurfaceService {
     private async flush(tier: SurfaceTier): Promise<void> {
         const queue = this.pending[tier];
         if (queue.size === 0) return;
-        if (!this.deps.isPaid()) {
+        if (!this.deps.isPaid() || (tier === "quality" && !this.qualityAllowed())) {
             // The plan changed under a queued batch: send nothing.
             queue.clear();
             return;

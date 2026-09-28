@@ -13,6 +13,18 @@ export const SETTINGS_COPY = {
         title: "Subline code",
         description: "From your purchase email. Keeps everything automatic."
     },
+    /** The plan card at the top of the page: what this install has, and its code. */
+    plan: {
+        none: "Not activated.",
+        automatic: "Plan: Automatic.",
+        ai: "Plan: Automatic + AI.",
+        codeLabel: "Your code:",
+        copy: "Copy",
+        copied: "Code copied.",
+        activate: "Activate",
+        addAi: "Add AI",
+        enterCode: "Enter a code"
+    },
     targetLang: {
         title: "Reading language",
         description: "Messages are translated into this language."

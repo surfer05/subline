@@ -25,15 +25,16 @@ vi.mock("../engines/groq", async importOriginal => ({
 vi.mock("../engines/relay", async importOriginal => ({
     ...(await importOriginal() as typeof import("../engines/relay")),
     fetchRelayStatus: vi.fn(),
-    fetchRelayCheckout: vi.fn()
+    fetchRelayCheckout: vi.fn(),
+    fetchRelayRedeem: vi.fn()
 }));
 
 import { translateWithClaude, TRUNCATED_ERROR } from "../engines/claude";
 import { translateWithGemini } from "../engines/gemini";
 import { translateWithGoogle } from "../engines/google";
 import { translateWithGroq } from "../engines/groq";
-import { fetchRelayCheckout, fetchRelayStatus } from "../engines/relay";
-import { relayCheckout, relayStatus, translateBatch } from "../native";
+import { fetchRelayCheckout, fetchRelayRedeem, fetchRelayStatus } from "../engines/relay";
+import { relayCheckout, relayRedeem, relayStatus, translateBatch } from "../native";
 import type { BatchRequest, Result } from "../types";
 
 const google = vi.mocked(translateWithGoogle);
@@ -639,7 +640,19 @@ describe("relayCheckout: a checkout URL for this install", () => {
     it("returns the URL the relay gave", async () => {
         checkoutFetch.mockResolvedValue("https://checkout.dodopayments.com/session/cks_1");
         expect(await relayCheckout(EV, "free_abc", "monthly")).toEqual({ ok: true, url: "https://checkout.dodopayments.com/session/cks_1" });
-        expect(checkoutFetch).toHaveBeenCalledWith("free_abc", "monthly", fetch);
+        expect(checkoutFetch).toHaveBeenCalledWith("free_abc", "monthly", fetch, undefined, undefined);
+    });
+
+    it("sends the install along, accepts the automatic plan, and passes the relay's refusal word on", async () => {
+        checkoutFetch.mockResolvedValue("https://checkout.dodopayments.com/session/cks_2");
+        await relayCheckout(EV, "slp_code", "automatic", "free_abc");
+        expect(checkoutFetch).toHaveBeenCalledWith("slp_code", "automatic", fetch, undefined, "free_abc");
+        const refused = Object.assign(new Error("relay checkout: HTTP 403 automatic_required"), { errorCode: "automatic_required" });
+        checkoutFetch.mockRejectedValue(refused);
+        expect(await relayCheckout(EV, "slp_code", "annual", "free_abc")).toEqual({
+            ok: false, error: "relay checkout: HTTP 403 automatic_required", errorCode: "automatic_required"
+        });
+        expect(await relayCheckout(EV, "slp_code", "lifetime", "free_abc")).toEqual({ ok: false, error: "unknown plan" });
     });
 
     it("never throws, and never returns the install id", async () => {
@@ -661,5 +674,41 @@ describe("relayCheckout: a checkout URL for this install", () => {
         expect(await relayStatus(EV, "free_abc")).toEqual({
             ok: true, plan: "trial", used: 0, cap: 300, purchase: { code: "LK-1", plan: "monthly" }
         });
+    });
+});
+
+describe("the paid-only model (v2) through the main process", () => {
+    const INSTALL = "free_" + "c".repeat(32);
+    const redeemFetch = vi.mocked(fetchRelayRedeem);
+
+    it("status: passes the install along, and the entitlement fields through", async () => {
+        relayStatusFetch.mockResolvedValue({
+            plan: "", used: 0, cap: 0, automatic: true, ai: false, code: "slp_x", previews: { used: 1, cap: 3 },
+            token: "p.s", tokenExpiresAt: 99
+        });
+        expect(await relayStatus(EV, "slp_code", INSTALL)).toEqual({
+            ok: true, plan: "", used: 0, cap: 0, automatic: true, ai: false, code: "slp_x",
+            previews: { used: 1, cap: 3 }, token: "p.s", tokenExpiresAt: 99
+        });
+        expect(relayStatusFetch).toHaveBeenLastCalledWith("slp_code", fetch, INSTALL);
+    });
+
+    it("status: hands the refusal word on, and scrubs both the code and the install id", async () => {
+        relayStatusFetch.mockRejectedValue(Object.assign(new Error(`relay: HTTP 403 device_limit ${INSTALL} slp_code`), { errorCode: "device_limit" }));
+        const res = await relayStatus(EV, "slp_code", INSTALL) as any;
+        expect(res.ok).toBe(false);
+        expect(res.errorCode).toBe("device_limit");
+        expect(res.error).not.toContain(INSTALL);
+        expect(res.error).not.toContain("slp_code");
+    });
+
+    it("redeem: returns the minted code, or the refusal word, never the install id, and never throws", async () => {
+        redeemFetch.mockResolvedValue("slp_minted");
+        expect(await relayRedeem(EV, INSTALL, "SERVER5")).toEqual({ ok: true, code: "slp_minted" });
+        expect(redeemFetch).toHaveBeenLastCalledWith(INSTALL, "SERVER5", fetch);
+        redeemFetch.mockRejectedValue(Object.assign(new Error(`relay redeem: HTTP 410 claimed ${INSTALL}`), { errorCode: "claimed" }));
+        const res = await relayRedeem(EV, INSTALL, "SERVER5") as any;
+        expect(res).toMatchObject({ ok: false, errorCode: "claimed" });
+        expect(res.error).not.toContain(INSTALL);
     });
 });

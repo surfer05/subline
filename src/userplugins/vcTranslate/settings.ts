@@ -1,11 +1,12 @@
 import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
-import { LocaleStore, React } from "@webpack/common";
+import { LocaleStore, React, Toasts } from "@webpack/common";
 
-import { freeMode, freePlanLine, PRICING_URL } from "./freePlan";
+import { copyToClipboard } from "@utils/clipboard";
+
+import { entitlementLevel, type Level, subscribeEntitlement } from "./entitlement";
 import { targetLanguageOptions } from "./languages";
-import { openUpgrade } from "./upgradeBridge";
-import { UPGRADE_COPY } from "./upgradeCopy";
+import { openCodeEntryFromSettings, openUpgrade } from "./upgradeBridge";
 import { notifySettingsChanged } from "./settingsBridge";
 import { SETTINGS_COPY } from "./settingsCopy";
 import { DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_MODEL } from "./types";
@@ -32,7 +33,7 @@ function defaultTargetLang(): string {
 
 /** The engine value a Subline code turns on. Same string the installer seeds (RELAY_ENGINE). */
 export const RELAY_ENGINE = "relay";
-/** The engine a blank code falls back to: the free plan (a 7-day automatic trial, then translate on click). */
+/** The engine a blank code falls back to: Google (≈) for an Automatic owner, nothing for an install that is not activated. */
 export const FREE_ENGINE = "google";
 
 /**
@@ -60,16 +61,56 @@ function syncEngineToCode(): void {
     notifySettingsChanged();
 }
 
-/** A free install, as far as settings can tell: no Subline code saved. */
-function isFreeBySettings(): boolean {
-    const raw = settings.store.sublineCode;
-    return (typeof raw === "string" ? raw.trim() : "") === "";
+/** The one line that says what this install has. */
+export function planLine(level: Level): string {
+    return level === "ai" ? SETTINGS_COPY.plan.ai : level === "automatic" ? SETTINGS_COPY.plan.automatic : SETTINGS_COPY.plan.none;
 }
 
-/** The local trial start, or now when this install has not started one yet. */
-function trialStartedAt(): number {
-    const v = settings.store.freeTrialStartedAt;
-    return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : Date.now();
+const LINK_STYLE = { cursor: "pointer", color: "var(--text-link, #00a8fc)" } as const;
+
+function link(text: string, onClick: () => void) {
+    return React.createElement("a", {
+        role: "button",
+        tabIndex: 0,
+        style: LINK_STYLE,
+        onClick: (e: any) => { e?.preventDefault?.(); onClick(); }
+    }, text);
+}
+
+/**
+ * The plan card at the top of the page: what this install has, the saved code
+ * with a Copy button (so a buyer can take it to another computer), and the one
+ * action that helps: Activate / Enter a code when there is nothing, Add AI for
+ * an Automatic owner. Redraws when the relay's answer changes.
+ */
+export function PlanCard() {
+    const [, redraw] = React.useReducer((n: number) => n + 1, 0);
+    React.useEffect(() => subscribeEntitlement(redraw), []);
+    const level = entitlementLevel();
+    const raw = settings.store.sublineCode;
+    const code = typeof raw === "string" ? raw.trim() : "";
+    const muted = { color: "var(--text-muted)", fontSize: "0.9rem" };
+    const rows: any[] = [React.createElement("div", { key: "plan", style: { color: "var(--text-default, var(--text-normal))" } }, planLine(level))];
+    if (code !== "") {
+        rows.push(React.createElement("div", { key: "code", style: { ...muted, display: "flex", gap: 8, alignItems: "center", marginTop: 4 } },
+            SETTINGS_COPY.plan.codeLabel, " ",
+            React.createElement("code", { style: { userSelect: "all" } }, code), " ",
+            React.createElement("button", {
+                type: "button",
+                "data-subline-copy": "",
+                onClick: () => {
+                    void copyToClipboard(code).then(() => Toasts.show({
+                        id: Toasts.genId(), type: Toasts.Type.SUCCESS, message: SETTINGS_COPY.plan.copied
+                    })).catch(() => { });
+                }
+            }, SETTINGS_COPY.plan.copy)
+        ));
+    }
+    const actions: any[] = [];
+    if (level === "none") actions.push(link(SETTINGS_COPY.plan.activate, openUpgrade), " · ", link(SETTINGS_COPY.plan.enterCode, openCodeEntryFromSettings));
+    else if (level === "automatic") actions.push(link(SETTINGS_COPY.plan.addAi, openUpgrade));
+    if (actions.length > 0) rows.push(React.createElement("div", { key: "actions", style: { ...muted, marginTop: 4 } }, ...actions));
+    return React.createElement("div", { style: { marginBottom: 8 } }, ...rows);
 }
 
 export const settings = definePluginSettings({
@@ -87,12 +128,24 @@ export const settings = definePluginSettings({
         // engine code still exists, unreachable, for the test suite; there is no
         // way into it from a shipped build. See tests/settings.test.ts.
         options: [
-            { label: "Google (free plan)", value: "google", default: true },
+            { label: "Google (≈)", value: "google", default: true },
             { label: "Subline (keyless AI, just paste your code)", value: "relay" }
         ],
         // engine is captured by value when the batcher is built, so a change
         // here must rebuild it (see settingsBridge.ts / index.tsx).
         onChange: notifySettingsChanged
+    },
+    // The installer's install id (32 lowercase hex, no prefix): the install a
+    // purchase or promo was tied to before Discord ever ran. taste.ts prefers
+    // it. CUSTOM, never shown.
+    installId: {
+        type: OptionType.CUSTOM,
+        default: ""
+    },
+    // First on the page: the plan, the code and its Copy button.
+    plan: {
+        type: OptionType.COMPONENT,
+        component: () => React.createElement(PlanCard)
     },
     sublineCode: {
         type: OptionType.STRING,
@@ -106,50 +159,12 @@ export const settings = definePluginSettings({
         // see a pasted/cleared code right away, not on next reload.
         onChange: syncEngineToCode
     },
-    // Directly under the code, so a free install sees what its plan is right
-    // where it would paste a code to change it. Read-only, and hidden for a
-    // paid install, which is told nothing new (see freePlan.ts).
-    freePlanStatus: {
-        type: OptionType.COMPONENT,
-        component: () => {
-            const start = trialStartedAt();
-            const line = freePlanLine(isFreeBySettings(), start);
-            if (line === null) return null;
-            const style = { color: "var(--text-muted)", fontSize: "0.9rem" };
-            // During the trial and after it, the line carries an Upgrade link, which
-            // opens the Upgrade panel (upgradePanel.tsx) through upgradeBridge.ts.
-            // A trial user who already wants to buy must not have to wait 7 days.
-            return React.createElement("div", { style }, line, " ", React.createElement("a", {
-                href: PRICING_URL,
-                target: "_blank",
-                rel: "noreferrer",
-                onClick: (e: any) => {
-                    e?.preventDefault?.();
-                    openUpgrade();
-                }
-            }, UPGRADE_COPY.settingsLink));
-        }
-    },
-    // When this install's free trial began (epoch ms), 0 until the first
-    // session that runs as a free install. CUSTOM so it never appears in the
-    // settings UI: it is bookkeeping, not a choice. The relay's own record of
-    // the trial outranks it (freePlan.ts); this is the fallback clock.
-    freeTrialStartedAt: {
-        type: OptionType.CUSTOM,
-        default: 0
-    },
     // The Subline code the reader last cleared by hand, "" for none. A
     // purchase the relay still links to this install is not saved again when
     // it is this code: clearing it was a choice. CUSTOM, never shown.
     clearedPurchaseCode: {
         type: OptionType.CUSTOM,
         default: ""
-    },
-    // The trial end (epoch ms) the "your trial ended" toast was shown for, 0
-    // for none: the toast fires once per actual ending (freePlan.ts).
-    freeTrialEndNoticeFor: {
-        type: OptionType.CUSTOM,
-        default: 0
     },
     anthropicApiKey: {
         type: OptionType.STRING,
@@ -284,11 +299,13 @@ export const settings = definePluginSettings({
         // is nothing for the reader to choose. The value stays for the plugin.
         hidden: () => true
     },
-    freePlanStatus: {
-        hidden: () => !isFreeBySettings()
+    sublineCode: {
+        // Shown in the plan card with a Copy button instead. A code is entered
+        // through "Enter a code", which checks it with the relay first.
+        hidden: () => true
     },
     translateSurfaces: {
-        hidden: () => isFreeBySettings()
+        hidden: () => entitlementLevel() === "none"
     },
     anthropicApiKey: {
         // Permanently hidden: bring-your-own-key is not an offered path (see the

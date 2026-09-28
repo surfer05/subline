@@ -13,6 +13,35 @@ export const CLIENT_HEADER = "x-subline-client";
 export const CLIENT_ID = `vcTranslate/${PLUGIN_VERSION}`;
 
 /**
+ * The paid-only model (v2). Every request says so with `x-subline-api: 2`, and
+ * names the install it comes from with `x-subline-install: free_<hex>`, so the
+ * relay can apply the 3-computer limit and join the install to its account.
+ * Without the api header the relay answers exactly as it did for v0.1.9 and
+ * earlier, which is what keeps older installs working until they update.
+ */
+export const API_HEADER = "x-subline-api";
+export const API_VERSION = "2";
+export const INSTALL_HEADER = "x-subline-install";
+
+/** The headers every v2 relay request carries. `install` is the install bearer ("free_<hex>"). */
+export function relayHeaders(credential: string, install?: string, json = false): Record<string, string> {
+    const h: Record<string, string> = {
+        authorization: `Bearer ${credential}`,
+        [CLIENT_HEADER]: CLIENT_ID,
+        [API_HEADER]: API_VERSION
+    };
+    if (install) h[INSTALL_HEADER] = install;
+    if (json) h["content-type"] = "application/json";
+    return h;
+}
+
+/** The relay's own error word ("device_limit", "claimed"...), when its body had one. */
+function withErrorCode<E extends Error>(err: E, body: any): E {
+    if (body && typeof body.error === "string" && /^[a-z_]{1,40}$/.test(body.error)) (err as any).errorCode = body.error;
+    return err;
+}
+
+/**
  * The Subline relay: keyless AI translation. The user's "key" is an opaque
  * CODE, not a provider key, and the request goes to Subline's own Worker, which
  * holds the paid Groq key and returns the SAME shape a direct provider call
@@ -87,6 +116,55 @@ export interface RelayStatus {
      * ever sent to the holder of the free id the checkout was opened with.
      */
     purchase?: { code: string; plan: string };
+    /* ---- v2 (paid-only) fields. Present together, or not at all. ---- */
+    /** Whether the account behind this install owns Automatic. */
+    automatic?: boolean;
+    /** Whether it has AI (✦ on everything) right now. */
+    ai?: boolean;
+    /** When the AI period ends (epoch ms), if stated. */
+    aiUntil?: number;
+    /** A code this install should save (a purchase, a promo or an early-user grant). */
+    code?: string;
+    /** Today's ✦ previews for an Automatic owner. */
+    previews?: { used: number; cap: number };
+    /** The relay's signed entitlement token, and when it (and so Automatic offline) runs out. */
+    token?: string;
+    tokenExpiresAt?: number;
+}
+
+/** POST /v1/redeem: a promo code for this install. A compiled constant, like RELAY_URL. */
+export const RELAY_REDEEM_URL = "https://subline-relay.rahul05alok.workers.dev/v1/redeem";
+
+/**
+ * Redeem a promo code for this install. Returns the Subline code the relay
+ * minted. Throws an HttpError carrying the relay's error word (`errorCode`:
+ * "not_found", "claimed", "already", "rate_limited", "unavailable").
+ */
+export async function fetchRelayRedeem(
+    install: string,
+    promo: string,
+    fetchImpl: typeof fetch = fetch,
+    timeoutMs: number = CHECKOUT_TIMEOUT_MS
+): Promise<string> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetchImpl(RELAY_REDEEM_URL, {
+            method: "POST",
+            headers: relayHeaders(install, install, true),
+            body: JSON.stringify({ code: promo }),
+            signal: controller.signal
+        });
+        let body: any = null;
+        try { body = await res.json(); } catch { /* fall through */ }
+        if (!res.ok || !body || body.ok !== true || typeof body.code !== "string" || body.code.trim() === "" || body.code.length > 200) {
+            const detail = body && typeof body.error === "string" ? ` ${body.error}` : "";
+            throw withErrorCode(new HttpError(`relay redeem: HTTP ${res.status}${detail}`, res.status), body);
+        }
+        return body.code.trim();
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 /**
@@ -106,14 +184,15 @@ export async function fetchRelayCheckout(
     code: string,
     plan: string,
     fetchImpl: typeof fetch = fetch,
-    timeoutMs: number = CHECKOUT_TIMEOUT_MS
+    timeoutMs: number = CHECKOUT_TIMEOUT_MS,
+    install?: string
 ): Promise<string> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
         const res = await fetchImpl(RELAY_CHECKOUT_URL, {
             method: "POST",
-            headers: { "content-type": "application/json", authorization: `Bearer ${code}`, [CLIENT_HEADER]: CLIENT_ID },
+            headers: relayHeaders(code, install, true),
             body: JSON.stringify({ plan }),
             signal: controller.signal
         });
@@ -121,7 +200,7 @@ export async function fetchRelayCheckout(
         try { body = await res.json(); } catch { /* fall through */ }
         if (!res.ok || !body || body.ok !== true || typeof body.url !== "string") {
             const detail = body && typeof body.error === "string" ? ` ${body.error}` : "";
-            throw new HttpError(`relay checkout: HTTP ${res.status}${detail}`, res.status);
+            throw withErrorCode(new HttpError(`relay checkout: HTTP ${res.status}${detail}`, res.status), body);
         }
         return body.url;
     } finally {
@@ -153,11 +232,12 @@ function countFrom(value: unknown): number | undefined {
  */
 export async function fetchRelayStatus(
     code: string,
-    fetchImpl: typeof fetch = fetch
+    fetchImpl: typeof fetch = fetch,
+    install?: string
 ): Promise<RelayStatus> {
     const res = await fetchImpl(RELAY_STATUS_URL, {
         method: "GET",
-        headers: { authorization: `Bearer ${code}`, [CLIENT_HEADER]: CLIENT_ID }
+        headers: relayHeaders(code, install)
     });
 
     let body: any = null;
@@ -165,12 +245,16 @@ export async function fetchRelayStatus(
 
     if (!res.ok || !body || body.ok !== true) {
         const detail = body && typeof body.error === "string" ? ` ${body.error}` : "";
-        throw new HttpError(
+        throw withErrorCode(new HttpError(
             `relay: HTTP ${res.status}${detail}`,
             res.status,
             body && typeof body.retryAfterMs === "number" ? body.retryAfterMs : undefined
-        );
+        ), body);
     }
+
+    // A v2 answer (the paid-only model): the entitlement, and no daily count
+    // unless the install is an Automatic owner with previews.
+    if (typeof body.automatic === "boolean") return v2StatusFrom(body);
 
     // Validated rather than blind-cast, on the same principle as the results
     // array below: a malformed count reaching the renderer would be shown to
@@ -191,6 +275,30 @@ export async function fetchRelayStatus(
     };
 }
 
+const positive = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+
+/** A v2 status body, field by field. Anything malformed is dropped, never trusted. */
+function v2StatusFrom(body: any): RelayStatus {
+    const used = countFrom(body.previews?.used);
+    const cap = countFrom(body.previews?.cap);
+    const previews = used !== undefined && cap !== undefined ? { used, cap } : undefined;
+    const code = typeof body.code === "string" && body.code.trim() !== "" && body.code.length <= 200 ? body.code.trim() : undefined;
+    return {
+        plan: typeof body.plan === "string" ? body.plan : "",
+        used: previews?.used ?? 0,
+        cap: previews?.cap ?? 0,
+        serverNow: positive(body.now) ? body.now : undefined,
+        automatic: body.automatic === true,
+        ai: body.ai === true,
+        aiUntil: positive(body.aiUntil) ? body.aiUntil : undefined,
+        code,
+        previews,
+        token: typeof body.token === "string" && body.token.length <= 4096 ? body.token : undefined,
+        tokenExpiresAt: positive(body.tokenExpiresAt) ? body.tokenExpiresAt : undefined,
+        purchase: purchaseFrom(body.purchase)
+    };
+}
+
 export async function translateWithRelay(
     req: BatchRequest,
     code: string,
@@ -202,11 +310,12 @@ export async function translateWithRelay(
 export async function translateWithRelayDetailed(
     req: BatchRequest,
     code: string,
-    fetchImpl: typeof fetch = fetch
+    fetchImpl: typeof fetch = fetch,
+    install?: string
 ): Promise<RelayOutcome> {
     const res = await fetchImpl(RELAY_URL, {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${code}`, [CLIENT_HEADER]: CLIENT_ID },
+        headers: relayHeaders(code, install, true),
         body: JSON.stringify(req)
     });
 
@@ -229,10 +338,9 @@ export async function translateWithRelayDetailed(
                 ? body.quotaLimitPerMinute
                 : undefined
         );
-        // A 402 "trial ended" states WHEN the relay has the trial ending, on
-        // its own clock. The renderer only believes an ending that comes with
-        // a past trialEndsAt (freePlan.ts), so both ride along.
-        if (body && typeof body.trialEndsAt === "number") (err as any).trialEndsAt = body.trialEndsAt;
+        // The relay's own error word ("ai_required", "device_limit"...), so
+        // the renderer can tell an entitlement refusal from a network fault.
+        withErrorCode(err, body);
         if (body && typeof body.now === "number") (err as any).serverNow = body.now;
         throw err;
     }

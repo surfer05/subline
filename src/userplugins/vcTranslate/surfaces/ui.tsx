@@ -122,22 +122,29 @@ export function SurfaceLines({ texts }: { texts: SurfaceText[]; }) {
     }
 }
 
-/** The ✦ translation of a tight text, or null while pending, skipped or failed. */
-export function tightTranslation(text: string): { lang: string; text: string; } | null {
+/**
+ * The translation of a tight text, or null while pending, skipped or failed.
+ * ✦ when there is one. Without AI (an Automatic owner) Google's ≈ is shown in
+ * place instead, since the relay is never asked.
+ */
+export function tightTranslation(text: string): { lang: string; text: string; glyph: "✦" | "≈"; } | null {
     if (service === null) return null;
     const entry = service.want(text, { tight: true });
     const q = entry?.quality;
-    if (!q || q.text.trim() === "") return null;
-    return { lang: q.lang, text: q.text.trim() };
+    if (q && q.text.trim() !== "") return { lang: q.lang, text: q.text.trim(), glyph: "✦" };
+    if (service.qualityAllowed()) return null;
+    const f = entry?.fast;
+    if (!f || f.text.trim() === "") return null;
+    return { lang: f.lang, text: f.text.trim(), glyph: "≈" };
 }
 
 const PREFIX_STYLE = { opacity: 0.75 } as const;
 
-/** "✦ translation", with the original text as its tooltip. */
-export function TranslatedInPlace({ original, translation }: { original: string; translation: unknown; }) {
+/** "✦ translation" (or "≈ translation"), with the original text as its tooltip. */
+export function TranslatedInPlace({ original, translation, glyph = "✦" }: { original: string; translation: unknown; glyph?: string; }) {
     return (
         <span title={original} data-subline-surface="in-place">
-            <span style={PREFIX_STYLE}>✦ </span>{translation as any}
+            <span style={PREFIX_STYLE}>{glyph} </span>{translation as any}
         </span>
     );
 }
@@ -161,7 +168,7 @@ export function TightSwap({ original, text, tooltip, render }: {
         if (t === null) return (original ?? null) as any;
         const shown = render ? render(t.text) : t.text;
         if (shown === null || shown === undefined) return (original ?? null) as any;
-        const swapped = <TranslatedInPlace original={tooltip ?? text} translation={shown} />;
+        const swapped = <TranslatedInPlace original={tooltip ?? text} translation={shown} glyph={t.glyph} />;
         // Discord's text sometimes carries a leading space (after an emoji).
         const lead = typeof original === "string" ? /^\s*/.exec(original)![0] : "";
         return lead === "" ? swapped : <>{lead}{swapped}</>;

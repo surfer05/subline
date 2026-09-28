@@ -162,18 +162,18 @@ describe("surface hooks", () => {
         expect(__surfaceService()).toBeNull();
     });
 
-    it("the settings toggle exists, defaults on, and is hidden without a code", () => {
+    it("the settings toggle exists, defaults on, and is hidden only for an install that owns nothing", async () => {
         const def = (settings as any).def.translateSurfaces;
         expect(def.displayName).toBe("Profiles, embeds and more");
         expect(def.description).toBe("Also translate statuses, bios, embeds, polls, topics and titles.");
         expect(settings.store.translateSurfaces).toBe(true);
-        expect(def.hidden()).toBe(true);
-        paid();
         expect(def.hidden()).toBe(false);
+        await restart(() => DataStore.clearEntitlementForTest());
+        expect(def.hidden()).toBe(true);
     });
 });
 
-describe("free and trial installs see no change", () => {
+describe("an install that owns nothing sees no change", () => {
     function renderEverything() {
         stubActivities.set("u1", [{ type: 4, state: "Bin gleich zurück" }]);
         stubProfiles.set("u1", { bio: "Ich liebe Pizza" });
@@ -206,7 +206,8 @@ describe("free and trial installs see no change", () => {
         }
     }
 
-    it("a free install renders nothing extra and sends zero surface requests", async () => {
+    it("renders nothing extra and sends zero surface requests", async () => {
+        await restart(() => DataStore.clearEntitlementForTest());
         expect(renderEverything()).toEqual([null, "Bin gleich zurück", null, "Hilfe gesucht"]);
         parsersUntouched();
         childrenUntouched();
@@ -214,15 +215,18 @@ describe("free and trial installs see no change", () => {
         expect(surfaceCalls()).toEqual([]);
     });
 
-    it("a trial the relay has confirmed sends zero surface requests too", async () => {
-        native.relayStatus.mockResolvedValue({ ok: true, plan: "trial", used: 0, cap: 300, trialEndsAt: Date.now() + 5 * DAY_MS });
-        await restart();
-        await settle(100);
-        expect(renderEverything()).toEqual([null, "Bin gleich zurück", null, "Hilfe gesucht"]);
-        parsersUntouched();
-        childrenUntouched();
+    it("an Automatic owner gets ≈ on surfaces, tight ones in place too, and nothing goes to the relay", async () => {
+        await restart(() => DataStore.setEntitlementForTest({ automatic: true, ai: false, tokenExpiresAt: Date.now() + 7 * DAY_MS }));
+        paid();   // an Automatic code is saved, so the engine setting reads "relay"
+        __stubSetSelectedChannel("f1");
+        tag("Hilfe gesucht");
         await settle();
-        expect(surfaceCalls()).toEqual([]);
+        const node = tag("Hilfe gesucht");
+        expect(node.type).toBe("span");
+        expect(node.props.title).toBe("Hilfe gesucht");
+        expect(text(node)).toBe("≈ rough: Hilfe gesucht");
+        expect(surfaceCalls("google").length).toBeGreaterThan(0);
+        expect(surfaceCalls("relay")).toEqual([]);
     });
 
     it("a paid install with the setting off sends zero surface requests", async () => {
@@ -672,7 +676,8 @@ describe("the reply bar", () => {
     const quoted = (id: string, channelId = "c1", content = "Kommst du heute Abend zum Essen?", more: Record<string, unknown> = {}) =>
         ({ id, channel_id: channelId, content, ...more });
 
-    it("a non-paid install gets Discord's quoted line back, the very same value", async () => {
+    it("an install that owns nothing gets Discord's quoted line back, the very same value", async () => {
+        await restart(() => DataStore.clearEntitlementForTest());
         expect(P.replyQuoteChildren(ORIGINAL, props(quoted("q1")))).toBe(ORIGINAL);
         await settle();
         expect(surfaceCalls()).toEqual([]);

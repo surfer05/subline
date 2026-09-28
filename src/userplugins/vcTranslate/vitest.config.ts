@@ -34,6 +34,7 @@ export default defineConfig({
             "@api/MessagePopover": stub("api-messagepopover.ts"),
             "@api/Notices": stub("api-notices.ts"),
             "@api/Settings": stub("api-settings.ts"),
+            "@utils/clipboard": stub("utils-clipboard.ts"),
             "@utils/Logger": stub("utils-logger.ts"),
             "@utils/native": stub("utils-native.ts"),
             "@utils/types": stub("utils-types.ts"),

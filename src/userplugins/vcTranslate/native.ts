@@ -4,7 +4,7 @@ import { translateWithClaude, TRUNCATED_ERROR } from "./engines/claude";
 import { translateWithGemini } from "./engines/gemini";
 import { translateWithGoogle } from "./engines/google";
 import { translateWithGroq } from "./engines/groq";
-import { fetchRelayCheckout, fetchRelayStatus, translateWithRelayDetailed } from "./engines/relay";
+import { fetchRelayCheckout, fetchRelayRedeem, fetchRelayStatus, translateWithRelayDetailed } from "./engines/relay";
 import type { ProviderRateLimit } from "./rateHint";
 import { withRetry } from "./retry";
 import { readStagedBuildIdSync } from "./stagedBuild";
@@ -66,9 +66,14 @@ export type NativeResponse =
          * limited". See rateHint.ts's modelFromGeminiBody.
          */
         quotaModel?: string;
-        /** A relay 402 "trial ended": when the relay has the trial ending, and its clock. */
-        trialEndsAt?: number;
+        /** The relay's clock on this refusal, when it stated one. */
         serverNow?: number;
+        /**
+         * The relay's own error word ("ai_required", "not_activated",
+         * "device_limit"...), when the relay refused. Lets the renderer tell an
+         * entitlement refusal from a network fault without parsing text.
+         */
+        errorCode?: string;
     };
 
 /**
@@ -161,12 +166,13 @@ async function runEngine(
     req: BatchRequest,
     apiKey: string,
     model: string | undefined,
-    debug: boolean
+    debug: boolean,
+    install?: string
 ): Promise<EngineOutcome> {
     // The relay states the ceiling for this code on every success; Groq is
     // the only engine that reports a remaining count of its own.
     if (engine === "relay") {
-        const out = await translateWithRelayDetailed(req, apiKey, fetch);
+        const out = await translateWithRelayDetailed(req, apiKey, fetch, install);
         return {
             results: out.results,
             statedLimitPerMinute: out.rpmLimit,
@@ -203,7 +209,10 @@ export async function translateBatch(
     // answer down. Defaults false so every existing call site (and every test
     // that does not care about this) behaves exactly as it did before this
     // parameter existed.
-    debug = false
+    debug = false,
+    // The install bearer ("free_<hex>"), sent to the relay as x-subline-install
+    // so it can apply the 3-computer limit. Ignored by every other engine.
+    install?: string
 ): Promise<NativeResponse> {
     let req: BatchRequest;
     try {
@@ -214,7 +223,7 @@ export async function translateBatch(
 
     try {
         const outcome = await withRetry(
-            () => runEngine(engine, req, apiKey, model, debug),
+            () => runEngine(engine, req, apiKey, model, debug, install),
             { retries: 1, delayMs: 1000, shouldRetry: isRetryable }
         );
         // `providerRateLimit` is undefined for every engine that reports
@@ -268,28 +277,57 @@ export async function translateBatch(
             ? scrubKey(named, apiKey)
             : undefined;
 
-        const endsAt = (err as { trialEndsAt?: unknown })?.trialEndsAt;
         const serverNow = (err as { serverNow?: unknown })?.serverNow;
+        const errorCode = (err as { errorCode?: unknown })?.errorCode;
         return {
             ok: false,
             error: scrubKey(raw, apiKey),
             retryAfterMs,
             quotaLimitPerMinute,
             quotaModel,
-            ...(typeof endsAt === "number" ? { trialEndsAt: endsAt } : {}),
-            ...(typeof serverNow === "number" ? { serverNow } : {})
+            ...(typeof serverNow === "number" ? { serverNow } : {}),
+            ...(typeof errorCode === "string" ? { errorCode } : {})
         };
     }
 }
 
 export type RelayStatusResponse =
     | {
-        ok: true; plan: string; used: number; cap: number; trialEndsAt?: number; serverNow?: number; trialProvisional?: boolean;
+        ok: true; plan: string; used: number; cap: number; serverNow?: number;
         purchase?: { code: string; plan: string };
+        /* v2: present together when the relay speaks the paid-only model. */
+        automatic?: boolean; ai?: boolean; aiUntil?: number; code?: string;
+        previews?: { used: number; cap: number }; token?: string; tokenExpiresAt?: number;
     }
-    | { ok: false; error: string };
+    | { ok: false; error: string; errorCode?: string };
 
-export type RelayCheckoutResponse = { ok: true; url: string } | { ok: false; error: string };
+export type RelayCheckoutResponse = { ok: true; url: string } | { ok: false; error: string; errorCode?: string };
+
+export type RelayRedeemResponse = { ok: true; code: string } | { ok: false; error: string; errorCode?: string };
+
+/** The relay's error word off a thrown HttpError, if it had one. */
+function errorCodeOf(err: unknown): { errorCode?: string } {
+    const c = (err as { errorCode?: unknown })?.errorCode;
+    return typeof c === "string" ? { errorCode: c } : {};
+}
+
+/**
+ * Redeem a promo code for this install (/v1/redeem). Never throws: a failure
+ * is { ok: false } with the relay's error word when it gave one, and the
+ * renderer turns that into the one sentence the reader sees.
+ */
+export async function relayRedeem(
+    _: IpcMainInvokeEvent,
+    install: string,
+    promo: string
+): Promise<RelayRedeemResponse> {
+    try {
+        return { ok: true, code: await fetchRelayRedeem(install, promo, fetch) };
+    } catch (err) {
+        const raw = err instanceof Error ? err.message : "unknown error";
+        return { ok: false, error: scrubKey(raw, install), ...errorCodeOf(err) };
+    }
+}
 
 /**
  * Ask the relay for a checkout URL for this install (see checkout.ts). Same
@@ -299,14 +337,15 @@ export type RelayCheckoutResponse = { ok: true; url: string } | { ok: false; err
 export async function relayCheckout(
     _: IpcMainInvokeEvent,
     code: string,
-    plan: string
+    plan: string,
+    install?: string
 ): Promise<RelayCheckoutResponse> {
-    if (plan !== "monthly" && plan !== "annual") return { ok: false, error: "unknown plan" };
+    if (plan !== "automatic" && plan !== "monthly" && plan !== "annual") return { ok: false, error: "unknown plan" };
     try {
-        return { ok: true, url: await fetchRelayCheckout(code, plan, fetch) };
+        return { ok: true, url: await fetchRelayCheckout(code, plan, fetch, undefined, install) };
     } catch (err) {
         const raw = err instanceof Error ? err.message : "unknown error";
-        return { ok: false, error: scrubKey(raw, code) };
+        return { ok: false, error: scrubKey(install ? scrubKey(raw, install) : raw, code), ...errorCodeOf(err) };
     }
 }
 
@@ -326,19 +365,27 @@ export async function relayCheckout(
  */
 export async function relayStatus(
     _: IpcMainInvokeEvent,
-    code: string
+    code: string,
+    install?: string
 ): Promise<RelayStatusResponse> {
     try {
-        const status = await fetchRelayStatus(code, fetch);
+        const status = await fetchRelayStatus(code, fetch, install);
         const out: RelayStatusResponse = { ok: true, plan: status.plan, used: status.used, cap: status.cap };
-        if (status.trialEndsAt !== undefined) out.trialEndsAt = status.trialEndsAt;
         if (status.serverNow !== undefined) out.serverNow = status.serverNow;
-        if (status.trialProvisional === true) out.trialProvisional = true;
         if (status.purchase !== undefined) out.purchase = status.purchase;
+        if (status.automatic !== undefined) {
+            out.automatic = status.automatic;
+            out.ai = status.ai === true;
+            if (status.aiUntil !== undefined) out.aiUntil = status.aiUntil;
+            if (status.code !== undefined) out.code = status.code;
+            if (status.previews !== undefined) out.previews = status.previews;
+            if (status.token !== undefined) out.token = status.token;
+            if (status.tokenExpiresAt !== undefined) out.tokenExpiresAt = status.tokenExpiresAt;
+        }
         return out;
     } catch (err) {
         const raw = err instanceof Error ? err.message : "unknown error";
-        return { ok: false, error: scrubKey(raw, code) };
+        return { ok: false, error: scrubKey(install ? scrubKey(raw, install) : raw, code), ...errorCodeOf(err) };
     }
 }
 
