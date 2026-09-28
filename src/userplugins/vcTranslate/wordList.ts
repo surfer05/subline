@@ -1,4 +1,4 @@
-/**
+/*! @license SCOWL word list, used under the notice below. A legal comment, so the build keeps it.
  * COMMON ENGLISH WORDS, for judging a short Morse decode.
  *
  * SOURCE: SCOWL (Spell Checker Oriented Word Lists) release 2020.12.07,

@@ -314,3 +314,15 @@ describe("translatableText", () => {
         expect(translatableText("hola amigo")).toBe("hola amigo");
     });
 });
+
+describe("the word list's licence notice", () => {
+    it("is a legal comment, so minification keeps it in the build", async () => {
+        const { readFileSync } = await import("node:fs");
+        const src = readFileSync(new URL("../wordList.ts", import.meta.url), "utf8");
+        expect(src.startsWith("/*!")).toBe(true);
+        const header = src.slice(0, src.indexOf("*/"));
+        expect(header).toContain("@license");
+        expect(header).toContain("Copyright 2000-2018 by Kevin Atkinson");
+        expect(header).toContain("Permission to use, copy, modify, distribute and sell these word");
+    });
+});

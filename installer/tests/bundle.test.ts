@@ -270,6 +270,19 @@ describe.skipIf(!existsSync(manifestPathFor(REAL_BUNDLE)))("a real built bundle"
         expect(readFileSync(join(REAL_BUNDLE, LOADER_ENTRY_NAME), "utf8")).not.toContain(result.value.buildId);
     });
 
+    it("ships the SCOWL word list notice with the renderer and in SOURCE.txt", () => {
+        // The plugin's word list is SCOWL, whose licence requires its notice in
+        // every copy. esbuild moves /*! comments into renderer.js.LEGAL.txt and
+        // leaves a pointer to that file in renderer.js.
+        const legal = readFileSync(join(REAL_BUNDLE, "renderer.js.LEGAL.txt"), "utf8");
+        expect(legal).toContain("Copyright 2000-2018 by Kevin Atkinson");
+        expect(legal).toContain("Permission to use, copy, modify, distribute and sell these word");
+        expect(readFileSync(join(REAL_BUNDLE, STAMPED_ENTRY_NAME), "utf8")).toContain("renderer.js.LEGAL.txt");
+        const source = readFileSync(join(REAL_BUNDLE, "SOURCE.txt"), "utf8");
+        expect(source).toContain("SCOWL");
+        expect(source).toContain("Copyright 2000-2018 by Kevin Atkinson");
+    });
+
     it("agrees with the build id checked into the plugin", () => {
         // If these ever diverge, the bundle on disk is not the code in the repo.
         const stamp = readFileSync(

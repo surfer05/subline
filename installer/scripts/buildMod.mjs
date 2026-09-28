@@ -270,6 +270,23 @@ This directory contains the compiled output of two GPL-3.0 works.
    The build id is a SHA-256 over the plugin's shipped sources, so the sources
    corresponding to this bundle are identifiable rather than merely claimed.
 
+3. The plugin includes a common-English word list from SCOWL (Spell Checker
+   Oriented Word Lists) release 2020.12.07, http://wordlist.aspell.net/ ,
+   used to judge short Morse decodes.
+
+   Copyright 2000-2018 by Kevin Atkinson
+
+   Permission to use, copy, modify, distribute and sell these word
+   lists, the associated scripts, the output created from the scripts,
+   and its documentation for any purpose is hereby granted without fee,
+   provided that the above copyright notice appears in all copies and
+   that both that copyright notice and this permission notice appear in
+   supporting documentation. Kevin Atkinson makes no representations
+   about the suitability of this array for any purpose. It is provided
+   "as is" without express or implied warranty.
+
+   The full notice is also in renderer.js.LEGAL.txt.
+
 Built at ${new Date().toISOString()} by installer/scripts/buildMod.mjs.
 `;
 }
