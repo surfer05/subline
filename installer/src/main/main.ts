@@ -238,7 +238,11 @@ function createFlow(): InstallFlow {
         log,
         helper: helperWiring(),
         // An unpackaged dev run's "app" is the Electron binary in node_modules.
-        repairHelper: app.isPackaged
+        repairHelper: app.isPackaged,
+        // The checkout opens in the default browser through Electron, never
+        // through a shell: a checkout URL carries "&", which cmd.exe would read
+        // as a command separator.
+        openExternal: url => shell.openExternal(url)
     });
     const created = new InstallFlow(ports);
     created.onChange = (state: FlowState) => send("flow:state", state);

@@ -31,9 +31,9 @@ export const ACTION_LABELS: Record<FlowActionType, string> = {
     // Both come from the code screen's one copy object (codeScreen.ts), which
     // is also what the renderer draws that screen from.
     "set-code": CODE_SCREEN_COPY.save,
-    // The free trial is the default path: no code, ≈ and ✦ automatic for 7
-    // days. "Use free Google only" was false, and so was leading with a form.
-    "skip-code": CODE_SCREEN_COPY.startTrial,
+    // Paid only: buying Automatic is the default path on the activation screen.
+    "buy-automatic": CODE_SCREEN_COPY.buy,
+    back: CODE_SCREEN_COPY.back,
     // Secondary: Subline already opened the pane itself. This is for someone
     // who closed it or lost it behind another window.
     "open-permission-settings": "Open it again",
@@ -66,10 +66,11 @@ const IS_PRIMARY: Record<FlowActionType, boolean> = {
     "force-quit-discord": true,
     recheck: false,
     "set-language": true,
-    // The trial is the filled button on the code screen. Save is drawn
+    // Buying is the filled button on the activation screen. Save is drawn
     // primary only once the field is revealed (codeScreen.ts decides that).
     "set-code": false,
-    "skip-code": true,
+    "buy-automatic": true,
+    back: false,
     "open-permission-settings": false,
     retry: true,
     "skip-helper": false,

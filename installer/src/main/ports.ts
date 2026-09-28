@@ -21,9 +21,12 @@ import { promisify } from "node:util";
 import { APP_MANAGEMENT_SETTINGS_URL, probeAppManagement } from "../app/appManagement.js";
 import type { FlowLogger, FlowPorts, HelperEnsureReport, HelperInstallOutcome } from "../app/flow.js";
 import type { HelperRemoval } from "../app/uninstall.js";
+import { type ActivationRelay, createActivationRelay, newInstallId } from "../app/activation.js";
 import {
     discordSettingsPathFor,
+    ensureInstallId,
     readDiscordLocale,
+    readInstallId,
     readSublineCode,
     ensureRelayEngine,
     setSublineCode,
@@ -70,6 +73,14 @@ export interface RealPortsOptions {
     searchRoots?: readonly string[];
     /** Injected by tests so no child process is spawned. */
     exec?: (file: string, args: string[]) => Promise<{ stdout: string }>;
+    /** Injected by tests so no request reaches the real relay. Defaults to the live relay over fetch. */
+    relay?: ActivationRelay;
+    /**
+     * Opens an https URL in the default browser. The app passes Electron's
+     * shell.openExternal; without it the platform opener is used, which is fine
+     * on macOS but on Windows goes through cmd.exe, where "&" in a URL splits it.
+     */
+    openExternal?: (url: string) => Promise<void>;
     /**
      * Everything the background helper's registration needs (§3 step 8b).
      *
@@ -524,6 +535,20 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
         setSublineCode: key => setSublineCode(vencordSettingsPathFor(platform, env, home), key),
         hasSublineCode: () => readSublineCode(vencordSettings) !== null,
         ensureRelayEngine: () => ensureRelayEngine(vencordSettings),
+
+        savedSublineCode: () => readSublineCode(vencordSettings),
+        savedInstallId: () => readInstallId(vencordSettings),
+        ensureInstallId: () => ensureInstallId(vencordSettings, newInstallId),
+        relay: options.relay ?? createActivationRelay({
+            fetch: (url, init) => globalThis.fetch(url, init),
+            version: options.productVersion
+        }),
+        // https only, and only a checkout URL: the flow hands over a Dodo URL.
+        openCheckout: async url => {
+            if (!/^https:\/\//.test(url)) return;
+            if (options.openExternal !== undefined) await options.openExternal(url);
+            else await openUrl(url, platform, exec);
+        },
 
         patch: (install, patchOptions) =>
             patchInstall(install, {

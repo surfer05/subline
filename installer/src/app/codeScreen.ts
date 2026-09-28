@@ -1,11 +1,11 @@
 /**
- * The code screen: a choice, not a form.
+ * The activation screen (the old code screen).
  *
- * In the normal path nobody types or pastes a key. Buying from inside Discord
- * saves the code there by itself, so this screen leads with the free trial
- * ("Start free trial" continues without a code) and keeps the paste field
- * behind "I have a code" for the people who do hold one (a friend's code, or a
- * purchase made on the website).
+ * Subline is paid: there is no free tier and no trial, and the installer does
+ * not change Discord until this install has Automatic. So the screen offers
+ * exactly two ways forward: buy Automatic ($4.99, once) in the browser, or
+ * enter a code (a promo code, or the license key from a purchase). There is no
+ * way past it without one of them.
  *
  * Pure and free of `document`, so the suite can test what the renderer draws:
  * the renderer is the one module vitest never executes.
@@ -15,20 +15,38 @@
  */
 
 export const CODE_SCREEN_COPY = {
-    /** The line under the heading, before and after "I have a code". */
-    detail: "Everything is free for 7 days. No code needed.",
-    /** The filled button. Same action as the old "Continue without a code". */
-    startTrial: "Start free trial",
-    /** The secondary button that reveals the paste field. Not a flow action. */
+    /** The heading of the screen. */
+    title: "Activate Subline",
+    /** The line under the heading. */
+    detail: "Subline is $4.99, once. Buy it here, or enter a code you have.",
+    /** The filled button: opens the checkout in the browser. */
+    buy: "Buy Automatic, $4.99",
+    /** The secondary button that reveals the code field. Not a flow action. */
     haveCode: "I have a code",
     /** The button under the revealed field. */
     save: "Save code",
     fieldLabel: "Subline code",
-    placeholder: "Paste your code here",
+    placeholder: "Paste or type your code",
     /** Under the field, once revealed. Names the sender, because the email lands in spam. */
-    whereFrom: "It's in your email from **Dodo Payments**. **Check spam.**",
+    whereFrom: "A server code, or the code in your email from **Dodo Payments**. **Check spam.**",
     /** The link to Dodo's customer portal, shown only when the portal URL is known. */
-    findCode: "Find my code"
+    findCode: "Find my code",
+    /** The waiting screen while the purchase happens in the browser. */
+    waitingTitle: "Finish in your browser",
+    waiting: "Finish the payment in your browser. Subline carries on by itself when it is done.",
+    /** Leaves the waiting screen. */
+    back: "Back",
+    /** The screen shown when a saved code could not be checked. */
+    checkTitle: "Can't reach Subline",
+    /* Errors, shown on the screen they happened on. */
+    errNotFound: "That code doesn't exist.",
+    errClaimed: "This code has been fully claimed.",
+    errAlready: "Already yours.",
+    errUnreachable: "Can't reach Subline right now. Try again in a minute.",
+    errDeviceLimit: "This code is already used on 3 computers.",
+    errNotActive: "That code is not active.",
+    errRateLimited: "Too many codes tried from this network today. Try again tomorrow.",
+    errEmpty: "Type or paste a code first."
 } as const;
 
 /**
@@ -53,7 +71,7 @@ export function portalUrl(businessId: string = DODO_BUSINESS_ID): string | null 
 }
 
 export type CodeScreenButton =
-    | { kind: "skip-code"; label: string; primary: boolean }
+    | { kind: "buy-automatic"; label: string; primary: boolean }
     | { kind: "set-code"; label: string; primary: boolean }
     | { kind: "reveal"; label: string; primary: boolean };
 
@@ -81,7 +99,7 @@ export function codeScreenView(opts: { revealed: boolean; hasError?: boolean; bu
             showField,
             findCodeUrl,
             buttons: [
-                { kind: "skip-code", label: CODE_SCREEN_COPY.startTrial, primary: true },
+                { kind: "buy-automatic", label: CODE_SCREEN_COPY.buy, primary: true },
                 { kind: "reveal", label: CODE_SCREEN_COPY.haveCode, primary: false }
             ]
         };
@@ -91,7 +109,7 @@ export function codeScreenView(opts: { revealed: boolean; hasError?: boolean; bu
         findCodeUrl,
         buttons: [
             { kind: "set-code", label: CODE_SCREEN_COPY.save, primary: true },
-            { kind: "skip-code", label: CODE_SCREEN_COPY.startTrial, primary: false }
+            { kind: "buy-automatic", label: CODE_SCREEN_COPY.buy, primary: false }
         ]
     };
 }

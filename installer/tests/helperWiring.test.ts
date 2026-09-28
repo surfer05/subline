@@ -75,7 +75,7 @@ const windowsWiring = () => ({ ...wiring(), executablePath: WINDOWS_EXE, schtask
  */
 async function setLanguage(flow: { send: (a: any) => Promise<any> }, code = "tr"): Promise<any> {
     const next = await flow.send({ type: "set-language", code });
-    return next.step === "choose-code" ? flow.send({ type: "skip-code" }) : next;
+    return next.step === "choose-code" ? flow.send({ type: "buy-automatic" }) : next;
 }
 
 describe("registering the agent", () => {
@@ -363,8 +363,19 @@ describe("the install flow installs the helper", () => {
                 ok: true as const,
                 value: { path: "/s.json", code, previous: null, created: true }
             }),
-            // No saved code, so the code screen is offered (and skipped by setLanguage).
+            // No saved code, so the activation screen is offered (and crossed by
+            // setLanguage with a purchase the scripted relay confirms at once).
             hasSublineCode: () => false,
+            savedSublineCode: () => null,
+            savedInstallId: () => null,
+            ensureInstallId: () => ({ ok: true as const, value: "0123456789abcdef0123456789abcdef" }),
+            relay: {
+                checkout: async () => ({ kind: "ok" as const, url: "https://checkout.dodopayments.com/session/cks_test" }),
+                status: async () => ({ kind: "ok" as const, automatic: true, ai: false, code: "LICENSE-KEY-1" }),
+                redeem: async () => ({ kind: "not_found" as const })
+            },
+            openCheckout: async () => {},
+            setSublineCode: (code: string) => ({ ok: true as const, value: { path: "/s.json", created: false, codeLength: code.length } }),
             patch: () => ({ ok: true as const, value: PATCH }),
             installHelper: async () => {
                 h.helperCalls += 1;

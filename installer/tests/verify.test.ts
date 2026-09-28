@@ -101,21 +101,18 @@ describe("only a painted subtitle confirms an install", () => {
         // tier being down is a real problem but not a failed install, and
         // conflating the two would send them to reinstall for nothing.
         writeBeacon({ lastError: { code: "rate-limited", at: iso(LAUNCHED_AT + 15_000) } });
-        const result = verify();
+        const result = verify({ expectUpgrade: true });
         expect(result.confirmed).toBe(true);
         expect(result.errorCode).toBe("rate-limited");
-        expect(result.summary).toContain("✦");
+        expect(result.summary).toContain("Your AI plan is on: the ✦ line follows a few seconds behind each ≈ line.");
     });
 
-    it("describes the free plan to a ≈-only install with no code, not a forever-automatic one", () => {
+    it("promises an Automatic-only install nothing about ✦, and never mentions a trial", () => {
         writeBeacon();
         const result = verify({ expectUpgrade: false });
         expect(result.status).toBe("translating-approx");
-        expect(result.summary).toContain(
-            "Without a code, ≈ and ✦ are automatic for your first 7 days, then messages translate when you click."
-        );
-        expect(result.summary).toContain("to keep everything automatic.");
-        expect(result.summary).not.toContain("—");
+        expect(result.summary).toBe("Working: translations are appearing in Discord (≈ Google).");
+        expect(result.summary).not.toMatch(/free|trial|7 days|✦/i);
     });
 
     it("does NOT confirm, and does NOT cry 'Discord changed', on translated-but-not-painted", () => {

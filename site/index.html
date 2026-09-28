@@ -174,8 +174,9 @@ a:hover{color:var(--fg)}
 .anchor{font-family:var(--font-serif);font-size:19px;line-height:1.42;font-weight:400;margin:26px 0 0;max-width:44ch;
   padding-left:14px;border-left:3px solid var(--accent)}
 .anchor b{font-weight:600}
-.free-cta{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:22px}
-.plans{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:26px}
+.dl-cta{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:22px}
+.plans{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:26px}
+@media (max-width:900px){.plans{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:700px){.plans{grid-template-columns:1fr}}
 .plans .card{min-width:0;overflow-wrap:anywhere}
 .badge{align-self:flex-start;font-family:var(--font-mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;
@@ -288,18 +289,18 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 <div class="cta">
   <a class="btn btn-primary" data-hero="primary" href="#downloads">Download for Mac</a>
   <a class="btn btn-secondary" data-hero="secondary" href="#downloads">Windows</a>
-  <span class="fine">Free</span>
+  <span class="fine">$4.99, once</span>
 </div>
 <p class="fine" data-hero="intel" style="margin:10px 0 0" hidden>Intel Mac? <a data-dl="mac-intel" href="https://github.com/surfer05/subline/releases/latest">Get the Intel version.</a></p>
 <div class="chat" role="group" aria-label="Example of a translated conversation">
   <div class="m"><div class="av"></div><div><div class="nm">rafa<span class="tm">20:14</span></div>
     <div class="tx">bora marcar? tô livre depois das 8</div>
-    <div class="sl"><span class="gl">≈</span><span class="lc">pt</span><span>shall we make a plan? I'm free after 8</span></div></div></div>
+    <div class="sl"><span class="gl">≈</span><span class="lc">pt</span><span>shall we make a plan? I'm around after 8</span></div></div></div>
   <div class="m"><div class="av"></div><div><div class="nm">yasmine<span class="tm">20:15</span></div>
     <div class="tx" dir="rtl">لما نبدأ نكتب، بنعمل خليط من العربي والفرنسي</div>
     <div class="sl"><span class="gl">✦</span><span class="lc">ar</span><span>when we start writing, we end up mixing Arabic and French</span></div></div></div>
 </div>
-<p class="cap"><span class="gl-inline">≈</span> Google, instant. <span class="gl-inline" style="margin-left:10px">✦</span> AI, reads the whole conversation. Free for 7 days.</p>
+<p class="cap"><span class="gl-inline">≈</span> Google, instant. <span class="gl-inline" style="margin-left:10px">✦</span> AI, reads the whole conversation.</p>
 <p class="fine" style="margin-top:26px">Needs the Discord desktop app. Not made by Discord.</p>
 </div>
 </section>
@@ -308,24 +309,32 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 <section id="pricing">
 <div class="wrap">
 <p class="kicker">Pricing</p>
-<h2 class="sec">Free to start</h2>
-<p class="lead">7 days free, fully automatic. After that, click a message to translate it. Paid: <span class="gl-inline">≈</span> and <span class="gl-inline">✦</span> on every message, plus profiles, statuses and embeds.</p>
-<div class="free-cta">
-  <a class="btn btn-primary" href="#downloads">Download free</a>
-  <span class="fine">No card. No account.</span>
+<h2 class="sec">Two plans</h2>
+<p class="lead"><b>Automatic</b> puts <span class="gl-inline">≈</span> under every message, once and for good. <b>AI</b> adds <span class="gl-inline">✦</span> on top.</p>
+<div class="dl-cta">
+  <a class="btn btn-primary" href="#downloads">Download Subline</a>
+  <span class="fine">You pay in the installer. $4.99, once.</span>
 </div>
 <div class="plans">
+  <!-- The Automatic product id is PENDING from the owner: replace
+       pdt_AUTOMATIC_PENDING below (one place on the site) once it is known. -->
+  <div class="panel card" data-plan="automatic">
+    <h3>Automatic</h3>
+    <div class="price">$4.99<span class="per">once</span></div>
+    <p><span class="gl-inline">≈</span> on every message, plus profiles, embeds and statuses. Decodes Morse, binary and more. 3 <span class="gl-inline">✦</span> previews a day.</p>
+    <a class="btn btn-secondary" data-buy="automatic" href="https://checkout.dodopayments.com/buy/pdt_AUTOMATIC_PENDING?quantity=1&amp;redirect_url=https%3A%2F%2Fsurfer05.github.io%2Fsubline%2F">Buy</a>
+  </div>
   <div class="panel card">
-    <h3>Monthly</h3>
+    <h3>AI monthly</h3>
     <div class="price">$2.49<span class="per">/mo</span></div>
-    <p>Cancel anytime.</p>
+    <p><span class="gl-inline">✦</span> AI on everything. Needs Automatic. Cancel anytime.</p>
     <a class="btn btn-secondary" data-buy="monthly" href="https://checkout.dodopayments.com/buy/pdt_0No1xmbcAqHdYAvt1RNPR?quantity=1&amp;redirect_url=https%3A%2F%2Fsurfer05.github.io%2Fsubline%2F">Buy</a>
   </div>
   <div class="panel card">
-    <span class="badge">4 months free</span>
-    <h3>Annual</h3>
+    <span class="badge">Save 4 months</span>
+    <h3>AI yearly</h3>
     <div class="price">$19.99<span class="per">/yr</span></div>
-    <p>Billed yearly.</p>
+    <p><span class="gl-inline">✦</span> AI on everything. Needs Automatic. Billed yearly.</p>
     <a class="btn btn-secondary" data-buy="annual" href="https://checkout.dodopayments.com/buy/pdt_0No1yAve1ozdxryVGZvf6?quantity=1&amp;redirect_url=https%3A%2F%2Fsurfer05.github.io%2Fsubline%2F">Buy</a>
   </div>
 </div>
@@ -405,15 +414,17 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 <tbody>
 <tr><td>Messages</td><td><b>Google</b> for <span class="gl-inline">≈</span>. Our <b>relay</b> for <span class="gl-inline">✦</span>, with a few earlier messages for context. The relay asks an AI through OpenRouter or Groq.</td><td>Nothing.</td></tr>
 <tr><td>Usernames</td><td>Sent with <span class="gl-inline">✦</span> so the AI knows who said what.</td><td>Nothing.</td></tr>
-<tr><td>Profiles and embeds</td><td>Paid only. Bios and statuses of people you see, wherever you see them. Embeds, polls, topics and titles you see, from channels Subline translates.</td><td>Cached on your device for 30 days.</td></tr>
-<tr><td>Your code</td><td>Unlocks <span class="gl-inline">✦</span>. The relay never sees your name or email.</td><td>Daily counts, deleted after 2 days.</td></tr>
-<tr><td>Free installs</td><td>A random id that times your 7 days. Your IP is counted to stop abuse. If you buy inside Discord, a scrambled form of this id goes to Dodo with the purchase, so Subline can switch on by itself.</td><td>Daily counts for 2 days. First use for 90 days. The link to your purchase for 30 days.</td></tr>
+<tr><td>Profiles and embeds</td><td>Bios and statuses of people you see, wherever you see them. Embeds, polls, topics and titles you see, from channels Subline translates.</td><td>Cached on your device for 30 days.</td></tr>
+<tr><td>Your code</td><td>Unlocks Subline. The relay never sees your name or email.</td><td>Daily counts, deleted after 2 days.</td></tr>
+<tr><td>Install id</td><td>A random id made when you install. It ties your purchase or code to this computer. If you buy from Subline, a scrambled form of it goes to Dodo with the purchase, so Subline can switch on by itself. Your IP is counted to stop abuse.</td><td>Daily counts for 2 days. The link to your purchase for 30 days.</td></tr>
+<tr><td>Computers</td><td>A code works on up to 3 computers. The relay keeps a scrambled id for each one to count them.</td><td>As long as the code works.</td></tr>
+<tr><td>Server codes</td><td>When you use a server code, the relay records that your install used it, to count its claims.</td><td>As long as the code runs.</td></tr>
 <tr><td>Stats</td><td>Totals only. No text, no names.</td><td>35 days.</td></tr>
 </tbody></table>
 <ul class="off">
   <li><span class="t">off</span><div><b>DMs are off.</b> Turn one on per chat, or press ⚡ on a single message.</div></li>
   <li><span class="t">off</span><div><b>Your own messages</b> are never translated.</div></li>
-  <li><span class="t">you</span><div><b>Turn it off</b> anytime. The globe button stops one channel. <b>Global Auto</b> in settings stops all of them.</div></li>
+  <li><span class="t">you</span><div><b>Turn it off</b> anytime. The globe button stops one channel. <b>All servers</b> in Subline's settings stops all of them.</div></li>
 </ul>
 <p class="fine" style="margin-top:30px;max-width:64ch">Subline is independent and not made by Discord. You install it yourself, at your own discretion.</p>
 </div>

@@ -79,6 +79,12 @@ function ports(overrides: { processesStdout?: string } = {}) {
         home,
         searchRoots: [discord.root],
         helper: helperWiring(),
+        // A relay that confirms the purchase at once: no request leaves the suite.
+        relay: {
+            checkout: async () => ({ kind: "ok" as const, url: "https://checkout.dodopayments.com/session/cks_test" }),
+            status: async () => ({ kind: "ok" as const, automatic: true, ai: false, code: "LICENSE-KEY-1" }),
+            redeem: async () => ({ kind: "not_found" as const })
+        },
         exec: async (file: string, args: string[]) => {
             calls.push({ file, args });
             return { stdout: overrides.processesStdout ?? "" };
@@ -102,7 +108,7 @@ async function setLanguage(
     code = "tr"
 ): Promise<any> {
     const next = await flow.send({ type: "set-language", code });
-    const after = next.step === "choose-code" ? await flow.send({ type: "skip-code" }) : next;
+    const after = next.step === "choose-code" ? await flow.send({ type: "buy-automatic" }) : next;
     // The last screen shows at once; the verification lands in the background.
     return after.step === "done" && flow.settled ? flow.settled() : after;
 }
