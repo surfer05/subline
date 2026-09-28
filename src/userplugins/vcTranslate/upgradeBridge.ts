@@ -1,21 +1,31 @@
 /**
  * Lets settings.ts (and anything else that must not import index.tsx) open
- * the Upgrade panel. index.tsx registers the opener on start() and clears it
- * on stop(). With no opener (plugin stopped) the pricing page opens instead,
- * so an Upgrade link is never a dead click.
+ * the Activate / Add AI panel and the code entry. index.tsx registers the
+ * openers on start() and clears them on stop(). With no opener (plugin
+ * stopped) the pricing page opens instead, so a link is never a dead click.
  */
 import { PRICING_URL } from "./freePlan";
 
 let opener: (() => void) | null = null;
+let codeOpener: (() => void) | null = null;
 
-export function registerUpgradeOpener(fn: (() => void) | null): void {
+export function registerUpgradeOpener(fn: (() => void) | null, codeFn: (() => void) | null = null): void {
     opener = fn;
+    codeOpener = codeFn;
 }
 
-export function openUpgrade(): void {
-    if (opener !== null) {
-        opener();
-        return;
-    }
+function pricing(): void {
     (globalThis as any).VencordNative?.native?.openExternal?.(PRICING_URL);
+}
+
+/** The Activate panel (not activated) or the Add AI panel (Automatic). */
+export function openUpgrade(): void {
+    if (opener !== null) opener();
+    else pricing();
+}
+
+/** The code entry, from the settings page's "Enter a code". */
+export function openCodeEntryFromSettings(): void {
+    if (codeOpener !== null) codeOpener();
+    else pricing();
 }

@@ -11,16 +11,44 @@ const mem = new Map<string, unknown>();
  */
 export const writes: string[] = [];
 
+/**
+ * THE DEFAULT PLAN FOR TESTS: an install that owns Automatic and AI, with an
+ * answer that never runs out. There is no free tier (entitlement.ts), so an
+ * empty store would be an install that translates nothing, and every test of
+ * translation itself would first have to activate. Tests of the plans
+ * themselves set their own (`setEntitlementForTest`) or clear it
+ * (`clearEntitlementForTest`).
+ */
+export const DEFAULT_ENTITLEMENT = { automatic: true, ai: true, tokenExpiresAt: Number.MAX_SAFE_INTEGER, checkedAt: 0 };
+const ENTITLEMENT_KEY = "VcTranslate_entitlement";
+
+function seed(): void {
+    mem.set(ENTITLEMENT_KEY, { ...DEFAULT_ENTITLEMENT });
+}
+seed();
+
 export async function get<T>(key: string): Promise<T | undefined> {
     return mem.get(key) as T | undefined;
 }
 
 export async function set(key: string, value: unknown): Promise<void> {
     writes.push(key);
-    mem.set(key, value);
+    if (value === undefined) mem.delete(key);
+    else mem.set(key, value);
+}
+
+/** What the next start() reads as this install's plan. */
+export function setEntitlementForTest(value: Record<string, unknown>): void {
+    mem.set(ENTITLEMENT_KEY, value);
+}
+
+/** An install that owns nothing (as far as the stored answer says). */
+export function clearEntitlementForTest(): void {
+    mem.delete(ENTITLEMENT_KEY);
 }
 
 export function __reset(): void {
     mem.clear();
     writes.length = 0;
+    seed();
 }

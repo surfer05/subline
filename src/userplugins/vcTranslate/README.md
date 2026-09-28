@@ -65,10 +65,32 @@ reverses it.
 After injecting, restart Discord and enable **VcTranslate** in
 Settings → Plugins.
 
+## Plans (paid only)
+
+There is no free tier and no trial. What an install owns comes from the
+relay's v2 `/v1/status` (sent with `x-subline-api: 2` and
+`x-subline-install`), is kept on disk (`entitlement.ts`), and counts offline
+only until the relay's `tokenExpiresAt` (7 days after its last good answer;
+the plugin asks at start and every 24 hours).
+
+- **Not activated**: nothing is translated, not even with Google, and no
+  surface is touched. One notice ("Activate") opens the Activate panel: buy
+  Automatic, or enter a code (a server's promo code is redeemed on
+  `/v1/redeem`; anything else is checked as a license key first).
+- **Automatic** ($4.99 once): ≈ Google on every message and surface (tight
+  surfaces show ≈ in place), local decoders, and three ✦ previews a day on
+  rough ≈ lines ("Preview ✦", or ⚡).
+- **AI** (monthly or annual, on top of Automatic): ✦ on everything, under the
+  saved code.
+
+The installer seeds its install id as the hidden `installId` setting, and the
+plugin prefers it (`taste.ts`). All copy lives in `upgradeCopy.ts` and
+`settingsCopy.ts`.
+
 ## Use
 
-Out of the box, no setup required: every server (guild) channel you read is
-already translated, using the free Google engine — that's the
+Once activated, no setup required: every server (guild) channel you read is
+translated, using Google (≈) — that's the
 `globalAuto` setting, on by default. DMs and group DMs are different: they're
 never swept in by `globalAuto`, so they stay untranslated until you opt a
 specific one in. Hover any message in a channel or DM → click the 🌐 button

@@ -18,10 +18,8 @@ import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
 import { DECODED_TITLE, decodedPrefix, decodeMessage, translatableText } from "./decode";
 import { isConfidentlyTargetLanguage } from "./detectLang";
-import {
-    __resetFreePlan, announceableTrialEnd, freeMode, isNewEnding, noteServerNow,
-    noteServerTrialEnd, previewDiffers, previewText, PRICING_URL, trialConfirmed, trialEndedMessage
-} from "./freePlan";
+import { entitlementLevel, ENTITLEMENT_REFRESH_MS, loadEntitlement, setEntitlement } from "./entitlement";
+import { previewDiffers, previewText, PRICING_URL } from "./freePlan";
 import {
     acquireSlot, loadRateGateTuning, rateGateAvailable, rateGateSettings, rateGateWaitMs,
     resetRateGate, tryAcquireIdleSlot, tuneRateGateToObservedLimit, tuneRateGateToProviderBudget
@@ -32,8 +30,8 @@ import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
 import {
-    installIdOnce, loadLocalTasteCount, markTasteExhausted, noteTasteSpent, recordTasteQuota, rolloverTasteIfNewUtcDay, TASTE_CAP, tasteBearer,
-    tasteCap, tasteExhausted, tasteLabel, tasteUsed
+    connectInstallIdSetting, installIdOnce, loadLocalTasteCount, markTasteExhausted, noteTasteSpent, recordTasteQuota,
+    rolloverTasteIfNewUtcDay, TASTE_CAP, tasteBearer, tasteCap, tasteExhausted, tasteLabel
 } from "./taste";
 import {
     recordError, recordPluginLoaded, recordRendered, recordTranslation, resetStatusBeacon
@@ -49,11 +47,11 @@ import {
     type BatchRequest, type EngineId, type PendingMessage
 } from "./types";
 import { ENGINE_RANK, isRealTranslation, mayReplace } from "./upgrade";
-import { createCheckoutFlow, type CheckoutFlow, type Purchase } from "./checkout";
+import { createCheckoutFlow, type CheckoutFlow, type Plan } from "./checkout";
 import { normalizeTargetLang } from "./languages";
 import { openUpgrade, registerUpgradeOpener } from "./upgradeBridge";
 import { UPGRADE_COPY } from "./upgradeCopy";
-import { openUpgradePanel } from "./upgradePanel";
+import { openActivatePanel, openCodeEntry, openUpgradePanel } from "./upgradePanel";
 import { createUpdateWatch, UPDATE_CHECK_INTERVAL_MS, type UpdateWatch } from "./updateNotice";
 import { SurfaceBudget } from "./surfaces/budget";
 import { SurfaceCache } from "./surfaces/cache";
@@ -480,21 +478,20 @@ function modelFor(engine: EngineId): string {
 /**
  * The engine actually in use — may differ from the configured one.
  *
- * One addition for the free plan, and only in the direction of MORE: a free
- * install whose trial the relay has confirmed this session runs the relay as
- * its quality tier, exactly as a paid install does (see `trialAutoActive`).
- * Everything that reads this — the quality batcher, the ⚡ label, the chat-bar
- * indicator — then treats the trial as what it is: the paid experience, for
- * seven days. A paid install never reaches that branch (`baseEngine` already
- * answers "relay" or a keyed engine for it).
+ * ✦ (the relay) needs AI on the account. An Automatic owner's saved code is a
+ * real Subline code, so the configured engine is "relay", but without AI there
+ * is no quality tier for it: Google (≈) alone, plus the day's three ✦
+ * previews on rough lines (see requestPreview). Everything that reads this
+ * (the quality batcher, the ⚡ label, the chat-bar indicator) then treats an
+ * Automatic owner as Google-only.
  */
 function effectiveEngine(): EngineId {
     const base = baseEngine();
-    if (base === "google" && trialAutoActive()) return "relay";
+    if (base === "relay" && entitlementLevel() !== "ai") return "google";
     return base;
 }
 
-/** The engine the configuration and the session's pins allow, before the free trial. */
+/** The engine the configuration and the session's pins allow, before the entitlement. */
 function baseEngine(): EngineId {
     const configured = settings.store.engine as EngineId;
     if (!isLlmEngine(configured)) return configured;
@@ -511,119 +508,78 @@ function baseEngine(): EngineId {
     return configured;
 }
 
-/* -------------------------------------------------------------- taste -- */
+/* ------------------------------------------------------- entitlement -- */
 
 /**
- * Is this a FREE install — the one the taste tier is for?
- *
- * Two conditions, and both matter. `effectiveEngine() === "google"` says there
- * is no quality tier running right now; "no code configured" says that is
- * because nothing was paid for, rather than because a paid code was rejected
- * or blocked this session (see `sessionFallback`). A paying user whose code hit
- * a 401 must get their own error, not a funnel nudge — and must never have a
- * `free_` bearer sent on their behalf.
+ * Anything paid for: Automatic or AI (see entitlement.ts). There is no free
+ * tier: an install with nothing translates nothing, not even with Google, and
+ * shows the activation notice instead.
  */
-function isTasteInstall(): boolean {
-    const configured = settings.store.engine as EngineId;
-    const code = typeof settings.store.sublineCode === "string"
-        ? settings.store.sublineCode.trim()
-        : "";
-    if (configured === "relay" && code !== "") return false;
-    // baseEngine, not effectiveEngine: a free install in its trial runs the
-    // relay, and is still a free install.
-    return baseEngine() === "google";
-}
-
-/* --------------------------------------------------------- free plan -- */
-
-/**
- * The install bearer, once the relay has CONFIRMED a running trial for it this
- * session (see refreshTasteQuota). Null until then, and null for a paid
- * install. This is the credential the trial's automatic ✦ is sent under.
- */
-let trialBearer: string | null = null;
-/**
- * The relay paused this trial's automatic ✦ (its daily allowance, or a
- * minute's throttle). A plain timestamp, in memory only, and never the paid
- * cooldown store: a paid code pasted later the same day must not inherit a
- * pause that belonged to the free trial.
- */
-let trialPausedUntil = 0;
-/** How long the trial's ✦ pauses after a "trial ended" the relay did not back with a past end. */
-const TRIAL_UNCLEAR_PAUSE_MS = 5 * 60_000;
-/** The relay refused the trial credential outright (401/403) this session. */
-let trialRefused = false;
-/** Whether this session has already asked the relay about the free plan. */
-let freeStatusAsked = false;
-
-/** The local trial start (see settings.ts's freeTrialStartedAt), or now if none. */
-function localTrialStart(): number {
-    const v = settings.store.freeTrialStartedAt;
-    return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : Date.now();
+function activated(): boolean {
+    return entitlementLevel() !== "none";
 }
 
 /**
- * Start the trial clock the first time a free install runs this version. An
- * install that already had one keeps it: the clock is never restarted.
+ * An Automatic owner with no working ✦ tier: ≈ on everything, and three ✦
+ * previews a day on rough ≈ lines. An AI install whose code was rejected this
+ * session (pinned to Google) is not this: it gets its own error, never a
+ * preview nudge.
  */
-function ensureTrialStarted(): void {
-    const v = settings.store.freeTrialStartedAt;
-    if (typeof v === "number" && Number.isFinite(v) && v > 0) return;
-    settings.store.freeTrialStartedAt = Date.now();
+function isAutomaticOnly(): boolean {
+    return entitlementLevel() === "automatic" && !isLlmEngine(effectiveEngine());
+}
+
+/** The saved Subline code, trimmed, or "". */
+function savedCode(): string {
+    const raw = settings.store.sublineCode;
+    return typeof raw === "string" ? raw.trim() : "";
 }
 
 /**
- * A free install whose trial is over: nothing is translated automatically, and
- * a "≈ Translate" line under each message that may be foreign does it on click.
+ * What every relay request carries: the saved code when there is one, else
+ * the install bearer, plus the install bearer on its own (x-subline-install).
  */
-function isClickMode(): boolean {
-    return isTasteInstall() && freeMode(localTrialStart()) === "click";
+async function relayCredentials(): Promise<{ credential: string; install: string; }> {
+    const install = tasteBearer(await installIdOnce());
+    const code = savedCode();
+    return { credential: code !== "" ? code : install, install };
+}
+
+/** The notice text the activation notice is showing, "" for none. */
+let activationNoticeShown = "";
+
+/**
+ * "Subline is not activated on this computer..." with an Activate button,
+ * once per session (and again only with a different sentence, such as the
+ * 3-computer limit). A notice, not a toast: it stays until dismissed.
+ */
+function showActivationNotice(message: string = UPGRADE_COPY.activateNotice): void {
+    if (activated() || activationNoticeShown === message) return;
+    activationNoticeShown = message;
+    showNotice(message, UPGRADE_COPY.activateButton, openUpgradeForLevel);
 }
 
 /**
- * Automatic ✦ for a free install. Only while the RELAY has confirmed the trial
- * this session: a trial the client merely believes in (an older relay, or no
- * answer yet) still translates every message automatically, with ≈ alone.
+ * The entitlement changed under a running session. Take the activation
+ * notice down (or put it up), rebuild so the quality tier appears or goes,
+ * redraw what is on screen, and translate the open channel if this install
+ * can now read it.
  */
-function trialAutoActive(): boolean {
-    return trialBearer !== null && !trialRefused && isTasteInstall() && trialConfirmed(localTrialStart());
-}
-
-/**
- * The free-plan state changed under a running session (the relay confirmed a
- * trial, or said it is over). Rebuild so the quality tier appears or goes,
- * and give the channel on screen its ✦ right away rather than on the next
- * open. Nothing is re-sent to Google: catch-up only re-asks for what a tier
- * still has to do.
- */
-function onFreePlanChanged(): void {
+function onEntitlementChanged(): void {
+    if (activated() && activationNoticeShown !== "") {
+        activationNoticeShown = "";
+        popNotice();
+    }
     if (fastBatcher === null) return;   // stopped
+    if (!activated()) showActivationNotice();
     rebuildBatcher();
-    // In click mode this sends nothing: it only lets the trial-ended note
-    // appear now, if a foreign message is already on screen.
+    notifyForcedInFlight();
     const open = SelectedChannelStore.getChannelId();
     if (open) catchUp(open);
 }
 
-/**
- * "Your 7-day free trial ended..." once per actual ending, the first time a
- * message is on screen after it. ONLY for an ending the relay stated (or, if
- * the relay has never answered, a full day past the local clock's end): see
- * announceableTrialEnd.
- */
-function maybeAnnounceTrialEnded(): void {
-    if (!isClickMode()) return;
-    const end = announceableTrialEnd(localTrialStart());
-    if (end === null) return;
-    const announced = settings.store.freeTrialEndNoticeFor;
-    if (!isNewEnding(end, typeof announced === "number" ? announced : 0)) return;
-    settings.store.freeTrialEndNoticeFor = end;
-    // A notice, not a toast: a toast cannot carry a button, and this is the
-    // one moment the reader most needs a way to upgrade.
-    showNotice(trialEndedMessage(), UPGRADE_COPY.noticeButton, openUpgrade);
-}
-
 /* --------------------------------------------------- reading language -- */
+
 
 /** The reading language this session last translated into. */
 let activeTargetLang: string | null = null;
@@ -690,135 +646,220 @@ function onTargetLangMaybeChanged(): void {
 /* ------------------------------------------------------------ upgrade -- */
 
 /**
- * The checkout the Upgrade panel started, if any (checkout.ts). One flow per
- * session: choosing a plan again restarts it, stop() stops it.
+ * The checkout the Activate or Add AI panel started, if any (checkout.ts). One
+ * flow per session: choosing a plan again restarts it, stop() stops it.
  */
 let checkoutFlow: CheckoutFlow | null = null;
+/** What the open checkout is for: done once the relay says this install has it. */
+let checkoutTarget: "automatic" | "ai" = "automatic";
 
 function getCheckoutFlow(): CheckoutFlow {
     if (checkoutFlow !== null) return checkoutFlow;
     checkoutFlow = createCheckoutFlow({
         bearer: async () => tasteBearer(await installIdOnce()),
         createCheckout: async (bearer, plan) => {
-            const res = await Native.relayCheckout(bearer, plan);
-            return res.ok ? { ok: true, url: res.url } : { ok: false, error: res.error };
+            const code = savedCode();
+            const res = await Native.relayCheckout(code !== "" ? code : bearer, plan, bearer);
+            return res.ok ? { ok: true, url: res.url } : { ok: false, error: res.error, errorCode: res.errorCode };
         },
         status: async bearer => {
-            const res = await Native.relayStatus(bearer);
-            return res.ok ? { ok: true, purchase: res.purchase } : { ok: false };
+            const code = savedCode();
+            const res = await Native.relayStatus(code !== "" ? code : bearer, bearer);
+            if (!res.ok) return { ok: false };
+            const before = entitlementLevel();
+            const saved = applyStatus(res);
+            if (saved || before !== entitlementLevel()) onEntitlementChanged();
+            // Done once the relay says this install has what was bought. The
+            // purchase itself was already saved above (applyStatus), so the
+            // flow is only told to stop polling.
+            const done = checkoutTarget === "ai" ? entitlementLevel() === "ai" : activated();
+            if (!done) return { ok: true };
+            announcePurchase();
+            return { ok: true, purchase: { code: savedCode(), plan: checkoutTarget } };
         },
         openExternal: url => (globalThis as any).VencordNative?.native?.openExternal?.(url),
-        onPurchase: onPurchaseLinked,
+        onPurchase: () => true,
         log: tasteLog
     });
     return checkoutFlow;
 }
 
 /**
- * The relay linked a purchase to this install. Save the key as the Subline
- * code, which switches the engine to the relay (settings.ts
- * syncEngineToCode), and make the running session paid right away: the
- * batcher is rebuilt for the relay under the new code, the free plan's click
- * mode ends (isTasteInstall is false once a code is set), and the channel on
- * screen is caught up.
+ * Save a code the relay linked to this install (a purchase, a promo or an
+ * early-user grant). Saving it switches the engine to the relay (settings.ts
+ * syncEngineToCode); the entitlement, not the code, decides what that means.
+ * Returns whether it was saved: not when it is already the saved code, and
+ * not when it is the code the reader cleared by hand (the relay keeps the
+ * link for 30 days, so without this it would come straight back).
  */
-function onPurchaseLinked(purchase: Purchase): boolean {
-    if (!isTasteInstall()) return false;   // a code arrived some other way meanwhile
-    // The reader cleared this very code in settings. The relay keeps the link
-    // for 30 days, so without this it would come straight back.
-    if (purchase.code === settings.store.clearedPurchaseCode) return false;
-    settings.store.sublineCode = purchase.code;
+function adoptCode(code: string): boolean {
+    const next = code.trim();
+    if (next === "" || next === savedCode()) return false;
+    if (next === settings.store.clearedPurchaseCode) return false;
+    settings.store.sublineCode = next;
     if (settings.store.engine !== "relay") settings.store.engine = "relay";
-    trialBearer = null;
-    clearStatusRetry();
-    // A notice, not a toast: it stays until dismissed. The purchase usually
-    // lands while the buyer is still in the browser (a subscription can sit in
-    // Pending for minutes), and a toast gone after a few seconds said nothing.
-    // Every path that saves a purchased code comes through here, and the
-    // isTasteInstall() guard above makes it once per saved code.
-    showNotice(UPGRADE_COPY.purchasedNotice, UPGRADE_COPY.purchasedNoticeButton, popNotice);
-    onFreePlanChanged();
     return true;
 }
 
+/** A week: how long Automatic works offline after the relay last answered, if it did not say. */
+const OFFLINE_GRACE_MS = 7 * 24 * 60 * 60_000;
+
 /**
- * What every Upgrade link and button does: the Upgrade panel, for a free
- * install only. A paid install has nothing to buy and is shown nothing.
+ * Take in a good /v1/status answer: the entitlement (v2 relays only), today's
+ * ✦ preview count, and any code to save. Returns whether a code was saved.
+ * An answer from an older relay (no `automatic` field) changes nothing but a
+ * linked purchase: it cannot say what this install owns.
  */
-function openUpgradeForFreeInstall(): void {
-    if (!isTasteInstall()) return;
-    openUpgradePanel(plan => {
-        void getCheckoutFlow().start(plan).then(() => {
-            Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message: UPGRADE_COPY.checkoutOpenedToast });
+function applyStatus(res: Extract<Awaited<ReturnType<typeof Native.relayStatus>>, { ok: true; }>): boolean {
+    if (typeof res.automatic === "boolean") {
+        const now = Date.now();
+        setEntitlement({
+            automatic: res.automatic,
+            ai: res.ai === true,
+            ...(res.aiUntil !== undefined ? { aiUntil: res.aiUntil } : {}),
+            ...(res.token !== undefined ? { token: res.token } : {}),
+            tokenExpiresAt: res.tokenExpiresAt ?? now + OFFLINE_GRACE_MS,
+            checkedAt: now
         });
+        if (res.previews !== undefined) recordTasteQuota(res.previews.used, res.previews.cap);
+    }
+    const linked = res.code ?? res.purchase?.code;
+    return linked !== undefined ? adoptCode(linked) : false;
+}
+
+/** The plan and code the "You're on." notice was last shown for. */
+let announcedPurchase = "";
+
+/**
+ * "You're on. Every message translates by itself now." A notice, not a toast:
+ * it stays until dismissed, because a purchase usually lands while the buyer
+ * is still in the browser. Once per plan and code, whichever path got there
+ * first (the checkout poll, a status refresh, a code entered by hand).
+ */
+function announcePurchase(): void {
+    const key = `${entitlementLevel()}:${savedCode()}`;
+    if (!activated() || key === announcedPurchase) return;
+    announcedPurchase = key;
+    showNotice(UPGRADE_COPY.purchasedNotice, UPGRADE_COPY.purchasedNoticeButton, popNotice);
+}
+
+/**
+ * What every Activate, Upgrade and Add AI link does: the Activate panel for an
+ * install with nothing (buy Automatic, or enter a code), the Add AI panel for
+ * an Automatic owner, and nothing for an install that already has AI.
+ */
+function openUpgradeForLevel(): void {
+    const level = entitlementLevel();
+    if (level === "none") {
+        openActivatePanel({ buy: () => startCheckout("automatic"), enterCode: openCodeEntryPanel });
+    } else if (level === "automatic") {
+        openUpgradePanel(plan => startCheckout(plan));
+    }
+}
+
+function startCheckout(plan: Plan): void {
+    checkoutTarget = plan === "automatic" ? "automatic" : "ai";
+    void getCheckoutFlow().start(plan).then(result => {
+        if (result === true) {
+            Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message: UPGRADE_COPY.checkoutOpenedToast });
+        } else if (result === "automatic_required") {
+            Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message: UPGRADE_COPY.aiNeedsAutomatic });
+        } else if (result === "already_owned") {
+            Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message: UPGRADE_COPY.alreadyAutomatic });
+            void refreshEntitlement();
+        }
     });
 }
 
-/**
- * How one taste request differs from every other quality request: it carries a
- * bearer that is not in settings at all (see taste.ts), and a failure means
- * something different — the day's three are gone, not that the engine is
- * unwell. Passed into `runTier` so a taste still goes through the SAME
- * `writeResult`/`mayReplace` path as an automatic ✦, which is what stops a
- * Google result arriving later from clobbering the line the user just spent one
- * of their three on.
- */
-interface TasteRun {
-    credential: string;
-    /**
-     * "press": one deliberate ⚡ taste (3 a day). "auto": the free trial's
-     * automatic ✦, sent with `mode: "auto"` so a relay whose record says the
-     * trial is over refuses it rather than spending a preview on it.
-     */
-    kind: "press" | "auto";
-    /** The relay answered "daily limit reached" — handled quietly, never as an error. */
-    onDailyLimit: (retryAfterMs?: number) => void;
+function openCodeEntryPanel(): void {
+    openCodeEntry(submitCode);
+}
+
+/** A promo code: uppercase letters and digits, 4 to 16 (never a license key or an slp_ code). */
+const PROMO_RE = /^[A-Z0-9]{4,16}$/;
+
+/** The one sentence for each /v1/redeem refusal. */
+function redeemErrorCopy(errorCode: string | undefined): string {
+    switch (errorCode) {
+        case "claimed": return UPGRADE_COPY.codeClaimed;
+        case "not_found": return UPGRADE_COPY.codeNotFound;
+        case "already": return UPGRADE_COPY.codeAlready;
+        case "rate_limited": return UPGRADE_COPY.codeRateLimited;
+        case "device_limit": return UPGRADE_COPY.deviceLimit;
+        default: return UPGRADE_COPY.codeUnreachable;
+    }
 }
 
 /**
- * The free trial's automatic ✦ is the relay engine under the install bearer.
- * Derived at send time, from the one thing that says so: a relay flush with
- * no Subline code configured, while the trial is confirmed. A paid code is
- * never replaced by this, however the rest of the state looks.
+ * "Enter a code". A promo code (a server's code) is redeemed for this install
+ * and the Subline code the relay mints is saved. Anything else is taken as a
+ * license key or a Subline code: it is checked with the relay first and saved
+ * only if it owns something. Resolves null when it worked, else the sentence
+ * to show.
  */
-function trialRunFor(engine: EngineId): TasteRun | undefined {
-    if (engine !== "relay" || trialBearer === null) return undefined;
-    const code = typeof settings.store.sublineCode === "string" ? settings.store.sublineCode.trim() : "";
-    if (code !== "") return undefined;
-    return {
-        credential: trialBearer,
-        kind: "auto",
-        onDailyLimit: retryAfterMs => {
-            trialPausedUntil = Date.now() + (retryAfterMs ?? DEFAULT_COOLDOWN_MS);
+async function submitCode(typed: string): Promise<string | null> {
+    const text = typed.trim();
+    if (text === "") return UPGRADE_COPY.codeEmpty;
+    let install: string;
+    try {
+        install = tasteBearer(await installIdOnce());
+    } catch {
+        return UPGRADE_COPY.codeUnreachable;
+    }
+    const promo = text.toUpperCase();
+    if (PROMO_RE.test(promo)) {
+        let res: Awaited<ReturnType<typeof Native.relayRedeem>>;
+        try {
+            res = await Native.relayRedeem(install, promo);
+        } catch {
+            return UPGRADE_COPY.codeUnreachable;
         }
-    };
+        if (!res.ok) return redeemErrorCopy(res.errorCode);
+        adoptCode(res.code);
+        await refreshEntitlement();
+        if (!activated()) return UPGRADE_COPY.codeUnreachable;
+        announcePurchase();
+        return null;
+    }
+    let res: Awaited<ReturnType<typeof Native.relayStatus>>;
+    try {
+        res = await Native.relayStatus(text, install);
+    } catch {
+        return UPGRADE_COPY.codeUnreachable;
+    }
+    if (!res.ok) {
+        if (res.errorCode === "device_limit") return UPGRADE_COPY.deviceLimit;
+        if (res.errorCode === "invalid_code") return UPGRADE_COPY.codeNotFound;
+        return UPGRADE_COPY.codeUnreachable;
+    }
+    if (typeof res.automatic !== "boolean") return UPGRADE_COPY.codeUnreachable;
+    if (!res.automatic && res.ai !== true) return UPGRADE_COPY.codeNotFound;
+    const before = entitlementLevel();
+    // Typed by the reader, so it wins even over a code they once cleared.
+    if (text === settings.store.clearedPurchaseCode) settings.store.clearedPurchaseCode = "";
+    applyStatus({ ...res, code: text });
+    if (before !== entitlementLevel()) onEntitlementChanged();
+    announcePurchase();
+    return null;
 }
-
 
 function tasteLog(message: string): void {
-    if (settings.store.debugLogging) logger.debug(`[taste] ${message}`);
+    if (settings.store.debugLogging) logger.debug(`[plan] ${message}`);
 }
 
 /**
- * Read today's count from the relay without spending one (see taste.ts and
- * native.ts's `relayStatus`).
- *
- * Best effort in every direction: a failure leaves the count UNKNOWN, which
- * reads as "tastes may still be available", because a status endpoint that is
- * briefly unreachable must not take a free user's three away. Never awaited by
- * anything the user is waiting on.
- */
-/**
- * The startup status call is retried until the relay answers: 5s, 15s, 60s,
- * then every 5 minutes. Without it, one failed call at startup left the
- * session on the local clock (no ✦ in the trial) until Discord restarted.
+ * The status call is retried until the relay answers: 5s, 15s, 60s, then every
+ * 5 minutes. Separately, a running install asks again every 24 hours, so an
+ * online install always holds a fresh answer and never reaches the offline
+ * limit (entitlement.ts).
  */
 const STATUS_RETRY_MS = [5_000, 15_000, 60_000];
 const STATUS_RETRY_EVERY_MS = 5 * 60_000;
 let statusRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let statusAttempts = 0;
-/** Bumped by stop(), so a status reply from a stopped session schedules nothing. */
+/** Bumped by stop(), so a status reply from a stopped session changes nothing. */
 let statusSession = 0;
+let entitlementTimer: ReturnType<typeof setInterval> | null = null;
 
 function scheduleStatusRetry(): void {
     if (statusRetryTimer !== null) return;
@@ -826,7 +867,7 @@ function scheduleStatusRetry(): void {
     statusAttempts++;
     statusRetryTimer = setTimeout(() => {
         statusRetryTimer = null;
-        if (isTasteInstall()) void refreshTasteQuota();
+        void refreshEntitlement();
     }, delay);
 }
 
@@ -836,48 +877,54 @@ function clearStatusRetry(): void {
     statusAttempts = 0;
 }
 
-async function refreshTasteQuota(): Promise<void> {
-    freeStatusAsked = true;
+/**
+ * Ask the relay what this install owns (v2 /v1/status), and act on it: save a
+ * linked code, switch the session on or off, take the activation notice down
+ * or put it up. Never awaited by anything the reader is waiting on, except
+ * "Enter a code". A relay that cannot be reached leaves the stored answer in
+ * charge until it runs out (entitlement.ts), and is asked again soon.
+ */
+async function refreshEntitlement(): Promise<void> {
     const session = statusSession;
     let answered = false;
     try {
-        const id = await installIdOnce();
-        const bearer = tasteBearer(id);
-        const res = await Native.relayStatus(bearer);
+        const { credential, install } = await relayCredentials();
+        const res = await Native.relayStatus(credential, install);
+        if (session !== statusSession) return;
         if (res.ok) {
-            // THE FREE PLAN, as the relay records it. `trialEndsAt` is only
-            // stated by a relay that knows about trials; an older one leaves
-            // the local clock in charge (and ✦ off: see trialAutoActive).
             answered = true;
             clearStatusRetry();
-            // A purchase started from this install is already linked: Discord
-            // was restarted (or the checkout poll timed out) before it landed.
-            // Switch on exactly as the checkout flow would, so it is not lost.
-            // Only when it was actually saved: a code the reader cleared is
-            // still linked on the relay, and this install must then go on to
-            // set up its trial and quota like any other free install.
-            if (res.purchase && session === statusSession && onPurchaseLinked(res.purchase)) return;
-            const wasAuto = trialAutoActive();
-            const wasClick = isClickMode();
-            noteServerTrialEnd(res.trialEndsAt, res.serverNow, Date.now(), res.trialProvisional === true);
-            if (res.plan === "trial") {
-                trialBearer = bearer;
-                tasteLog("the relay confirms the free trial: ✦ is automatic");
-            } else {
-                // The day's three: counted against the taste allowance only.
-                // A trial states its own, larger allowance, which is not what
-                // the ⚡ taste label counts.
-                recordTasteQuota(res.used, res.cap);
-                tasteLog(`the relay says ${tasteUsed()} of ${tasteCap()} used today`);
-            }
-            if (wasAuto !== trialAutoActive() || wasClick !== isClickMode()) onFreePlanChanged();
+            const before = entitlementLevel();
+            const saved = applyStatus(res);
+            if (saved || before !== entitlementLevel()) onEntitlementChanged();
+            else if (!activated()) showActivationNotice();
+            if (saved) announcePurchase();
+            tasteLog(`the relay says: ${entitlementLevel()}`);
+        } else if (res.errorCode === "device_limit" || res.errorCode === "invalid_code") {
+            // Not a network fault: this code does not work on this computer.
+            answered = true;
+            clearStatusRetry();
+            const before = entitlementLevel();
+            setEntitlement(null);
+            if (res.errorCode === "device_limit") showActivationNotice(UPGRADE_COPY.deviceLimit);
+            if (before !== "none") onEntitlementChanged();
+            else showActivationNotice();
+            tasteLog(`the relay refused this install (${res.errorCode})`);
         } else {
-            tasteLog(`today's count is unknown: ${res.error}`);
+            tasteLog(`what this install owns is unknown: ${res.error}`);
+            if (!activated()) showActivationNotice();
         }
     } catch {
-        tasteLog("today's count is unknown: the status call did not complete");
+        tasteLog("what this install owns is unknown: the status call did not complete");
+        if (session === statusSession && !activated()) showActivationNotice();
     }
     if (!answered && session === statusSession) scheduleStatusRetry();
+}
+
+/** Relay refusals that are about what this install owns, not about the network. */
+const ENTITLEMENT_REFUSAL_CODES: readonly string[] = ["not_activated", "ai_required", "device_limit", "invalid_code"];
+function isEntitlementRefusal(code: string | undefined): boolean {
+    return code !== undefined && ENTITLEMENT_REFUSAL_CODES.includes(code);
 }
 
 /* ------------------------------------------------- LLM cooldown / fallback -- */
@@ -1277,6 +1324,8 @@ function coveredByGlobalAuto(channelId: string): boolean {
 }
 
 function channelActive(channelId: string): boolean {
+    // Nothing paid for: no channel translates, not even with Google.
+    if (!activated()) return false;
     // A covered server channel is on unless the user switched it off here.
     if (coveredByGlobalAuto(channelId)) return !isChannelDisabled(channelId);
     // Anything else (globalAuto off, or a DM) is on only by explicit opt-in.
@@ -1570,19 +1619,8 @@ async function runTier(
     // ForcedHint's own doc). Both onFlush closures in rebuildBatcher leave
     // this undefined, so every `report?.(...)` below is a no-op for the
     // automatic pipeline — its invisible-failure behaviour is unchanged.
-    report?: (outcome: ForcedHint) => void,
-    // Set ONLY by a free install's ⚡ press (see `tasteTranslate`). Undefined
-    // everywhere else, so every paid and keyed path below reads exactly as it
-    // did before the taste tier existed. Three things change when it is set:
-    // where the credential comes from, that the relay's daily count is
-    // recorded, and that a refusal is handled quietly instead of parking the
-    // engine and announcing a paid user's quota.
-    tasteRun?: TasteRun
+    report?: (outcome: ForcedHint) => void
 ): Promise<void> {
-    // A free install's relay request, whichever kind: a ⚡ taste (passed in)
-    // or the trial's automatic ✦ (derived here, see trialRunFor). Undefined
-    // for every paid and keyed request, which read exactly as before.
-    const taste = tasteRun ?? trialRunFor(engine);
     const isQuality = engine !== "google";
     // The in-flight set belonging to THIS tier. The other tier's request for
     // the same id (if any) is a separate round trip and settles on its own.
@@ -1635,9 +1673,7 @@ async function runTier(
         // by IP and answers 429 with an HTML block page; retrying into that is
         // how a transient block becomes a sustained one — and unlike the LLMs,
         // Google has no rate gate to fall back on.
-        // The trial's own pause (its daily allowance, or a throttle) is a
-        // cooldown in all but name, kept apart from the paid store on purpose.
-        if (isCoolingDown(engine) || (taste?.kind === "auto" && Date.now() < trialPausedUntil)) {
+        if (isCoolingDown(engine)) {
             if (debug) {
                 logger.debug(
                     `[flush] ${engine}: blocked — cooling down for another `
@@ -1698,28 +1734,15 @@ async function runTier(
         // vanish the batch with no marker.
         let res: Awaited<ReturnType<typeof Native.translateBatch>> | null;
         try {
+            // The relay is told which install asks (the 3-computer limit).
+            const install = engine === "relay" ? tasteBearer(await installIdOnce()) : undefined;
             res = await Native.translateBatch(
                 engine,
-                // A taste's bearer is NOT in settings — it is the install id
-                // (see taste.ts), which is exactly why it is passed in rather
-                // than looked up. `apiKeyFor("relay")` would read the empty
-                // sublineCode of a free install and send no credential at all.
-                taste !== undefined
-                    ? taste.credential
-                    : isLlmEngine(engine) ? apiKeyFor(engine) : "",
-                JSON.stringify(
-                    engine === "google"
-                        ? withSourceLangs(req)
-                        // The trial's automatic ✦ says so (see TasteRun);
-                        // a ⚡ taste sends what every earlier client sent.
-                        : taste?.kind === "auto" ? { ...req, mode: "auto" } : req
-                ),
-                // The relay has no model setting, so `modelFor("relay")` is ""
-                // either way; `undefined` is what the relay contract states a
-                // taste request sends, and saying so here keeps this call site
-                // readable against that contract.
-                taste !== undefined ? undefined : modelFor(engine),
-                debug
+                isLlmEngine(engine) ? apiKeyFor(engine) : "",
+                JSON.stringify(engine === "google" ? withSourceLangs(req) : req),
+                modelFor(engine),
+                debug,
+                install
             );
         } catch {
             res = null;
@@ -1782,51 +1805,13 @@ async function runTier(
             // error string into the DOM.
             report?.({ kind: "failed", code: errorCode });
 
-            if (res !== null && taste !== undefined) {
-                // A FREE TASTE IS NOT A PAID USER'S QUOTA, so none of the
-                // machinery below applies to it. `enterCooldown` would retune
-                // the rate gate from a free tier's ceiling and announce "Today's
-                // ✦ allowance is used up" — the paid wording, with no way to
-                // act on it; `fallBackToGoogle` would pin the session and raise
-                // a RED toast about a rejected key that the user never entered.
-                // The only fact worth keeping is the one the relay stated: the
-                // day's three are gone. The caller turns that into the nudge.
-                if (taste.kind === "auto") {
-                    // THE TRIAL'S AUTOMATIC ✦. Every refusal is quiet: ≈ is
-                    // already on screen for these messages, and none of these
-                    // is something the reader did or can fix.
-                    if (/trial ended/i.test(res.error)) {
-                        // Believed ONLY with a past trialEndsAt from the
-                        // relay (on its clock): telling a reader mid-trial that
-                        // their trial ended is the one thing this must never
-                        // do. A 402 without one just pauses ✦ for a while.
-                        const wasClick = isClickMode();
-                        noteServerTrialEnd(res.trialEndsAt, res.serverNow);
-                        if (typeof res.trialEndsAt === "number" && isClickMode()) {
-                            tasteLog("the relay says the free trial has ended");
-                            if (!wasClick) onFreePlanChanged();
-                            else rebuildBatcher();
-                        } else {
-                            tasteLog("the relay refused the trial's ✦ without a past end; pausing, ≈ keeps working");
-                            taste.onDailyLimit(TRIAL_UNCLEAR_PAUSE_MS);
-                        }
-                    } else if (isDailyLimit(res.error) || res.retryAfterMs) {
-                        tasteLog("the relay paused the trial's ✦ for now; ≈ keeps working");
-                        taste.onDailyLimit(res.retryAfterMs);
-                    } else if (/\b40[13]\b/.test(res.error)) {
-                        // Not a key the user entered, so never the red
-                        // "rejected your code" toast: the trial's ✦ simply
-                        // stops for this session, and ≈ carries on.
-                        tasteLog(`the relay refused the trial credential (${errorCode})`);
-                        trialRefused = true;
-                        rebuildBatcher();
-                    }
-                } else if (isDailyLimit(res.error)) {
-                    tasteLog("the relay says today's three are used — nothing more is sent today");
-                    taste.onDailyLimit();
-                } else {
-                    tasteLog(`the request failed (${errorCode}); nothing is counted against today`);
-                }
+            if (res !== null && engine === "relay" && isEntitlementRefusal(res.errorCode)) {
+                // The relay refused on what this install owns (AI lapsed, a
+                // 4th computer), not on the network or the code's validity:
+                // ask it again, and the session follows its answer. No red
+                // toast, no fallback pin: ≈ is already on screen.
+                tasteLog(`the relay refused ✦ (${res.errorCode}); asking what this install owns`);
+                void refreshEntitlement();
             } else if (res !== null) {
                 // Park the engine for as long as the API asked for. Still the
                 // whole point of the cooldown: retrying into a wall that just
@@ -1941,22 +1926,6 @@ async function runTier(
             }
         }
 
-        // Today's taste count, straight from the relay. Recorded before the
-        // writes below for the same reason the provider reading above is: a
-        // throw in the write loop must not lose the one number the ⚡ button
-        // has to show, and a press whose count was lost would be a press the
-        // user is never told about.
-        // The relay's clock, for the trial's skew correction (freePlan.ts).
-        if (taste !== undefined) noteServerNow(res.serverNow);
-        // A trial-sized cap (a ⚡ press the relay counted against a running
-        // trial) is not the taste allowance, and must never reach the "n of 3
-        // left today" label as "299 of 300".
-        if (taste?.kind === "press") noteTasteSpent();
-        if (taste?.kind === "press" && !(typeof res.quotaCap === "number" && res.quotaCap > TASTE_CAP)) {
-            recordTasteQuota(res.quotaUsed, res.quotaCap);
-            tasteLog(`press accepted — ${tasteUsed()} of ${tasteCap()} used today`);
-        }
-
         for (const r of res.results) {
             const key = makeKey(r.id, req.targetLang);
             if (debug) {
@@ -2054,20 +2023,12 @@ async function forceQualityTranslate(message: Message): Promise<void> {
     // hides the button in exactly this case, but the engine can change
     // between render and click, so check again rather than trust stale props.
     if (!isLlmEngine(engine)) {
-        // ...unless this is a FREE install, where ⚡ is now the taste tier's
-        // one deliberate press rather than a dead button. Checked here, after
-        // the engine, so a paid install pinned to Google by a rejected code
-        // still takes the branch below and gets its own error.
-        if (isTasteInstall()) {
-            // After the trial a v0.1.6 client never shows a free reader the
-            // full ✦ line: ⚡ asks for the same preview a click on a rough ≈
-            // line does, from the same three a day. During the trial ⚡ is
-            // the taste press it always was.
-            if (isClickMode()) {
-                await previewPress(message);
-                return;
-            }
-            await tasteTranslate(message);
+        // ...unless this is an Automatic owner, where ⚡ asks for a ✦
+        // PREVIEW, from the same three a day as "Preview ✦" on a rough line.
+        // Checked after the engine, so an AI install pinned to Google by a
+        // rejected code still takes the branch below and gets its own error.
+        if (isAutomaticOnly()) {
+            await previewPress(message);
             return;
         }
         if (debug) logger.debug(`[force-quality] ${message.id}: blocked — no LLM engine usable right now`);
@@ -2139,99 +2100,7 @@ async function forceQualityTranslate(message: Message): Promise<void> {
     }
 }
 
-/**
- * ONE free taste: send this one message to the relay under the install id, and
- * render the ✦ it comes back with.
- *
- * DELIBERATE PRESSES ONLY. Nothing here is reachable from MESSAGE_CREATE,
- * catch-up or scroll-back. A free install gets automatic ✦ only during a trial
- * the relay has confirmed, and that runs as the ordinary quality batcher under
- * the install bearer (see `trialRunFor`), never through here. Three a day is
- * only meaningful if the user spends them on messages they chose.
- *
- * Routed through `runTier` rather than calling `Native.translateBatch` here,
- * for the same reason `forceQualityTranslate` is: the write then lands through
- * `writeResult()`/`mayReplace()` with `via: "relay"`, so a Google result
- * arriving a moment later cannot clobber the line the user just spent one of
- * their three on — which, on this tier, is the entire product demonstration.
- */
-async function tasteTranslate(message: Message): Promise<void> {
-    // A new UTC day is a new three. Checked on the press rather than on a
-    // timer (see taste.ts): nothing has to be armed, and the count is refreshed
-    // from the relay in the background so the button's label catches up too.
-    if (rolloverTasteIfNewUtcDay()) {
-        tasteLog("a new UTC day began — today's count is cleared and re-read");
-        void refreshTasteQuota();
-    }
-
-    if (tasteExhausted()) {
-        // NOTHING IS SENT. The relay would refuse it, and a refusal the user
-        // can see coming is a request nobody should spend. Nothing is SAID
-        // either (v0.1.6): the button's own label already reads "0 of 3 left
-        // today", and a toast on top of it was a nag, not information.
-        tasteLog(`${message.id}: press ignored — today's ${tasteCap()} are used, nothing sent`);
-        return;
-    }
-
-    if (inFlightQuality.has(message.id)) {
-        tasteLog(`${message.id}: press ignored — already translating this message`);
-        return;
-    }
-
-    const id = await installIdOnce();
-
-    // A second press can land while the id above is being read from disk. Ask
-    // again rather than trust the answer from before the await — otherwise two
-    // presses on one message would both go out and both be counted.
-    if (inFlightQuality.has(message.id)) {
-        tasteLog(`${message.id}: press ignored — already translating this message`);
-        return;
-    }
-
-    inFlightQuality.add(message.id);
-    clearForcedHint(message.id);
-    forcedInFlight.add(message.id);
-    notifyForcedInFlight();
-
-    const req: BatchRequest = {
-        messages: [{
-            id: message.id,
-            author: message.author?.username ?? "unknown",
-            text: translatableText(message.content ?? ""),
-            replyToId: replyParentId(message)
-        }],
-        // The same conversation context a paid ⚡ press sends — see
-        // forceQualityTranslate. A taste is the one ✦ this user will ever see;
-        // it is the last request that should be handicapped.
-        context: contextBefore(message, FORCED_CONTEXT_SIZE),
-        targetLang: settings.store.targetLang
-    };
-
-    try {
-        await runTier(
-            "relay", req, batcherGeneration, undefined,
-            outcome => setForcedHint(message.id, outcome),
-            {
-                credential: tasteBearer(id),
-                kind: "press",
-                // The relay knew before we did. Recorded, and nothing said:
-                // the label already counts down to "0 of 3 left today".
-                onDailyLimit: () => markTasteExhausted()
-            }
-        );
-    } finally {
-        forcedInFlight.delete(message.id);
-        notifyForcedInFlight();
-    }
-}
-
-/* --------------------------------------------- click to translate -- */
-
-/**
- * Messages whose "≈ Translate" click is out right now, so the accessory can
- * say so. Notified through the same listeners as the ⚡ indicator.
- */
-const clickInFlight = new Set<string>();
+/* ---------------------------------------------------- ✦ previews -- */
 
 /**
  * The ✦ previews this session has been shown: the first few words of the real
@@ -2261,78 +2130,9 @@ function googleUnsure(entry: { via: EngineId; lang: string; conf?: number }, con
 }
 
 /**
- * The "≈ Translate" click: the normal ≈ Google translation, for this one
- * message, because the reader asked for it.
- *
- * Routed through runTier like any fast-tier batch, so it lands through
- * writeResult/mayReplace and shows the ≈ line exactly as the automatic path
- * would. Then, and only if that line is one the confidence logic rates rough,
- * and only while today's previews last, the relay is asked what ✦ reads it as.
+ * An Automatic owner's ✦ preview of this message: from "Preview ✦" on a rough
+ * ≈ line, or from ⚡. Three a day, counted by the relay.
  */
-/**
- * Messages whose click landed while Google was cooling down, so the line says
- * so for a moment instead of silently going back to "≈ Translate".
- */
-const clickBusy = new Map<string, ReturnType<typeof setTimeout>>();
-
-function setClickBusy(messageId: string): void {
-    const t = clickBusy.get(messageId);
-    if (t !== undefined) clearTimeout(t);
-    clickBusy.set(messageId, setTimeout(() => {
-        clickBusy.delete(messageId);
-        notifyForcedInFlight();
-    }, FORCED_HINT_TTL_MS));
-    notifyForcedInFlight();
-}
-
-async function clickTranslate(message: Message): Promise<void> {
-    if (clickInFlight.has(message.id) || inFlightFast.has(message.id)) return;
-    if (isCoolingDown("google")) {
-        setClickBusy(message.id);
-        return;
-    }
-    const channelId = message.channel_id;
-    const pending: PendingMessage = {
-        id: message.id,
-        author: message.author?.username ?? "unknown",
-        text: readableContent(message.content ?? "", channelId),
-        channelId,
-        replyToId: replyParentId(message)
-    };
-    clickInFlight.add(message.id);
-    inFlightFast.add(message.id);
-    notifyForcedInFlight();
-    try {
-        await runTier("google", {
-            messages: [{ id: pending.id, author: pending.author, text: pending.text, replyToId: pending.replyToId }],
-            context: [],
-            targetLang: settings.store.targetLang
-        }, batcherGeneration, channelId);
-    } finally {
-        clickInFlight.delete(message.id);
-        notifyForcedInFlight();
-    }
-
-    const entry = getTranslation(makeKey(message.id, settings.store.targetLang));
-    if (!isRealTranslation(entry)) {
-        // Google refused and is now parked: say so, briefly.
-        if (isCoolingDown("google")) setClickBusy(message.id);
-        return;
-    }
-    if (entry.via !== "google") return;
-    if (!googleUnsure(entry, translatableText(message.content ?? "")).unsure) return;
-    await requestPreview(message, pending.text, entry.text);
-}
-
-/**
- * Ask the relay what ✦ reads this message as, in PREVIEW mode: a v0.1.6 relay
- * translates it for real and returns only the first few words, and this
- * client cuts whatever comes back by the same rule (an older relay ignores
- * the mode), so this client never shows a free reader the full ✦ line after
- * the trial. Three a day, the same allowance as the ⚡ taste. When the three
- * are gone nothing is sent and nothing is said.
- */
-/** ⚡ on the free plan after its trial: a ✦ preview of this message. */
 async function previewPress(message: Message): Promise<void> {
     if (forcedInFlight.has(message.id)) return;
     const entry = getTranslation(makeKey(message.id, settings.store.targetLang));
@@ -2347,15 +2147,22 @@ async function previewPress(message: Message): Promise<void> {
     }
 }
 
+/**
+ * Ask the relay what ✦ reads this message as, in PREVIEW mode: the relay
+ * translates it for real and returns only the first few words, and this
+ * client cuts whatever comes back by the same rule, so an Automatic owner
+ * never gets the full ✦ line. Three a day. When the three are gone nothing is
+ * sent and nothing is said: the ⚡ label already counts down.
+ */
 async function requestPreview(message: Message, text: string, googleText: string | null): Promise<void> {
     if (previewAsked.has(message.id)) return;
-    if (rolloverTasteIfNewUtcDay()) void refreshTasteQuota();
+    if (rolloverTasteIfNewUtcDay()) void refreshEntitlement();
     if (tasteExhausted()) {
         tasteLog(`${message.id}: no preview, today's ${tasteCap()} are used`);
         return;
     }
     previewAsked.add(message.id);
-    const id = await installIdOnce();
+    const { credential, install } = await relayCredentials();
     const req: BatchRequest = {
         messages: [{ id: message.id, author: message.author?.username ?? "unknown", text, replyToId: replyParentId(message) }],
         context: contextBefore(message, FORCED_CONTEXT_SIZE),
@@ -2364,45 +2171,35 @@ async function requestPreview(message: Message, text: string, googleText: string
     };
     let res: Awaited<ReturnType<typeof Native.translateBatch>> | null;
     try {
-        res = await Native.translateBatch("relay", tasteBearer(id), JSON.stringify(req), undefined, settings.store.debugLogging);
+        res = await Native.translateBatch("relay", credential, JSON.stringify(req), undefined, settings.store.debugLogging, install);
     } catch {
         res = null;
     }
     if (res === null || !res.ok) {
         if (res !== null && isDailyLimit(res.error)) markTasteExhausted();
+        if (res !== null && isEntitlementRefusal(res.errorCode)) void refreshEntitlement();
         tasteLog(`${message.id}: no preview (${res === null ? "IPC call rejected" : "the relay refused"})`);
         return;
     }
-    noteServerNow(res.serverNow);
     noteTasteSpent();
     if (!(typeof res.quotaCap === "number" && res.quotaCap > TASTE_CAP)) recordTasteQuota(res.quotaUsed, res.quotaCap);
     const r = res.results.find(x => x.id === message.id);
     if (r === undefined || "failed" in r || r.skip) return;
-    // CUT HERE TOO. A v0.1.6 relay cuts a preview itself, but an older relay
-    // ignores `mode` and answers with the full ✦ line. The same 5-word /
+    // CUT HERE TOO. The relay cuts a preview itself, but the same 5-word /
     // 32-character rule is applied again, so a full ✦ line can never appear
     // in a preview whatever the relay did.
     const cut = previewText(r.text);
     const preview = { text: cut.text, truncated: cut.truncated || r.truncated === true };
-    // ✦ reads it the same way ≈ does: a preview would show the reader nothing
-    // they cannot already read, so it is not shown.
-    // It still cost one of the three, so the reader is told what it found:
-    // "✦ reads this the same way." rather than nothing at all.
-    if (googleText !== null && !previewDiffers(preview.text, googleText)) {
-        tasteLog(`${message.id}: ✦ agrees with ≈`);
-        if (previews.size >= MAX_PREVIEWS_KEPT) {
-            const oldest = previews.keys().next();
-            if (!oldest.done) previews.delete(oldest.value);
-        }
-        previews.set(message.id, { text: "", truncated: false, same: true });
-        notifyForcedInFlight();
-        return;
-    }
+    // ✦ reads it the same way ≈ does: the reader is told so ("✦ reads this the
+    // same way.") rather than shown words they can already read.
+    const shown = googleText !== null && !previewDiffers(preview.text, googleText)
+        ? { text: "", truncated: false, same: true as const }
+        : preview;
     if (previews.size >= MAX_PREVIEWS_KEPT) {
         const oldest = previews.keys().next();
         if (!oldest.done) previews.delete(oldest.value);
     }
-    previews.set(message.id, preview);
+    previews.set(message.id, shown);
     notifyForcedInFlight();
 }
 
@@ -2597,20 +2394,6 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true, r
         // consuming context see a coherent conversation either way.
         fastBatcher?.recordContext(pending);
         if (allowQuality && recordContext) qualityBatcher?.recordContext(pending);
-        return;
-    }
-
-    // THE FREE PLAN AFTER ITS TRIAL: nothing is translated automatically.
-    // This message may be foreign (no local rule placed it in the reader's
-    // language), so the accessory offers "≈ Translate" under it instead, and
-    // a click is what spends a request (see clickTranslate). The first time
-    // that happens after the trial, the reader is told why, once.
-    if (isClickMode()) {
-        fastBatcher?.recordContext(pending);
-        if (settings.store.debugLogging) {
-            logger.debug(`[enqueue] ${pending.id}: free plan, translates on click`);
-        }
-        maybeAnnounceTrialEnded();
         return;
     }
 
@@ -2911,21 +2694,6 @@ function catchUp(channelId: string, opts: CatchUpOptions = {}) {
     if (!channelActive(channelId)) return;
     if (!becomingFocused && !isFocusedChannel(channelId)) return;
 
-    // The free plan after its trial translates on click only, so a backlog
-    // costs nothing. It can still be the first time a "≈ Translate" line is
-    // on screen, which is the moment the once-ever trial-ended note is for.
-    if (isClickMode()) {
-        if (announceableTrialEnd(localTrialStart()) !== null) {
-            const me = UserStore.getCurrentUser()?.id;
-            const loaded = MessageStore.getMessages(channelId);
-            const messages: any[] = loaded && typeof loaded.toArray === "function" ? loaded.toArray() : [];
-            if (messages.some(m => !isLocallySkipped(m?.content ?? "", m?.author?.id === me))) {
-                maybeAnnounceTrialEnded();
-            }
-        }
-        return;
-    }
-
     const count = settings.store.catchUpCount;
     if (count <= 0) return;
 
@@ -3184,48 +2952,6 @@ function forcedHintDisplay(hint: ForcedHint): { text: string; title: string } {
 }
 
 /**
- * "≈ Translate": the free plan's line under a message that may be foreign,
- * once the trial is over. Muted like every other subtitle prefix, and a real
- * button, because it is the whole way a free install reads a message now.
- * Nothing for a message the local rules already place in the reader's own
- * language: those were never going to be translated automatically either.
- */
-function clickToTranslateLine(message: Message) {
-    if (clickInFlight.has(message.id)) {
-        return (
-            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-                ≈ translating…
-            </div>
-        );
-    }
-    const isOwn = message.author?.id === UserStore.getCurrentUser()?.id;
-    if (isLocallySkipped(message.content ?? "", isOwn)) return null;
-    if (clickBusy.has(message.id)) {
-        return (
-            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-                Google is busy. Try again in a moment.
-            </div>
-        );
-    }
-    return (
-        <div
-            role="button"
-            tabIndex={0}
-            style={{ fontSize: "0.85rem", color: "var(--text-muted)", cursor: "pointer" }}
-            title="Translate this message with Google (≈)"
-            onClick={() => { void clickTranslate(message); }}
-            onKeyDown={(e: any) => {
-                if (e?.key !== "Enter" && e?.key !== " ") return;
-                e.preventDefault?.();
-                void clickTranslate(message);
-            }}
-        >
-            ≈ Translate
-        </div>
-    );
-}
-
-/**
  * "✦ reads this as: the leak says the… Upgrade" — the real ✦ translation's
  * first few words, under a ≈ line rated rough. See requestPreview.
  */
@@ -3252,14 +2978,6 @@ function previewLine(messageId: string) {
             </a>
         </div>
     );
-}
-
-/** A line, with the message's ✦ preview (if any) under it. */
-function withPreview(line: any, messageId: string) {
-    const preview = previewLine(messageId);
-    if (preview === null) return line;
-    if (line === null) return preview;
-    return <div>{line}{preview}</div>;
 }
 
 function TranslationAccessory({ message }: { message: Message; }) {
@@ -3330,8 +3048,6 @@ function translationLines(message: Message) {
     // click can never render alongside a fresh "⚡ translating…". Never read
     // when `forcing` is true, for exactly that reason.
     const hint = forcing ? undefined : forcedHintFor(message.id);
-    // The free plan after its trial: translate on click (see isClickMode).
-    const clickMode = isClickMode();
 
     if (!entry) {
         // Nothing to show yet — UNLESS a forced request is why: the reader
@@ -3359,7 +3075,6 @@ function translationLines(message: Message) {
                 </div>
             );
         }
-        if (clickMode) return withPreview(clickToTranslateLine(message), message.id);
         return null;
     }
 
@@ -3405,13 +3120,6 @@ function translationLines(message: Message) {
     // container's muted colour, i.e. becomes unreadable. --text-default is the
     // current name, --text-normal the legacy one, and the literal is a
     // dark-theme-readable last resort if Discord renames it again.
-    // On the free plan after its trial nothing retries a message on its own,
-    // so a click that did not land offers the click again rather than a
-    // "waiting" or "failed" line that would never change.
-    if (clickMode && !forcing && !hint && ("failed" in entry || "deferred" in entry)) {
-        return withPreview(clickToTranslateLine(message), message.id);
-    }
-
     if ("failed" in entry) {
         return (
             <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
@@ -3452,7 +3160,7 @@ function translationLines(message: Message) {
                 style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}
                 title={llmComing
                     ? "The quick translator (Google) didn't answer, so the quality engine is translating this message instead."
-                    : "Google's free translator is busy right now. Subline retries on its own; adding a free AI key in settings covers these gaps instantly."}
+                    : "Google's translator is busy right now. Subline retries on its own."}
             >
                 {llmComing ? "⏳ translating…" : "⏳ waiting for the translator…"}
                 {forcing && " · ⚡ translating…"}
@@ -3486,7 +3194,10 @@ function translationLines(message: Message) {
     // only that judgement: "≈ rough" appears exactly when the confidence logic
     // above rates this Google line unreliable, never to make ≈ look worse
     // than it is. A paid install keeps the "?" it always had.
-    const rough = unsure && isTasteInstall();
+    const rough = unsure && isAutomaticOnly();
+    // An Automatic owner can ask what ✦ reads a rough line as, three times a
+    // day. Offered once per message, and not once today's three are used.
+    const offerPreview = rough && !forcing && !previews.has(message.id) && !previewAsked.has(message.id) && !tasteExhausted();
     // No label at all for "und", "zxx" or anything that names no language.
     const label = languageLabel(entry.lang);
     const langName = label === null ? null : languageName(label);
@@ -3522,6 +3233,21 @@ function translationLines(message: Message) {
               * text says otherwise. pre-wrap keeps the breaks and still wraps.
               */}
             <span style={TRANSLATION_TEXT_STYLE}>{entry.text.trim()}</span>
+            {offerPreview && (
+                <span style={{ color: "var(--text-muted)" }}>
+                    {" · "}
+                    <a
+                        role="button"
+                        tabIndex={0}
+                        data-subline-preview-ask=""
+                        style={{ cursor: "pointer" }}
+                        title={tasteLabel()}
+                        onClick={(e: any) => { e?.preventDefault?.(); void previewPress(message); }}
+                    >
+                        {UPGRADE_COPY.previewAsk}
+                    </a>
+                </span>
+            )}
             {/*
               * ALONGSIDE the line above, never instead of it — a forced click
               * on a message that already carries a Google ≈ line (the common
@@ -3581,41 +3307,37 @@ function forceQualityPopoverRender(message: Message) {
     const channel = ChannelStore.getChannel(message.channel_id);
     if (!channel) return null;
 
+    // Nothing paid for: nothing to press.
+    if (!activated()) return null;
     const engine = effectiveEngine();
-    // A FREE INSTALL GETS THE BUTTON TOO, and this is the change that opens the
-    // funnel: it used to return null here, so the one action that shows a free
-    // user what ✦ reads like was invisible to exactly the people who had never
-    // seen it. Three deliberate presses a day (see `tasteTranslate`); automatic
-    // ✦ stays off.
-    const taste = !isLlmEngine(engine) && isTasteInstall();
-    if (!isLlmEngine(engine) && !taste) return null;
+    // An Automatic owner gets the button too: a ✦ PREVIEW, from the same
+    // three a day as "Preview ✦" on a rough ≈ line.
+    const preview = !isLlmEngine(engine) && isAutomaticOnly();
+    if (!isLlmEngine(engine) && !preview) return null;
 
     const key = makeKey(message.id, settings.store.targetLang);
     if (hasQualityVerdict(key)) return null;
 
-    // A new UTC day is a new three, here as on a press (tasteTranslate), so
-    // yesterday's "used up" never outlives midnight on the button.
-    if (taste && rolloverTasteIfNewUtcDay()) void refreshTasteQuota();
-    if (taste && tasteExhausted()) {
-        // Today's three are used, so a press would send nothing. Offer the
-        // one thing that does help: the Upgrade panel.
-        return {
-            label: `${UPGRADE_COPY.popoverUpgrade} (${tasteLabel()})`,
-            icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
-            message,
-            channel,
-            onClick: () => openUpgrade()
-        };
-    }
-
-    if (taste && isClickMode()) {
-        // After the trial ⚡ is a ✦ PREVIEW, from the same three a day as the
-        // preview under a rough ≈ line. Nothing to offer once one has been
-        // asked for this message: asking again would spend another of the
-        // three for the same answer.
+    if (preview) {
+        // A new UTC day is a new three, so yesterday's "used up" never
+        // outlives midnight on the button.
+        if (rolloverTasteIfNewUtcDay()) void refreshEntitlement();
+        if (tasteExhausted()) {
+            // Today's three are used, so a press would send nothing. Offer the
+            // one thing that does help: the Add AI panel.
+            return {
+                label: `${UPGRADE_COPY.popoverUpgrade} (${tasteLabel()})`,
+                icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
+                message,
+                channel,
+                onClick: () => openUpgrade()
+            };
+        }
+        // Nothing to offer once one has been asked for this message: asking
+        // again would spend another of the three for the same answer.
         if (previews.has(message.id) || previewAsked.has(message.id)) return null;
         return {
-            label: `Preview Subline ✦ (${tasteLabel()})`,
+            label: `${UPGRADE_COPY.popoverPreview} (${tasteLabel()})`,
             icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
             message,
             channel,
@@ -3624,22 +3346,7 @@ function forceQualityPopoverRender(message: Message) {
             }
         };
     }
-
-    if (taste) {
-        // The count is the whole label, because it is the only thing about
-        // this press the user cannot work out for themselves. No countdown and
-        // no readiness: a taste is not paced by the rate gate the way a paid
-        // stream of batches is, and three a day is the only limit that bites.
-        return {
-            label: `Translate with Subline ✦ (${tasteLabel()})`,
-            icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
-            message,
-            channel,
-            onClick: () => {
-                void forceQualityTranslate(message);
-            }
-        };
-    }
+    if (!isLlmEngine(engine)) return null;
 
     const { label } = LLM_ENGINES[engine];
 
@@ -3858,16 +3565,20 @@ let surfaceBudget: SurfaceBudget | null = null;
 export const SURFACE_ACCESSORY_ID = "VcTranslateSurfaces";
 
 /**
- * A PAID install, and nothing else: a Subline code, the relay selected and in
- * use (not fallen back to Google this session), and the setting on. A free
- * install in its trial runs the relay on the install bearer, not a code, so
- * it is not paid here and sees no change at all.
+ * An install that has paid for surfaces: Automatic or AI, with the setting
+ * on. Automatic gets Google (≈) on every surface, tight ones in place too;
+ * AI also gets ✦ (see surfaceQualityAllowed). An install with nothing gets
+ * Discord exactly as it was.
  */
 function isPaidSurfaceUser(): boolean {
     if (surfaceService === null) return false;
     if (settings.store.translateSurfaces === false) return false;
-    const code = typeof settings.store.sublineCode === "string" ? settings.store.sublineCode.trim() : "";
-    return settings.store.engine === "relay" && code !== "" && baseEngine() === "relay";
+    return activated();
+}
+
+/** Whether surfaces may ask the relay (✦): only with AI and a working relay tier. */
+function surfaceQualityAllowed(): boolean {
+    return effectiveEngine() === "relay";
 }
 
 function surfaceDebug(message: string): void {
@@ -3899,21 +3610,26 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
         targetLang: settings.store.targetLang,
         ...(engine === "google" ? { maxConcurrency: 1 } : {})
     };
+    if (engine === "relay" && !surfaceQualityAllowed()) return null;
     let res: Awaited<ReturnType<typeof Native.translateBatch>>;
     try {
+        const install = engine === "relay" ? tasteBearer(await installIdOnce()) : undefined;
         res = await Native.translateBatch(
             engine,
             engine === "relay" ? apiKeyFor("relay") : "",
             JSON.stringify(req),
             modelFor(engine),
-            settings.store.debugLogging
+            settings.store.debugLogging,
+            install
         );
     } catch {
         return null;
     }
     if (!res.ok) {
         surfaceDebug(`[surface] ${engine}: not ok (${beaconErrorCode(res)})`);
-        if (engine === "relay") {
+        if (engine === "relay" && isEntitlementRefusal(res.errorCode)) {
+            void refreshEntitlement();
+        } else if (engine === "relay") {
             if (res.retryAfterMs) {
                 enterCooldown("relay", res.retryAfterMs, res.quotaLimitPerMinute, res.quotaModel, res.error);
             } else if (/\b403\b/.test(res.error)) {
@@ -3949,6 +3665,7 @@ function startSurfaces(): SurfaceService {
     );
     surfaceService = new SurfaceService({
         isPaid: isPaidSurfaceUser,
+        qualityAllowed: surfaceQualityAllowed,
         targetLang: () => settings.store.targetLang,
         locallySkipped: text => shouldSkip(text, false) || isConfidentlyTargetLanguage(text, settings.store.targetLang),
         translate: translateSurfaceBatch,
@@ -4340,7 +4057,7 @@ export default definePlugin({
             if (!isPaidSurfaceUser() || typeof text !== "string" || text.trim() === "") return text;
             const t = tightTranslation(text);
             if (t === null) return text;
-            return [text, <div key="subline-surface" style={BUBBLE_LINE_STYLE} data-subline-surface="status-bubble">✦ {t.text}</div>];
+            return [text, <div key="subline-surface" style={BUBBLE_LINE_STYLE} data-subline-surface="status-bubble">{t.glyph} {t.text}</div>];
         } catch {
             return text;
         }
@@ -4353,8 +4070,9 @@ export default definePlugin({
             if (original == null) return original;
             if (props?.isReplyAuthorBlocked === true || props?.isReplyAuthorIgnored === true) return original;
             if (isHiddenSuspended(props?.referencedMessage?.message)) return original;
-            // Free installs see only a decoded code here (local, free); anything
-            // else is Discord's own value, untouched.
+            // Nothing paid for: Discord's own value, untouched. With the
+            // surfaces setting off, only a decoded code (local, free).
+            if (!activated()) return original;
             if (!isPaidSurfaceUser() && decodeMessage(props?.referencedMessage?.message?.content) === null) return original;
             return <ReplyQuote original={original} referenced={props?.referencedMessage} />;
         } catch {
@@ -4419,8 +4137,13 @@ export default definePlugin({
     },
 
     async start() {
-        // Every Upgrade link opens the Upgrade panel while the plugin runs.
-        registerUpgradeOpener(openUpgradeForFreeInstall);
+        // Every Activate / Add AI link opens the right panel while the plugin runs.
+        registerUpgradeOpener(openUpgradeForLevel, openCodeEntryPanel);
+        // The installer's install id (settings.json) wins over the plugin's own.
+        connectInstallIdSetting({
+            read: () => settings.store.installId,
+            write: id => { settings.store.installId = id; }
+        });
         normaliseTargetLangSetting();
         normaliseEngineSetting();
         activeTargetLang = settings.store.targetLang;
@@ -4470,21 +4193,15 @@ export default definePlugin({
         });
         updateWatch.start();
 
-        // THE FREE PLAN. The first session a free install runs this version
-        // starts its 7-day trial clock (an install that already has one keeps
-        // it). The relay is then asked, never awaited, what it has on record:
-        // whether the trial is running (✦ turns on) or over (translate on
-        // click), and how many of today's three ✦ previews are left. A slow or
-        // unreachable relay delays nothing: until it answers, the local clock
-        // decides, and a trial it has not confirmed translates with ≈ alone.
-        //
-        // (The old once-ever "Subline is translating with free Google" notice
-        // is gone: during the trial it is not true, and afterwards the one
-        // trial-ended notice says what changed.)
-        if (isTasteInstall()) {
-            ensureTrialStarted();
-            void refreshTasteQuota();
-        }
+        // WHAT THIS INSTALL OWNS. The last answer is read from disk first
+        // (awaited: it decides whether anything is translated at all), then
+        // the relay is asked again, never awaited, and every 24 hours after.
+        // Until it answers, the stored answer stands until it runs out
+        // (entitlement.ts). An install with nothing gets the activation notice
+        // once the relay has answered, or failed to.
+        await loadEntitlement();
+        void refreshEntitlement();
+        entitlementTimer = setInterval(() => { void refreshEntitlement(); }, ENTITLEMENT_REFRESH_MS);
 
         // The weekly note's running count. Awaited, like the channel lists
         // below, so the first translation of the session is counted into the
@@ -4518,31 +4235,25 @@ export default definePlugin({
         const cacheReady = loadPersistedTranslations();
 
         rebuildBatcher();
-        let wasFree = isTasteInstall();
-        let lastCode = typeof settings.store.sublineCode === "string" ? settings.store.sublineCode.trim() : "";
+        let lastCode = savedCode();
         onSettingsChanged(() => {
             // Order matters: lift a stale pin BEFORE rebuilding, so the new
             // batcher is built for the engine the user now has credentials for.
             releaseFallbackIfCredentialChanged();
             onTargetLangMaybeChanged();
-            // A code cleared mid-session is a free install from now on: its
-            // trial starts (or resumes) exactly as it would at start(), and the
-            // relay is asked again what this install's free plan is (the answer
-            // from before the code was saved no longer describes it).
-            const free = isTasteInstall();
-            const flipped = free !== wasFree;
-            wasFree = free;
-            const code = typeof settings.store.sublineCode === "string" ? settings.store.sublineCode.trim() : "";
-            if (flipped && free && lastCode !== "") settings.store.clearedPurchaseCode = lastCode;
-            if (code !== "") lastCode = code;
-            if (free) {
-                ensureTrialStarted();
-                if (!freeStatusAsked || flipped) void refreshTasteQuota();
-            }
+            // A different code is a different account: the relay is asked
+            // again what this install owns, and the screen is redrawn. A code
+            // cleared by hand is remembered, so a purchase the relay still
+            // links to this install does not bring it straight back.
+            const code = savedCode();
+            const changed = code !== lastCode;
+            if (changed && code === "" && lastCode !== "") settings.store.clearedPurchaseCode = lastCode;
+            lastCode = code;
             rebuildBatcher();
-            // Paid and free draw different lines (click mode, previews): redraw
-            // what is on screen now, not on the next message.
-            if (flipped) onFreePlanChanged();
+            if (changed) {
+                void refreshEntitlement();
+                onEntitlementChanged();
+            }
         });
         FluxDispatcher.subscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.subscribe("MESSAGE_UPDATE", onMessageUpdate);
@@ -4596,8 +4307,14 @@ export default definePlugin({
         updateWatch = null;
         onSettingsChanged(null);
         registerUpgradeOpener(null);
+        connectInstallIdSetting(null);
         checkoutFlow?.stop();
         checkoutFlow = null;
+        if (entitlementTimer !== null) clearInterval(entitlementTimer);
+        entitlementTimer = null;
+        activationNoticeShown = "";
+        announcedPurchase = "";
+        checkoutTarget = "automatic";
         activeTargetLang = null;
         FluxDispatcher.unsubscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onMessageUpdate);
@@ -4665,21 +4382,13 @@ export default definePlugin({
         // looks exactly like one applied twenty-one times.
         forcedInFlightListeners.clear();
         deferredChannels.clear();
-        // The free plan's session state. The relay is asked again on the next
-        // start(); the trial's start time and the weekly count are persisted
-        // and read back then.
-        trialBearer = null;
-        trialPausedUntil = 0;
-        trialRefused = false;
-        freeStatusAsked = false;
+        // The plan's session state. The relay is asked again on the next
+        // start(); its last answer and the weekly count are persisted and read
+        // back then.
         statusSession++;
         if (statusRetryTimer !== null) clearTimeout(statusRetryTimer);
         statusRetryTimer = null;
         statusAttempts = 0;
-        __resetFreePlan();
-        clickInFlight.clear();
-        for (const t of clickBusy.values()) clearTimeout(t);
-        clickBusy.clear();
         previews.clear();
         previewAsked.clear();
         __resetWeeklyStats();

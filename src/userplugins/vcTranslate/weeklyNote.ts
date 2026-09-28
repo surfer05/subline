@@ -1,6 +1,7 @@
 import * as DataStore from "@api/DataStore";
 
-import { DAY_MS } from "./freePlan";
+/** A day, in ms. */
+export const DAY_MS = 86_400_000;
 
 /**
  * THE WEEKLY NOTE: "This week: 12 messages in 3 languages."

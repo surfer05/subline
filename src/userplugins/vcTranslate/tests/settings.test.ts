@@ -1,9 +1,14 @@
 import { __resetSettings } from "@api/Settings";
-import { beforeEach, describe, expect, it } from "vitest";
+import { OptionType } from "@utils/types";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RELAY_ENGINE as INSTALLER_RELAY_ENGINE } from "../../../../installer/src/app/language";
 import settings, { FREE_ENGINE, RELAY_ENGINE } from "../settings";
 import { onSettingsChanged } from "../settingsBridge";
+import { __resetEntitlement, setEntitlement } from "../entitlement";
+import { registerUpgradeOpener } from "../upgradeBridge";
+import { __resetClipboard, copied } from "./stubs/utils-clipboard";
+import { __resetWebpackCommon, shownToasts } from "./stubs/webpack-common";
 
 /**
  * These guard the product's paywall against a self-inflicted loophole: if the
@@ -140,15 +145,86 @@ describe("the settings page copy", () => {
 describe("clearing the code", () => {
     beforeEach(() => __resetSettings());
 
-    it("switches the engine back and shows the free-plan line straight away", () => {
+    it("switches the engine back to Google straight away", () => {
         settings.store.sublineCode = "SUBLINE-TEST-CODE";
-        const line = (settings as any).def.freePlanStatus;
-        expect(line.hidden()).toBe(true);
-        expect(line.component()).toBeNull();
-        settings.store.freeTrialStartedAt = Date.now();
+        expect(settings.store.engine).toBe(RELAY_ENGINE);
         settings.store.sublineCode = "";
         expect(settings.store.engine).toBe(FREE_ENGINE);
-        expect(line.hidden()).toBe(false);
-        expect(line.component().children[0]).toBe("Free trial: 7 days left.");
+    });
+});
+
+describe("the plan card", () => {
+    const text = (node: any): string => {
+        if (node === null || node === undefined || node === false) return "";
+        if (typeof node === "string" || typeof node === "number") return String(node);
+        if (Array.isArray(node)) return node.map(text).join("");
+        return text(node.children);
+    };
+    function find(node: any, pred: (n: any) => boolean): any {
+        if (node === null || typeof node !== "object") return null;
+        if (Array.isArray(node)) { for (const c of node) { const f = find(c, pred); if (f) return f; } return null; }
+        if (pred(node)) return node;
+        return find(node.children, pred);
+    }
+    const card = () => {
+        const el = (settings as any).def.plan.component();
+        return el.type(el.props ?? {});
+    };
+    const future = () => Date.now() + 86_400_000;
+
+    beforeEach(() => {
+        __resetSettings();
+        __resetEntitlement();
+        __resetClipboard();
+        __resetWebpackCommon();
+    });
+    afterEach(() => registerUpgradeOpener(null));
+
+    it("is first on the page, and the code field itself is hidden (codes are entered and checked in the panel)", () => {
+        const keys = Object.keys((settings as any).def);
+        expect(keys.indexOf("plan")).toBeLessThan(keys.indexOf("sublineCode"));
+        expect((settings as any).def.sublineCode.hidden()).toBe(true);
+    });
+
+    it("says Not activated, and offers Activate and Enter a code, for an install that owns nothing", () => {
+        const opened: string[] = [];
+        registerUpgradeOpener(() => opened.push("panel"), () => opened.push("code"));
+        const out = card();
+        expect(text(out)).toContain("Not activated.");
+        find(out, n => text(n) === "Activate" && typeof n.props?.onClick === "function").props.onClick({ preventDefault() { } });
+        find(out, n => text(n) === "Enter a code" && typeof n.props?.onClick === "function").props.onClick({ preventDefault() { } });
+        expect(opened).toEqual(["panel", "code"]);
+    });
+
+    it("names the plan, shows the code with a Copy button that copies it, and offers Add AI to an Automatic owner", async () => {
+        setEntitlement({ automatic: true, ai: false, tokenExpiresAt: future(), checkedAt: 0 });
+        settings.store.sublineCode = "slp_share_me";
+        const out = card();
+        expect(text(out)).toContain("Plan: Automatic.");
+        expect(text(out)).toContain("Your code:");
+        expect(text(out)).toContain("slp_share_me");
+        expect(text(out)).toContain("Add AI");
+        find(out, n => n.props?.["data-subline-copy"] !== undefined).props.onClick();
+        await vi.waitFor(() => expect(copied).toEqual(["slp_share_me"]));
+        await vi.waitFor(() => expect(shownToasts.map(t => t.message)).toEqual(["Code copied."]));
+    });
+
+    it("says Automatic + AI, with nothing to buy", () => {
+        setEntitlement({ automatic: true, ai: true, tokenExpiresAt: future(), checkedAt: 0 });
+        const out = card();
+        expect(text(out)).toContain("Plan: Automatic + AI.");
+        expect(text(out)).not.toContain("Add AI");
+        expect(text(out)).not.toContain("Activate");
+    });
+
+    it("hides the surfaces toggle only for an install that owns nothing", () => {
+        expect((settings as any).def.translateSurfaces.hidden()).toBe(true);
+        setEntitlement({ automatic: true, ai: false, tokenExpiresAt: future(), checkedAt: 0 });
+        expect((settings as any).def.translateSurfaces.hidden()).toBe(false);
+    });
+
+    it("keeps the installer's install id as hidden bookkeeping", () => {
+        expect((settings as any).def.installId.type).toBe(OptionType.CUSTOM);
+        expect(settings.store.installId).toBe("");
     });
 });

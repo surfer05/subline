@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-    fetchRelayCheckout, fetchRelayStatus, RELAY_CHECKOUT_URL, RELAY_STATUS_URL, translateWithRelay, translateWithRelayDetailed
+    fetchRelayCheckout, fetchRelayRedeem, fetchRelayStatus, RELAY_CHECKOUT_URL, RELAY_REDEEM_URL, RELAY_STATUS_URL,
+    translateWithRelay, translateWithRelayDetailed
 } from "../engines/relay";
 import type { BatchRequest } from "../types";
 
@@ -161,5 +162,74 @@ describe("fetchRelayCheckout", () => {
             init.signal.addEventListener("abort", () => reject(new Error("aborted")));
         }));
         await expect(fetchRelayCheckout("free_x", "monthly", fetchImpl as any, 5)).rejects.toThrow(/aborted/);
+    });
+});
+
+describe("the paid-only model (v2) on the wire", () => {
+    const INSTALL = "free_" + "b".repeat(32);
+    const ok = (body: any) => vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => body });
+    const refused = (status: number, body: any) => vi.fn().mockResolvedValue({ ok: false, status, json: async () => body });
+
+    it("says it speaks v2, and names the install, on every request", async () => {
+        const status = ok({ ok: true, automatic: true, ai: false, tokenExpiresAt: 5 });
+        await fetchRelayStatus("slp_code", status as any, INSTALL);
+        const [, s] = status.mock.calls[0];
+        expect(s.headers).toMatchObject({ authorization: "Bearer slp_code", "x-subline-api": "2", "x-subline-install": INSTALL });
+        expect(s.headers["x-subline-client"]).toMatch(/^vcTranslate\//);
+
+        const translate = ok({ ok: true, results: [] });
+        await translateWithRelayDetailed(req(["hola"]), "slp_code", translate as any, INSTALL);
+        expect(translate.mock.calls[0][1].headers).toMatchObject({ "x-subline-api": "2", "x-subline-install": INSTALL });
+
+        const checkout = ok({ ok: true, url: "https://checkout.dodopayments.com/session/x" });
+        await fetchRelayCheckout("slp_code", "automatic", checkout as any, 10_000, INSTALL);
+        expect(checkout.mock.calls[0][1].headers).toMatchObject({ "x-subline-api": "2", "x-subline-install": INSTALL });
+        expect(JSON.parse(checkout.mock.calls[0][1].body)).toEqual({ plan: "automatic" });
+    });
+
+    it("reads what the install owns, field by field, and drops anything malformed", async () => {
+        const out = await fetchRelayStatus(INSTALL, ok({
+            ok: true, automatic: true, ai: true, aiUntil: 1_900_000_000_000, code: " slp_x ", now: 1_800_000_000_000,
+            previews: { used: 1, cap: 3 }, token: "p.s", tokenExpiresAt: 1_800_600_000_000
+        }) as any, INSTALL);
+        expect(out).toMatchObject({
+            automatic: true, ai: true, aiUntil: 1_900_000_000_000, code: "slp_x", previews: { used: 1, cap: 3 },
+            token: "p.s", tokenExpiresAt: 1_800_600_000_000, serverNow: 1_800_000_000_000
+        });
+        const bad = await fetchRelayStatus(INSTALL, ok({
+            ok: true, automatic: true, ai: "yes", aiUntil: -1, code: 7, previews: { used: "x" }, tokenExpiresAt: "soon"
+        }) as any, INSTALL);
+        expect(bad).toMatchObject({ automatic: true, ai: false });
+        expect(bad.aiUntil).toBeUndefined();
+        expect(bad.code).toBeUndefined();
+        expect(bad.previews).toBeUndefined();
+        expect(bad.tokenExpiresAt).toBeUndefined();
+    });
+
+    it("carries the relay's refusal word on the error (device limit, invalid code)", async () => {
+        await expect(fetchRelayStatus("slp_code", refused(403, { ok: false, error: "device_limit" }) as any, INSTALL))
+            .rejects.toMatchObject({ errorCode: "device_limit" });
+        await expect(translateWithRelayDetailed(req(["hola"]), "slp_code", refused(402, { ok: false, error: "ai_required" }) as any, INSTALL))
+            .rejects.toMatchObject({ errorCode: "ai_required" });
+        // Only a plain word is taken, never remote prose.
+        await expect(fetchRelayStatus("slp_code", refused(500, { ok: false, error: "Something <b>bad</b>" }) as any, INSTALL))
+            .rejects.not.toHaveProperty("errorCode");
+    });
+
+    it("redeems a promo code for the install and returns the minted code", async () => {
+        const fetchImpl = ok({ ok: true, code: " slp_minted " });
+        expect(await fetchRelayRedeem(INSTALL, "SERVER5", fetchImpl as any)).toBe("slp_minted");
+        const [url, init] = fetchImpl.mock.calls[0];
+        expect(url).toBe(RELAY_REDEEM_URL);
+        expect(init.method).toBe("POST");
+        expect(init.headers).toMatchObject({ authorization: `Bearer ${INSTALL}`, "x-subline-install": INSTALL, "x-subline-api": "2" });
+        expect(JSON.parse(init.body)).toEqual({ code: "SERVER5" });
+    });
+
+    it("throws the redeem refusal word, and treats an answer with no code as a failure", async () => {
+        for (const [status, error] of [[410, "claimed"], [404, "not_found"], [409, "already"], [429, "rate_limited"], [503, "unavailable"]] as const) {
+            await expect(fetchRelayRedeem(INSTALL, "SERVER5", refused(status, { ok: false, error }) as any)).rejects.toMatchObject({ errorCode: error });
+        }
+        await expect(fetchRelayRedeem(INSTALL, "SERVER5", ok({ ok: true }) as any)).rejects.toThrow(/relay redeem: HTTP 200/);
     });
 });

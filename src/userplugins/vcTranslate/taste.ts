@@ -1,21 +1,18 @@
 import * as DataStore from "@api/DataStore";
 
 /**
- * THE TASTE TIER — three ✦ a day for an install with no code.
+ * THE INSTALL ID AND TODAY'S ✦ PREVIEWS.
  *
- * During a free install's 7-day trial a ⚡ press spends one on the full ✦
- * line (while the relay has not confirmed the trial). Once the trial is over
- * (see freePlan.ts), the three pay for ✦ PREVIEWS only, from ⚡ or from a click
- * on a rough ≈ line: the first few words, cut by the relay and again by the
- * client. Never automatic, never a batch, only a message the reader chose.
- * This module owns the two pieces of state that makes possible: WHO is asking (an install id the relay
- * counts against) and HOW MANY are left today.
+ * Two pieces of state an install needs whatever it owns. WHO is asking: an
+ * install id the relay ties purchases, promo codes and the 3-computer limit
+ * to (sent as `x-subline-install`, and as the credential when no code is
+ * saved). HOW MANY ✦ previews are left today: an Automatic owner gets three a
+ * day on rough ≈ lines (see index.tsx requestPreview).
  *
- * Everything here is deliberately free of Discord, of settings and of the
- * network, so the funnel's arithmetic — the count, the day rollover, the
- * wording — can be read and tested on its own. index.tsx owns the decisions
- * (is this a free install? was this press allowed?) and native.ts owns the
- * requests.
+ * Everything here is deliberately free of Discord and of the network, so the
+ * count, the day rollover and the wording can be read and tested on their
+ * own. index.tsx owns the decisions and native.ts owns the requests. (The
+ * module keeps its old name: "taste" was the free tier's three a day.)
  */
 
 /**
@@ -62,11 +59,52 @@ function newInstallId(): string {
     return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * THE INSTALLER'S ID. A fresh install is activated in the installer, before
+ * Discord ever runs this code, so the installer generates the id, ties the
+ * purchase or promo to it, and seeds it into Vencord's settings as
+ * `plugins.VcTranslate.installId`. index.tsx connects that setting here. When it
+ * holds a valid id it wins; otherwise the DataStore id (or a fresh one) is
+ * used and written back to it, so the two always agree afterwards.
+ */
+export interface InstallIdSetting {
+    read(): unknown;
+    write(id: string): void;
+}
+let installIdSetting: InstallIdSetting | null = null;
+
+export function connectInstallIdSetting(setting: InstallIdSetting | null): void {
+    installIdSetting = setting;
+}
+
+function settingId(): string | null {
+    try {
+        const v = installIdSetting?.read();
+        return typeof v === "string" && INSTALL_ID_RE.test(v) ? v : null;
+    } catch {
+        return null;
+    }
+}
+
+function writeSettingId(id: string): void {
+    try {
+        if (settingId() !== id) installIdSetting?.write(id);
+    } catch { /* the DataStore copy still holds it */ }
+}
+
 export async function installIdOnce(): Promise<string> {
     if (installId !== null) return installId;
     if (installIdPending !== null) return installIdPending;
 
     installIdPending = (async () => {
+        const seeded = settingId();
+        if (seeded !== null) {
+            installId = seeded;
+            try {
+                if (await DataStore.get<unknown>(INSTALL_ID_KEY) !== seeded) await DataStore.set(INSTALL_ID_KEY, seeded);
+            } catch { /* the setting holds it */ }
+            return seeded;
+        }
         let stored: unknown;
         try {
             stored = await DataStore.get<unknown>(INSTALL_ID_KEY);
@@ -81,6 +119,7 @@ export async function installIdOnce(): Promise<string> {
         // with no way for the user to clear it.
         if (typeof stored === "string" && INSTALL_ID_RE.test(stored)) {
             installId = stored;
+            writeSettingId(stored);
             return stored;
         }
         const fresh = newInstallId();
@@ -91,6 +130,7 @@ export async function installIdOnce(): Promise<string> {
             // for this session; the next launch simply generates another.
         }
         installId = fresh;
+        writeSettingId(fresh);
         return fresh;
     })();
 

@@ -3273,11 +3273,22 @@ describe("the force-quality popover action (⚡)", () => {
     // seen it. A free install now gets three deliberate presses a day (see
     // taste.ts / tasteTranslate), so the button is offered — and says how many
     // are left. The suite below ("the taste tier") pins what pressing it does.
-    it("is offered to a free install, carrying the count of today's free tastes", () => {
+    it("is offered to an Automatic owner as a ✦ preview, carrying today's count", async () => {
+        plugin.stop!();
+        DataStore.setEntitlementForTest({ automatic: true, ai: false, tokenExpiresAt: Date.now() + 86_400_000 });
+        await plugin.start!();
         settings.store.engine = "google";
         const btn = forceButton(discordMessage("1", "hola"));
         expect(btn).not.toBeNull();
-        expect(btn!.label).toContain("3 of 3 left today");
+        expect(btn!.label).toBe("Preview ✦ (3 of 3 left today)");
+    });
+
+    it("is not offered at all to an install that owns nothing", async () => {
+        plugin.stop!();
+        DataStore.clearEntitlementForTest();
+        await plugin.start!();
+        useGemini();
+        expect(forceButton(discordMessage("1", "hola"))).toBeNull();
     });
 
     it("is still hidden for a PAID install whose code was rejected this session", async () => {
@@ -3402,7 +3413,7 @@ describe("the force-quality popover action (⚡)", () => {
  * plan). These run in a trial the relay has NOT confirmed (relayStatus fails
  * or answers with no trialEndsAt), which is the ⚡ taste's own world.
  */
-describe("the taste tier (three free ✦ a day)", () => {
+describe("✦ previews for an Automatic owner (three a day)", () => {
     function forceButton(message: any) {
         const registered = __getPopoverButton(FORCE_QUALITY_POPOVER_ID);
         return registered ? registered.render(message) : null;
@@ -3412,15 +3423,20 @@ describe("the taste tier (three free ✦ a day)", () => {
         for (let i = 0; i < 20; i++) await Promise.resolve();
     }
 
-    /** Every relay call this test run made, as [bearer, requestJson] pairs. */
+    // An Automatic owner: ≈ on everything, ✦ only as previews.
+    beforeEach(async () => {
+        plugin.stop!();
+        __resetTaste();
+        DataStore.setEntitlementForTest({ automatic: true, ai: false, tokenExpiresAt: Date.now() + 7 * 86_400_000 });
+        await plugin.start!();
+        await flush();
+    });
+
+    /** Every relay call this test run made. */
     const relayCalls = () =>
         native.translateBatch.mock.calls.filter(c => c[0] === "relay");
 
-    /**
-     * The relay answers one message and states the day's count, exactly as the
-     * contract says: { ok:true, results, used, cap } — carried to the renderer
-     * as quotaUsed/quotaCap (see native.ts).
-     */
+    /** The relay answers a preview and states the day's count, as quotaUsed/quotaCap. */
     function relayAnswers(used: number, cap = TASTE_CAP) {
         native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => {
             const { messages } = JSON.parse(payload);
@@ -3428,7 +3444,7 @@ describe("the taste tier (three free ✦ a day)", () => {
             return {
                 ok: true,
                 results: messages.map((m: { id: string; }) => ({
-                    id: m.id, lang: "es", text: "sharper " + m.id, skip: false
+                    id: m.id, lang: "es", text: "sharper " + m.id, skip: false, truncated: true
                 })),
                 quotaUsed: used,
                 quotaCap: cap
@@ -3444,88 +3460,51 @@ describe("the taste tier (three free ✦ a day)", () => {
         await flush();
     }
 
-    it("sends exactly one relay request, under a free_ install-id bearer, and renders it as ✦", async () => {
+    it("sends exactly one preview request, under the install bearer, and never stores it as a translation", async () => {
         relayAnswers(1);
 
         await press("1");
 
         expect(relayCalls()).toHaveLength(1);
-        const [engine, bearer, payload, model] = relayCalls()[0];
+        const [engine, bearer, payload, model, , install] = relayCalls()[0];
         expect(engine).toBe("relay");
-        // The contract: Bearer free_<32 lowercase hex>. Nothing from settings,
-        // nothing derived from the user or the machine.
         expect(bearer).toMatch(/^free_[0-9a-f]{32}$/);
+        expect(install).toBe(bearer);
+        expect(JSON.parse(payload).mode).toBe("preview");
         expect(JSON.parse(payload).messages.map((m: any) => m.id)).toEqual(["1"]);
         expect(model).toBeUndefined();
-
-        // Written through writeResult with via "relay", which is what makes it
-        // render as ✦ and what stops a later Google line replacing it.
-        expect(getTranslation(key("1"))).toMatchObject({ via: "relay", text: "sharper 1" });
+        // A preview is not a translation: nothing lands in the store.
+        expect(getTranslation(key("1"))).toBeUndefined();
     });
 
-    it("a Google result landing later cannot clobber the line a taste bought", async () => {
-        // The whole point of routing a taste through writeResult/mayReplace
-        // rather than writing it directly: on this tier the ✦ line IS the
-        // product demonstration, and a slow ≈ arriving a second later must not
-        // quietly replace it with the rough version.
-        let releaseGoogle: () => void = () => { };
-        native.translateBatch.mockImplementation(
-            async (engine: string, _k: string, payload: string) => {
-                if (engine === "relay") {
-                    return {
-                        ok: true,
-                        results: JSON.parse(payload).messages.map((m: { id: string; }) => ({
-                            id: m.id, lang: "es", text: "sharper " + m.id, skip: false
-                        })),
-                        quotaUsed: 1, quotaCap: 3
-                    };
-                }
-                return new Promise(resolve => {
-                    releaseGoogle = () => resolve(googleAnswers(payload, "rough", "es"));
-                });
-            }
-        );
-
-        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola que tal") });
-        await vi.advanceTimersByTimeAsync(1);
-        await flush();
-
+    it("sends the saved code as the credential when there is one", async () => {
+        settings.store.sublineCode = "slp_automatic";
+        relayAnswers(1);
         await press("1");
-        expect(getTranslation(key("1"))).toMatchObject({ via: "relay", text: "sharper 1" });
-
-        releaseGoogle();
-        await flush();
-
-        expect(getTranslation(key("1"))).toMatchObject({ via: "relay", text: "sharper 1" });
+        expect(relayCalls()[0][1]).toBe("slp_automatic");
+        expect(relayCalls()[0][5]).toMatch(/^free_[0-9a-f]{32}$/);
     });
 
     it("counts down on the button from the relay's own count, and says nothing when the three are used", async () => {
         native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => {
             if (_e !== "relay") return { ok: true, results: [] };
             const { messages } = JSON.parse(payload);
-            // The relay states `used` after counting this request.
             const used = relayCalls().length;
             return {
                 ok: true,
-                results: messages.map((m: { id: string; }) => ({
-                    id: m.id, lang: "es", text: "sharper " + m.id, skip: false
-                })),
+                results: messages.map((m: { id: string; }) => ({ id: m.id, lang: "es", text: "sharper " + m.id, skip: false })),
                 quotaUsed: used,
                 quotaCap: 3
             };
         });
 
+        expect(forceButton(discordMessage("x", "hola"))!.label).toBe("Preview ✦ (3 of 3 left today)");
         await press("1");
         expect(forceButton(discordMessage("x", "hola"))!.label).toContain("2 of 3 left today");
-        expect(shownToasts).toHaveLength(0);
-
         await press("2");
         expect(forceButton(discordMessage("x", "hola"))!.label).toContain("1 of 3 left today");
-        expect(shownToasts).toHaveLength(0);
-
         await press("3");
-        // v0.1.6: no "3 of 3 free ✦ used today." toast. The label is the count.
-        expect(forceButton(discordMessage("x", "hola"))!.label).toContain("0 of 3 left today");
+        expect(forceButton(discordMessage("x", "hola"))!.label).toBe("Add AI ✦ (0 of 3 left today)");
         expect(shownToasts).toHaveLength(0);
     });
 
@@ -3535,41 +3514,26 @@ describe("the taste tier (three free ✦ a day)", () => {
         const spent = relayCalls().length;
         shownToasts.length = 0;
 
-        await press("2");
+        // The button now offers Add AI; pressing it opens a panel, never a request.
+        forceButton(discordMessage("2", "hola que tal"))!.onClick!(undefined as any);
+        await flush();
 
-        // NOTHING went out: the relay would refuse it, and a refusal the user
-        // can see coming is a request nobody should spend.
         expect(relayCalls()).toHaveLength(spent);
-        // v0.1.6: the old "Today's 3 free ✦ are used. Upgrade for more." toast
-        // is gone. The ⚡ label already says "0 of 3 left today".
         expect(shownToasts).toHaveLength(0);
     });
 
     it("handles the relay's daily-limit 429 quietly: no toast, no red error", async () => {
-        // The relay knew before we did — a second device, or a count this
-        // install never saw. It must read exactly like a locally-known refusal.
         native.translateBatch.mockImplementation(async (engine: string) =>
             engine === "relay"
-                ? {
-                    ok: false,
-                    error: "relay: HTTP 429 daily limit reached",
-                    retryAfterMs: 15 * 60 * 60 * 1_000
-                }
+                ? { ok: false, error: "relay: HTTP 429 daily limit reached", retryAfterMs: 15 * 60 * 60 * 1_000 }
                 : { ok: true, results: [] });
 
         await press("1");
 
         expect(shownToasts).toHaveLength(0);
-        // Never the PAID wording, which names an allowance this user has not
-        // bought and offers a tomorrow instead of an upgrade.
         expect(shownToasts.some(t => /allowance is used up/.test(t.message))).toBe(false);
-
-        // And the count is now known, so the next press sends nothing at all.
-        const spent = relayCalls().length;
-        shownToasts.length = 0;
-        await press("2");
-        expect(relayCalls()).toHaveLength(spent);
-        expect(shownToasts).toHaveLength(0);
+        // And the count is now known: the button offers Add AI, and nothing more goes out.
+        expect(forceButton(discordMessage("2", "hola"))!.label).toContain("Add AI");
     });
 
     it("reuses one install id across presses, and persists it exactly once", async () => {
@@ -3582,30 +3546,29 @@ describe("the taste tier (three free ✦ a day)", () => {
         expect(bearers).toHaveLength(2);
         expect(bearers[0]).toBe(bearers[1]);
         expect(bearers[0]).toMatch(/^free_[0-9a-f]{32}$/);
-
-        // Generated and written ONCE, ever. A second write would mean a second
-        // id, and a user with six tastes instead of three.
         expect(DataStore.writes.filter(k => k === INSTALL_ID_KEY)).toHaveLength(1);
         expect(await DataStore.get(INSTALL_ID_KEY)).toBe(bearers[0].replace("free_", ""));
     });
 
     it("reads today's count back from /v1/status at start, so a restart is not three more", async () => {
-        native.relayStatus.mockResolvedValue({ ok: true, plan: "taste", used: 3, cap: 3 });
+        native.relayStatus.mockResolvedValue({
+            ok: true, plan: "", used: 0, cap: 0, automatic: true, ai: false,
+            previews: { used: 3, cap: 3 }, tokenExpiresAt: Date.now() + 86_400_000
+        });
         plugin.stop!();
         __resetTaste();
         await plugin.start!();
         await flush();
 
-        // Nothing left, learned without spending one.
-        expect(forceButton(discordMessage("1", "hola"))!.label).toContain("0 of 3 left today");
-
+        expect(forceButton(discordMessage("1", "hola"))!.label).toBe("Add AI ✦ (0 of 3 left today)");
         native.translateBatch.mockClear();
-        await press("1");
+        forceButton(discordMessage("1", "hola"))!.onClick!(undefined as any);
+        await flush();
         expect(relayCalls()).toHaveLength(0);
-        expect(shownToasts.some(t => /Upgrade for more/.test(t.message))).toBe(false);
     });
 
-    it("never turns the automatic ✦ batcher on without a confirmed trial — a live message gets Google alone", async () => {
+    it("never turns the automatic ✦ batcher on: a live message gets Google alone", async () => {
+        settings.store.sublineCode = "slp_automatic";
         native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) =>
             _e === "google" ? googleAnswers(payload, "rough", "es") : { ok: true, results: [] });
 
@@ -3616,7 +3579,29 @@ describe("the taste tier (three free ✦ a day)", () => {
         expect(getTranslation(key("1"))).toMatchObject({ via: "google" });
     });
 
-    it("never sends a free_ bearer for a PAID install, which keeps its own path", async () => {
+    it("clears the count when the UTC day turns over, so tomorrow is three again", async () => {
+        relayAnswers(3);
+        await press("1");
+        expect(forceButton(discordMessage("x", "hola"))!.label).toContain("0 of 3 left today");
+
+        vi.setSystemTime(new Date(Date.now() + 25 * 60 * 60 * 1_000));
+        relayAnswers(1);
+        const spent = relayCalls().length;
+
+        await press("2");
+
+        expect(relayCalls().length).toBe(spent + 1);
+    });
+});
+
+describe("an AI install keeps its own path", () => {
+    function forceButton(message: any) {
+        const registered = __getPopoverButton(FORCE_QUALITY_POPOVER_ID);
+        return registered ? registered.render(message) : null;
+    }
+    const relayCalls = () => native.translateBatch.mock.calls.filter(c => c[0] === "relay");
+
+    it("never sends the install bearer as the credential for a paid code", async () => {
         settings.store.engine = "relay";
         settings.store.sublineCode = "slp_paid";
         native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) =>
@@ -3629,36 +3614,15 @@ describe("the taste tier (three free ✦ a day)", () => {
                 }
                 : { ok: true, results: [] });
 
-        // The automatic quality tier, which a paid install still has.
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
-        // And a manual ⚡ press.
-        await press("2");
+        forceButton(discordMessage("2", "hola que tal"))!.onClick!(undefined as any);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
 
         const bearers = relayCalls().map(c => c[1]);
         expect(bearers.length).toBeGreaterThan(0);
         expect(bearers.every(b => b === "slp_paid")).toBe(true);
-        expect(bearers.some(b => String(b).startsWith("free_"))).toBe(false);
-        // The paid ⚡ label is the readiness wording, not a taste count.
         expect(forceButton(discordMessage("3", "hola"))!.label).not.toContain("left today");
-    });
-
-    it("clears the count when the UTC day turns over, so tomorrow is three again", async () => {
-        relayAnswers(3);
-        await press("1");
-        expect(forceButton(discordMessage("x", "hola"))!.label).toContain("0 of 3 left today");
-
-        // Past UTC midnight. The relay's day has rolled; the local count read
-        // yesterday says nothing about today, and the press must go out.
-        vi.setSystemTime(new Date(Date.now() + 25 * 60 * 60 * 1_000));
-        native.relayStatus.mockResolvedValue({ ok: true, plan: "taste", used: 0, cap: 3 });
-        relayAnswers(1);
-        const spent = relayCalls().length;
-
-        await press("2");
-
-        expect(relayCalls().length).toBe(spent + 1);
-        expect(getTranslation(key("2"))).toMatchObject({ via: "relay" });
     });
 });
 
@@ -3697,25 +3661,19 @@ describe("the Subline code in the plugin", () => {
         expect(relay[0][1]).toBe("SUBLINE-TEST-CODE");
     });
 
-    it("is a free install again once the code is cleared: taste ⚡, no red toast", async () => {
+    it("clearing the code: Google only, no red toast, and the relay is asked again what this install owns", async () => {
         settings.store.sublineCode = "SUBLINE-TEST-CODE";
+        const asked = native.relayStatus.mock.calls.length;
         settings.store.sublineCode = "";
         expect(settings.store.engine).toBe("google");
+        await flush();
+        expect(native.relayStatus.mock.calls.length).toBeGreaterThan(asked);
 
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
         expect(shownToasts.some(t => /no Subline code set/.test(t.message))).toBe(false);
         expect(shownToasts.some(t => t.type === "FAILURE")).toBe(false);
-
-        // The ⚡ button is the taste tier's, and a press sends a free_ bearer.
-        const btn = forceButton(discordMessage("2", "hola que tal"));
-        expect(btn!.label).toContain("left today");
-        native.translateBatch.mockClear();
-        btn!.onClick!(undefined as any);
-        await flush();
-        const relay = native.translateBatch.mock.calls.filter(c => c[0] === "relay");
-        expect(relay).toHaveLength(1);
-        expect(relay[0][1]).toMatch(/^free_[0-9a-f]{32}$/);
+        expect(native.translateBatch.mock.calls.filter(c => c[0] === "relay")).toHaveLength(0);
     });
 
     it("says \"Subline code\", never \"API key\", when the relay rejects the code", async () => {
@@ -4201,8 +4159,12 @@ describe("the debugLogging setting", () => {
         // Google install and never looked at a log line at all. A free install
         // now gets the button (see taste.ts), so that state no longer exists
         // for it, and the decision worth logging is the taste tier's own.
-        it("offers the Upgrade panel, and sends nothing, once today's three are used", async () => {
-            // engine is "google" (the beforeEach default) — a free install.
+        it("offers the Add AI panel, and sends nothing, once today's three are used", async () => {
+            // An Automatic owner: previews only.
+            plugin.stop!();
+            DataStore.setEntitlementForTest({ automatic: true, ai: false, tokenExpiresAt: Date.now() + 86_400_000 });
+            await plugin.start!();
+            settings.store.debugLogging = true;
             native.translateBatch.mockImplementation(async (engine: string) =>
                 engine === "relay"
                     ? {
@@ -4220,7 +4182,7 @@ describe("the debugLogging setting", () => {
             // of a press that would send nothing (upgradeCopy.ts).
             const sentBefore = native.translateBatch.mock.calls.length;
             const btn = forceButton(discordMessage("2", "que tal"))!;
-            expect(btn.label).toBe("Go automatic ✦ (0 of 3 left today)");
+            expect(btn.label).toBe("Add AI ✦ (0 of 3 left today)");
             btn.onClick!(undefined as any);
             for (let i = 0; i < 20; i++) await Promise.resolve();
 

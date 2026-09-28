@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-    CHECKOUT_RETURN_URL, createCheckoutFlow, installHash, isDodoCheckoutUrl, PLAN_PRODUCTS, POLL_EVERY_MS,
+    AUTOMATIC_PRODUCT_ID, CHECKOUT_RETURN_URL, createCheckoutFlow, installHash, isDodoCheckoutUrl, PLAN_PRODUCTS, POLL_EVERY_MS,
     POLL_FOR_MS, SLOW_POLL_EVERY_MS, SLOW_POLL_FOR_MS, staticCheckoutUrl, type CheckoutDeps
 } from "../checkout";
 
@@ -44,8 +44,12 @@ describe("the static checkout link", () => {
         expect(staticCheckoutUrl("monthly", HASH)).toContain(`redirect_url=${encodeURIComponent("https://surfer05.github.io/subline/?from=discord")}`);
     });
 
-    it("uses the live product ids", () => {
-        expect(PLAN_PRODUCTS).toEqual({ monthly: "pdt_0No1xmbcAqHdYAvt1RNPR", annual: "pdt_0No1yAve1ozdxryVGZvf6" });
+    it("uses the live product ids, and the Automatic placeholder until the owner gives its id", () => {
+        expect(PLAN_PRODUCTS).toEqual({
+            automatic: AUTOMATIC_PRODUCT_ID, monthly: "pdt_0No1xmbcAqHdYAvt1RNPR", annual: "pdt_0No1yAve1ozdxryVGZvf6"
+        });
+        expect(AUTOMATIC_PRODUCT_ID).toBe("pdt_AUTOMATIC_PENDING");
+        expect(staticCheckoutUrl("automatic", HASH)).toContain("/buy/pdt_AUTOMATIC_PENDING?");
     });
 });
 

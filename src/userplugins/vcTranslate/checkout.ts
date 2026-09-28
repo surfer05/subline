@@ -23,12 +23,28 @@
  * is tested on its own.
  */
 
-export type Plan = "monthly" | "annual";
+export type Plan = "automatic" | "monthly" | "annual";
+
+/**
+ * The Dodo product for Automatic ($4.99 once). PENDING: the owner has not
+ * given the live product id yet. Set it here (and only here) when it exists;
+ * until then only the static fallback link is wrong, the relay checkout is
+ * what normally opens.
+ */
+export const AUTOMATIC_PRODUCT_ID = "pdt_AUTOMATIC_PENDING";
 
 export const PLAN_PRODUCTS: Record<Plan, string> = {
+    automatic: AUTOMATIC_PRODUCT_ID,
     monthly: "pdt_0No1xmbcAqHdYAvt1RNPR",
     annual: "pdt_0No1yAve1ozdxryVGZvf6"
 };
+
+/**
+ * Relay refusals that mean "this purchase is not for you", not "the relay is
+ * down": the static link must NOT open for them, or a static link would sell
+ * what the relay just refused (AI without Automatic, Automatic twice).
+ */
+export const CHECKOUT_REFUSALS = new Set(["automatic_required", "already_owned"]);
 
 /**
  * Where Dodo sends the buyer after paying: the site root, marked as a checkout
@@ -80,7 +96,7 @@ export interface CheckoutDeps {
     /** This install's free bearer ("free_<32hex>"). */
     bearer: () => Promise<string>;
     /** POST /v1/checkout through the main process. */
-    createCheckout: (bearer: string, plan: Plan) => Promise<{ ok: true; url: string } | { ok: false; error: string }>;
+    createCheckout: (bearer: string, plan: Plan) => Promise<{ ok: true; url: string } | { ok: false; error: string; errorCode?: string }>;
     /** GET /v1/status through the main process; `purchase` once linked. */
     status: (bearer: string) => Promise<{ ok: boolean; purchase?: Purchase }>;
     openExternal: (url: string) => void;
@@ -93,8 +109,12 @@ export interface CheckoutDeps {
 }
 
 export interface CheckoutFlow {
-    /** Open checkout for a plan and start (or restart) polling. */
-    start: (plan: Plan) => Promise<void>;
+    /**
+     * Open checkout for a plan and start (or restart) polling. Resolves true
+     * when a checkout page was opened, or the relay's refusal word when it
+     * refused the purchase (see CHECKOUT_REFUSALS), or false if superseded.
+     */
+    start: (plan: Plan) => Promise<true | false | string>;
     stop: () => void;
     isPolling: () => boolean;
 }
@@ -148,6 +168,10 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
         let url: string | null = null;
         try {
             const res = await deps.createCheckout(bearer, plan);
+            if (!res.ok && res.errorCode !== undefined && CHECKOUT_REFUSALS.has(res.errorCode)) {
+                log(`checkout: the relay refused this plan (${res.errorCode})`);
+                return res.errorCode;
+            }
             if (res.ok && isDodoCheckoutUrl(res.url)) url = res.url;
             else log(`checkout: relay could not create a session (${res.ok ? "not a Dodo URL" : res.error}), using the static link`);
         } catch (e) {
@@ -158,11 +182,12 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
             try { hash = await installHash(bearer); } catch { hash = null; }
             url = staticCheckoutUrl(plan, hash);
         }
-        if (gen !== generation) return;
+        if (gen !== generation) return false;
         deps.openExternal(url);
         deadline = now() + POLL_FOR_MS;
         slowDeadline = now() + SLOW_POLL_FOR_MS;
         schedule(gen, bearer);
+        return true;
     };
 
     return { start, stop, isPolling: () => timer !== null };

@@ -45,7 +45,7 @@ function clock() {
     };
 }
 
-function setup(opts: { paid?: () => boolean; translate?: (tier: SurfaceTier, texts: string[]) => Promise<SurfaceOutcome>; } = {}) {
+function setup(opts: { paid?: () => boolean; quality?: () => boolean; translate?: (tier: SurfaceTier, texts: string[]) => Promise<SurfaceOutcome>; } = {}) {
     const c = clock();
     const { storage, writes, mem } = memoryStorage();
     const cache = new SurfaceCache({ storage, now: c.now, schedule: c.schedule, cancel: c.cancel });
@@ -54,6 +54,7 @@ function setup(opts: { paid?: () => boolean; translate?: (tier: SurfaceTier, tex
         texts.map(t => ({ lang: "de", text: `${tier === "quality" ? "Q" : "F"}:${t}`, conf: 0.99 })));
     const service = new SurfaceService({
         isPaid: opts.paid ?? (() => true),
+        ...(opts.quality ? { qualityAllowed: opts.quality } : {}),
         targetLang: () => "en",
         locallySkipped: t => /^hello\b/i.test(t),
         translate: async (tier, texts) => { calls.push({ tier, texts }); return translate(tier, texts); },
@@ -366,5 +367,34 @@ describe("surface cost units", () => {
         expect(surfaceCost("x".repeat(1000))).toBe(2);
         expect(surfaceCost("x".repeat(1001))).toBe(3);
         expect(surfaceCost("x".repeat(2000))).toBe(3);
+    });
+});
+
+describe("without ✦ (an Automatic owner)", () => {
+    it("asks Google for every surface, tight ones too, and never the relay", async () => {
+        const { service, calls, c } = setup({ quality: () => false });
+        expect(service.want("Hallo zusammen", { tight: true })).toBeNull();
+        expect(service.want("Guten Morgen")).toBeNull();
+        await c.advance(5_000);
+        expect(calls.map(x => x.tier)).toEqual(["fast"]);
+        expect(calls[0]!.texts.sort()).toEqual(["Guten Morgen", "Hallo zusammen"]);
+        expect(service.want("Hallo zusammen", { tight: true })).toMatchObject({ fast: { text: "F:Hallo zusammen" } });
+        expect(service.qualityAllowed()).toBe(false);
+    });
+
+    it("sends a quality batch that was queued before ✦ went away to nobody", async () => {
+        let quality = true;
+        const { service, calls, c } = setup({ quality: () => quality });
+        service.want("Hallo zusammen", { tight: true });
+        quality = false;
+        await c.advance(5_000);
+        expect(calls.filter(x => x.tier === "quality")).toEqual([]);
+    });
+
+    it("with ✦, a tight mark still never asks Google", async () => {
+        const { service, calls, c } = setup({ quality: () => true });
+        service.want("Hallo zusammen", { tight: true });
+        await c.advance(5_000);
+        expect(calls.map(x => x.tier)).toEqual(["quality"]);
     });
 });

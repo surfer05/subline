@@ -98,14 +98,26 @@ describe("decoded line under a message", () => {
         expect(text.indexOf("hola amigo")).toBeLessThan(text.indexOf("hello friend"));
     });
 
-    it("still decodes on the free plan after the trial, without a click", async () => {
-        settings.store.freeTrialStartedAt = Date.now() - 30 * DAY_MS;
+    it("decodes for an Automatic owner, and the decoded text goes to Google", async () => {
+        plugin.stop!();
+        DataStore.setEntitlementForTest({ automatic: true, ai: false, tokenExpiresAt: Date.now() + DAY_MS });
+        await plugin.start!();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "aG9sYSBhbWlnbw==") });
+        await settle();
+        const google = native.translateBatch.mock.calls.filter(c => c[0] === "google");
+        expect(google.map(c => JSON.parse(c[2]).messages[0].text)).toEqual(["hola amigo"]);
+        expect(native.translateBatch.mock.calls.filter(c => c[0] === "relay")).toHaveLength(0);
+        expect(rendered(discordMessage("1", "aG9sYSBhbWlnbw=="))).toContain("decoded · base64 · hola amigo");
+    });
+
+    it("decodes nothing for an install that owns nothing", async () => {
+        plugin.stop!();
+        DataStore.clearEntitlementForTest();
+        await plugin.start!();
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "aG9sYSBhbWlnbw==") });
         await settle();
         expect(native.translateBatch).not.toHaveBeenCalled();
-        const text = rendered(discordMessage("1", "aG9sYSBhbWlnbw=="));
-        expect(text).toContain("decoded · base64 · hola amigo");
-        expect(text).toContain("≈ Translate");
+        expect(rendered(discordMessage("1", "aG9sYSBhbWlnbw=="))).not.toContain("decoded");
     });
 });
 
@@ -196,9 +208,13 @@ describe("the ⚡ press sends the decoded text too", () => {
         expect(gemini.map(c => JSON.parse(c[2]).messages[0].text)).toEqual(["hola amigo"]);
     });
 
-    it("on a free install's taste", async () => {
+    it("on an Automatic owner's ✦ preview", async () => {
+        plugin.stop!();
+        DataStore.setEntitlementForTest({ automatic: true, ai: false, tokenExpiresAt: Date.now() + DAY_MS });
+        await plugin.start!();
         await press("ｈｏｌａ ａｍｉｇｏ");
         const relay = native.translateBatch.mock.calls.filter(c => c[0] === "relay");
         expect(relay.map(c => JSON.parse(c[2]).messages[0].text)).toEqual(["hola amigo"]);
+        expect(relay.map(c => JSON.parse(c[2]).mode)).toEqual(["preview"]);
     });
 });
