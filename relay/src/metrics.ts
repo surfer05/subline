@@ -15,7 +15,10 @@ export type Outcome =
     | "relay_credit" | "not_found"
     // A v0.1.6 client asked for automatic translation after its 7-day trial.
     // Refused before any spend; counts how many installs reached the trial wall.
-    | "trial_ended";
+    | "trial_ended"
+    // v2 (paid-only) refusals: no entitlement, Automatic without AI asking
+    // for full ✦, and a 4th computer on one account.
+    | "not_activated" | "ai_required" | "device_limit";
 
 /** A non-reversible short fingerprint of the code, so per-code volume can be
  *  seen in analytics without storing the credential. */

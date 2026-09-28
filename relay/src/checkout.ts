@@ -27,6 +27,7 @@
  *     /api-reference/discounts/create-discount
  */
 import { ipBucket, isNewClient, isTasteBearer, variantConfig, type CodeRecord, type Env } from "./codes";
+import { installOf, isApiV2, resolveEntitlement } from "./entitle";
 
 export const DEFAULT_DODO_API_BASE = "https://live.dodopayments.com";
 export const DEFAULT_CHECKOUT_RETURN_URL = "https://surfer05.github.io/subline/";
@@ -100,6 +101,7 @@ function cause(e: unknown): string {
 /** POST /v1/checkout. */
 export async function handleCheckout(req: Request, env: Env, now: number = Date.now()): Promise<Response> {
     if (req.method !== "POST") return fail("method not allowed", 405);
+    if (isApiV2(req)) return handleCheckoutV2(req, env, now);
     // Only a v0.1.10+ plugin buys through here, as the free install it is:
     // a well-formed free_ bearer AND the client header, both checked before
     // any KV read or write and before Dodo is called. The site sells through
@@ -122,9 +124,45 @@ export async function handleCheckout(req: Request, env: Env, now: number = Date.
         return fail("checkout unavailable", 503);
     }
 
-    const hash = await installHash(bearer);
+    return createSession(env, await installHash(bearer), productId, now, req.headers.get("cf-connecting-ip"));
+}
+
+/**
+ * v2 (paid-only) checkout: Automatic, or AI on top of it. The install id rides
+ * in x-subline-install; the bearer is the saved code or the install id. AI
+ * needs Automatic first (403 automatic_required), and Automatic cannot be
+ * bought twice (409 already_owned). Checked before anything is written for a
+ * refused request other than what entitlement resolution itself learns.
+ */
+async function handleCheckoutV2(req: Request, env: Env, now: number): Promise<Response> {
+    const install = installOf(req);
+    const h = (req.headers.get("authorization") || "").trim();
+    const credential = h.startsWith("Bearer ") ? h.slice(7).trim() : "";
+    if (!install || !credential || !isNewClient(req.headers.get("x-subline-client"))) return fail("bad request", 400);
+    if (credential.startsWith("free_") && credential !== install) return fail("bad request", 400);
+    let body: any;
+    try { body = JSON.parse(await req.text()); } catch { return fail("bad request", 400); }
+    const plan = body?.plan;
+    if (plan !== "automatic" && plan !== "monthly" && plan !== "annual") return fail("bad request", 400);
+    if (!env.DODO_API_KEY) return fail("checkout unavailable", 503);
+    const productId = productFor(env, plan);
+    if (!productId) {
+        console.warn("checkout: no VARIANTS entry for plan", { plan });
+        return fail("checkout unavailable", 503);
+    }
+    const r = await resolveEntitlement(env, install, credential, now);
+    if (!r.ok) return fail(r.error, r.status);
+    if (plan === "automatic" && r.automatic) return fail("already_owned", 409);
+    if (plan !== "automatic" && !r.automatic) return fail("automatic_required", 403);
+    return createSession(env, r.hash, productId, now, req.headers.get("cf-connecting-ip"));
+}
+
+/**
+ * Rate-limit, then ask Dodo for a checkout session tied to this install hash.
+ * Shared by the legacy and the v2 checkout.
+ */
+async function createSession(env: Env, hash: string, productId: string, now: number, ip: string | null): Promise<Response> {
     const hour = Math.floor(now / HOUR_MS);
-    const ip = req.headers.get("cf-connecting-ip");
     try {
         if (ip && !(await underHourly(env, `rl:coip:${ipBucket(ip)}:${hour}`, CHECKOUT_IP_PER_HOUR))) {
             return fail("slow down", 429, HOUR_MS - (now % HOUR_MS));

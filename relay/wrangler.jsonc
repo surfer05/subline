@@ -65,7 +65,15 @@
     // plan ∈ free|paid|monthly|annual|lifetime.
     "VARIANTS": {
       "pdt_0No1xmbcAqHdYAvt1RNPR": { "plan": "monthly", "dailyCap": 2000 },
-      "pdt_0No1yAve1ozdxryVGZvf6": { "plan": "annual", "dailyCap": 2000 }
+      "pdt_0No1yAve1ozdxryVGZvf6": { "plan": "annual", "dailyCap": 2000 },
+      // AUTOMATIC ($4.99 once, license key, never expires). PLACEHOLDER id until
+      // the owner creates the Dodo product: replace "pdt_AUTOMATIC_PENDING" with
+      // the real product id before selling it. Until then POST /v1/checkout for
+      // plan "automatic" asks Dodo for a product that does not exist and answers
+      // 503 "checkout unavailable"; nothing else is affected. dailyCap is not
+      // used for spend (Automatic is Google on the client); its ✦ previews are
+      // counted per account (3 a day, src/entitle.ts).
+      "pdt_AUTOMATIC_PENDING": { "plan": "automatic", "dailyCap": 3 }
     },
     // Dodo Payments API base for POST /v1/checkout and POST /admin/coupon
     // (src/checkout.ts). Live: https://live.dodopayments.com, test:
@@ -77,10 +85,27 @@
     // Where Dodo sends the buyer after paying. Dodo appends payment_id or
     // subscription_id, status, license_key and email as query parameters, and
     // the site shows its thanks view when it sees them.
-    "CHECKOUT_RETURN_URL": "https://surfer05.github.io/subline/"
+    "CHECKOUT_RETURN_URL": "https://surfer05.github.io/subline/",
+    // Launch of the paid-only model (v2 clients). An install whose trial:<id>
+    // record (first translate on a v0.1.6+ client) is OLDER than this gets
+    // Automatic free as an early user, minted as an slp_ code it can show in
+    // settings. Epoch ms or an ISO date. Move it to the actual release moment
+    // before deploying for launch. Empty: no early-user grants.
+    "LAUNCH_AT": "2026-09-28T00:00:00Z"
+    // ENTITLEMENT_SECRET (a secret, `wrangler secret put ENTITLEMENT_SECRET`,
+    // e.g. openssl rand -hex 32) signs the v2 entitlement token. Without it the
+    // token goes out unsigned and AI is still enforced here.
   },
-  "durable_objects": { "bindings": [{ "name": "BUDGET", "class_name": "Budget" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Budget"] }],
+  // PROMO: one Durable Object per promo code, the exact claim counter behind
+  // "the first 100 installs" (src/promo.ts). Migration v2 creates the class.
+  "durable_objects": { "bindings": [
+    { "name": "BUDGET", "class_name": "Budget" },
+    { "name": "PROMO", "class_name": "Promo" }
+  ] },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Budget"] },
+    { "tag": "v2", "new_sqlite_classes": ["Promo"] }
+  ],
   "kv_namespaces": [
     // Create with `wrangler kv namespace create CODES`, paste the id here.
     { "binding": "CODES", "id": "f83c4973ea574abd9000ad5735ccd52a" }

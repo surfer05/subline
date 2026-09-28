@@ -11,7 +11,8 @@
     "secret:groq": "wrangler secret put GROQ_KEY",
     "secret:admin": "wrangler secret put ADMIN_TOKEN",
     "secret:dodo": "wrangler secret put DODO_API_KEY",
-    "tail": "wrangler tail"
+    "tail": "wrangler tail",
+    "secret:entitlement": "wrangler secret put ENTITLEMENT_SECRET"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250801.0",

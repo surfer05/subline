@@ -24,9 +24,12 @@ import {
 } from "./codes";
 import { translateWithFallback, toPreview, type BatchRequest, type TranslateError, type Provider } from "./translate";
 import { record, type Outcome } from "./metrics";
+import { installOf, isApiV2, PREVIEW_DAILY_CAP, resolveEntitlement } from "./entitle";
+import { createPromo, handleRedeem, handleStatusV2, promoStats } from "./v2";
 import { bumpStat, markActive, safely, clampDays, readStats } from "./stats";
 import { createCoupon, handleCheckout, purchaseFor } from "./checkout";
 export { Budget } from "./budget";
+export { Promo } from "./promo";
 
 const MAX_MESSAGES = 40;     // client's QUALITY_MAX_BATCH is 25; headroom, not unbounded
 const MAX_CONTEXT = 12;      // client's context ring is 8; a big context is a cost-inflation vector
@@ -179,6 +182,161 @@ async function readBody(req: Request): Promise<unknown | null> {
     try { return JSON.parse(new TextDecoder().decode(buf)); } catch { return null; }
 }
 
+type Done = (r: Response, outcome: Outcome, code: string | null, msgs: number, plan?: string | null) => Response;
+
+/**
+ * Reserve, translate, answer: the shared tail of /v1/translate once the
+ * request has been resolved to the counters it is charged to (`code`,
+ * `rec`) and whether it is a preview. Legacy and v2 both end here, so spend,
+ * refunds and error mapping cannot drift apart.
+ */
+async function serveBatch(
+    env: Env, ctx: ExecutionContext, done: Done, req: Request, code: string | null, rec: CodeRecord,
+    batch: BatchRequest, preview: boolean, free: FreePlan | null, newClient: boolean, now: number,
+    v2: boolean = false
+): Promise<Response> {
+    const plan = rec.plan ?? "free";
+    const promptChars =
+        batch.context.reduce((n, c) => n + c.text.length + c.author.length, 0) +
+        batch.messages.reduce((n, m) => n + m.text.length + (m.author?.length ?? 0), 0) +
+        batch.targetLang.length;
+    // Two units: `cost` is the per-bearer daily count the client sees
+    // (messages only for taste/trial), `budgetCost` is the real spend the
+    // global guard and the trial's per-IP cost cap are charged.
+    const cost = costFor(rec, batch.messages.length, promptChars);
+    const budgetCost = budgetCostFor(batch.messages.length, promptChars);
+    // The per-IP taste/trial ceiling needs the caller's address, and ONLY
+    // for a keyless request: no other plan grows an ip counter, and a
+    // request with no cf-connecting-ip (not fronted by Cloudflare) just
+    // skips the cap.
+    // A v2 preview is charged per ACCOUNT (a paying Automatic owner), never
+    // per address, so it skips the keyless per-IP ceilings.
+    const tasteIp = !v2 && (plan === "taste" || plan === "trial") ? req.headers.get("cf-connecting-ip") : null;
+
+    const res = await reserve(env, code!, rec, cost, now, tasteIp, budgetCost);
+    if (!res.ok) {
+        // A keyless request whose limit counters could not be written
+        // (KV failing) is refused CLOSED, before any spend (see reserve).
+        if (res.reason === "unavailable") {
+            return done(fail("temporarily unavailable", 503, res.retryAfterMs), "capacity", code, 0, plan);
+        }
+        const status = 429; // cap_exceeded / rate_limited / capacity all park the engine
+        const label = res.reason === "capacity" ? "capacity" : res.reason;
+        if (res.reason === "rate_limited") {
+            // State the ceiling that was hit, in the field the plugin's
+            // rate gate already learns from (native.ts →
+            // enterCooldown → tuneRateGateToObservedLimit), so one
+            // 429 retunes the client to this code's real limit.
+            return done(json({
+                ok: false, error: "slow down", retryAfterMs: res.retryAfterMs,
+                quotaLimitPerMinute: rpmLimitFor(rec)
+            }, status), label as Outcome, code, 0, plan);
+        }
+        return done(fail(
+            res.reason === "cap_exceeded" ? "daily limit reached" : "temporarily unavailable",
+            status, res.retryAfterMs
+        ), label as Outcome, code, 0, plan);
+    }
+
+    // Every KV write that is not a spend counter happens only from here
+    // on, after reserve() passed the per-bearer and per-IP ceilings and
+    // the budget. Before this point a request with a fresh random free_
+    // id costs the relay reads only, so rerolling ids cannot be turned
+    // into unbounded KV writes.
+    if (free?.provisional) {
+        // First successful press of this id: make its trial real.
+        ctx.waitUntil(startTrial(env, code!, now).catch(e =>
+            console.warn("trial start write failed", { error: String((e as any)?.message ?? e).slice(0, 200) })));
+    }
+    // Owner stats (distinct installs / trials / paid codes per day), off
+    // the critical path and failure-proof.
+    ctx.waitUntil(safely(() => markActive(env, code!, rec.plan, now)));
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), GROQ_TIMEOUT_MS);
+    try {
+        const { primary, fallback } = providers(env);
+        const full = await translateWithFallback(batch, primary, fallback, controller.signal);
+        clearTimeout(timer);
+        // Preview: cut on the server, so a request that asks for a
+        // preview never gets the full text back. Only a v0.1.6 client
+        // asks; a legacy (v0.1.5) free_ press sends no mode and still
+        // gets full ✦ text within its 3-a-day taste allowance.
+        const results = preview ? toPreview(full) : full;
+        if (preview) ctx.waitUntil(safely(() => bumpStat(env, now, "previews")));
+        // `rpmLimit` rides every success so the plugin's rate gate can
+        // tune itself to this code's ceiling without ever hitting it.
+        // `now` (server epoch ms) only for a header'd client, so it can
+        // count trialEndsAt down against the relay's clock rather than a
+        // skewed local one; a legacy body stays byte-identical.
+        const ok = { ok: true, results, used: res.used, cap: res.cap, rpmLimit: rpmLimitFor(rec) };
+        return done(json(newClient ? { ...ok, now } : ok), "ok", code, cost, plan);
+    } catch (e) {
+        clearTimeout(timer);
+        const err = e as TranslateError;
+        const timedOut = controller.signal.aborted || err.status === 504;
+        // Refund only when the call genuinely did not spend. A timeout
+        // reached Groq and may have billed, so it stays charged — which
+        // also stops a client forcing slow batches to burn the key for
+        // free while their daily cap never advances.
+        if (!timedOut && err.status !== 401 && err.status !== 403) {
+            ctx.waitUntil(refund(env, code!, cost, now, tasteIp, rec.plan, budgetCost));
+        }
+        // The relay's OWN key failing (401/403 from an upstream) is a
+        // SERVER fault, never surfaced as "your code is bad".
+        if (err.status === 401 || err.status === 403) {
+            return done(fail("translation service unavailable", 503), "relay_key_fail", code, 0, plan);
+        }
+        // 402 = OpenRouter is out of credits. The relay's BILLING
+        // problem, and by now the Groq fallback has already been tried
+        // and failed too (translateWithFallback runs first). Same
+        // user-facing answer as a dead key — never "your code is bad" —
+        // with its own metric label so a billing alarm is countable.
+        if (err.status === 402) {
+            return done(fail("translation service unavailable", 503), "relay_credit", code, 0, plan);
+        }
+        if (err.status === 429) {
+            return done(fail("translation service busy", 429, err.retryAfterMs ?? 30_000), "upstream_error", code, 0, plan);
+        }
+        return done(fail("translation service unavailable", 503, 15_000), "upstream_error", code, 0, plan);
+    }
+}
+
+/**
+ * /v1/translate for a v2 (paid-only) client. ✦ needs AI and is charged to the
+ * account's live AI code. An Automatic owner without AI gets ✦ PREVIEWS only
+ * (3 a day per account, cut on the relay). Nothing else is served: no
+ * entitlement is 402 not_activated. The trial and taste tiers do not exist for
+ * a v2 client.
+ */
+async function translateV2(env: Env, ctx: ExecutionContext, done: Done, req: Request): Promise<Response> {
+    const install = installOf(req);
+    const credential = bearer(req);
+    if (!install || !credential || (credential.startsWith("free_") && credential !== install)) {
+        return done(fail("bad request", 400), "bad_payload", credential, 0);
+    }
+    const now = Date.now();
+    const body = await readBody(req);
+    if (body === null) return done(fail("payload too large or malformed", 413), "too_large", credential, 0);
+    if (!validBatch(body)) return done(fail("bad request", 400), "bad_payload", credential, 0);
+    const batch = body as BatchRequest;
+    const r = await resolveEntitlement(env, install, credential, now);
+    if (!r.ok) {
+        const outcome: Outcome = r.error === "device_limit" ? "device_limit" : r.error === "invalid_code" ? "unknown_code" : "capacity";
+        return done(fail(r.error, r.status), outcome, credential, 0);
+    }
+    if (r.ai && r.aiCode && r.aiRec) {
+        const preview = (body as any).mode === "preview";
+        return serveBatch(env, ctx, done, req, r.aiCode, r.aiRec, batch, preview, null, true, now, true);
+    }
+    if (!r.automatic || !r.acctId) return done(fail("not_activated", 402), "not_activated", credential, 0);
+    if ((body as any).mode !== "preview") return done(fail("ai_required", 402), "ai_required", credential, 0);
+    // The account's previews: a synthetic taste-shaped record on its own
+    // counter (use:pv:<account>:<day>), fail-closed like every keyless count.
+    const pvRec: CodeRecord = { status: "active", plan: "taste", dailyCap: PREVIEW_DAILY_CAP };
+    return serveBatch(env, ctx, done, req, "pv:" + r.acctId, pvRec, batch, true, null, true, now, true);
+}
+
 export default {
     async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
         const url = new URL(req.url);
@@ -192,6 +350,7 @@ export default {
         // ---- POST /v1/translate — the hot path ----------------------------
         if (url.pathname === "/v1/translate") {
             if (req.method !== "POST") return fail("method not allowed", 405);
+            if (isApiV2(req)) return translateV2(env, ctx, done, req);
             const code = bearer(req);
 
             const auth = await authCode(env, code);
@@ -244,108 +403,7 @@ export default {
             if (mode === "auto" && freeFailed) {
                 return done(fail("temporarily unavailable", 503, 60_000), "capacity", code, 0, plan);
             }
-            const promptChars =
-                batch.context.reduce((n, c) => n + c.text.length + c.author.length, 0) +
-                batch.messages.reduce((n, m) => n + m.text.length + (m.author?.length ?? 0), 0) +
-                batch.targetLang.length;
-            // Two units: `cost` is the per-bearer daily count the client sees
-            // (messages only for taste/trial), `budgetCost` is the real spend the
-            // global guard and the trial's per-IP cost cap are charged.
-            const cost = costFor(rec, batch.messages.length, promptChars);
-            const budgetCost = budgetCostFor(batch.messages.length, promptChars);
-            // The per-IP taste/trial ceiling needs the caller's address, and ONLY
-            // for a keyless request: no other plan grows an ip counter, and a
-            // request with no cf-connecting-ip (not fronted by Cloudflare) just
-            // skips the cap.
-            const tasteIp = plan === "taste" || plan === "trial" ? req.headers.get("cf-connecting-ip") : null;
-
-            const res = await reserve(env, code!, rec, cost, now, tasteIp, budgetCost);
-            if (!res.ok) {
-                // A keyless request whose limit counters could not be written
-                // (KV failing) is refused CLOSED, before any spend (see reserve).
-                if (res.reason === "unavailable") {
-                    return done(fail("temporarily unavailable", 503, res.retryAfterMs), "capacity", code, 0, plan);
-                }
-                const status = 429; // cap_exceeded / rate_limited / capacity all park the engine
-                const label = res.reason === "capacity" ? "capacity" : res.reason;
-                if (res.reason === "rate_limited") {
-                    // State the ceiling that was hit, in the field the plugin's
-                    // rate gate already learns from (native.ts →
-                    // enterCooldown → tuneRateGateToObservedLimit), so one
-                    // 429 retunes the client to this code's real limit.
-                    return done(json({
-                        ok: false, error: "slow down", retryAfterMs: res.retryAfterMs,
-                        quotaLimitPerMinute: rpmLimitFor(rec)
-                    }, status), label as Outcome, code, 0, plan);
-                }
-                return done(fail(
-                    res.reason === "cap_exceeded" ? "daily limit reached" : "temporarily unavailable",
-                    status, res.retryAfterMs
-                ), label as Outcome, code, 0, plan);
-            }
-
-            // Every KV write that is not a spend counter happens only from here
-            // on, after reserve() passed the per-bearer and per-IP ceilings and
-            // the budget. Before this point a request with a fresh random free_
-            // id costs the relay reads only, so rerolling ids cannot be turned
-            // into unbounded KV writes.
-            if (free?.provisional) {
-                // First successful press of this id: make its trial real.
-                ctx.waitUntil(startTrial(env, code!, now).catch(e =>
-                    console.warn("trial start write failed", { error: String((e as any)?.message ?? e).slice(0, 200) })));
-            }
-            // Owner stats (distinct installs / trials / paid codes per day), off
-            // the critical path and failure-proof.
-            ctx.waitUntil(safely(() => markActive(env, code!, rec.plan, now)));
-
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), GROQ_TIMEOUT_MS);
-            try {
-                const { primary, fallback } = providers(env);
-                const full = await translateWithFallback(batch, primary, fallback, controller.signal);
-                clearTimeout(timer);
-                // Preview: cut on the server, so a request that asks for a
-                // preview never gets the full text back. Only a v0.1.6 client
-                // asks; a legacy (v0.1.5) free_ press sends no mode and still
-                // gets full ✦ text within its 3-a-day taste allowance.
-                const results = preview ? toPreview(full) : full;
-                if (preview) ctx.waitUntil(safely(() => bumpStat(env, now, "previews")));
-                // `rpmLimit` rides every success so the plugin's rate gate can
-                // tune itself to this code's ceiling without ever hitting it.
-                // `now` (server epoch ms) only for a header'd client, so it can
-                // count trialEndsAt down against the relay's clock rather than a
-                // skewed local one; a legacy body stays byte-identical.
-                const ok = { ok: true, results, used: res.used, cap: res.cap, rpmLimit: rpmLimitFor(rec) };
-                return done(json(newClient ? { ...ok, now } : ok), "ok", code, cost, plan);
-            } catch (e) {
-                clearTimeout(timer);
-                const err = e as TranslateError;
-                const timedOut = controller.signal.aborted || err.status === 504;
-                // Refund only when the call genuinely did not spend. A timeout
-                // reached Groq and may have billed, so it stays charged — which
-                // also stops a client forcing slow batches to burn the key for
-                // free while their daily cap never advances.
-                if (!timedOut && err.status !== 401 && err.status !== 403) {
-                    ctx.waitUntil(refund(env, code!, cost, now, tasteIp, rec.plan, budgetCost));
-                }
-                // The relay's OWN key failing (401/403 from an upstream) is a
-                // SERVER fault, never surfaced as "your code is bad".
-                if (err.status === 401 || err.status === 403) {
-                    return done(fail("translation service unavailable", 503), "relay_key_fail", code, 0, plan);
-                }
-                // 402 = OpenRouter is out of credits. The relay's BILLING
-                // problem, and by now the Groq fallback has already been tried
-                // and failed too (translateWithFallback runs first). Same
-                // user-facing answer as a dead key — never "your code is bad" —
-                // with its own metric label so a billing alarm is countable.
-                if (err.status === 402) {
-                    return done(fail("translation service unavailable", 503), "relay_credit", code, 0, plan);
-                }
-                if (err.status === 429) {
-                    return done(fail("translation service busy", 429, err.retryAfterMs ?? 30_000), "upstream_error", code, 0, plan);
-                }
-                return done(fail("translation service unavailable", 503, 15_000), "upstream_error", code, 0, plan);
-            }
+            return serveBatch(env, ctx, done, req, code, rec, batch, preview, free, newClient, now);
         }
 
         // ---- GET /v1/status — usage for the settings pane -----------------
@@ -353,6 +411,7 @@ export default {
         // and cap 3, which is what the plugin reads at startup to show
         // "2 of 3 left today" before anyone presses anything.
         if (url.pathname === "/v1/status") {
+            if (isApiV2(req)) return handleStatusV2(req, env, Date.now());
             const code = bearer(req);
             const auth = await authCode(env, code);
             if (!auth.ok) return fail("invalid or missing code", auth.reason === "no_code" ? 401 : 403);
@@ -385,6 +444,23 @@ export default {
         }
 
         // ---- POST /v1/checkout — buy without handling a key (checkout.ts) --
+        // ---- POST /v1/redeem — a promo code grants Automatic (v2 only) -------
+        if (url.pathname === "/v1/redeem") {
+            if (!isApiV2(req)) return fail("bad request", 400);
+            return handleRedeem(req, env, Date.now());
+        }
+
+        // ---- POST /admin/promo — create a promo code (ADMIN_TOKEN) ---------
+        if (url.pathname === "/admin/promo") {
+            if (req.method !== "POST") return fail("method not allowed", 405);
+            const token = bearer(req);
+            if (!env.ADMIN_TOKEN) return fail("admin disabled", 503);
+            if (!token || !(await timingSafeEqual(token, env.ADMIN_TOKEN))) return fail("unauthorized", 401);
+            const body = await readBody(req);
+            if (!body) return fail("bad request", 400);
+            return createPromo(env, body, Date.now());
+        }
+
         if (url.pathname === "/v1/checkout") {
             return handleCheckout(req, env);
         }
@@ -409,7 +485,7 @@ export default {
             if (!env.ADMIN_TOKEN) return fail("admin disabled", 503);
             if (!token || !(await timingSafeEqual(token, env.ADMIN_TOKEN))) return fail("unauthorized", 401);
             const days = clampDays(url.searchParams.get("days"));
-            return json({ ok: true, approximate: true, days: await readStats(env, days, Date.now()) });
+            return json({ ok: true, approximate: true, days: await readStats(env, days, Date.now()), promos: await promoStats(env) });
         }
 
         // ---- POST /admin/codes — mint / revoke (ADMIN_TOKEN gated) --------

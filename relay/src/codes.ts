@@ -64,6 +64,15 @@ export interface Env {
     /** Where Dodo sends the buyer after paying (it appends payment_id or
      *  subscription_id, status, license_key, email). Default: the site root. */
     CHECKOUT_RETURN_URL?: string;
+    /** One Promo Durable Object per promo code (promo.ts): the exact claim
+     *  counter behind "the first 100 installs". Without it /v1/redeem is 503. */
+    PROMO?: DurableObjectNamespace;
+    /** HMAC key for the v2 entitlement token (entitle.ts). A secret. Absent:
+     *  tokens go out unsigned, and AI is still enforced here on the relay. */
+    ENTITLEMENT_SECRET?: string;
+    /** Launch moment (epoch ms or ISO date). An install whose trial:<id>
+     *  record is older gets Automatic free as an early user. Unset: no grants. */
+    LAUNCH_AT?: string;
 }
 
 export interface CodeRecord {
@@ -77,7 +86,7 @@ export interface CodeRecord {
     // stored, so it can be enumerated here without ever being mintable.
     // "trial" is the same keyless install during its first 7 days (see TRIAL
     // below): equally synthetic, equally never stored, never in KNOWN_PLANS.
-    plan?: "free" | "taste" | "trial" | "paid" | "monthly" | "annual" | "lifetime";
+    plan?: "free" | "taste" | "trial" | "paid" | "monthly" | "annual" | "lifetime" | "automatic";
     /** Maker-facing note. NEVER put PII here — the relay stores no identity. */
     note?: string;
     /** Opaque Merchant-of-Record join id (subscription id, else payment id), kept
@@ -104,6 +113,10 @@ export interface CodeRecord {
     terminal?: boolean;
     /** Epoch ms the code was made terminal (audit only; not identity). */
     revokedAt?: number;
+    /** Epoch ms the webhook first created this code. ABSENT on every code made
+     *  before the paid-only launch, which is what marks an AI code as
+     *  grandfathered into Automatic (entitle.ts). */
+    createdAt?: number;
 }
 
 const DAY_MS = 86_400_000;
@@ -662,7 +675,7 @@ const FREE_FALLBACK_CAP = 500; // the conservative cap for an unmapped/misconfig
 // The plans a PURCHASE may map to. "taste" and "trial" are deliberately NOT here: they are the
 // synthetic keyless tier, so a product-id map must never be able to mint one
 // (that would be a stored free_-style record with a purchased cap).
-const KNOWN_PLANS = new Set(["free", "paid", "monthly", "annual", "lifetime"]);
+const KNOWN_PLANS = new Set(["free", "paid", "monthly", "annual", "lifetime", "automatic"]);
 
 // Provisional expiry stamped on a SUBSCRIPTION code at license_key.created so it
 // is NEVER born never-expiring (paywall bypass #2). 3 days generously absorbs
@@ -937,6 +950,7 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
             expiresAt: existing?.expiresAt ?? provisional,
             terminal: existing?.terminal,
             revokedAt: existing?.revokedAt,
+            createdAt: existing ? existing.createdAt : now,
             // Unmapped product is a config error: fail safe on the cap AND flag it.
             note: cfg.mapped ? existing?.note : `unmapped product_id — capped at free default (${FREE_FALLBACK_CAP}/day)`,
         };

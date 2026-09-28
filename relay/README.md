@@ -25,9 +25,66 @@ translation** to Subline clients presenting an opaque per-user **code**.
 | `POST /webhook/mor` | Dodo Standard-Webhooks signature | issue/revoke on purchase/refund (inert until configured) |
 | `POST /v1/checkout` | `Bearer free_<id>` + `x-subline-client` | `{plan:"monthly"\|"annual"}` → `{ok,url}`: a Dodo checkout session tied to this install (503 without `DODO_API_KEY`) |
 | `POST /admin/coupon` | `Bearer <ADMIN_TOKEN>` | `{name}` → a single-use 100%-off code for 3 monthly cycles |
+| `POST /v1/redeem` (v2) | code or install + `x-subline-install` | `{code}` → `{ok,code}`: a promo code grants Automatic |
+| `POST /admin/promo` | `Bearer <ADMIN_TOKEN>` | `{code, cap}` → a server promo code, Automatic for the first `cap` installs |
 
 Responses use the plugin's exact `NativeResponse` shape, so the client `relay`
 engine needs no reshaping.
+
+## v2: paid only (Automatic, AI, promo codes)
+
+A v2 client sends `x-subline-api: 2` and its install id in
+`x-subline-install: free_<32 hex>` on every request; the bearer is its saved
+code, or the install id when it has none. Requests WITHOUT `x-subline-api: 2`
+are answered exactly as before (taste, trial, previews, purchase links), so
+v0.1.5 to v0.1.9 clients keep working until they update. Code: `src/entitle.ts`,
+`src/v2.ts`, `src/promo.ts`.
+
+- **Plans.** Automatic ($4.99 once, VARIANTS plan `automatic`, a license key
+  that never expires) and AI (monthly/annual), sold only on top of Automatic.
+  The Automatic product id in `wrangler.jsonc` is a PLACEHOLDER
+  (`pdt_AUTOMATIC_PENDING`) until the owner creates the Dodo product.
+- **Accounts.** `acct:<id>` joins a buyer's codes and installs; `ia:<hash>` and
+  `ca:<code>` point at it. What an install may use is the union over the
+  account's live codes. At most **3 installs** per account; a 4th gets 403
+  `device_limit`. A purchase made from an install (`paid:<hash>`, the same
+  checkout link as v1) joins that install's account on its next status.
+- **Grants.** An AI code made before launch (no `createdAt`, or older than
+  `LAUNCH_AT`) gives its account Automatic, kept after the subscription lapses
+  and lost if that code is refunded. An install whose `trial:<id>` record is
+  older than `LAUNCH_AT` gets Automatic free as an early user (an `slp_` code,
+  note `early`).
+- **Refunds** revoke the code they paid for; the union simply stops counting it.
+  Refunding Automatic leaves AI, refunding AI leaves Automatic.
+- **`GET /v1/status` (v2)** →
+  `{ok, automatic, ai, aiUntil?, code?, previews:{used,cap}, token, tokenExpiresAt, now}`.
+  `code` is a code the install should save (only when it presented its
+  install id). `token` is base64url(JSON `{v,i,a,ai,exp}`) + "." +
+  base64url(HMAC-SHA256 with `ENTITLEMENT_SECRET`), valid 7 days; empty
+  signature when the secret is unset. AI is enforced here either way.
+- **`POST /v1/translate` (v2).** AI: full ✦, charged to the account's AI code.
+  Automatic only: `mode:"preview"` gets 3 cut previews a day per account
+  (`use:pv:<account>:<day>`), anything else 402 `ai_required`. No
+  entitlement: 402 `not_activated`.
+- **`POST /v1/checkout` (v2)** takes `plan: "automatic"|"monthly"|"annual"`:
+  AI without Automatic is 403 `automatic_required`, Automatic twice is 409
+  `already_owned`.
+- **Promo codes.** `node scripts/promo.mjs LEAKCLUB 100` (ADMIN_TOKEN from the
+  environment) creates `promo:<CODE>`: 4 to 16 uppercase letters or digits,
+  refused if it is already a working code. `POST /v1/redeem {code}` answers
+  200 `{ok, code:"slp_..."}` (a new Subline code, plan automatic, note
+  `promo:<CODE>`), 404 `not_found`, 410 `claimed`, 409 `already`, 429
+  `rate_limited` (3 per address a day), 503 `unavailable`. The cap is counted
+  by one `Promo` Durable Object per code, so 100 is exactly 100, one per
+  install. `/admin/stats` adds `promos: [{code, cap, redemptions, aiPurchases}]`.
+- **KV writes.** A status call from an install already in its account writes
+  nothing. Writes happen only when something is learnt: an install or code
+  joining an account (`acct:`, `ia:`, `ca:`), a grandfather or early grant,
+  a redemption (`code:`, account rows, the per-address counter). A preview
+  writes its day counter; AI writes the code's counters as v1 does.
+- **Deploy.** Migration `v2` creates the `Promo` class. Optional secret:
+  `npx wrangler secret put ENTITLEMENT_SECRET` (`openssl rand -hex 32`). Var
+  `LAUNCH_AT` (epoch ms or ISO date): move it to the real launch moment.
 
 ## The taste tier (keyless installs)
 
