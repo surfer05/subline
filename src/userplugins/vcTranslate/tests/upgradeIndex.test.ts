@@ -321,6 +321,53 @@ describe("clearing the code in settings", () => {
         expect(native.translateBatch.mock.calls.length).toBeGreaterThan(0);
     });
 
+    it("a cleared code that is still linked does not skip the free trial's setup", async () => {
+        await restart(() => {
+            settings.store.sublineCode = "LK-K1";
+            settings.store.engine = "relay";
+            // Still inside the local 7 days.
+            settings.store.freeTrialStartedAt = Date.now() - DAY_MS;
+        });
+        settings.store.sublineCode = "";
+        await flush();
+        // The relay still links K1 and says the trial runs for 3 more days.
+        native.relayStatus.mockResolvedValue({
+            ok: true, plan: "trial", used: 0, cap: 300, trialEndsAt: Date.now() + 3 * DAY_MS, now: Date.now(),
+            purchase: { code: "LK-K1", plan: "monthly" }
+        });
+        await restart();
+        expect(settings.store.sublineCode).toBe("");
+        // The trial was set up: a new foreign message gets automatic ✦ from the relay.
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("7", "hola que tal amigo") });
+        await vi.advanceTimersByTimeAsync(25_000);
+        await flush();
+        expect(native.translateBatch.mock.calls.filter(c => c[0] === "relay").length).toBeGreaterThan(0);
+    });
+
+    it("keeps polling past a cleared code that is still linked, and saves a new purchase", async () => {
+        await restart(() => {
+            settings.store.sublineCode = "LK-K1";
+            settings.store.engine = "relay";
+        });
+        settings.store.sublineCode = "";
+        await flush();
+        __resetNotices();
+        native.relayStatus.mockResolvedValue({ ok: true, plan: "taste", used: 0, cap: 3, purchase: { code: "LK-K1", plan: "monthly" } });
+        openUpgrade();
+        pressPlan(0);
+        await flush();
+        await vi.advanceTimersByTimeAsync(3 * POLL_EVERY_MS);
+        await flush();
+        expect(settings.store.sublineCode).toBe("");
+        // The new purchase replaces the old link on the relay.
+        native.relayStatus.mockResolvedValue({ ok: true, plan: "taste", used: 0, cap: 3, purchase: { code: "LK-K2", plan: "annual" } });
+        await vi.advanceTimersByTimeAsync(POLL_EVERY_MS);
+        await flush();
+        expect(settings.store.sublineCode).toBe("LK-K2");
+        expect(settings.store.engine).toBe("relay");
+        expectOnNotice();
+    });
+
     it("still saves a different purchase later", async () => {
         await restart(() => {
             settings.store.sublineCode = "LK-OLD";
@@ -331,6 +378,40 @@ describe("clearing the code in settings", () => {
         native.relayStatus.mockResolvedValue({ ok: true, plan: "taste", used: 0, cap: 3, purchase: { code: "LK-NEW", plan: "annual" } });
         await restart();
         expect(settings.store.sublineCode).toBe("LK-NEW");
+    });
+});
+
+describe("an engine left over from an older build", () => {
+    const stranded: [string, Record<string, string>][] = [
+        ["relay", {}],
+        ["groq", { groqApiKey: "" }],
+        ["gemini", { geminiApiKey: "" }],
+        ["claude", { anthropicApiKey: "" }]
+    ];
+    for (const [engine, keys] of stranded) {
+        it(`${engine} with no code or key becomes Google at start, with no red toast`, async () => {
+            await restart(() => {
+                settings.store.sublineCode = "";
+                settings.store.engine = engine;
+                Object.assign(settings.store, keys);
+                // Inside the local trial, so ≈ translates automatically.
+                settings.store.freeTrialStartedAt = Date.now() - DAY_MS;
+            });
+            expect(settings.store.engine).toBe("google");
+            FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("5", "hola que tal amigo") });
+            await vi.advanceTimersByTimeAsync(25_000);
+            await flush();
+            expect(native.translateBatch.mock.calls.some(c => c[0] === "google")).toBe(true);
+            expect(shownToasts.filter(t => /no .* set/i.test(String(t.message)))).toHaveLength(0);
+        });
+    }
+
+    it("a saved code means the relay, whatever the stored engine says", async () => {
+        await restart(() => {
+            settings.store.sublineCode = "LK-SAVED";
+            settings.store.engine = "google";
+        });
+        expect(settings.store.engine).toBe("relay");
     });
 });
 

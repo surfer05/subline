@@ -643,6 +643,28 @@ function normaliseTargetLangSetting(): void {
 }
 
 /**
+ * The engine follows the code, and the settings page no longer shows it, so a
+ * stored value from an older build can strand an install: "relay" with no
+ * code, or a bring-your-own-key engine with no key (v0.1.8 and earlier). Those
+ * would fall back to Google anyway, but with a red "no key set" toast the
+ * reader can do nothing about. Once, at start: a code means the relay, and no
+ * code means Google. An LLM engine that does have its own key is left alone
+ * (not offered in shipped builds, but the engine code and its tests remain).
+ */
+function normaliseEngineSetting(): void {
+    const raw = settings.store.sublineCode;
+    const code = typeof raw === "string" ? raw.trim() : "";
+    const engine = settings.store.engine as EngineId;
+    if (code !== "") {
+        if (engine !== "relay") settings.store.engine = "relay";
+        return;
+    }
+    if (engine === "google") return;
+    if (engine !== "relay" && isLlmEngine(engine) && apiKeyFor(engine).trim() !== "") return;
+    settings.store.engine = "google";
+}
+
+/**
  * The reading language changed under a running session. New translations use
  * the new language as soon as the batcher is rebuilt (the settings handler does
  * that right after this). What was cached in the old language is dropped, in
@@ -700,11 +722,11 @@ function getCheckoutFlow(): CheckoutFlow {
  * mode ends (isTasteInstall is false once a code is set), and the channel on
  * screen is caught up.
  */
-function onPurchaseLinked(purchase: Purchase): void {
-    if (!isTasteInstall()) return;   // a code arrived some other way meanwhile
+function onPurchaseLinked(purchase: Purchase): boolean {
+    if (!isTasteInstall()) return false;   // a code arrived some other way meanwhile
     // The reader cleared this very code in settings. The relay keeps the link
     // for 30 days, so without this it would come straight back.
-    if (purchase.code === settings.store.clearedPurchaseCode) return;
+    if (purchase.code === settings.store.clearedPurchaseCode) return false;
     settings.store.sublineCode = purchase.code;
     if (settings.store.engine !== "relay") settings.store.engine = "relay";
     trialBearer = null;
@@ -716,6 +738,7 @@ function onPurchaseLinked(purchase: Purchase): void {
     // isTasteInstall() guard above makes it once per saved code.
     showNotice(UPGRADE_COPY.purchasedNotice, UPGRADE_COPY.purchasedNoticeButton, popNotice);
     onFreePlanChanged();
+    return true;
 }
 
 /**
@@ -830,10 +853,10 @@ async function refreshTasteQuota(): Promise<void> {
             // A purchase started from this install is already linked: Discord
             // was restarted (or the checkout poll timed out) before it landed.
             // Switch on exactly as the checkout flow would, so it is not lost.
-            if (res.purchase && session === statusSession) {
-                onPurchaseLinked(res.purchase);
-                return;
-            }
+            // Only when it was actually saved: a code the reader cleared is
+            // still linked on the relay, and this install must then go on to
+            // set up its trial and quota like any other free install.
+            if (res.purchase && session === statusSession && onPurchaseLinked(res.purchase)) return;
             const wasAuto = trialAutoActive();
             const wasClick = isClickMode();
             noteServerTrialEnd(res.trialEndsAt, res.serverNow, Date.now(), res.trialProvisional === true);
@@ -4399,6 +4422,7 @@ export default definePlugin({
         // Every Upgrade link opens the Upgrade panel while the plugin runs.
         registerUpgradeOpener(openUpgradeForFreeInstall);
         normaliseTargetLangSetting();
+        normaliseEngineSetting();
         activeTargetLang = settings.store.targetLang;
 
         // Text outside messages (paid only). Registered first so a slow read

@@ -84,8 +84,10 @@ export interface CheckoutDeps {
     /** GET /v1/status through the main process; `purchase` once linked. */
     status: (bearer: string) => Promise<{ ok: boolean; purchase?: Purchase }>;
     openExternal: (url: string) => void;
-    /** A linked purchase arrived. Called once per checkout flow. */
-    onPurchase: (purchase: Purchase) => void;
+    /** A linked purchase arrived: save it. Returns false when it was not saved (for example a
+     *  code the reader cleared, which the relay still links), and the poll then
+     *  keeps going so a later, different purchase still lands. */
+    onPurchase: (purchase: Purchase) => boolean;
     log?: (message: string) => void;
     now?: () => number;
 }
@@ -130,9 +132,9 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
             }
             if (gen !== generation) return;
             const p = res?.ok ? res.purchase : undefined;
-            if (p && typeof p.code === "string" && p.code.trim() !== "") {
+            if (p && typeof p.code === "string" && p.code.trim() !== ""
+                && deps.onPurchase({ code: p.code.trim(), plan: p.plan })) {
                 stop();
-                deps.onPurchase({ code: p.code.trim(), plan: p.plan });
                 return;
             }
             schedule(gen, bearer);

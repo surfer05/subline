@@ -20,7 +20,7 @@ function deps(over: Partial<CheckoutDeps> = {}) {
         createCheckout: vi.fn(async () => ({ ok: true as const, url: SESSION_URL })),
         status: vi.fn(async () => ({ ok: true })),
         openExternal: vi.fn(),
-        onPurchase: vi.fn(),
+        onPurchase: vi.fn(() => true),
         ...over
     };
     return d;
@@ -105,6 +105,25 @@ describe("the checkout flow", () => {
         expect(flow.isPolling()).toBe(false);
         await vi.advanceTimersByTimeAsync(10 * POLL_EVERY_MS);
         expect(d.status).toHaveBeenCalledTimes(3);
+    });
+
+    it("keeps polling when a purchase is not saved, and stops once one is", async () => {
+        let code = "LK-K1";
+        const d = deps({
+            status: vi.fn(async () => ({ ok: true, purchase: { code, plan: "monthly" as const } })),
+            onPurchase: vi.fn((p: { code: string }) => p.code !== "LK-K1")
+        });
+        const flow = createCheckoutFlow(d);
+        await flow.start("monthly");
+        await vi.advanceTimersByTimeAsync(3 * POLL_EVERY_MS);
+        expect(d.onPurchase).toHaveBeenCalledTimes(3);
+        expect(flow.isPolling()).toBe(true);
+        code = "LK-K2";
+        await vi.advanceTimersByTimeAsync(POLL_EVERY_MS);
+        expect(d.onPurchase).toHaveBeenLastCalledWith({ code: "LK-K2", plan: "monthly" });
+        expect(flow.isPolling()).toBe(false);
+        await vi.advanceTimersByTimeAsync(5 * POLL_EVERY_MS);
+        expect(d.onPurchase).toHaveBeenCalledTimes(4);
     });
 
     it("keeps polling through a failed status call", async () => {
