@@ -262,11 +262,13 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
   <p class="kicker">Thanks</p>
   <h2 class="sec">You're all set.</h2>
   <p class="lead">Go back to Discord. Subline is already on.</p>
+  <p class="fine">Your code is also in your email.</p>
 </div>
 <div data-thanks-discord-pending hidden>
   <p class="kicker">Thanks</p>
   <h2 class="sec">Payment is being confirmed.</h2>
   <p class="lead">Subline switches on in Discord by itself, usually within a few minutes.</p>
+  <p class="fine">Your code is also in your email.</p>
 </div>
 <div data-thanks-failed hidden>
   <p class="kicker">Checkout</p>
@@ -436,7 +438,9 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
   //
   // A checkout started from Discord returns to "?from=discord". Discord has
   // already saved the code by itself, so that view only says to go back there:
-  // no code and no downloads, even when Dodo appended a key.
+  // no code and no downloads, even when Dodo appended a key. Without Dodo's
+  // parameters there is nothing to confirm, so "?from=discord" alone gets the
+  // neutral thanks view, like "#thanks".
   //
   // Returns null when this is not a return from checkout. Otherwise
   // { state: "ok" | "pending" | "failed", keys: [...], fromDiscord: bool }.
@@ -448,8 +452,7 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
     var fromDiscord = !!params && params.get("from") === "discord";
     var isReturn = !!params && status !== "" && !!(params.get("payment_id") || params.get("subscription_id"));
     if (!isReturn) {
-      if (fromDiscord && (hash === "#thanks" || status === "")) return { state: "ok", keys: [], fromDiscord: true };
-      return hash === "#thanks" ? { state: "ok", keys: [], fromDiscord: false } : null;
+      return hash === "#thanks" || fromDiscord ? { state: "ok", keys: [], fromDiscord: false } : null;
     }
   
     var OK = ["succeeded", "active"];
@@ -501,11 +504,7 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
       });
     }
     try {
-      // A Discord return keeps "?from=discord" (no key in it), so a refresh
-      // still says "go back to Discord" rather than showing downloads.
-      if (location.search && history.replaceState) {
-        history.replaceState(null, "", location.pathname + (ret.fromDiscord ? "?from=discord" : "") + "#thanks");
-      }
+      if (location.search && history.replaceState) history.replaceState(null, "", location.pathname + "#thanks");
     } catch (e) { /* the view still shows */ }
   })();
 

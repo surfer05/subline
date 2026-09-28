@@ -192,11 +192,7 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}"${HIDDEN_SECTIONS.h
       });
     }
     try {
-      // A Discord return keeps "?from=discord" (no key in it), so a refresh
-      // still says "go back to Discord" rather than showing downloads.
-      if (location.search && history.replaceState) {
-        history.replaceState(null, "", location.pathname + (ret.fromDiscord ? "?from=discord" : "") + "#thanks");
-      }
+      if (location.search && history.replaceState) history.replaceState(null, "", location.pathname + "#thanks");
     } catch (e) { /* the view still shows */ }
   })();
 

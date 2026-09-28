@@ -11,7 +11,9 @@
 //
 // A checkout started from Discord returns to "?from=discord". Discord has
 // already saved the code by itself, so that view only says to go back there:
-// no code and no downloads, even when Dodo appended a key.
+// no code and no downloads, even when Dodo appended a key. Without Dodo's
+// parameters there is nothing to confirm, so "?from=discord" alone gets the
+// neutral thanks view, like "#thanks".
 //
 // Returns null when this is not a return from checkout. Otherwise
 // { state: "ok" | "pending" | "failed", keys: [...], fromDiscord: bool }.
@@ -23,8 +25,7 @@ function parseCheckoutReturn(search, hash) {
   var fromDiscord = !!params && params.get("from") === "discord";
   var isReturn = !!params && status !== "" && !!(params.get("payment_id") || params.get("subscription_id"));
   if (!isReturn) {
-    if (fromDiscord && (hash === "#thanks" || status === "")) return { state: "ok", keys: [], fromDiscord: true };
-    return hash === "#thanks" ? { state: "ok", keys: [], fromDiscord: false } : null;
+    return hash === "#thanks" || fromDiscord ? { state: "ok", keys: [], fromDiscord: false } : null;
   }
 
   var OK = ["succeeded", "active"];

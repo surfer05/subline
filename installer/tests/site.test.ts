@@ -85,9 +85,10 @@ describe("the checkout return", () => {
         expect(parse("?from=discord&payment_id=pay_1&status=failed", "")).toEqual({ state: "failed", keys: [], fromDiscord: true });
     });
 
-    it("the Discord view survives the refresh after the address is cleaned", () => {
-        expect(parse("?from=discord", "#thanks")).toEqual({ state: "ok", keys: [], fromDiscord: true });
-        expect(parse("?from=discord", "")).toEqual({ state: "ok", keys: [], fromDiscord: true });
+    it("from=discord without Dodo's parameters shows the neutral thanks view", () => {
+        expect(parse("?from=discord", "")).toEqual({ state: "ok", keys: [], fromDiscord: false });
+        expect(parse("?from=discord", "#thanks")).toEqual({ state: "ok", keys: [], fromDiscord: false });
+        expect(parse("?from=discord&payment_id=pay_1", "")).toEqual({ state: "ok", keys: [], fromDiscord: false });
     });
 
     it("an unrelated from= value is not a Discord return", () => {
@@ -124,11 +125,13 @@ describe("the built page", () => {
         const discord = block("data-thanks-discord");
         expect(discord).toContain("<h2 class=\"sec\">You're all set.</h2>");
         expect(discord).toContain("<p class=\"lead\">Go back to Discord. Subline is already on.</p>");
-        expect(discord.match(/<p /g)).toHaveLength(2); // the kicker and the one line
+        expect(discord).toContain("<p class=\"fine\">Your code is also in your email.</p>");
+        expect(discord.match(/<p /g)).toHaveLength(3); // the kicker, the one line, the email line
         expect(discord).not.toMatch(/data-dl|data-thanks-code|data-thanks-copy/);
         const pending = block("data-thanks-discord-pending");
         expect(pending.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "))
             .toContain("Payment is being confirmed. Subline switches on in Discord by itself, usually within a few minutes.");
+        expect(pending).toContain("<p class=\"fine\">Your code is also in your email.</p>");
     });
 
     it("shows only the Discord view on a Discord return, and only the code view on a site return", () => {
@@ -154,16 +157,18 @@ describe("the built page", () => {
         const d = run("?from=discord&subscription_id=sub_1&status=active&license_key=LK-001");
         expect(d.shown).toEqual(["discord"]);
         expect(d.code).toBe("");
-        expect(d.replaced).toBe("/subline/?from=discord#thanks");
+        expect(d.replaced).toBe("/subline/#thanks");
         expect(run("?from=discord&subscription_id=sub_1&status=pending").shown).toEqual(["discord-pending"]);
         const s = run("?subscription_id=sub_1&status=active&license_key=LK-001");
         expect(s.shown).toEqual(["ok", "keys"]);
         expect(s.code).toBe("LK-001");
         expect(s.replaced).toBe("/subline/#thanks");
+        // No Dodo parameters: nothing to confirm, so the neutral view.
+        expect(run("?from=discord").shown).toEqual(["ok"]);
     });
 
     it("drops the key from the address bar once it is read, and never sends it", () => {
-        expect(PAGE).toContain('history.replaceState(null, "", location.pathname + (ret.fromDiscord ? "?from=discord" : "") + "#thanks")');
+        expect(PAGE).toContain('history.replaceState(null, "", location.pathname + "#thanks")');
         const script = PAGE.slice(PAGE.lastIndexOf("<script>"));
         // The only network call on the page is the GitHub release lookup.
         expect(script.match(/fetch\(/g)).toHaveLength(1);
