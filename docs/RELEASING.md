@@ -45,6 +45,52 @@ SUBLINE_SIGN=1 SUBLINE_NOTARIZE=1 pnpm dist:mac
 
 ---
 
+## v0.2.0 release day
+
+The paid-only release. Do these in order.
+
+1. **Put the real Automatic product id in, in all 4 places**, replacing
+   `pdt_AUTOMATIC_PENDING`:
+   - `relay/wrangler.jsonc` (VARIANTS, plan `automatic`)
+   - `src/userplugins/vcTranslate/checkout.ts` (`AUTOMATIC_PRODUCT_ID`)
+   - `installer/src/app/activation.ts` (`AUTOMATIC_PRODUCT_ID`)
+   - `design/site/pricing/index.html` (the Automatic card's Buy link)
+
+   Then redeploy the relay: `cd relay && npx wrangler deploy`, and smoke-test
+   that `/v1/checkout` for plan `automatic` returns a `dodopayments.com` URL.
+   The placeholder tests in all three packages, `release.mjs` and
+   `buildSite.mjs` refuse to go on while the placeholder is anywhere.
+2. **Reconcile the monthly price in Dodo** with the copy: AI monthly is
+   **$1.99** everywhere in the app, installer and site. Change the Dodo
+   product's price if it still says anything else.
+3. **LAUNCH_AT is already set live** (`2026-09-29T11:56:40Z`). Do not reset it.
+   Early users are judged against a fixed cutoff in the relay code, not
+   LAUNCH_AT, so nothing on release day depends on it.
+4. **Build the release** without `SUBLINE_ALLOW_PLACEHOLDER` (it must not be set
+   in your shell): `pnpm stamp` at the repo root, commit the stamp, then
+   `cd installer && pnpm release --win` as in the short version above.
+5. **Publish the GitHub release BEFORE deploying the site.** The site's
+   download buttons point at `releases/latest`, so deploying the site first
+   sends people to the old version. From `installer/`:
+
+   ```sh
+   gh release create v0.2.0 --repo surfer05/subline --title "Subline 0.2.0" \
+     --notes-file ../docs/release-notes/v0.2.0.md \
+     release/subline-release.json release/SHA256SUMS \
+     release/Subline-0.2.0-arm64.dmg release/Subline-0.2.0-x64.dmg \
+     release/Subline-Setup-0.2.0.exe release/subline-mod-<build id>.zip
+   ```
+
+   The release notes are tracked in the repo, at `docs/release-notes/v0.2.0.md`.
+6. **Build and deploy the site** without `SUBLINE_ALLOW_PLACEHOLDER`:
+   `node scripts/buildSite.mjs`, then `node scripts/buildSite.mjs --check`, then
+   deploy as usual.
+7. **Coupons.** The 100% coupon from `relay/scripts/coupon.mjs` only works on
+   the **monthly** AI product, and it goes on Dodo's **payment page**, not in
+   Subline's code box.
+
+---
+
 ## 1. One-off setup
 
 ### The signing certificate

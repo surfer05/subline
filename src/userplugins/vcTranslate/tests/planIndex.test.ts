@@ -17,7 +17,7 @@ const native = vi.hoisted(() => {
 
 import plugin, { DEAD_CODE_CONFIRM_MS, FORCE_QUALITY_POPOVER_ID, __surfaceService } from "../index";
 import { AUTOMATIC_PRODUCT_ID, isConfiguredProduct, POLL_EVERY_MS } from "../checkout";
-import { ENTITLEMENT_REFRESH_MS, holderFor, __resetEntitlement } from "../entitlement";
+import { ENTITLEMENT_REFRESH_MS, entitlementLevel, holderFor, __resetEntitlement } from "../entitlement";
 import type { NativeResponse } from "../native";
 import settings from "../settings";
 import { clearStore, getTranslation, makeKey, setTranslation } from "../store";
@@ -515,7 +515,8 @@ describe("entering a code", () => {
 
     it("says a key does not exist, or is on 3 computers already, and saves nothing", async () => {
         await startNotActivated();
-        native.relayStatus.mockResolvedValue({ ok: false, error: "relay: HTTP 401 invalid_code", errorCode: "invalid_code" });
+        // A dead or unknown code: the check answers 200 with deadCode and a failed check.
+        native.relayStatus.mockResolvedValue({ ...v2({ automatic: false }), deadCode: "abcd-1234-efgh-5678", check: { valid: false, automatic: false, ai: false } });
         await enter("abcd-1234-efgh-5678");
         native.relayStatus.mockResolvedValue({ ok: false, error: "relay: HTTP 403 device_limit", errorCode: "device_limit" });
         lastModal().el.props.actions[0].onClick();
@@ -602,6 +603,17 @@ describe("an Automatic owner", () => {
         expect(native.relayCheckout.mock.calls[0]![1]).toBe("annual");
         expect(native.openExternal).not.toHaveBeenCalled();
         expect(shownToasts.map(t => t.message)).toContain("AI needs Automatic first.");
+    });
+
+    it("says under the AI plans that a coupon goes on the payment page", async () => {
+        const { UpgradePanelBody } = await import("../upgradePanel");
+        const text = (n: any): string => typeof n === "string" ? n
+            : Array.isArray(n) ? n.map(text).join(" ")
+            : n && typeof n === "object" && "children" in n ? text(n.children) : "";
+        const body = text(UpgradePanelBody());
+        expect(body).toContain("Have a coupon? Enter it on the payment page.");
+        // After the plans, not before them.
+        expect(body.indexOf("Have a coupon?")).toBeGreaterThan(body.indexOf("$19.99 a year"));
     });
 
     it("stops polling an AI checkout once the relay says AI, and says so once", async () => {
@@ -873,16 +885,20 @@ describe("the audit round", () => {
         expect(settings.store.sublineCode).toBe("");
     });
 
-    it("a saved code the relay no longer knows is dropped, and the install id alone is asked (Automatic stays)", async () => {
+    it("a saved code the relay no longer knows keeps its plan on the first strike, then is dropped and the install id alone is asked (Automatic stays)", async () => {
         DataStore.setEntitlementForTest({ automatic: true, ai: true, tokenExpiresAt: Date.now() + 7 * DAY, checkedAt: Date.now() });
         settings.store.sublineCode = "LK-REFUNDED";
         settings.store.engine = "relay";
+        // The relay answers 200 for the dead code: nothing owned through it.
         native.relayStatus.mockImplementation(async (credential: string) => credential === "LK-REFUNDED"
-            ? { ok: false, error: "relay: HTTP 401 invalid_code", errorCode: "invalid_code" }
+            ? { ...v2({ automatic: false }), deadCode: "LK-REFUNDED" }
             : v2({ automatic: true }));
         await plugin.start!();
         await flush();
         expect(settings.store.sublineCode).toBe("LK-REFUNDED");
+        // First strike: the plan stored for the code is kept, AI included.
+        expect(entitlementLevel()).toBe("ai");
+        expect(activationNotices()).toHaveLength(0);
         await vi.advanceTimersByTimeAsync(DEAD_CODE_CONFIRM_MS + 1_000);
         await flush();
         expect(settings.store.sublineCode).toBe("");
