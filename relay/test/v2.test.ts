@@ -1130,3 +1130,106 @@ describe("POST /admin/reissue (leaked keys)", () => {
         expect(JSON.parse(kv._dump()[`code:${code}`]!).status).toBe("revoked");
     });
 });
+
+describe("third audit: reissue replays and one early code per computer", () => {
+    const admin = (e: Env, path: string, body: any) => worker.fetch(new Request(`https://relay${path}`, {
+        method: "POST", headers: { authorization: "Bearer admintok", "content-type": "application/json" }, body: JSON.stringify(body)
+    }), e, ctx);
+    const aiOwner = async () => {
+        const kv = fakeKV();
+        const e = env(kv);
+        await buy(e, A, "KEY-AUTO-1", "pdt_auto", "pay_a");
+        await status(e, A);
+        await buy(e, A, "KEY-AI-1", "pdt_month", "pay_m", "sub_m");
+        expect((await status(e, A, "KEY-AI-1")).body).toMatchObject({ automatic: true, ai: true });
+        return { e, kv };
+    };
+
+    it("a replayed license_key.created cannot revive a reissued key, and renewals and refunds reach the new code", async () => {
+        const { e, kv } = await aiOwner();
+        const { code } = await (await admin(e, "/admin/reissue", { code: "KEY-AI-1" })).json() as any;
+        expect(JSON.parse(kv._dump()["code:KEY-AI-1"]!)).toMatchObject({ status: "revoked", reissuedTo: code });
+
+        // Dodo retries the original create for the old key.
+        const replay = await applyMorEvent(e, { type: "license_key.created", data: { key: "KEY-AI-1", product_id: "pdt_month", payment_id: "pay_m", subscription_id: "sub_m" } }, NOW);
+        expect(replay.action).toBe("reissued_noop");
+        expect(JSON.parse(kv._dump()["code:KEY-AI-1"]!).status).toBe("revoked");
+        expect(kv._dump()["order:sub_m"]).toBe(code);
+        expect(kv._dump()["order:pay_m"]).toBe(code);
+
+        const later = NOW + 40 * 86_400_000;
+        await applyMorEvent(e, { type: "subscription.renewed", data: { subscription_id: "sub_m", next_billing_date: new Date(later).toISOString() } }, NOW);
+        expect(JSON.parse(kv._dump()[`code:${code}`]!).expiresAt).toBe(later);
+        expect(JSON.parse(kv._dump()["code:KEY-AI-1"]!).status).toBe("revoked");
+        await applyMorEvent(e, { type: "refund.succeeded", data: { payment_id: "pay_m" } }, NOW);
+        expect(JSON.parse(kv._dump()[`code:${code}`]!)).toMatchObject({ status: "revoked", terminal: true });
+        expect((await status(e, A, "KEY-AI-1")).body.deadCode).toBe("KEY-AI-1");
+    });
+
+    it("an order: row still naming the old key is followed to the live code", async () => {
+        const { e, kv } = await aiOwner();
+        const { code } = await (await admin(e, "/admin/reissue", { code: "KEY-AI-1" })).json() as any;
+        // An index written before the reissue (or by an older relay) still names the old key.
+        await kv.put("order:sub_m", "KEY-AI-1");
+        const later = NOW + 50 * 86_400_000;
+        await applyMorEvent(e, { type: "subscription.renewed", data: { subscription_id: "sub_m", next_billing_date: new Date(later).toISOString() } }, NOW);
+        expect(JSON.parse(kv._dump()[`code:${code}`]!).expiresAt).toBe(later);
+        const old = JSON.parse(kv._dump()["code:KEY-AI-1"]!);
+        expect(old.status).toBe("revoked");
+        expect(old.expiresAt).not.toBe(later);
+    });
+
+    const earlyUser = async () => {
+        const kv = fakeKV({ [`trial:${"a".repeat(32)}`]: String(CUTOFF - 5000) });
+        const e = env(kv);
+        const first = await status(e, A);
+        expect(first.body).toMatchObject({ automatic: true, grant: "early" });
+        expect(kv._dump()[`early:${await installHash(A)}`]).toBeDefined();
+        return { e, kv, code: first.body.code as string };
+    };
+    const earlyCodes = (kv: any) => Object.entries(kv._dump()).filter(([k, v]) => k.startsWith("code:") && String(v).includes("\"early")).length;
+
+    it("reset-installs does not let the same computer mint a second early code", async () => {
+        const { e, kv, code } = await earlyUser();
+        expect((await (await admin(e, "/admin/reset-installs", { code })).json() as any).ok).toBe(true);
+        const again = await status(e, A);
+        expect(again.body.automatic).toBe(false);
+        expect(again.body.grant).toBeUndefined();
+        expect(earlyCodes(kv)).toBe(1);
+        // Its own code still works when entered.
+        expect((await status(e, A, code)).body.automatic).toBe(true);
+    });
+
+    it("reissue does not let the same computer mint a second early code", async () => {
+        const { e, kv, code } = await earlyUser();
+        const { code: fresh } = await (await admin(e, "/admin/reissue", { code })).json() as any;
+        const again = await status(e, A);
+        expect(again.body.automatic).toBe(false);
+        expect(again.body.grant).toBeUndefined();
+        // Only the original (now revoked) and its reissue exist: no third code was minted.
+        expect(Object.keys(kv._dump()).filter(k => k.startsWith("code:")).length).toBe(2);
+        expect((await status(e, A, fresh)).body.automatic).toBe(true);
+    });
+
+    it("eviction does not let the same computer mint a second early code", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        try {
+            vi.setSystemTime(NOW);
+            const { e, kv, code } = await earlyUser();
+            await status(e, B, code);
+            await status(e, C, code);
+            vi.setSystemTime(NOW + 31 * 86_400_000);
+            await status(e, B, code);
+            await status(e, C, code);
+            // D takes A's slot: A was unseen for 31 days.
+            expect((await status(e, D, code)).body.automatic).toBe(true);
+            expect(kv._dump()[`ia:${await installHash(A)}`]).toBeUndefined();
+            const again = await status(e, A);
+            expect(again.body.automatic).toBe(false);
+            expect(again.body.grant).toBeUndefined();
+            expect(earlyCodes(kv)).toBe(1);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+});

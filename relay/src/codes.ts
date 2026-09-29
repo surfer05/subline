@@ -117,6 +117,29 @@ export interface CodeRecord {
      *  before the paid-only launch, which is what marks an AI code as
      *  grandfathered into Automatic (entitle.ts). */
     createdAt?: number;
+    /** Set by POST /admin/reissue on the OLD code: the code that replaced it.
+     *  A reissued code is dead for good. Webhook events that still name it (a
+     *  replayed license_key.created, a refund, a renewal) are forwarded along
+     *  this link to the live code, never applied to the dead one. */
+    reissuedTo?: string;
+}
+
+/** Hops followReissue will take: a reissued code of a reissued code, and so on. */
+const MAX_REISSUE_HOPS = 5;
+
+/**
+ * Follow reissuedTo links from `key` to the live code (bounded, loop-safe).
+ * Returns the last code reached and its record (undefined when missing).
+ */
+export async function followReissue(env: Env, key: string): Promise<{ key: string; rec: CodeRecord | undefined }> {
+    const seen = new Set<string>([key]);
+    let rec = safeParse(await env.CODES.get(`code:${key}`));
+    for (let hop = 0; hop < MAX_REISSUE_HOPS && rec?.reissuedTo && !seen.has(rec.reissuedTo); hop++) {
+        key = rec.reissuedTo;
+        seen.add(key);
+        rec = safeParse(await env.CODES.get(`code:${key}`));
+    }
+    return { key, rec };
 }
 
 const DAY_MS = 86_400_000;
@@ -837,8 +860,8 @@ interface Lifecycle {
  *  license_key_created can fold it in. Returns a coarse action label for tests. */
 async function applyLifecycle(env: Env, orderId: string, d: Lifecycle): Promise<string> {
     if (!orderId) return "ignored_no_order";
-    const key = await env.CODES.get(`order:${orderId}`);
-    if (!key) {
+    const orderKey = await env.CODES.get(`order:${orderId}`);
+    if (!orderKey) {
         const prev = (safeParse(await env.CODES.get(`pending:${orderId}`)) as any) ?? {};
         if (d.revoked) prev.revoked = true;
         if (d.terminal) { prev.terminal = true; if (typeof d.revokedAt === "number") prev.revokedAt = d.revokedAt; }
@@ -852,15 +875,18 @@ async function applyLifecycle(env: Env, orderId: string, d: Lifecycle): Promise<
         // while we were staging. If it is visible now, fold the staged row into
         // the code directly. (KV lag can still hide it; authCode's lazy fold is
         // the backstop for that.)
-        const lateKey = await env.CODES.get(`order:${orderId}`);
-        if (!lateKey) return "staged";
-        const lateRec = safeParse(await env.CODES.get(`code:${lateKey}`));
+        const lateOrder = await env.CODES.get(`order:${orderId}`);
+        if (!lateOrder) return "staged";
+        const { key: lateKey, rec: lateRec } = await followReissue(env, lateOrder);
         if (!lateRec) return "staged";
         await drainPending(env, lateRec, [orderId]);
         await env.CODES.put(`code:${lateKey}`, JSON.stringify(lateRec));
         return "applied_after_stage";
     }
-    const rec = safeParse(await env.CODES.get(`code:${key}`));
+    // A reissued code forwards to the code that replaced it (see reissuedTo).
+    const followed = await followReissue(env, orderKey);
+    const key = followed.key;
+    const rec = followed.rec;
     if (!rec) return "code_missing";
     // #1: TERMINAL is sticky and dead. Once refunded/expired, NOTHING — not a
     // replayed/out-of-order active event, not a late renewal — reactivates it or
@@ -943,6 +969,10 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
         // un-revoke a refunded purchase.
         const rawExisting = await env.CODES.get(`code:${key}`);
         const existing = safeParse(rawExisting);
+        // A REISSUED key (admin reissue after a leak) stays dead: a replayed
+        // create must not revive it or point its order: rows back at it. The
+        // rows already name the new code, so renewals and refunds reach that.
+        if (existing?.reissuedTo) return { action: "reissued_noop" };
         // #2: a subscription code must NEVER be born without an expiry, or a
         // missed/absent subscription event would leave it valid forever (the
         // authCode expiry net is skipped when expiresAt is undefined). Stamp a

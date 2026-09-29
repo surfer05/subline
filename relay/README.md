@@ -147,6 +147,29 @@ Before `LAUNCH_AT` (or while it is the placeholder) nothing changes. Code: `src/
   2026-09-29T00:00:00Z in `src/entitle.ts`, never `LAUNCH_AT`: a `trial:`
   record dated before it, or (with the client's prior-use hint) a `use:` or
   `seen:` marker for a UTC day that ended before it.
+- **What qualifies as an early user, exactly** (quotable): an install
+  qualifies when EITHER (1) the relay holds a `trial:<id>` record for its
+  install id whose first-use time is before 2026-09-29T00:00:00Z (a 0.1.6 or
+  later client whose trial started, meaning it got at least one ✦ AI
+  translation, before that moment; the record keeps 90 days from that first
+  use), OR (2) the client sends the prior-use hint (`x-subline-prior: 1`) and
+  the relay holds a usage counter (`use:<id>:<day>`) or an active-install
+  marker (`seen:free:` / `seen:trial:`) for that install on one of the three
+  whole UTC days before the cutoff (2026-09-26, 27 or 28). Those day markers
+  keep only about 2 days, so path (2) mattered only right after the cutoff.
+  Nothing else counts: not LAUNCH_AT, not a hint alone, not a record from
+  2026-09-29 or later.
+- **One early code per computer.** The grant writes `early:<install hash>`
+  (epoch ms), with no expiry. reset-installs, reissue and eviction clear a
+  computer from its account but never this row, so the same computer never
+  mints a second early code (its code still works when entered). Retention:
+  kept until someone asks us to delete it. It holds only the scrambled install
+  hash and a time.
+- **Reissue and webhooks.** A reissued code keeps `reissuedTo: <new code>`.
+  A replayed `license_key.created` for it is a no-op (it stays dead and its
+  `order:` rows keep naming the new code), and every lifecycle event that
+  still reaches the old code (refund, renewal, expiry) is forwarded along
+  `reissuedTo` (at most 5 hops, loop-safe) to the live code.
 
 ## The taste tier (keyless installs)
 

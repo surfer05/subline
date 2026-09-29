@@ -286,6 +286,18 @@ async function live(env: Env, code: string): Promise<CodeRecord | null> {
 export const EARLY_CUTOFF_MS = Date.parse("2026-09-29T00:00:00Z");
 
 /**
+ * `early:<install hash>` → epoch ms: this computer was given an early-user
+ * code. Written once, with the grant, and never expired: reset-installs,
+ * reissue and eviction clear a computer from its account but never this row,
+ * so the same computer can never mint a second early code. It holds only the
+ * scrambled install hash and a time. (The code it got can still be entered
+ * again, as any code can.)
+ */
+export function earlyKey(hash: string): string {
+    return `early:${hash}`;
+}
+
+/**
  * THE LEGACY (0.1.x, no `x-subline-api: 2`) FREE TIER AFTER LAUNCH. Before
  * LAUNCH_AT (or while it is unset) every free_ id is served as it always was.
  * From LAUNCH_AT on, the old taste/trial allowance goes only to an id with a
@@ -425,7 +437,11 @@ export async function resolveEntitlement(
         // cutoff (never LAUNCH_AT, see EARLY_CUTOFF_MS).
         let grant: "early" | undefined;
         if (!automatic && !(w.acct?.early)) {
-            if (await usedBeforeCutoff(env, install, hash, opts.prior === true)) {
+            // The per-computer marker (earlyKey) is read only once the evidence
+            // says yes. It stops a second early code for the same computer after
+            // reset-installs, reissue or eviction dropped it from its account.
+            if (await usedBeforeCutoff(env, install, hash, opts.prior === true)
+                && await env.CODES.get(earlyKey(hash)) === null) {
                 automatic = true;
                 grant = "early";
                 if (!opts.dryRun) {
@@ -435,6 +451,7 @@ export async function resolveEntitlement(
                     await env.CODES.put(`code:${minted}`, JSON.stringify(rec));
                     joinCode(w, minted, now);
                     w.acct!.early = true;
+                    w.puts.set(earlyKey(hash), String(now));
                     firstAutomatic = minted;
                     firstLive ??= minted;
                 }
@@ -565,7 +582,7 @@ export async function reissueCode(env: Env, code: string, now: number): Promise<
     }
     await env.CODES.put(`ca:${fresh}`, acctId);
     await env.CODES.delete(`ca:${code}`);
-    await env.CODES.put(`code:${code}`, JSON.stringify({ ...rec, status: "revoked", revokedAt: now, note: "reissued" }));
+    await env.CODES.put(`code:${code}`, JSON.stringify({ ...rec, status: "revoked", revokedAt: now, note: "reissued", reissuedTo: fresh }));
 
     acct.codes = acct.codes.map(c => c === code ? fresh : c);
     if (acct.grandfather === code) acct.grandfather = fresh;
