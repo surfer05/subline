@@ -1336,8 +1336,11 @@ describe("the subtitle accessory", () => {
         setTranslation(key("1"), { deferred: true });
 
         // Default engine is google (the keyless install).
-        const waiting = text(render(discordMessage("1", "hola")));
+        const waitingNode = render(discordMessage("1", "hola"));
+        const waiting = text(waitingNode);
         expect(waiting).toContain("waiting for the translator");
+        // Its hover says what is happening, in the owner's words.
+        expect(JSON.stringify(waitingNode)).toContain("Google is busy. Subline retries by itself.");
         expect(waiting).not.toContain("⚠");
         expect(waiting).not.toContain("failed");
 
@@ -3280,7 +3283,7 @@ describe("the force-quality popover action (⚡)", () => {
         settings.store.engine = "google";
         const btn = forceButton(discordMessage("1", "hola"));
         expect(btn).not.toBeNull();
-        expect(btn!.label).toBe("Preview ✦ (3 of 3 left today)");
+        expect(btn!.label).toBe("Preview ✦ (5 left today)");
     });
 
     it("is not offered at all to an install that owns nothing", async () => {
@@ -3485,7 +3488,7 @@ describe("✦ previews for an Automatic owner (three a day)", () => {
         expect(relayCalls()[0][5]).toMatch(/^free_[0-9a-f]{32}$/);
     });
 
-    it("counts down on the button from the relay's own count, and says nothing when the three are used", async () => {
+    it("counts down on the button from the relay's own count, and says nothing when the five are used", async () => {
         native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => {
             if (_e !== "relay") return { ok: true, results: [] };
             const { messages } = JSON.parse(payload);
@@ -3494,22 +3497,22 @@ describe("✦ previews for an Automatic owner (three a day)", () => {
                 ok: true,
                 results: messages.map((m: { id: string; }) => ({ id: m.id, lang: "es", text: "sharper " + m.id, skip: false })),
                 quotaUsed: used,
-                quotaCap: 3
+                quotaCap: 5
             };
         });
 
-        expect(forceButton(discordMessage("x", "hola"))!.label).toBe("Preview ✦ (3 of 3 left today)");
-        await press("1");
-        expect(forceButton(discordMessage("x", "hola"))!.label).toContain("2 of 3 left today");
-        await press("2");
-        expect(forceButton(discordMessage("x", "hola"))!.label).toContain("1 of 3 left today");
-        await press("3");
-        expect(forceButton(discordMessage("x", "hola"))!.label).toBe("Add AI ✦ (0 of 3 left today)");
+        expect(forceButton(discordMessage("x", "hola"))!.label).toBe("Preview ✦ (5 left today)");
+        for (let n = 1; n <= 4; n++) {
+            await press(String(n));
+            expect(forceButton(discordMessage("x", "hola"))!.label).toBe(`Preview ✦ (${5 - n} left today)`);
+        }
+        await press("5");
+        expect(forceButton(discordMessage("x", "hola"))!.label).toBe("Add AI ✦");
         expect(shownToasts).toHaveLength(0);
     });
 
-    it("sends nothing on the fourth press, and says nothing either", async () => {
-        relayAnswers(3);
+    it("sends nothing on the sixth press, and says nothing either", async () => {
+        relayAnswers(5);
         await press("1");
         const spent = relayCalls().length;
         shownToasts.length = 0;
@@ -3550,17 +3553,17 @@ describe("✦ previews for an Automatic owner (three a day)", () => {
         expect(await DataStore.get(INSTALL_ID_KEY)).toBe(bearers[0].replace("free_", ""));
     });
 
-    it("reads today's count back from /v1/status at start, so a restart is not three more", async () => {
+    it("reads today's count back from /v1/status at start, so a restart is not five more", async () => {
         native.relayStatus.mockResolvedValue({
             ok: true, plan: "", used: 0, cap: 0, automatic: true, ai: false,
-            previews: { used: 3, cap: 3 }, tokenExpiresAt: Date.now() + 86_400_000
+            previews: { used: 5, cap: 5 }, tokenExpiresAt: Date.now() + 86_400_000
         });
         plugin.stop!();
         __resetTaste();
         await plugin.start!();
         await flush();
 
-        expect(forceButton(discordMessage("1", "hola"))!.label).toBe("Add AI ✦ (0 of 3 left today)");
+        expect(forceButton(discordMessage("1", "hola"))!.label).toBe("Add AI ✦");
         native.translateBatch.mockClear();
         forceButton(discordMessage("1", "hola"))!.onClick!(undefined as any);
         await flush();
@@ -3579,10 +3582,10 @@ describe("✦ previews for an Automatic owner (three a day)", () => {
         expect(getTranslation(key("1"))).toMatchObject({ via: "google" });
     });
 
-    it("clears the count when the UTC day turns over, so tomorrow is three again", async () => {
-        relayAnswers(3);
+    it("clears the count when the UTC day turns over, so tomorrow is five again", async () => {
+        relayAnswers(5);
         await press("1");
-        expect(forceButton(discordMessage("x", "hola"))!.label).toContain("0 of 3 left today");
+        expect(forceButton(discordMessage("x", "hola"))!.label).toBe("Add AI ✦");
 
         vi.setSystemTime(new Date(Date.now() + 25 * 60 * 60 * 1_000));
         relayAnswers(1);
@@ -4170,7 +4173,7 @@ describe("the debugLogging setting", () => {
                     ? {
                         ok: true,
                         results: [{ id: "1", lang: "es", text: "good", skip: false }],
-                        quotaUsed: 3, quotaCap: 3
+                        quotaUsed: 5, quotaCap: 5
                     }
                     : { ok: true, results: [] });
 
@@ -4182,7 +4185,7 @@ describe("the debugLogging setting", () => {
             // of a press that would send nothing (upgradeCopy.ts).
             const sentBefore = native.translateBatch.mock.calls.length;
             const btn = forceButton(discordMessage("2", "que tal"))!;
-            expect(btn.label).toBe("Add AI ✦ (0 of 3 left today)");
+            expect(btn.label).toBe("Add AI ✦");
             btn.onClick!(undefined as any);
             for (let i = 0; i < 20; i++) await Promise.resolve();
 

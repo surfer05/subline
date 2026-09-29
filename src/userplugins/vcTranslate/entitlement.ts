@@ -5,7 +5,7 @@ import * as DataStore from "@api/DataStore";
  *
  * There is no free tier. An install is one of three things:
  *  - "none": nothing is translated; the activation notice is shown;
- *  - "automatic": ≈ Google on every message and surface, decoders, and three
+ *  - "automatic": ≈ Google on every message and surface, decoders, and five
  *    ✦ previews a day on rough ≈ lines;
  *  - "ai": the above plus ✦ on everything (relay, under the saved code).
  *
@@ -31,6 +31,15 @@ export interface Entitlement {
     tokenExpiresAt: number;
     /** When the relay last answered (epoch ms). */
     checkedAt: number;
+    /**
+     * WHO the answer was for: a fingerprint of the saved code and the install
+     * id it was asked with (see holderFor). An answer about a code the reader
+     * has since cleared, or about another install id (Subline uninstalled and
+     * installed again makes a new one, while Discord keeps this store), says
+     * nothing about this install, so it counts as "none" until the relay
+     * answers for the new pair. Absent on answers stored by older builds.
+     */
+    holder?: string;
 }
 
 export const ENTITLEMENT_KEY = "VcTranslate_entitlement";
@@ -38,6 +47,36 @@ export const ENTITLEMENT_KEY = "VcTranslate_entitlement";
 export const ENTITLEMENT_REFRESH_MS = 24 * 60 * 60_000;
 
 let current: Entitlement | null = null;
+/** The fingerprint of the code and install id in use now, once known. */
+let currentHolder: string | null = null;
+
+/**
+ * A short fingerprint of a code and an install id (FNV-1a, 32 bit, twice with
+ * different seeds). Not a secret and not a check against tampering: it only
+ * tells two credentials apart, and it keeps the code itself out of this store.
+ */
+export function holderFor(code: string, installId: string): string {
+    const input = code + "\n" + installId;
+    const fnv = (seed: number) => {
+        let h = seed >>> 0;
+        for (let i = 0; i < input.length; i++) {
+            h ^= input.charCodeAt(i);
+            h = Math.imul(h, 16777619) >>> 0;
+        }
+        return h.toString(16).padStart(8, "0");
+    };
+    return fnv(2166136261) + fnv(84696351);
+}
+
+/** Say which code and install id are in use now (index.tsx, at start and on every code change). */
+export function setCurrentHolder(holder: string | null): void {
+    currentHolder = holder;
+    notify();
+}
+
+export function getCurrentHolder(): string | null {
+    return currentHolder;
+}
 const listeners = new Set<() => void>();
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -56,6 +95,7 @@ export function parseEntitlement(raw: unknown): Entitlement | null {
     };
     if (finite(o.aiUntil) && o.aiUntil > 0) out.aiUntil = o.aiUntil;
     if (typeof o.token === "string" && o.token.length <= 4096) out.token = o.token;
+    if (typeof o.holder === "string" && o.holder.length <= 64) out.holder = o.holder;
     return out;
 }
 
@@ -89,6 +129,8 @@ export function getEntitlement(): Entitlement | null {
 export function entitlementLevel(now: number = Date.now()): Level {
     const e = current;
     if (e === null || now >= e.tokenExpiresAt) return "none";
+    // An answer about a different code or install id is not about this one.
+    if (e.holder !== undefined && currentHolder !== null && e.holder !== currentHolder) return "none";
     const aiLive = e.ai && (e.aiUntil === undefined || now < e.aiUntil);
     if (aiLive) return "ai";
     return e.automatic ? "automatic" : "none";
@@ -108,5 +150,6 @@ function notify(): void {
 /** Test-only: forget the in-memory state (disk is the DataStore stub's business). */
 export function __resetEntitlement(): void {
     current = null;
+    currentHolder = null;
     listeners.clear();
 }

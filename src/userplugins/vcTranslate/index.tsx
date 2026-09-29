@@ -18,7 +18,9 @@ import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
 import { DECODED_TITLE, decodedPrefix, decodeMessage, translatableText } from "./decode";
 import { isConfidentlyTargetLanguage } from "./detectLang";
-import { entitlementLevel, ENTITLEMENT_REFRESH_MS, loadEntitlement, setEntitlement } from "./entitlement";
+import {
+    entitlementLevel, ENTITLEMENT_REFRESH_MS, holderFor, loadEntitlement, setCurrentHolder, setEntitlement
+} from "./entitlement";
 import { previewDiffers, previewText, PRICING_URL } from "./freePlan";
 import {
     acquireSlot, loadRateGateTuning, rateGateAvailable, rateGateSettings, rateGateWaitMs,
@@ -30,8 +32,8 @@ import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
 import {
-    connectInstallIdSetting, installIdOnce, loadLocalTasteCount, markTasteExhausted, noteTasteSpent, recordTasteQuota,
-    rolloverTasteIfNewUtcDay, TASTE_CAP, tasteBearer, tasteCap, tasteExhausted, tasteLabel
+    connectInstallIdSetting, installIdOnce, knownInstallId, loadLocalTasteCount, markTasteExhausted, noteTasteSpent, recordTasteQuota,
+    rolloverTasteIfNewUtcDay, TASTE_CAP, tasteBearer, tasteCap, tasteExhausted, tasteLabel, tasteRemaining
 } from "./taste";
 import {
     recordError, recordPluginLoaded, recordRendered, recordTranslation, resetStatusBeacon
@@ -711,20 +713,36 @@ const OFFLINE_GRACE_MS = 7 * 24 * 60 * 60_000;
  * linked purchase: it cannot say what this install owns.
  */
 function applyStatus(res: Extract<Awaited<ReturnType<typeof Native.relayStatus>>, { ok: true; }>): boolean {
+    // The code first: the answer is then stored for the code it is about.
+    const linked = res.code ?? res.purchase?.code;
+    const saved = linked !== undefined ? adoptCode(linked) : false;
     if (typeof res.automatic === "boolean") {
         const now = Date.now();
+        const holder = currentHolderNow();
         setEntitlement({
             automatic: res.automatic,
             ai: res.ai === true,
             ...(res.aiUntil !== undefined ? { aiUntil: res.aiUntil } : {}),
             ...(res.token !== undefined ? { token: res.token } : {}),
             tokenExpiresAt: res.tokenExpiresAt ?? now + OFFLINE_GRACE_MS,
-            checkedAt: now
+            checkedAt: now,
+            ...(holder !== null ? { holder } : {})
         });
         if (res.previews !== undefined) recordTasteQuota(res.previews.used, res.previews.cap);
     }
-    const linked = res.code ?? res.purchase?.code;
-    return linked !== undefined ? adoptCode(linked) : false;
+    return saved;
+}
+
+/**
+ * The fingerprint of the saved code and this install id, recorded as the
+ * current one (entitlement.ts). Null only before the install id is known.
+ */
+function currentHolderNow(): string | null {
+    const id = knownInstallId();
+    if (id === null) return null;
+    const h = holderFor(savedCode(), id);
+    setCurrentHolder(h);
+    return h;
 }
 
 /** The plan and code the "You're on." notice was last shown for. */
@@ -2024,7 +2042,7 @@ async function forceQualityTranslate(message: Message): Promise<void> {
     // between render and click, so check again rather than trust stale props.
     if (!isLlmEngine(engine)) {
         // ...unless this is an Automatic owner, where ⚡ asks for a ✦
-        // PREVIEW, from the same three a day as "Preview ✦" on a rough line.
+        // PREVIEW, from the same five a day as "Preview ✦" on a rough line.
         // Checked after the engine, so an AI install pinned to Google by a
         // rejected code still takes the branch below and gets its own error.
         if (isAutomaticOnly()) {
@@ -2151,7 +2169,7 @@ async function previewPress(message: Message): Promise<void> {
  * Ask the relay what ✦ reads this message as, in PREVIEW mode: the relay
  * translates it for real and returns only the first few words, and this
  * client cuts whatever comes back by the same rule, so an Automatic owner
- * never gets the full ✦ line. Three a day. When the three are gone nothing is
+ * never gets the full ✦ line. Five a day. When the five are gone nothing is
  * sent and nothing is said: the ⚡ label already counts down.
  */
 async function requestPreview(message: Message, text: string, googleText: string | null): Promise<void> {
@@ -3160,7 +3178,7 @@ function translationLines(message: Message) {
                 style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}
                 title={llmComing
                     ? "The quick translator (Google) didn't answer, so the quality engine is translating this message instead."
-                    : "Google's translator is busy right now. Subline retries on its own."}
+                    : UPGRADE_COPY.googleBusy}
             >
                 {llmComing ? "⏳ translating…" : "⏳ waiting for the translator…"}
                 {forcing && " · ⚡ translating…"}
@@ -3196,7 +3214,7 @@ function translationLines(message: Message) {
     // than it is. A paid install keeps the "?" it always had.
     const rough = unsure && isAutomaticOnly();
     // An Automatic owner can ask what ✦ reads a rough line as, three times a
-    // day. Offered once per message, and not once today's three are used.
+    // day. Offered once per message, and not once today's five are used.
     const offerPreview = rough && !forcing && !previews.has(message.id) && !previewAsked.has(message.id) && !tasteExhausted();
     // No label at all for "und", "zxx" or anything that names no language.
     const label = languageLabel(entry.lang);
@@ -3311,7 +3329,7 @@ function forceQualityPopoverRender(message: Message) {
     if (!activated()) return null;
     const engine = effectiveEngine();
     // An Automatic owner gets the button too: a ✦ PREVIEW, from the same
-    // three a day as "Preview ✦" on a rough ≈ line.
+    // five a day as "Preview ✦" on a rough ≈ line.
     const preview = !isLlmEngine(engine) && isAutomaticOnly();
     if (!isLlmEngine(engine) && !preview) return null;
 
@@ -3319,14 +3337,14 @@ function forceQualityPopoverRender(message: Message) {
     if (hasQualityVerdict(key)) return null;
 
     if (preview) {
-        // A new UTC day is a new three, so yesterday's "used up" never
+        // A new UTC day is a new five, so yesterday's "used up" never
         // outlives midnight on the button.
         if (rolloverTasteIfNewUtcDay()) void refreshEntitlement();
         if (tasteExhausted()) {
-            // Today's three are used, so a press would send nothing. Offer the
+            // Today's five are used, so a press would send nothing. Offer the
             // one thing that does help: the Add AI panel.
             return {
-                label: `${UPGRADE_COPY.popoverUpgrade} (${tasteLabel()})`,
+                label: UPGRADE_COPY.popoverUpgrade,
                 icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
                 message,
                 channel,
@@ -3337,7 +3355,7 @@ function forceQualityPopoverRender(message: Message) {
         // again would spend another of the three for the same answer.
         if (previews.has(message.id) || previewAsked.has(message.id)) return null;
         return {
-            label: `${UPGRADE_COPY.popoverPreview} (${tasteLabel()})`,
+            label: UPGRADE_COPY.popoverPreview.replace("{n}", String(tasteRemaining())),
             icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
             message,
             channel,
@@ -4199,6 +4217,10 @@ export default definePlugin({
         // Until it answers, the stored answer stands until it runs out
         // (entitlement.ts). An install with nothing gets the activation notice
         // once the relay has answered, or failed to.
+        // Whose answer is stored matters: a code cleared since, or a new
+        // install id after Subline was removed and installed again, makes the
+        // stored answer about someone else (entitlement.ts holder).
+        setCurrentHolder(holderFor(savedCode(), await installIdOnce()));
         await loadEntitlement();
         void refreshEntitlement();
         entitlementTimer = setInterval(() => { void refreshEntitlement(); }, ENTITLEMENT_REFRESH_MS);
@@ -4207,7 +4229,7 @@ export default definePlugin({
         // below, so the first translation of the session is counted into the
         // week it belongs to.
         await loadWeeklyStats();
-        // The client's own count of today's three (a second guard; taste.ts).
+        // The client's own count of today's five (a second guard; taste.ts).
         await loadLocalTasteCount();
         showWeeklyNoteIfDue();
 
@@ -4249,6 +4271,9 @@ export default definePlugin({
             const changed = code !== lastCode;
             if (changed && code === "" && lastCode !== "") settings.store.clearedPurchaseCode = lastCode;
             lastCode = code;
+            // What the relay said about the old code is not about the new one:
+            // until it answers again, the stored answer counts for nothing.
+            if (changed) currentHolderNow();
             rebuildBatcher();
             if (changed) {
                 void refreshEntitlement();
