@@ -64,6 +64,11 @@ import type { AwaitVerifyOptions, VerificationReport } from "../verify/verify.js
  */
 const SETTLE_BEFORE_LAUNCH_MS = 2_500;
 
+/** The tiers screen: the two paid plans. `**` is bold. */
+export const TIERS_DETAIL =
+    "≈ is Google Translate, under every message. ✦ is an AI that reads the conversation, so slang and "
+    + "replies come out right. **Automatic** gives you ≈ for $4.99, once. **AI** adds ✦ for $1.99 a month.";
+
 
 /**
  * Everything a `PatcherError` knows, as log fields.
@@ -308,6 +313,8 @@ export interface FlowPorts {
     savedSublineCode(): string | null;
     /** The install id already in the settings, or null. Read only. */
     savedInstallId(): string | null;
+    /** A code the reader cleared in Subline's settings, never saved again; null for none. Read only. */
+    clearedCode(): string | null;
     /** The install id, created and written into the settings if there is none. */
     ensureInstallId(): Result<string>;
     /** The relay: checkout, status, redeem. */
@@ -476,9 +483,7 @@ export class InstallFlow {
                 return this.set(state({
                     step: "tiers",
                     // Paid only: Automatic once, AI on top. `**` is bold.
-                    detail: "≈ is Google Translate: instant, under every message. ✦ is an AI that reads the "
-                        + "conversation around a message, so slang and replies come out right. **Automatic** is "
-                        + "$4.99, once, and gives you ≈ everywhere. **AI** adds ✦ for $2.49 a month.",
+                    detail: TIERS_DETAIL,
                     actions: ["next", "cancel"]
                 }));
 
@@ -1105,7 +1110,7 @@ export class InstallFlow {
     }
 
     /**
-     * "Buy Automatic, $4.99": a relay checkout for this install, opened in the
+     * "Buy for $4.99": a relay checkout for this install, opened in the
      * browser (the static link when the relay could not make one), then the
      * relay is asked every few seconds until the purchase lands. No timeout:
      * the screen waits until the purchase or Back, like the permission wait.
@@ -1187,6 +1192,14 @@ export class InstallFlow {
         const answer = await this.ports.relay.status(installBearer(id), id);
         this.ports.log.info("activation.install-check", { result: answer.kind, automatic: answer.kind === "ok" ? answer.automatic : null });
         if (answer.kind === "unreachable") return this.checkFailed(answer.cause);
+        // The relay can hand back a code the reader cleared in Subline's
+        // settings (it keeps a purchase linked to the install for 30 days).
+        // Clearing was their decision: never save it again and never skip the
+        // activation screen on its strength.
+        if (answer.kind === "ok" && answer.code !== null && answer.code === this.ports.clearedCode()) {
+            this.ports.log.info("activation.cleared-code-ignored", {});
+            return this.codeStep();
+        }
         if (answer.kind === "ok" && answer.automatic) return this.saveConfirmedCode(answer.code, answer.ai);
         return this.codeStep();
     }

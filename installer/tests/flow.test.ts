@@ -134,6 +134,7 @@ interface Script {
     savedCode?: string | null;
     /** An install id already in the settings. */
     savedInstallId?: string | null;
+    clearedCode?: string | null;
     ensureInstallId?: Result<string>;
     /** The relay. Status may be scripted per call (the last entry repeats). */
     relayStatus?: StatusAnswer | StatusAnswer[];
@@ -243,6 +244,7 @@ function harness(script: Script = {}): Harness {
         hasSublineCode: () => script.hasSublineCode ?? (script.savedCode != null),
         savedSublineCode: () => script.savedCode !== undefined ? script.savedCode : (script.hasSublineCode ? "slp_savedcode" : null),
         savedInstallId: () => script.savedInstallId ?? null,
+        clearedCode: () => script.clearedCode ?? null,
         ensureInstallId: () => {
             h.installIdWrites += 1;
             return script.ensureInstallId ?? { ok: true, value: script.savedInstallId ?? TEST_INSTALL_ID };
@@ -395,9 +397,8 @@ describe("the happy path", () => {
 
         expect(tiers.step).toBe("tiers");
         expect(tiers.detail).toBe(
-            "≈ is Google Translate: instant, under every message. ✦ is an AI that reads the conversation around "
-            + "a message, so slang and replies come out right. **Automatic** is $4.99, once, and gives you ≈ "
-            + "everywhere. **AI** adds ✦ for $2.49 a month."
+            "≈ is Google Translate, under every message. ✦ is an AI that reads the conversation, so slang and "
+            + "replies come out right. **Automatic** gives you ≈ for $4.99, once. **AI** adds ✦ for $1.99 a month."
         );
         expect(tiers.detail).not.toMatch(/free|trial|7 days/i);
     });
@@ -1222,6 +1223,20 @@ describe("the activation screen (paid only)", () => {
         });
     }
 
+    it("a brief outage on redeem: the retry message, then the same code works on the next try", async () => {
+        const script: { relayRedeem?: RedeemAnswer } = { relayRedeem: { kind: "unreachable", cause: "fetch failed" } };
+        const h = harness(script);
+        await toCodeStep(h);
+        const first = await h.flow.send({ type: "set-code", code: "MYSERVER" });
+        expect(first.step).toBe("choose-code");
+        expect(first.detail).toBe("Can't reach Subline right now. Try again in a minute.");
+        expect(h.patchCalls).toHaveLength(0);
+        delete script.relayRedeem;
+        const second = await h.flow.send({ type: "set-code", code: "MYSERVER" });
+        expect(h.codeWrites).toEqual(["slp_promominted"]);
+        expect(second.step).toBe("done");
+    });
+
     it("the exact copy for redeem errors is the owner's", () => {
         expect(CODE_SCREEN_COPY.errClaimed).toBe("This code has been fully claimed.");
         expect(CODE_SCREEN_COPY.errNotFound).toBe("That code doesn't exist.");
@@ -1314,6 +1329,21 @@ describe("the activation screen (paid only)", () => {
         expect(seen).not.toContain("choose-code");
         expect(h.codeWrites).toEqual(["slp_early"]);
         expect(next.step).toBe("done");
+    });
+
+    it("a reinstall never brings back a code the reader cleared, and shows the activation screen", async () => {
+        // The reader cleared their code in Subline's settings, then reinstalled
+        // keeping settings: the relay still links the purchase to this install id.
+        const h = harness({
+            savedInstallId: "fedcba9876543210fedcba9876543210",
+            clearedCode: "LICENSE-OLD",
+            relayStatus: { kind: "ok", automatic: true, ai: true, code: "LICENSE-OLD" }
+        });
+        await toDetection(h);
+        const next = await h.flow.send({ type: "set-language", code: "tr" });
+        expect(next.step).toBe("choose-code");
+        expect(h.codeWrites).toEqual([]);
+        expect(h.patchCalls).toHaveLength(0);
     });
 
     it("an install id the relay does not know as activated gets the activation screen", async () => {

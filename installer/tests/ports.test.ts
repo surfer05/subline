@@ -379,3 +379,35 @@ describe("paths", () => {
         expect(linux.productDir).toBeNull();
     });
 });
+
+describe("opening a checkout on Windows", () => {
+    it("hands the exact URL, & and all, to shell.openExternal and never to cmd.exe", async () => {
+        const opened: string[] = [];
+        const execCalls: string[] = [];
+        const p = createFlowPorts({
+            appResourcesPath: appResources,
+            productVersion: "0.1.0",
+            log: { info: () => {}, warn: () => {}, error: () => {} },
+            platform: "win32",
+            env: { APPDATA: join(home, "AppData", "Roaming"), LOCALAPPDATA: join(home, "AppData", "Local") },
+            home,
+            searchRoots: [discord.root],
+            helper: helperWiring(),
+            relay: {
+                checkout: async () => ({ kind: "failed" as const, cause: "test" }),
+                status: async () => ({ kind: "ok" as const, automatic: false, ai: false, code: null }),
+                redeem: async () => ({ kind: "not_found" as const })
+            },
+            openExternal: async url => { opened.push(url); },
+            exec: async (file: string) => { execCalls.push(file); return { stdout: "" }; }
+        });
+        const url = "https://checkout.dodopayments.com/buy/pdt_AUTOMATIC_PENDING?quantity=1&metadata_install=0123456789abcdef"
+            + "&redirect_url=https%3A%2F%2Fsurfer05.github.io%2Fsubline%2F%3Ffrom%3Ddiscord";
+        await p.openCheckout(url);
+        expect(opened).toEqual([url]);
+        expect(execCalls).toEqual([]);
+        // Not https: nothing is opened at all.
+        await p.openCheckout("http://checkout.dodopayments.com/x?a=1&b=2");
+        expect(opened).toHaveLength(1);
+    });
+});

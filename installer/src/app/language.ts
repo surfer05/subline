@@ -569,3 +569,25 @@ export function ensureRelayEngine(settingsPath: string | null): Result<EnsureRel
     if (!written.ok) return written as Result<EnsureRelayEngineReport>;
     return ok({ changed: true, previous });
 }
+
+/**
+ * The code the reader cleared in Subline's settings inside Discord
+ * (`plugins.VcTranslate.clearedPurchaseCode`, written by the plugin), or null.
+ * The relay keeps a purchase linked to the install for 30 days, so a status
+ * answer can hand that very code back. The installer must never save it again:
+ * clearing a code is the reader's decision, and a reinstall must not undo it.
+ */
+export const CLEARED_CODE_KEY = "clearedPurchaseCode";
+
+export function readClearedCode(settingsPath: string | null): string | null {
+    if (settingsPath === null || !existsSync(settingsPath)) return null;
+    try {
+        const parsed: unknown = JSON.parse(readFileSync(settingsPath, "utf8"));
+        const plugins = (parsed as { plugins?: Record<string, unknown> } | null)?.plugins;
+        const plugin = plugins?.[PLUGIN_SETTINGS_KEY] as Record<string, unknown> | undefined;
+        const value = plugin?.[CLEARED_CODE_KEY];
+        return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+    } catch {
+        return null;
+    }
+}

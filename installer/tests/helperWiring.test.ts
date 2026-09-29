@@ -368,6 +368,7 @@ describe("the install flow installs the helper", () => {
             hasSublineCode: () => false,
             savedSublineCode: () => null,
             savedInstallId: () => null,
+            clearedCode: () => null,
             ensureInstallId: () => ({ ok: true as const, value: "0123456789abcdef0123456789abcdef" }),
             relay: {
                 checkout: async () => ({ kind: "ok" as const, url: "https://checkout.dodopayments.com/session/cks_test" }),
