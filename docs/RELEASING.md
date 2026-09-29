@@ -49,6 +49,12 @@ SUBLINE_SIGN=1 SUBLINE_NOTARIZE=1 pnpm dist:mac
 
 The paid-only release. Do these in order.
 
+0. **Create the Automatic product in Dodo correctly.** One-time payment,
+   $4.99, with **License Keys enabled** and no key expiry. Without the License
+   Key entitlement Dodo sends no `license_key.created`, the relay mints no
+   code, and every buyer pays and waits forever. Confirm the webhook endpoint
+   subscribes to `license_key.created` and `payment.*`.
+
 1. **Put the real Automatic product id in, in all 4 places**, replacing
    `pdt_AUTOMATIC_PENDING`:
    - `relay/wrangler.jsonc` (VARIANTS, plan `automatic`)
@@ -58,6 +64,10 @@ The paid-only release. Do these in order.
 
    Then redeploy the relay: `cd relay && npx wrangler deploy`, and smoke-test
    that `/v1/checkout` for plan `automatic` returns a `dodopayments.com` URL.
+   Then do one real end-to-end purchase of Automatic from a test install
+   (the 100% coupon only covers monthly AI, so this is a real $4.99 charge):
+   check the install activates with "Plan: Automatic", then refund it in
+   Dodo and check the relay revokes it.
    The placeholder tests in all three packages, `release.mjs` and
    `buildSite.mjs` refuse to go on while the placeholder is anywhere.
 2. **Reconcile the monthly price in Dodo** with the copy: AI monthly is
