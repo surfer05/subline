@@ -78,7 +78,7 @@ the plugin asks at start and every 24 hours).
   Automatic, or enter a code (a server's promo code is redeemed on
   `/v1/redeem`; anything else is checked as a license key first).
 - **Automatic** ($4.99 once): ≈ Google on every message and surface (tight
-  surfaces show ≈ in place), local decoders, and three ✦ previews a day on
+  surfaces show ≈ in place), local decoders, and five ✦ previews a day on
   rough ≈ lines ("Preview ✦", or ⚡).
 - **AI** (monthly or annual, on top of Automatic): ✦ on everything, under the
   saved code.

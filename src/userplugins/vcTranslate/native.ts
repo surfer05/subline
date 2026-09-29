@@ -4,7 +4,8 @@ import { translateWithClaude, TRUNCATED_ERROR } from "./engines/claude";
 import { translateWithGemini } from "./engines/gemini";
 import { translateWithGoogle } from "./engines/google";
 import { translateWithGroq } from "./engines/groq";
-import { fetchRelayCheckout, fetchRelayRedeem, fetchRelayStatus, translateWithRelayDetailed } from "./engines/relay";
+import { fetchRelayCheckout, fetchRelayRedeem, fetchRelayStatus, type StatusOptions, translateWithRelayDetailed } from "./engines/relay";
+import { HttpError } from "./httpError";
 import type { ProviderRateLimit } from "./rateHint";
 import { withRetry } from "./retry";
 import { readStagedBuildIdSync } from "./stagedBuild";
@@ -41,7 +42,7 @@ export type NativeResponse =
         quotaLimitPerMinute?: number;
         /**
          * The TASTE tier's daily count, as the relay stated it on this
-         * success: `quotaUsed` messages spent today out of `quotaCap` (three).
+         * success: `quotaUsed` previews spent today out of `quotaCap` (five).
          *
          * Same route and same reason as `quotaLimitPerMinute` above — the
          * engine is the only code that ever sees a Response — but a different
@@ -298,17 +299,27 @@ export type RelayStatusResponse =
         /* v2: present together when the relay speaks the paid-only model. */
         automatic?: boolean; ai?: boolean; aiUntil?: number; code?: string;
         previews?: { used: number; cap: number }; token?: string; tokenExpiresAt?: number;
+        deadCode?: string; grant?: "early"; check?: { valid: boolean; automatic: boolean; ai: boolean };
     }
-    | { ok: false; error: string; errorCode?: string };
+    | { ok: false; error: string; errorCode?: string; status?: number };
 
-export type RelayCheckoutResponse = { ok: true; url: string } | { ok: false; error: string; errorCode?: string };
+/**
+ * `status` is the relay's HTTP status when it answered at all. Absent means
+ * the request never got an answer (offline, DNS, timeout): the only case in
+ * which the static checkout link may be tried.
+ */
+export type RelayCheckoutResponse = { ok: true; url: string } | { ok: false; error: string; errorCode?: string; status?: number };
 
-export type RelayRedeemResponse = { ok: true; code: string } | { ok: false; error: string; errorCode?: string };
+export type RelayRedeemResponse = { ok: true; code: string } | { ok: false; error: string; errorCode?: string; status?: number };
 
-/** The relay's error word off a thrown HttpError, if it had one. */
-function errorCodeOf(err: unknown): { errorCode?: string } {
+/** The relay's error word and HTTP status off a thrown HttpError, if it had them. */
+function errorCodeOf(err: unknown): { errorCode?: string; status?: number } {
     const c = (err as { errorCode?: unknown })?.errorCode;
-    return typeof c === "string" ? { errorCode: c } : {};
+    const s = err instanceof HttpError ? err.status : undefined;
+    return {
+        ...(typeof c === "string" ? { errorCode: c } : {}),
+        ...(typeof s === "number" && s > 0 ? { status: s } : {})
+    };
 }
 
 /**
@@ -361,15 +372,19 @@ export async function relayCheckout(
  *
  * Never throws: an unreachable status endpoint means "count unknown", and the
  * renderer treats unknown as "tastes may still be available" rather than taking
- * a free user's three away over a transient network fault.
+ * a paid install's plan away over a transient network fault.
  */
 export async function relayStatus(
     _: IpcMainInvokeEvent,
     code: string,
-    install?: string
+    install?: string,
+    options?: StatusOptions
 ): Promise<RelayStatusResponse> {
     try {
-        const status = await fetchRelayStatus(code, fetch, install);
+        const status = await fetchRelayStatus(code, fetch, install, {
+            prior: options?.prior === true,
+            check: options?.check === true
+        });
         const out: RelayStatusResponse = { ok: true, plan: status.plan, used: status.used, cap: status.cap };
         if (status.serverNow !== undefined) out.serverNow = status.serverNow;
         if (status.purchase !== undefined) out.purchase = status.purchase;
@@ -381,6 +396,9 @@ export async function relayStatus(
             if (status.previews !== undefined) out.previews = status.previews;
             if (status.token !== undefined) out.token = status.token;
             if (status.tokenExpiresAt !== undefined) out.tokenExpiresAt = status.tokenExpiresAt;
+            if (status.deadCode !== undefined) out.deadCode = status.deadCode;
+            if (status.grant !== undefined) out.grant = status.grant;
+            if (status.check !== undefined) out.check = status.check;
         }
         return out;
     } catch (err) {

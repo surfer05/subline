@@ -60,6 +60,8 @@ export interface SurfaceDeps {
     budget?: { remaining(): number; spend(units: number): void; };
     /** At most this many relay requests per minute for surfaces (default 4). */
     maxQualityPerMinute?: number;
+    /** At most this many Google requests per minute for surfaces (default 60). */
+    maxFastPerMinute?: number;
     maxBatchBytes?: number;
     fastDebounceMs?: number;
     qualityDebounceMs?: number;
@@ -87,6 +89,12 @@ function byteLength(text: string): number {
 export const SURFACE_FAIL_RETRY_MS = 10 * 60_000;
 export const SURFACE_NOT_NOW_RETRY_MS = 60_000;
 export const SURFACE_MAX_QUALITY_PER_MINUTE = 4;
+/**
+ * Google is free to us, but a member list or a busy server can want hundreds
+ * of statuses at once, and Google answers a burst with 429s. Surfaces take at
+ * most this many Google requests a minute, one at a time.
+ */
+export const SURFACE_MAX_FAST_PER_MINUTE = 60;
 const MINUTE_MS = 60_000;
 
 export interface WantOptions {
@@ -108,8 +116,14 @@ export class SurfaceService {
     private generation = 0;
     /** Requests actually sent, per tier. For tests and debug logging. */
     readonly sent: Record<SurfaceTier, number> = { fast: 0, quality: 0 };
-    /** When each recent surface relay request left, for the per-minute cap. */
-    private qualitySends: number[] = [];
+    /** When each recent surface request left, per tier, for the per-minute caps. */
+    private readonly sends: Record<SurfaceTier, number[]> = { fast: [], quality: [] };
+    /**
+     * A request of this tier is out. The next batch is armed only when it
+     * comes back: one request at a time per tier, never a burst of parallel
+     * ones while the first is still waiting on Google.
+     */
+    private readonly busy: Record<SurfaceTier, boolean> = { fast: false, quality: false };
 
     constructor(private readonly deps: SurfaceDeps) { }
 
@@ -155,9 +169,10 @@ export class SurfaceService {
             this.pending[tier].clear();
             this.inFlight[tier].clear();
             this.retryAt[tier].clear();
+            this.sends[tier] = [];
+            this.busy[tier] = false;
         }
         this.listeners.clear();
-        this.qualitySends = [];
     }
 
     private queue(tier: SurfaceTier, key: string, text: string): void {
@@ -169,7 +184,7 @@ export class SurfaceService {
     }
 
     private arm(tier: SurfaceTier, atLeastMs = 0): void {
-        if (this.timers[tier] !== null) return;
+        if (this.timers[tier] !== null || this.busy[tier]) return;
         const ms = Math.max(atLeastMs, tier === "fast"
             ? this.deps.fastDebounceMs ?? SURFACE_FAST_DEBOUNCE_MS
             : this.deps.qualityDebounceMs ?? SURFACE_QUALITY_DEBOUNCE_MS);
@@ -197,13 +212,18 @@ export class SurfaceService {
                 queue.clear();
                 return;
             }
-            // At most `maxQualityPerMinute` surface requests a minute. A full
-            // window waits for its oldest request to age out.
+        }
+        // At most `maxQualityPerMinute` relay requests and `maxFastPerMinute`
+        // Google requests a minute. A full window waits for its oldest
+        // request to age out.
+        {
             const now = this.deps.now();
-            this.qualitySends = this.qualitySends.filter(t => now - t < MINUTE_MS);
-            const cap = this.deps.maxQualityPerMinute ?? SURFACE_MAX_QUALITY_PER_MINUTE;
-            if (this.qualitySends.length >= cap) {
-                this.arm(tier, this.qualitySends[0] + MINUTE_MS - now);
+            this.sends[tier] = this.sends[tier].filter(t => now - t < MINUTE_MS);
+            const cap = tier === "quality"
+                ? this.deps.maxQualityPerMinute ?? SURFACE_MAX_QUALITY_PER_MINUTE
+                : this.deps.maxFastPerMinute ?? SURFACE_MAX_FAST_PER_MINUTE;
+            if (this.sends[tier].length >= cap) {
+                this.arm(tier, this.sends[tier][0] + MINUTE_MS - now);
                 return;
             }
         }
@@ -227,15 +247,14 @@ export class SurfaceService {
             units += cost;
         }
         if (batch.length === 0) return;
-        if (tier === "quality") this.qualitySends.push(this.deps.now());
+        this.sends[tier].push(this.deps.now());
         for (const [key] of batch) {
             queue.delete(key);
             this.inFlight[tier].add(key);
         }
-        // Whatever did not fit leaves in the next request.
-        if (queue.size > 0) this.arm(tier);
 
         const generation = this.generation;
+        this.busy[tier] = true;
         const texts = batch.map(([, text]) => text);
         this.sent[tier]++;
         this.deps.debug?.(`[surface] ${tier}: ${texts.length} text(s) in one request`);
@@ -246,6 +265,10 @@ export class SurfaceService {
             outcome = null;
         }
         if (generation !== this.generation) return;
+        this.busy[tier] = false;
+        // Whatever did not fit, or was asked for meanwhile, leaves in the next
+        // request, armed only now that this one is back.
+        if (this.pending[tier].size > 0) this.arm(tier);
         if (tier === "quality" && outcome !== null) this.deps.budget?.spend(units);
 
         const now = this.deps.now();

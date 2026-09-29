@@ -16,7 +16,7 @@ const native = vi.hoisted(() => {
 });
 
 import plugin, { FORCE_QUALITY_POPOVER_ID, __surfaceService } from "../index";
-import { AUTOMATIC_PRODUCT_ID, POLL_EVERY_MS } from "../checkout";
+import { AUTOMATIC_PRODUCT_ID, isConfiguredProduct, POLL_EVERY_MS } from "../checkout";
 import { ENTITLEMENT_REFRESH_MS, holderFor, __resetEntitlement } from "../entitlement";
 import type { NativeResponse } from "../native";
 import settings from "../settings";
@@ -38,7 +38,7 @@ import {
  *   - an install with nothing translates nothing and shows one activation
  *     notice, whose Activate button opens the Activate panel (buy Automatic,
  *     or enter a code);
- *   - Automatic: ≈ Google on every message, and three ✦ previews a day on
+ *   - Automatic: ≈ Google on every message, and five ✦ previews a day on
  *     rough ≈ lines (a "Preview ✦" link, or ⚡);
  *   - AI: ✦ on everything, as a paid install always had;
  *   - what the install owns comes from the relay's v2 /v1/status, is kept on
@@ -264,16 +264,34 @@ describe("an install that owns nothing", () => {
         expect(calls("relay")).toHaveLength(0);
     });
 
-    it("opens the static Automatic link, tagged with the install, when the relay cannot make a checkout", async () => {
-        native.relayCheckout.mockResolvedValue({ ok: false, error: "relay checkout: HTTP 503 checkout unavailable" });
+    it("opens nothing and says buying isn't available when the relay answers checkout unavailable", async () => {
+        native.relayCheckout.mockResolvedValue({
+            ok: false, error: "relay checkout: HTTP 503", errorCode: "checkout_unavailable", status: 503
+        });
         await startNotActivated();
         activationNotices()[0]!.onOkClick();
         lastModal().el.props.actions[1].onClick();
-        // The install hash is a real SHA-256 (crypto.subtle), not a microtask.
-        await vi.waitFor(() => expect(native.openExternal).toHaveBeenCalled());
-        const url = new URL(native.openExternal.mock.calls[0]![0]);
-        expect(url.pathname).toBe(`/buy/${AUTOMATIC_PRODUCT_ID}`);
-        expect(url.searchParams.get("metadata_install")).toMatch(/^[0-9a-f]{16}$/);
+        await vi.waitFor(() => expect(shownToasts.map(t => t.message))
+            .toContain("Buying isn't available yet. Use a code, or try again later."));
+        expect(native.openExternal).not.toHaveBeenCalled();
+    });
+
+    it("with the relay unreachable, opens the static Automatic link only once the product is set up", async () => {
+        native.relayCheckout.mockResolvedValue({ ok: false, error: "fetch failed" });
+        await startNotActivated();
+        activationNotices()[0]!.onOkClick();
+        lastModal().el.props.actions[1].onClick();
+        await vi.waitFor(() => expect(native.openExternal.mock.calls.length + shownToasts.length).toBeGreaterThan(0));
+        if (isConfiguredProduct(AUTOMATIC_PRODUCT_ID)) {
+            // The install hash is a real SHA-256 (crypto.subtle), not a microtask.
+            await vi.waitFor(() => expect(native.openExternal).toHaveBeenCalled());
+            const url = new URL(native.openExternal.mock.calls[0]![0]);
+            expect(url.pathname).toBe(`/buy/${AUTOMATIC_PRODUCT_ID}`);
+            expect(url.searchParams.get("metadata_install")).toMatch(/^[0-9a-f]{16}$/);
+        } else {
+            expect(native.openExternal).not.toHaveBeenCalled();
+            expect(shownToasts.map(t => t.message)).toContain("Buying isn't available yet. Use a code, or try again later.");
+        }
     });
 });
 
@@ -346,7 +364,8 @@ describe("what the install owns, from the relay", () => {
         native.relayStatus.mockResolvedValue({ ok: false, error: "relay: HTTP 403 device_limit", errorCode: "device_limit" });
         await plugin.start!();
         await flush();
-        expect(shownNotices.map(n => n.message)).toContain("This code is already used on 3 computers.");
+        expect(shownNotices.map(n => n.message))
+            .toContain("This code is on 3 computers already. It frees up after 30 days unused, or ask us to reset it.");
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
         await settle();
         expect(calls()).toHaveLength(0);
@@ -437,16 +456,42 @@ describe("entering a code", () => {
         expect(failures()).toEqual(["Can't reach Subline right now. Try again in a minute."]);
     });
 
-    it("checks a license key with the relay first, then saves it", async () => {
+    it("checks a typed key without linking it, asks, and only links it once confirmed", async () => {
         await startNotActivated();
-        native.relayStatus.mockResolvedValue(v2({ automatic: true }));
+        native.relayStatus.mockResolvedValue({ ...v2({ automatic: true }), check: { valid: true, automatic: true, ai: false } });
+        const asked = native.relayStatus.mock.calls.length;
         const { onClose } = await enter("abcd-1234-efgh-5678");
-        const last = native.relayStatus.mock.calls[native.relayStatus.mock.calls.length - 1]!;
-        expect(last[0]).toBe("abcd-1234-efgh-5678");
+        // One check-only call, with x-subline-check, and nothing saved yet.
+        expect(native.relayStatus.mock.calls.length).toBe(asked + 1);
+        const check = native.relayStatus.mock.calls[asked]!;
+        expect(check[0]).toBe("abcd-1234-efgh-5678");
+        expect(check[2]).toEqual({ check: true });
+        expect(settings.store.sublineCode).toBe("");
+        expect(onClose).toHaveBeenCalled();
+        const confirm = lastModal();
+        expect(confirm.el.props.title).toBe("This code works");
+        expect(confirm.el.props.subtitle).toBe("Use it on this computer? Each code works on up to 3 computers.");
+        expect(confirm.el.props.actions[0].text).toBe("Use it");
+        confirm.el.props.actions[0].onClick();
+        await flush();
+        // Then the normal, linking status call (no check header).
+        const link = native.relayStatus.mock.calls[asked + 1]!;
+        expect(link[0]).toBe("abcd-1234-efgh-5678");
+        expect(link[2]).toBeUndefined();
         expect(native.relayRedeem).not.toHaveBeenCalled();
         expect(settings.store.sublineCode).toBe("abcd-1234-efgh-5678");
-        expect(onClose).toHaveBeenCalled();
+        expect(confirm.onClose).toHaveBeenCalled();
         expect(onNotices()).toHaveLength(1);
+    });
+
+    it("a checked code that gives nothing is refused before anything is linked", async () => {
+        await startNotActivated();
+        native.relayStatus.mockResolvedValue({ ...v2({ automatic: false }), check: { valid: false, automatic: false, ai: false } });
+        const modals = openedModals.length;
+        await enter("abcd-1234-efgh-5678");
+        expect(failures()).toEqual(["That code doesn't exist."]);
+        expect(openedModals.length).toBe(modals + 2);   // the Activate panel and the code entry, no confirm
+        expect(settings.store.sublineCode).toBe("");
     });
 
     it("says a key does not exist, or is on 3 computers already, and saves nothing", async () => {
@@ -456,7 +501,10 @@ describe("entering a code", () => {
         native.relayStatus.mockResolvedValue({ ok: false, error: "relay: HTTP 403 device_limit", errorCode: "device_limit" });
         lastModal().el.props.actions[0].onClick();
         await flush();
-        expect(failures()).toEqual(["That code doesn't exist.", "This code is already used on 3 computers."]);
+        expect(failures()).toEqual([
+            "That code doesn't exist.",
+            "This code is on 3 computers already. It frees up after 30 days unused, or ask us to reset it."
+        ]);
         expect(settings.store.sublineCode).toBe("");
     });
 
@@ -735,5 +783,162 @@ describe("the Windows test round", () => {
         await settle();
         expect(calls("relay").length).toBeGreaterThan(0);
         expect(calls("relay")[0]![1]).toBe("slp_mac");
+    });
+});
+
+// ---------------------------------------------------------------------------
+describe("the audit round", () => {
+    const DAY = 24 * HOUR;
+    const lastStatusCall = () => native.relayStatus.mock.calls[native.relayStatus.mock.calls.length - 1]!;
+
+    it("a dead code is dropped and marked cleared, and the Automatic code the relay hands back is saved", async () => {
+        DataStore.setEntitlementForTest({ automatic: true, ai: true, tokenExpiresAt: Date.now() + 7 * DAY, checkedAt: Date.now() });
+        settings.store.sublineCode = "LK-AI-GONE";
+        settings.store.engine = "relay";
+        native.relayStatus.mockResolvedValue({ ...v2({ automatic: true, code: "slp_auto9" }), deadCode: "LK-AI-GONE" });
+        await plugin.start!();
+        await flush();
+        expect(settings.store.sublineCode).toBe("slp_auto9");
+        expect(settings.store.clearedPurchaseCode).toBe("LK-AI-GONE");
+        // Automatic survives the AI lapse: ≈ on every message, no ✦.
+        native.relayStatus.mockResolvedValue(v2({ automatic: true }));
+        answer();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal amigo") });
+        await settle();
+        expect(calls("google")).toHaveLength(1);
+        expect(calls("relay")).toHaveLength(0);
+        expect(activationNotices()).toHaveLength(0);
+    });
+
+    it("a dead code with nothing handed back is dropped, and the relay is asked again with the install id", async () => {
+        DataStore.setEntitlementForTest({ automatic: true, ai: true, tokenExpiresAt: Date.now() + 7 * DAY, checkedAt: Date.now() });
+        settings.store.sublineCode = "LK-AI-GONE";
+        settings.store.engine = "relay";
+        native.relayStatus.mockResolvedValue({ ...v2({ automatic: true }), deadCode: "LK-AI-GONE" });
+        await plugin.start!();
+        await flush();
+        expect(settings.store.sublineCode).toBe("");
+        expect(settings.store.clearedPurchaseCode).toBe("LK-AI-GONE");
+        const [credential, install] = lastStatusCall();
+        expect(credential).toMatch(/^free_[0-9a-f]{32}$/);
+        expect(credential).toBe(install);
+        // The dead code never comes back, even if a later answer names it.
+        native.relayStatus.mockResolvedValue(v2({ automatic: true, code: "LK-AI-GONE" }));
+        await vi.advanceTimersByTimeAsync(ENTITLEMENT_REFRESH_MS);
+        await flush();
+        expect(settings.store.sublineCode).toBe("");
+    });
+
+    it("a saved code the relay no longer knows is dropped, and the install id alone is asked (Automatic stays)", async () => {
+        DataStore.setEntitlementForTest({ automatic: true, ai: true, tokenExpiresAt: Date.now() + 7 * DAY, checkedAt: Date.now() });
+        settings.store.sublineCode = "LK-REFUNDED";
+        settings.store.engine = "relay";
+        native.relayStatus.mockImplementation(async (credential: string) => credential === "LK-REFUNDED"
+            ? { ok: false, error: "relay: HTTP 401 invalid_code", errorCode: "invalid_code" }
+            : v2({ automatic: true }));
+        await plugin.start!();
+        await flush();
+        expect(settings.store.sublineCode).toBe("");
+        expect(settings.store.clearedPurchaseCode).toBe("LK-REFUNDED");
+        expect(lastStatusCall()[0]).toMatch(/^free_[0-9a-f]{32}$/);
+        expect(activationNotices()).toHaveLength(0);
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal amigo") });
+        await settle();
+        expect(calls("google")).toHaveLength(1);
+    });
+
+    it("says the install was used before 0.2.0 (a local trial start), once, until the relay has answered", async () => {
+        (settings.store as any).freeTrialStartedAt = Date.now() - 30 * DAY;
+        await startNotActivated();
+        expect(native.relayStatus.mock.calls[0]![2]).toEqual({ prior: true });
+        await vi.advanceTimersByTimeAsync(ENTITLEMENT_REFRESH_MS);
+        await flush();
+        expect(lastStatusCall()[2]).toBeUndefined();
+    });
+
+    it("says so too for an install id that was here before the installer seeded one", async () => {
+        await DataStore.set("VcTranslate_installId", "a".repeat(32));
+        await startNotActivated();
+        expect(native.relayStatus.mock.calls[0]![1]).toBe("free_" + "a".repeat(32));
+        expect(native.relayStatus.mock.calls[0]![2]).toEqual({ prior: true });
+    });
+
+    it("a fresh install sends no prior-use hint", async () => {
+        await startNotActivated();
+        expect(native.relayStatus.mock.calls[0]![2]).toBeUndefined();
+    });
+
+    it("an early user is thanked instead of told they bought something", async () => {
+        DataStore.clearEntitlementForTest();
+        native.relayStatus.mockResolvedValue({ ...v2({ automatic: true, code: "slp_early1" }), grant: "early" });
+        await plugin.start!();
+        await flush();
+        expect(settings.store.sublineCode).toBe("slp_early1");
+        const messages = shownNotices.map(n => n.message);
+        expect(messages).toContain("Thanks for being early. Automatic is yours, free.");
+        expect(messages).not.toContain(UPGRADE_COPY.purchasedNotice);
+    });
+
+    it("a saved code the relay cannot check yet shows the checking notice, never Activate, and keeps retrying", async () => {
+        DataStore.clearEntitlementForTest();
+        settings.store.sublineCode = "LK-SAVED";
+        settings.store.engine = "relay";
+        native.relayStatus.mockResolvedValue({ ok: false, error: "fetch failed" });
+        await plugin.start!();
+        await flush();
+        const checking = () => shownNotices.filter(n => n.message === "Can't reach Subline to check your code. Retrying.");
+        expect(checking()).toHaveLength(1);
+        expect(checking()[0]!.buttonText).toBe("OK");
+        expect(activationNotices()).toHaveLength(0);
+        const asked = native.relayStatus.mock.calls.length;
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flush();
+        expect(native.relayStatus.mock.calls.length).toBe(asked + 1);
+        expect(checking()).toHaveLength(1);   // not shown twice
+        expect(activationNotices()).toHaveLength(0);
+        // The relay answers: the notice comes down and translation starts.
+        native.relayStatus.mockResolvedValue(v2({ automatic: true, ai: true }));
+        await vi.advanceTimersByTimeAsync(15_000);
+        await flush();
+        expect(checking()).toHaveLength(0);
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal amigo") });
+        await settle();
+        expect(calls("google")).toHaveLength(1);
+    });
+
+    for (const [clockName, localOffset] of [["fast", DAY], ["slow", -DAY]] as const) {
+        it(`a ${clockName} local clock: the offline limit is 7 days of real time, measured on the local clock`, async () => {
+            const serverNow = Date.now();
+            vi.setSystemTime(serverNow + localOffset);
+            DataStore.clearEntitlementForTest();
+            native.relayStatus.mockResolvedValue({ ...v2({ automatic: true, tokenExpiresAt: serverNow + 7 * DAY }), serverNow });
+            await plugin.start!();
+            await flush();
+            const { getEntitlement } = await import("../entitlement");
+            expect(getEntitlement()!.tokenExpiresAt).toBe(Date.now() + 7 * DAY);
+        });
+    }
+
+    it("a promo code that is already yours asks the relay what this install owns", async () => {
+        await startNotActivated();
+        native.relayRedeem.mockResolvedValue({ ok: false, error: "relay redeem: HTTP 409", errorCode: "already" });
+        const asked = native.relayStatus.mock.calls.length;
+        activationNotices()[0]!.onOkClick();
+        lastModal().el.props.actions[0].onClick();
+        const { el } = lastModal();
+        el.children.flat().find((c: any) => c?.type === "input").props.onChange({ target: { value: "SERVER1" } });
+        el.props.actions[0].onClick();
+        await flush();
+        expect(native.relayStatus.mock.calls.length).toBe(asked + 1);
+    });
+
+    it("buying Automatic again (409 already owned) asks the relay again", async () => {
+        await startNotActivated();
+        native.relayCheckout.mockResolvedValue({ ok: false, error: "relay checkout: HTTP 409", errorCode: "already_owned", status: 409 });
+        const asked = native.relayStatus.mock.calls.length;
+        activationNotices()[0]!.onOkClick();
+        lastModal().el.props.actions[1].onClick();
+        await vi.waitFor(() => expect(native.relayStatus.mock.calls.length).toBe(asked + 1));
+        expect(native.openExternal).not.toHaveBeenCalled();
     });
 });

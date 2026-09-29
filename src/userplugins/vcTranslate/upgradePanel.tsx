@@ -113,11 +113,45 @@ const INPUT_STYLE = {
 } as const;
 
 /**
- * The code entry. `submit` gets the typed text and resolves null when the
- * code worked (the modal closes) or the sentence to show when it did not
- * (a toast; the modal stays open).
+ * What submitting a code can lead to: null (it worked, the modal closes), the
+ * sentence to show (a toast; the modal stays open), or a code that checked
+ * out and waits for the reader to confirm it on this computer (`confirm`
+ * links it, and resolves like `submit` does).
  */
-export function openCodeEntry(submit: (text: string) => Promise<string | null>): void {
+export type CodeSubmitResult = string | null | { confirm: () => Promise<string | null> };
+
+/** "This code works. Use it on this computer?" with a "Use it" button. */
+function openCodeConfirm(confirm: () => Promise<string | null>): void {
+    let busy = false;
+    try {
+        openModal((props: any) => (
+            <Modal
+                {...props}
+                title={UPGRADE_COPY.codeConfirmTitle}
+                subtitle={UPGRADE_COPY.codeConfirm}
+                actions={[
+                    {
+                        text: UPGRADE_COPY.codeConfirmButton, variant: "primary", onClick: () => {
+                            if (busy) return;
+                            busy = true;
+                            void confirm().then(error => {
+                                if (error === null) props.onClose();
+                                else Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message: error });
+                            }).finally(() => { busy = false; });
+                        }
+                    }
+                ]}
+            />
+        ));
+    } catch {
+        openPricingInstead();
+    }
+}
+
+/**
+ * The code entry. `submit` gets the typed text; see CodeSubmitResult.
+ */
+export function openCodeEntry(submit: (text: string) => Promise<CodeSubmitResult>): void {
     // Outside the render function: Discord renders a modal more than once
     // (its open transition), and the typed text must survive that.
     let value = "";
@@ -128,9 +162,13 @@ export function openCodeEntry(submit: (text: string) => Promise<string | null>):
                 if (busy) return;
                 busy = true;
                 try {
-                    const error = await submit(value);
-                    if (error === null) props.onClose();
-                    else Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message: error });
+                    const result = await submit(value);
+                    if (result === null) props.onClose();
+                    else if (typeof result === "string") Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message: result });
+                    else {
+                        props.onClose();
+                        openCodeConfirm(result.confirm);
+                    }
                 } finally {
                     busy = false;
                 }

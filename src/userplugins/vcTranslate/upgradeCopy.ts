@@ -28,7 +28,16 @@ export const UPGRADE_COPY = {
     codeAlready: "Already yours.",
     codeUnreachable: "Can't reach Subline right now. Try again in a minute.",
     codeRateLimited: "Too many codes from this network today. Try again tomorrow.",
-    deviceLimit: "This code is already used on 3 computers.",
+    deviceLimit: "This code is on 3 computers already. It frees up after 30 days unused, or ask us to reset it.",
+    /** A typed license key or Subline code checked OK, before it is linked to this computer. */
+    codeConfirmTitle: "This code works",
+    codeConfirm: "Use it on this computer? Each code works on up to 3 computers.",
+    codeConfirmButton: "Use it",
+
+    /* ---- a saved code the relay could not check yet ---- */
+    /** A notice while a saved code is unconfirmed because the relay can't be reached. No Activate button. */
+    checkingNotice: "Can't reach Subline to check your code. Retrying.",
+    checkingNoticeButton: "OK",
 
     /* ---- Automatic owners: add AI ---- */
     panelTitle: "Add AI",
@@ -42,6 +51,8 @@ export const UPGRADE_COPY = {
     annualButton: "Yearly $19.99 · 2 months free",
     aiNeedsAutomatic: "AI needs Automatic first.",
     alreadyAutomatic: "You already have Automatic.",
+    /** The relay answered that it cannot sell this right now (no product set up, or the shop is down). */
+    checkoutUnavailable: "Buying isn't available yet. Use a code, or try again later.",
 
     /* ---- shared ---- */
     panelFootnote: "Pay in your browser. Subline switches on here by itself.",
@@ -49,6 +60,8 @@ export const UPGRADE_COPY = {
     /** A notice that stays until dismissed: the buyer is often still in the browser when it lands. */
     purchasedNotice: "You're on. Every message translates by itself now.",
     purchasedNoticeButton: "OK",
+    /** Instead of "You're on." when the relay grants Automatic to an early user. */
+    earlyNotice: "Thanks for being early. Automatic is yours, free.",
 
     /* ---- ✦ previews (Automatic) ---- */
     /** The link on a rough ≈ line that asks for a ✦ preview. */

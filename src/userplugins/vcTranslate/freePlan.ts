@@ -2,7 +2,7 @@
  * ✦ PREVIEWS for an Automatic owner, and where Upgrade links point.
  *
  * There is no free plan any more (see entitlement.ts): an install is not
- * activated, Automatic, or AI. Automatic owners get three ✦ previews a day on
+ * activated, Automatic, or AI. Automatic owners get five ✦ previews a day on
  * rough ≈ lines: the first few words of the real ✦ translation, cut by the
  * relay and again here. Pure, so the cut can be tested on its own.
  */

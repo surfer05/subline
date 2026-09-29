@@ -22,22 +22,50 @@ export const CLIENT_ID = `vcTranslate/${PLUGIN_VERSION}`;
 export const API_HEADER = "x-subline-api";
 export const API_VERSION = "2";
 export const INSTALL_HEADER = "x-subline-install";
+/**
+ * "This install was used before 0.2.0" (a local trial start, or an install id
+ * older than the installer-seeded one). Only a hint: the relay grants the
+ * early-user Automatic only if it already has a record of this id from before
+ * its launch moment. Sent until the relay has answered once.
+ */
+export const PRIOR_HEADER = "x-subline-prior";
+/**
+ * "Check this code, do not link it": a typed code is checked first, so a
+ * mistyped or someone else's code never takes one of an account's 3
+ * computers. The reader confirms, then a normal status call links it.
+ */
+export const CHECK_HEADER = "x-subline-check";
+
+/** Optional extras on a v2 status request. */
+export interface StatusOptions {
+    prior?: boolean;
+    check?: boolean;
+}
 
 /** The headers every v2 relay request carries. `install` is the install bearer ("free_<hex>"). */
-export function relayHeaders(credential: string, install?: string, json = false): Record<string, string> {
+export function relayHeaders(credential: string, install?: string, json = false, options: StatusOptions = {}): Record<string, string> {
     const h: Record<string, string> = {
         authorization: `Bearer ${credential}`,
         [CLIENT_HEADER]: CLIENT_ID,
         [API_HEADER]: API_VERSION
     };
     if (install) h[INSTALL_HEADER] = install;
+    if (options.prior) h[PRIOR_HEADER] = "1";
+    if (options.check) h[CHECK_HEADER] = "1";
     if (json) h["content-type"] = "application/json";
     return h;
 }
 
-/** The relay's own error word ("device_limit", "claimed"...), when its body had one. */
+/**
+ * The relay's own error word ("device_limit", "claimed"...), when its body had
+ * one. The checkout's "checkout unavailable" (it has a space) is filed as
+ * "checkout_unavailable", so the renderer can tell it apart from a network
+ * failure.
+ */
 function withErrorCode<E extends Error>(err: E, body: any): E {
-    if (body && typeof body.error === "string" && /^[a-z_]{1,40}$/.test(body.error)) (err as any).errorCode = body.error;
+    if (!body || typeof body.error !== "string") return err;
+    if (/^[a-z_]{1,40}$/.test(body.error)) (err as any).errorCode = body.error;
+    else if (body.error === "checkout unavailable") (err as any).errorCode = "checkout_unavailable";
     return err;
 }
 
@@ -65,7 +93,7 @@ export const RELAY_URL = "https://subline-relay.rahul05alok.workers.dev/v1/trans
  *
  * Only the TASTE tier reads this. A paid code has no daily count worth showing,
  * and learns its per-minute ceiling from the translate responses it is already
- * making; a free install has three presses a day and has to know how many are
+ * making; an Automatic owner has five previews a day and has to know how many are
  * left after a Discord restart, without buying one to find out.
  */
 export const RELAY_STATUS_URL = "https://subline-relay.rahul05alok.workers.dev/v1/status";
@@ -77,8 +105,8 @@ export const RELAY_STATUS_URL = "https://subline-relay.rahul05alok.workers.dev/v
  * untaught guess — see rateGate.ts. Absent on an older relay, and then the
  * gate simply keeps whatever it has.
  *
- * `used`/`cap` are the TASTE tier's daily count (messages used today, out of
- * three). The relay states them on every success; they used to be parsed and
+ * `used`/`cap` are the preview allowance's daily count (previews used today, out of
+ * five). The relay states them on every success; they used to be parsed and
  * dropped here, which meant the only way for a free install to learn its own
  * count was to spend one. Absent for a paid code, and then nothing downstream
  * shows a count at all.
@@ -130,6 +158,12 @@ export interface RelayStatus {
     /** The relay's signed entitlement token, and when it (and so Automatic offline) runs out. */
     token?: string;
     tokenExpiresAt?: number;
+    /** The code presented is dead (lapsed, refunded, revoked, unknown). */
+    deadCode?: string;
+    /** "early": this answer first granted the early-user Automatic. */
+    grant?: "early";
+    /** The answer to a check-only request (x-subline-check): nothing was linked. */
+    check?: { valid: boolean; automatic: boolean; ai: boolean };
 }
 
 /** POST /v1/redeem: a promo code for this install. A compiled constant, like RELAY_URL. */
@@ -228,16 +262,17 @@ function countFrom(value: unknown): number | undefined {
  * Throws an HttpError on any failure, exactly as translateWithRelayDetailed
  * does, so native.ts can map it the same way. The caller treats a failure as
  * "count unknown" — never as "nothing left" — because a status endpoint that
- * is briefly unreachable must not take a free user's three tastes away.
+ * is briefly unreachable must not take a paid install's plan away.
  */
 export async function fetchRelayStatus(
     code: string,
     fetchImpl: typeof fetch = fetch,
-    install?: string
+    install?: string,
+    options: StatusOptions = {}
 ): Promise<RelayStatus> {
     const res = await fetchImpl(RELAY_STATUS_URL, {
         method: "GET",
-        headers: relayHeaders(code, install)
+        headers: relayHeaders(code, install, false, options)
     });
 
     let body: any = null;
@@ -295,7 +330,13 @@ function v2StatusFrom(body: any): RelayStatus {
         previews,
         token: typeof body.token === "string" && body.token.length <= 4096 ? body.token : undefined,
         tokenExpiresAt: positive(body.tokenExpiresAt) ? body.tokenExpiresAt : undefined,
-        purchase: purchaseFrom(body.purchase)
+        purchase: purchaseFrom(body.purchase),
+        deadCode: typeof body.deadCode === "string" && body.deadCode.trim() !== "" && body.deadCode.length <= 200
+            ? body.deadCode.trim() : undefined,
+        grant: body.grant === "early" ? "early" : undefined,
+        check: body.check && typeof body.check === "object" && typeof body.check.valid === "boolean"
+            ? { valid: body.check.valid, automatic: body.check.automatic === true, ai: body.check.ai === true }
+            : undefined
     };
 }
 

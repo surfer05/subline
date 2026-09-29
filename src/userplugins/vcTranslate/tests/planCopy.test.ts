@@ -44,7 +44,7 @@ describe("the copy after the free tier", () => {
         expect(UPGRADE_COPY.codeNotFound).toBe("That code doesn't exist.");
         expect(UPGRADE_COPY.codeAlready).toBe("Already yours.");
         expect(UPGRADE_COPY.codeUnreachable).toBe("Can't reach Subline right now. Try again in a minute.");
-        expect(UPGRADE_COPY.deviceLimit).toBe("This code is already used on 3 computers.");
+        expect(UPGRADE_COPY.deviceLimit).toBe("This code is on 3 computers already. It frees up after 30 days unused, or ask us to reset it.");
         expect(UPGRADE_COPY.automaticButton).toBe("Buy for $4.99");
         expect(UPGRADE_COPY.enterCodeButton).toBe("Enter a code");
         expect(UPGRADE_COPY.activateButton).toBe("Activate");

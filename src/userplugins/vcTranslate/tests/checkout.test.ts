@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-    AUTOMATIC_PRODUCT_ID, CHECKOUT_RETURN_URL, createCheckoutFlow, installHash, isDodoCheckoutUrl, PLAN_PRODUCTS, POLL_EVERY_MS,
+    AUTOMATIC_PRODUCT_ID, CHECKOUT_RETURN_URL, createCheckoutFlow, installHash, isConfiguredProduct, isDodoCheckoutUrl, PLAN_PRODUCTS, POLL_EVERY_MS,
     POLL_FOR_MS, SLOW_POLL_EVERY_MS, SLOW_POLL_FOR_MS, staticCheckoutUrl, type CheckoutDeps
 } from "../checkout";
 
@@ -44,12 +44,11 @@ describe("the static checkout link", () => {
         expect(staticCheckoutUrl("monthly", HASH)).toContain(`redirect_url=${encodeURIComponent("https://surfer05.github.io/subline/?from=discord")}`);
     });
 
-    it("uses the live product ids, and the Automatic placeholder until the owner gives its id", () => {
+    it("uses the live product ids, and one constant for Automatic", () => {
         expect(PLAN_PRODUCTS).toEqual({
             automatic: AUTOMATIC_PRODUCT_ID, monthly: "pdt_0No1xmbcAqHdYAvt1RNPR", annual: "pdt_0No1yAve1ozdxryVGZvf6"
         });
-        expect(AUTOMATIC_PRODUCT_ID).toBe("pdt_AUTOMATIC_PENDING");
-        expect(staticCheckoutUrl("automatic", HASH)).toContain("/buy/pdt_AUTOMATIC_PENDING?");
+        expect(staticCheckoutUrl("automatic", HASH)).toContain(`/buy/${AUTOMATIC_PRODUCT_ID}?`);
     });
 });
 
@@ -77,9 +76,8 @@ describe("the checkout flow", () => {
     });
 
     for (const [why, createCheckout] of [
-        ["the relay refuses", vi.fn(async () => ({ ok: false as const, error: "relay checkout: HTTP 503 checkout unavailable" }))],
-        ["the relay call throws", vi.fn(async () => { throw new Error("IPC gone"); })],
-        ["the relay returns a non-Dodo URL", vi.fn(async () => ({ ok: true as const, url: "https://evil.example/pay" }))]
+        ["the relay cannot be reached", vi.fn(async () => ({ ok: false as const, error: "fetch failed" }))],
+        ["the relay call throws", vi.fn(async () => { throw new Error("IPC gone"); })]
     ] as const) {
         it(`falls back to the static link with the install hash when ${why}`, async () => {
             const d = deps({ createCheckout: createCheckout as any });
@@ -88,6 +86,35 @@ describe("the checkout flow", () => {
             expect(d.openExternal.mock.calls[0][0]).toBe(staticCheckoutUrl("annual", HASH));
         });
     }
+
+    for (const [why, createCheckout] of [
+        ["the relay answers checkout unavailable",
+            vi.fn(async () => ({ ok: false as const, error: "relay checkout: HTTP 503", errorCode: "checkout_unavailable", status: 503 }))],
+        ["the relay answers any other error", vi.fn(async () => ({ ok: false as const, error: "relay checkout: HTTP 500", status: 500 }))],
+        ["the relay returns a non-Dodo URL", vi.fn(async () => ({ ok: true as const, url: "https://evil.example/pay" }))]
+    ] as const) {
+        it(`opens nothing and says buying is unavailable when ${why}`, async () => {
+            const d = deps({ createCheckout: createCheckout as any });
+            const flow = createCheckoutFlow(d);
+            expect(await flow.start("annual")).toBe("unavailable");
+            expect(d.openExternal).not.toHaveBeenCalled();
+            expect(flow.isPolling()).toBe(false);
+        });
+    }
+
+    it("never opens the static link for a product that is still the placeholder", async () => {
+        expect(isConfiguredProduct(PLAN_PRODUCTS.monthly)).toBe(true);
+        expect(isConfiguredProduct("pdt_SOMETHING_PENDING")).toBe(false);
+        const d = deps({ createCheckout: vi.fn(async () => ({ ok: false as const, error: "fetch failed" })) as any });
+        const flow = createCheckoutFlow(d);
+        const result = await flow.start("automatic");
+        if (isConfiguredProduct(PLAN_PRODUCTS.automatic)) {
+            expect(result).toBe(true);
+        } else {
+            expect(result).toBe("unavailable");
+            expect(d.openExternal).not.toHaveBeenCalled();
+        }
+    });
 
     it("asks for the purchase every 5 seconds and hands it over once", async () => {
         let linked = false;
