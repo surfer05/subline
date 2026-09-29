@@ -166,6 +166,20 @@ export const settings = definePluginSettings({
         type: OptionType.CUSTOM,
         default: ""
     },
+    // When a 0.1.x build started this install's free trial (epoch ms), 0 for
+    // never. 0.2.0 starts no trials; this is only read, as evidence of earlier
+    // use for the early-user check (taste.ts priorUseHint). CUSTOM, never shown.
+    freeTrialStartedAt: {
+        type: OptionType.CUSTOM,
+        default: 0
+    },
+    // The saved code the relay first called dead, and when (epoch ms). A code
+    // is dropped only when a second dead answer comes at least an hour later,
+    // so a relay storage lag cannot throw away a good code. CUSTOM, never shown.
+    deadCodeSeen: {
+        type: OptionType.CUSTOM,
+        default: { code: "", at: 0 } as { code: string; at: number; }
+    },
     anthropicApiKey: {
         type: OptionType.STRING,
         description: "Anthropic API key (only used when the Claude engine is selected)",

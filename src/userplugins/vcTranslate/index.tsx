@@ -32,7 +32,7 @@ import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
 import {
-    connectInstallIdSetting, installIdOnce, knownInstallId, loadLocalTasteCount, markPriorHintSent, markTasteExhausted, noteTasteSpent,
+    connectInstallIdSetting, EARLY_CHECK_MS, earlyCheckSince, endEarlyCheck, installIdOnce, knownInstallId, loadLocalTasteCount, markPriorHintDone, markTasteExhausted, noteTasteSpent,
     priorUseHint, recordTasteQuota, rolloverTasteIfNewUtcDay, TASTE_CAP, tasteBearer, tasteCap, tasteExhausted, tasteLabel, tasteRemaining
 } from "./taste";
 import {
@@ -52,7 +52,7 @@ import { ENGINE_RANK, isRealTranslation, mayReplace } from "./upgrade";
 import { createCheckoutFlow, type CheckoutFlow, type Plan } from "./checkout";
 import { normalizeTargetLang } from "./languages";
 import { openUpgrade, registerUpgradeOpener } from "./upgradeBridge";
-import { UPGRADE_COPY } from "./upgradeCopy";
+import { RESET_HELP_URL, UPGRADE_COPY } from "./upgradeCopy";
 import { type CodeSubmitResult, openActivatePanel, openCodeEntry, openUpgradePanel } from "./upgradePanel";
 import { createUpdateWatch, UPDATE_CHECK_INTERVAL_MS, type UpdateWatch } from "./updateNotice";
 import { SurfaceBudget } from "./surfaces/budget";
@@ -549,8 +549,17 @@ async function relayCredentials(): Promise<{ credential: string; install: string
 
 /** The notice text the activation notice is showing, "" for none. */
 let activationNoticeShown = "";
-/** Whether "Can't reach Subline to check your code. Retrying." is up. */
-let checkingNoticeShown = false;
+/**
+ * Which "checking" notice is up, "" for none: "code" for "Can't reach Subline
+ * to check your code. Retrying.", "early" for the early-user check.
+ */
+let checkingNoticeShown: "" | "code" | "early" = "";
+/**
+ * The relay's last answer was the 3-computer limit. Every Activate link then
+ * shows that sentence and its GitHub link, never the buy panel: buying again
+ * would not free a computer.
+ */
+let deviceLimited = false;
 
 /**
  * A saved code the relay has not confirmed, because it could not be reached
@@ -559,35 +568,66 @@ let checkingNoticeShown = false;
  * they already own. A plain notice instead, and the status call keeps
  * retrying (scheduleStatusRetry).
  */
-function showCheckingNotice(): void {
-    if (activated() || checkingNoticeShown) return;
-    checkingNoticeShown = true;
-    showNotice(UPGRADE_COPY.checkingNotice, UPGRADE_COPY.checkingNoticeButton, popNotice);
+function showCheckingNotice(kind: "code" | "early" = "code"): void {
+    if (activated() || checkingNoticeShown === kind) return;
+    if (checkingNoticeShown !== "") popNotice();
+    checkingNoticeShown = kind;
+    if (kind === "early") showNotice(UPGRADE_COPY.earlyCheckingNotice, UPGRADE_COPY.earlyCheckingNoticeButton, popNotice);
+    else showNotice(UPGRADE_COPY.checkingNotice, UPGRADE_COPY.checkingNoticeButton, popNotice);
 }
 
-/** The relay could not be reached: the checking notice with a saved code, else the activation notice. */
-function showUnreachableNotice(): void {
+/**
+ * The relay could not be reached. A saved code: the code checking notice. An
+ * early user (the prior-use hint was sent and the relay has not answered it
+ * yet): the early-user checking notice, for at most a day of retries. Anyone
+ * else: the activation notice.
+ */
+async function showUnreachableNotice(prior: boolean): Promise<void> {
     if (activated()) return;
-    if (savedCode() !== "") showCheckingNotice();
-    else showActivationNotice();
+    if (savedCode() !== "") { showCheckingNotice("code"); return; }
+    if (prior) {
+        const since = await earlyCheckSince(Date.now());
+        if (since !== null && Date.now() - since < EARLY_CHECK_MS) {
+            showCheckingNotice("early");
+            return;
+        }
+    }
+    takeDownCheckingNotice();
+    showActivationNotice();
 }
 
 /** The relay answered: the checking notice has said what it had to. */
 function takeDownCheckingNotice(): void {
-    if (!checkingNoticeShown) return;
-    checkingNoticeShown = false;
+    if (checkingNoticeShown === "") return;
+    checkingNoticeShown = "";
     popNotice();
 }
 
 /**
  * "Subline is not activated on this computer..." with an Activate button,
- * once per session (and again only with a different sentence, such as the
- * 3-computer limit). A notice, not a toast: it stays until dismissed.
+ * once per session (and again only with a different sentence). A notice, not
+ * a toast: it stays until dismissed.
  */
 function showActivationNotice(message: string = UPGRADE_COPY.activateNotice): void {
     if (activated() || activationNoticeShown === message) return;
     activationNoticeShown = message;
     showNotice(message, UPGRADE_COPY.activateButton, openUpgradeForLevel);
+}
+
+/** Open the page where a reader asks for a computer reset. */
+function openResetHelp(): void {
+    (globalThis as any).VencordNative?.native?.openExternal?.(RESET_HELP_URL);
+}
+
+/**
+ * The 3-computer limit, with a "GitHub" button that opens the issues page
+ * (a toast cannot carry a link; a notice can). Never the buy panel.
+ */
+function showDeviceLimitNotice(): void {
+    deviceLimited = true;
+    if (activationNoticeShown === UPGRADE_COPY.deviceLimit) return;
+    activationNoticeShown = UPGRADE_COPY.deviceLimit;
+    showNotice(UPGRADE_COPY.deviceLimit, UPGRADE_COPY.deviceLimitButton, openResetHelp);
 }
 
 /**
@@ -740,6 +780,43 @@ function adoptCode(code: string): boolean {
 const OFFLINE_GRACE_MS = 7 * 24 * 60 * 60_000;
 
 /**
+ * A saved code is dropped as dead only after TWO dead answers for it at least
+ * this far apart. The relay's storage can lag (a code minted a moment ago may
+ * not be readable everywhere yet), and dropping a good code on one answer
+ * would log a paying reader out.
+ */
+export const DEAD_CODE_CONFIRM_MS = 60 * 60_000;
+let deadRecheckTimer: ReturnType<typeof setTimeout> | null = null;
+
+function deadCodeSeen(): { code: string; at: number; } {
+    const v = settings.store.deadCodeSeen as { code?: unknown; at?: unknown; } | undefined;
+    return typeof v?.code === "string" && typeof v?.at === "number" ? { code: v.code, at: v.at } : { code: "", at: 0 };
+}
+
+/**
+ * The relay called `code` dead. True when this confirms an earlier dead answer
+ * for the same code at least DEAD_CODE_CONFIRM_MS ago (drop it now). Otherwise
+ * the first sighting is recorded and a re-check is scheduled for when the
+ * hour is up; the code and what it owned stay meanwhile.
+ */
+function deadCodeConfirmed(code: string, now: number = Date.now()): boolean {
+    const seen = deadCodeSeen();
+    if (seen.code === code && now - seen.at >= DEAD_CODE_CONFIRM_MS) {
+        settings.store.deadCodeSeen = { code: "", at: 0 };
+        return true;
+    }
+    if (seen.code !== code) settings.store.deadCodeSeen = { code, at: now };
+    const at = seen.code === code ? seen.at : now;
+    if (deadRecheckTimer === null) {
+        deadRecheckTimer = setTimeout(() => {
+            deadRecheckTimer = null;
+            void refreshEntitlement();
+        }, Math.max(0, at + DEAD_CODE_CONFIRM_MS - now) + 1_000);
+    }
+    return false;
+}
+
+/**
  * Take in a good /v1/status answer: the entitlement (v2 relays only), today's
  * ✦ preview count, and any code to save. Returns whether a code was saved.
  * An answer from an older relay (no `automatic` field) changes nothing but a
@@ -747,23 +824,33 @@ const OFFLINE_GRACE_MS = 7 * 24 * 60 * 60_000;
  */
 function applyStatus(res: Extract<Awaited<ReturnType<typeof Native.relayStatus>>, { ok: true; }>): boolean {
     // A DEAD code (lapsed, refunded, revoked) is forgotten here and marked as
-    // cleared, so the relay's link cannot bring it back. The relay still
-    // answers for the whole account behind this install, so an AI lapse
-    // leaves Automatic in place; clearing the code asks again with the
+    // cleared, so the relay's link cannot bring it back, but only on the
+    // second dead answer at least an hour after the first (deadCodeConfirmed).
+    // Until then the saved code stays, and so does nothing replace it. The
+    // relay still answers for the whole account behind this install, so an AI
+    // lapse leaves Automatic in place; clearing the code asks again with the
     // install id (the settings handler in start()).
     let dropped = false;
+    let deadPending = false;
     let saved = false;
     applyingStatus = true;
     try {
         if (res.deadCode !== undefined && res.deadCode === savedCode()) {
-            settings.store.clearedPurchaseCode = res.deadCode;
-            settings.store.sublineCode = "";
-            dropped = true;
+            if (deadCodeConfirmed(res.deadCode)) {
+                settings.store.clearedPurchaseCode = res.deadCode;
+                settings.store.sublineCode = "";
+                dropped = true;
+            } else {
+                deadPending = true;
+            }
+        } else if (res.deadCode === undefined && savedCode() !== "" && deadCodeSeen().code === savedCode()) {
+            // The relay knows the code after all: forget the earlier "dead".
+            settings.store.deadCodeSeen = { code: "", at: 0 };
         }
         // The code next: the answer is then stored for the code it is about.
         // What the relay hands back wins (it prefers the Automatic code).
         const linked = res.code ?? res.purchase?.code;
-        saved = linked !== undefined ? adoptCode(linked) : false;
+        saved = linked !== undefined && !deadPending ? adoptCode(linked) : false;
     } finally {
         applyingStatus = false;
     }
@@ -833,6 +920,13 @@ function announcePurchase(): void {
  */
 function openUpgradeForLevel(): void {
     const level = entitlementLevel();
+    if (level === "none" && deviceLimited) {
+        // Buying again would not free a computer: the sentence and its link.
+        Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message: UPGRADE_COPY.deviceLimit });
+        activationNoticeShown = "";
+        showDeviceLimitNotice();
+        return;
+    }
     if (level === "none") {
         openActivatePanel({ buy: () => startCheckout("automatic"), enterCode: openCodeEntryPanel });
     } else if (level === "automatic") {
@@ -857,7 +951,19 @@ function startCheckout(plan: Plan): void {
 }
 
 function openCodeEntryPanel(): void {
-    openCodeEntry(submitCode);
+    openCodeEntry(async text => {
+        const result = await submitCode(text);
+        // The 3-computer limit also gets its notice, which carries the GitHub link.
+        if (result === UPGRADE_COPY.deviceLimit) showDeviceLimitNotice();
+        if (result === null || typeof result === "string") return result;
+        return {
+            confirm: async () => {
+                const error = await result.confirm();
+                if (error === UPGRADE_COPY.deviceLimit) showDeviceLimitNotice();
+                return error;
+            }
+        };
+    });
 }
 
 /** A promo code: uppercase letters and digits, 4 to 16 (never a license key or an slp_ code). */
@@ -1005,16 +1111,21 @@ async function refreshEntitlement(): Promise<void> {
     let answered = false;
     try {
         const { credential, install } = await relayCredentials();
-        // Until the relay has answered once, say whether this install was
-        // used before 0.2.0 (taste.ts priorUseHint). The relay checks it
-        // against its own records; it never trusts it alone.
-        const prior = await priorUseHint((settings.store as any).freeTrialStartedAt);
+        // While this install does not own Automatic, say whether it was used
+        // before 0.2.0 (taste.ts priorUseHint). The relay checks it against
+        // its own records; it never trusts it alone.
+        const prior = await priorUseHint(settings.store.freeTrialStartedAt);
         const res = await Native.relayStatus(credential, install, prior ? { prior: true } : undefined);
         if (session !== statusSession) return;
         if (res.ok) {
             answered = true;
             clearStatusRetry();
-            if (prior) markPriorHintSent();
+            deviceLimited = false;
+            // The hint stops once Automatic is here. A plain automatic:false to
+            // a hinted request is the relay's definitive no: the early-user
+            // check is over and the activation notice follows.
+            if (res.automatic === true) markPriorHintDone();
+            else if (prior && typeof res.automatic === "boolean") endEarlyCheck();
             takeDownCheckingNotice();
             const before = entitlementLevel();
             const saved = applyStatus(res);
@@ -1030,6 +1141,12 @@ async function refreshEntitlement(): Promise<void> {
             answered = true;
             clearStatusRetry();
             takeDownCheckingNotice();
+            if (res.errorCode === "invalid_code" && credential !== install && credential === savedCode() && !deadCodeConfirmed(credential)) {
+                // The first "dead" answer for this code: keep it and what it
+                // owned, and ask again in an hour (a relay storage lag).
+                tasteLog("the relay does not know the saved code yet; asking again in an hour");
+                return;
+            }
             const before = entitlementLevel();
             setEntitlement(null);
             if (res.errorCode === "invalid_code" && credential !== install && credential === savedCode()) {
@@ -1048,17 +1165,21 @@ async function refreshEntitlement(): Promise<void> {
                 void refreshEntitlement();
                 return;
             }
-            if (res.errorCode === "device_limit") showActivationNotice(UPGRADE_COPY.deviceLimit);
-            if (before !== "none") onEntitlementChanged();
+            if (res.errorCode === "device_limit") {
+                // The 3-computer limit: its own notice, with the GitHub link,
+                // and never the buy panel.
+                showDeviceLimitNotice();
+                if (before !== "none") onEntitlementChanged();
+            } else if (before !== "none") onEntitlementChanged();
             else showActivationNotice();
             tasteLog(`the relay refused this install (${res.errorCode})`);
         } else {
             tasteLog(`what this install owns is unknown: ${res.error}`);
-            showUnreachableNotice();
+            await showUnreachableNotice(prior);
         }
     } catch {
         tasteLog("what this install owns is unknown: the status call did not complete");
-        if (session === statusSession) showUnreachableNotice();
+        if (session === statusSession) await showUnreachableNotice(await priorUseHint(settings.store.freeTrialStartedAt).catch(() => false));
     }
     if (!answered && session === statusSession) scheduleStatusRetry();
 }
@@ -4469,7 +4590,10 @@ export default definePlugin({
         if (entitlementTimer !== null) clearInterval(entitlementTimer);
         entitlementTimer = null;
         activationNoticeShown = "";
-        checkingNoticeShown = false;
+        checkingNoticeShown = "";
+        deviceLimited = false;
+        if (deadRecheckTimer !== null) clearTimeout(deadRecheckTimer);
+        deadRecheckTimer = null;
         applyingStatus = false;
         earlyGrantPending = false;
         announcedPurchase = "";

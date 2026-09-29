@@ -15,7 +15,7 @@ const native = vi.hoisted(() => {
     return { translateBatch, readStagedBuildId, relayStatus, relayCheckout, relayRedeem, openExternal };
 });
 
-import plugin, { FORCE_QUALITY_POPOVER_ID, __surfaceService } from "../index";
+import plugin, { DEAD_CODE_CONFIRM_MS, FORCE_QUALITY_POPOVER_ID, __surfaceService } from "../index";
 import { AUTOMATIC_PRODUCT_ID, isConfiguredProduct, POLL_EVERY_MS } from "../checkout";
 import { ENTITLEMENT_REFRESH_MS, holderFor, __resetEntitlement } from "../entitlement";
 import type { NativeResponse } from "../native";
@@ -24,6 +24,7 @@ import { clearStore, getTranslation, makeKey, setTranslation } from "../store";
 import { __resetTaste } from "../taste";
 import { UPGRADE_COPY } from "../upgradeCopy";
 import { WEEK_MS } from "../weeklyNote";
+import { OptionType } from "./stubs/utils-types";
 import { __resetSettings } from "./stubs/api-settings";
 import { __resetNotices, shownNotices } from "./stubs/api-notices";
 import * as DataStore from "./stubs/api-datastore";
@@ -365,10 +366,28 @@ describe("what the install owns, from the relay", () => {
         await plugin.start!();
         await flush();
         expect(shownNotices.map(n => n.message))
-            .toContain("This code is on 3 computers already. It frees up after 30 days unused, or ask us to reset it.");
+            .toContain("This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub.");
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
         await settle();
         expect(calls()).toHaveLength(0);
+    });
+
+    it("at the 3-computer limit the notice links to GitHub, and Activate never opens the buy panel", async () => {
+        DataStore.clearEntitlementForTest();
+        native.relayStatus.mockResolvedValue({ ok: false, error: "relay: HTTP 403 device_limit", errorCode: "device_limit" });
+        await plugin.start!();
+        await flush();
+        const limit = shownNotices.find(n => n.message === UPGRADE_COPY.deviceLimit)!;
+        expect(limit.buttonText).toBe("GitHub");
+        limit.onOkClick();
+        expect(native.openExternal).toHaveBeenCalledWith("https://github.com/surfer05/subline/issues");
+        expect(activationNotices()).toHaveLength(0);
+        // Any Activate link now repeats the limit instead of selling Automatic.
+        const modals = openedModals.length;
+        const { openUpgrade } = await import("../upgradeBridge");
+        openUpgrade();
+        expect(openedModals.length).toBe(modals);
+        expect(shownToasts.map(t => t.message)).toContain(UPGRADE_COPY.deviceLimit);
     });
 
     it("an older relay's answer (no plan fields) changes nothing", async () => {
@@ -469,8 +488,8 @@ describe("entering a code", () => {
         expect(settings.store.sublineCode).toBe("");
         expect(onClose).toHaveBeenCalled();
         const confirm = lastModal();
-        expect(confirm.el.props.title).toBe("This code works");
-        expect(confirm.el.props.subtitle).toBe("Use it on this computer? Each code works on up to 3 computers.");
+        expect(confirm.el.props.title).toBe("Use this code?");
+        expect(confirm.el.props.subtitle).toBe("It works on up to 3 computers.");
         expect(confirm.el.props.actions[0].text).toBe("Use it");
         confirm.el.props.actions[0].onClick();
         await flush();
@@ -503,7 +522,7 @@ describe("entering a code", () => {
         await flush();
         expect(failures()).toEqual([
             "That code doesn't exist.",
-            "This code is on 3 computers already. It frees up after 30 days unused, or ask us to reset it."
+            "This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub."
         ]);
         expect(settings.store.sublineCode).toBe("");
     });
@@ -511,7 +530,7 @@ describe("entering a code", () => {
     it("asks for a code when the field is empty, and sends nothing", async () => {
         await startNotActivated();
         await enter("   ");
-        expect(failures()).toEqual(["Type your code first."]);
+        expect(failures()).toEqual(["Type or paste a code first."]);
         expect(native.relayRedeem).not.toHaveBeenCalled();
     });
 });
@@ -798,6 +817,10 @@ describe("the audit round", () => {
         native.relayStatus.mockResolvedValue({ ...v2({ automatic: true, code: "slp_auto9" }), deadCode: "LK-AI-GONE" });
         await plugin.start!();
         await flush();
+        // One dead answer is not enough (a relay storage lag): the code stays.
+        expect(settings.store.sublineCode).toBe("LK-AI-GONE");
+        await vi.advanceTimersByTimeAsync(DEAD_CODE_CONFIRM_MS + 1_000);
+        await flush();
         expect(settings.store.sublineCode).toBe("slp_auto9");
         expect(settings.store.clearedPurchaseCode).toBe("LK-AI-GONE");
         // Automatic survives the AI lapse: ≈ on every message, no ✦.
@@ -810,12 +833,33 @@ describe("the audit round", () => {
         expect(activationNotices()).toHaveLength(0);
     });
 
+    it("one dead answer never drops a good code: a relay storage lag passes", async () => {
+        DataStore.setEntitlementForTest({ automatic: true, ai: true, tokenExpiresAt: Date.now() + 7 * DAY, checkedAt: Date.now() });
+        settings.store.sublineCode = "LK-NEW";
+        settings.store.engine = "relay";
+        native.relayStatus.mockResolvedValue({ ...v2({ automatic: true, code: "slp_other" }), deadCode: "LK-NEW" });
+        await plugin.start!();
+        await flush();
+        expect(settings.store.sublineCode).toBe("LK-NEW");
+        expect(settings.store.clearedPurchaseCode).toBe("");
+        // The relay catches up before the hour is out: the re-check finds the
+        // code live, and the earlier "dead" is forgotten.
+        native.relayStatus.mockResolvedValue(v2({ automatic: true, ai: true }));
+        await vi.advanceTimersByTimeAsync(DEAD_CODE_CONFIRM_MS + 1_000);
+        await flush();
+        expect(settings.store.sublineCode).toBe("LK-NEW");
+        expect(settings.store.deadCodeSeen).toEqual({ code: "", at: 0 });
+    });
+
     it("a dead code with nothing handed back is dropped, and the relay is asked again with the install id", async () => {
         DataStore.setEntitlementForTest({ automatic: true, ai: true, tokenExpiresAt: Date.now() + 7 * DAY, checkedAt: Date.now() });
         settings.store.sublineCode = "LK-AI-GONE";
         settings.store.engine = "relay";
         native.relayStatus.mockResolvedValue({ ...v2({ automatic: true }), deadCode: "LK-AI-GONE" });
         await plugin.start!();
+        await flush();
+        expect(settings.store.sublineCode).toBe("LK-AI-GONE");
+        await vi.advanceTimersByTimeAsync(DEAD_CODE_CONFIRM_MS + 1_000);
         await flush();
         expect(settings.store.sublineCode).toBe("");
         expect(settings.store.clearedPurchaseCode).toBe("LK-AI-GONE");
@@ -838,6 +882,9 @@ describe("the audit round", () => {
             : v2({ automatic: true }));
         await plugin.start!();
         await flush();
+        expect(settings.store.sublineCode).toBe("LK-REFUNDED");
+        await vi.advanceTimersByTimeAsync(DEAD_CODE_CONFIRM_MS + 1_000);
+        await flush();
         expect(settings.store.sublineCode).toBe("");
         expect(settings.store.clearedPurchaseCode).toBe("LK-REFUNDED");
         expect(lastStatusCall()[0]).toMatch(/^free_[0-9a-f]{32}$/);
@@ -847,13 +894,76 @@ describe("the audit round", () => {
         expect(calls("google")).toHaveLength(1);
     });
 
-    it("says the install was used before 0.2.0 (a local trial start), once, until the relay has answered", async () => {
-        (settings.store as any).freeTrialStartedAt = Date.now() - 30 * DAY;
+    it("keeps saying the install was used before 0.2.0 while the relay says automatic:false, and stops once it says true", async () => {
+        settings.store.freeTrialStartedAt = Date.now() - 30 * DAY;
         await startNotActivated();
         expect(native.relayStatus.mock.calls[0]![2]).toEqual({ prior: true });
+        // Still automatic:false: the next status call carries the hint again.
+        await vi.advanceTimersByTimeAsync(ENTITLEMENT_REFRESH_MS);
+        await flush();
+        expect(lastStatusCall()[2]).toEqual({ prior: true });
+        // Automatic now: the hint stops for good.
+        native.relayStatus.mockResolvedValue(v2({ automatic: true }));
+        await vi.advanceTimersByTimeAsync(ENTITLEMENT_REFRESH_MS);
+        await flush();
         await vi.advanceTimersByTimeAsync(ENTITLEMENT_REFRESH_MS);
         await flush();
         expect(lastStatusCall()[2]).toBeUndefined();
+    });
+
+    it("declares the local trial start as a hidden setting", () => {
+        const def = (settings as any).def.freeTrialStartedAt;
+        expect(def).toBeDefined();
+        expect(def.type).toBe(OptionType.CUSTOM);
+        expect(def.default).toBe(0);
+    });
+
+    it("an early user whose relay cannot be reached sees the early-user check, not the buy prompt, for up to a day", async () => {
+        settings.store.freeTrialStartedAt = Date.now() - 30 * DAY;
+        DataStore.clearEntitlementForTest();
+        native.relayStatus.mockResolvedValue({ ok: false, error: "fetch failed" });
+        await plugin.start!();
+        await flush();
+        const early = () => shownNotices.filter(n => n.message === "Checking your early-user access. This can take a minute.");
+        expect(early()).toHaveLength(1);
+        expect(early()[0]!.buttonText).toBe("OK");
+        expect(activationNotices()).toHaveLength(0);
+        // Hours of failed retries: still the check, never the buy prompt.
+        await vi.advanceTimersByTimeAsync(20 * HOUR);
+        await flush();
+        expect(early()).toHaveLength(1);
+        expect(activationNotices()).toHaveLength(0);
+        // Past a day of retries: the activation notice.
+        await vi.advanceTimersByTimeAsync(5 * HOUR);
+        await flush();
+        expect(activationNotices()).toHaveLength(1);
+    });
+
+    it("an early user the relay answers automatic:false to, with the hint sent, gets the activation notice", async () => {
+        settings.store.freeTrialStartedAt = Date.now() - 30 * DAY;
+        await startNotActivated();
+        expect(native.relayStatus.mock.calls[0]![2]).toEqual({ prior: true });
+        expect(shownNotices.filter(n => n.message === UPGRADE_COPY.earlyCheckingNotice)).toHaveLength(0);
+        expect(activationNotices()).toHaveLength(1);
+        // A later outage does not bring the early-user check back.
+        native.relayStatus.mockResolvedValue({ ok: false, error: "fetch failed" });
+        await vi.advanceTimersByTimeAsync(ENTITLEMENT_REFRESH_MS);
+        await flush();
+        expect(shownNotices.filter(n => n.message === UPGRADE_COPY.earlyCheckingNotice)).toHaveLength(0);
+    });
+
+    it("an early user checked while offline gets Automatic once the relay answers", async () => {
+        settings.store.freeTrialStartedAt = Date.now() - 30 * DAY;
+        DataStore.clearEntitlementForTest();
+        native.relayStatus.mockResolvedValue({ ok: false, error: "fetch failed" });
+        await plugin.start!();
+        await flush();
+        native.relayStatus.mockResolvedValue({ ...v2({ automatic: true, code: "slp_early2" }), grant: "early" });
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flush();
+        expect(settings.store.sublineCode).toBe("slp_early2");
+        expect(shownNotices.map(n => n.message)).toContain(UPGRADE_COPY.earlyNotice);
+        expect(activationNotices()).toHaveLength(0);
     });
 
     it("says so too for an install id that was here before the installer seeded one", async () => {

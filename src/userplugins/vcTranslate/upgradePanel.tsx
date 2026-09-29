@@ -120,7 +120,7 @@ const INPUT_STYLE = {
  */
 export type CodeSubmitResult = string | null | { confirm: () => Promise<string | null> };
 
-/** "This code works. Use it on this computer?" with a "Use it" button. */
+/** "Use this code?" / "It works on up to 3 computers." with a "Use it" button. */
 function openCodeConfirm(confirm: () => Promise<string | null>): void {
     let busy = false;
     try {

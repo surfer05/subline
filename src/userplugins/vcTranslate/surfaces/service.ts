@@ -66,6 +66,8 @@ export interface SurfaceDeps {
     fastDebounceMs?: number;
     qualityDebounceMs?: number;
     maxBatch?: number;
+    /** Fast-tier (Google) texts per batch (default SURFACE_MAX_FAST_BATCH). */
+    maxFastBatch?: number;
     failRetryMs?: number;
     notNowRetryMs?: number;
 }
@@ -73,6 +75,12 @@ export interface SurfaceDeps {
 export const SURFACE_FAST_DEBOUNCE_MS = 400;
 export const SURFACE_QUALITY_DEBOUNCE_MS = 1_500;
 export const SURFACE_MAX_BATCH = 25;
+/**
+ * A fast-tier (Google) surface batch carries at most this many texts. Google is
+ * asked once per text, so a small batch keeps each burst short and lets the
+ * per-minute cap below meter it finely.
+ */
+export const SURFACE_MAX_FAST_BATCH = 5;
 /** A batch never carries more than this much text (UTF-8 bytes). */
 export const SURFACE_MAX_BATCH_BYTES = 20 * 1024;
 /** Longer texts are not surface-translated at all: no request, no line. */
@@ -91,8 +99,9 @@ export const SURFACE_NOT_NOW_RETRY_MS = 60_000;
 export const SURFACE_MAX_QUALITY_PER_MINUTE = 4;
 /**
  * Google is free to us, but a member list or a busy server can want hundreds
- * of statuses at once, and Google answers a burst with 429s. Surfaces take at
- * most this many Google requests a minute, one at a time.
+ * of statuses at once, and Google answers a burst with 429s. Surfaces send at
+ * most this many TEXTS to Google a minute (each text is one Google call), one
+ * batch at a time.
  */
 export const SURFACE_MAX_FAST_PER_MINUTE = 60;
 const MINUTE_MS = 60_000;
@@ -202,7 +211,8 @@ export class SurfaceService {
             queue.clear();
             return;
         }
-        const max = this.deps.maxBatch ?? SURFACE_MAX_BATCH;
+        let max = this.deps.maxBatch ?? SURFACE_MAX_BATCH;
+        if (tier === "fast") max = Math.min(max, this.deps.maxFastBatch ?? SURFACE_MAX_FAST_BATCH);
         const maxBytes = this.deps.maxBatchBytes ?? SURFACE_MAX_BATCH_BYTES;
         let left = Number.POSITIVE_INFINITY;
         if (tier === "quality") {
@@ -213,9 +223,10 @@ export class SurfaceService {
                 return;
             }
         }
-        // At most `maxQualityPerMinute` relay requests and `maxFastPerMinute`
-        // Google requests a minute. A full window waits for its oldest
-        // request to age out.
+        // At most `maxQualityPerMinute` relay REQUESTS and `maxFastPerMinute`
+        // Google TEXTS a minute (each text is one Google call). A full window
+        // waits for its oldest entry to age out; a nearly full one sends only
+        // as many fast texts as it still has room for.
         {
             const now = this.deps.now();
             this.sends[tier] = this.sends[tier].filter(t => now - t < MINUTE_MS);
@@ -226,6 +237,7 @@ export class SurfaceService {
                 this.arm(tier, this.sends[tier][0] + MINUTE_MS - now);
                 return;
             }
+            if (tier === "fast") max = Math.min(max, cap - this.sends[tier].length);
         }
         // Pack by count, by size, and (for ✦) by what today's budget still
         // allows. A text the budget can no longer afford is dropped from the
@@ -247,7 +259,12 @@ export class SurfaceService {
             units += cost;
         }
         if (batch.length === 0) return;
-        this.sends[tier].push(this.deps.now());
+        // One entry per relay request, one per Google text.
+        {
+            const sentAt = this.deps.now();
+            const entries = tier === "fast" ? batch.length : 1;
+            for (let i = 0; i < entries; i++) this.sends[tier].push(sentAt);
+        }
         for (const [key] of batch) {
             queue.delete(key);
             this.inFlight[tier].add(key);

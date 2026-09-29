@@ -3,8 +3,9 @@
  *
  * A message written entirely in one of these is shown decoded, on its own
  * line, under the message: "decoded · morse · HAPPY BIRTHDAY". Decoding runs on this
- * computer with no network and no account, so it is free on every plan, in
- * the trial, after it, and offline.
+ * computer with no network, so it costs nothing and works offline. Like every
+ * other line it needs an activated install (Automatic or AI): an install with
+ * nothing shows no lines at all.
  *
  * If the decoded text is itself foreign, it is that decoded text (not the
  * dots and dashes) that goes through the normal translation pipeline; the

@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { SurfaceCache, type SurfaceStorage } from "../surfaces/cache";
-import { SURFACE_MAX_FAST_PER_MINUTE, SurfaceService, type SurfaceOutcome, type SurfaceTier } from "../surfaces/service";
+import { SURFACE_MAX_FAST_BATCH, SURFACE_MAX_FAST_PER_MINUTE, SurfaceService, type SurfaceOutcome, type SurfaceTier } from "../surfaces/service";
 
 /**
  * Google bursts from surfaces (a member list, a busy server): one Google
- * request at a time, and at most SURFACE_MAX_FAST_PER_MINUTE a minute.
+ * batch at a time, at most SURFACE_MAX_FAST_BATCH texts a batch, and at most
+ * SURFACE_MAX_FAST_PER_MINUTE texts a minute.
  */
 
 function clock() {
@@ -33,6 +34,7 @@ function clock() {
     };
 }
 
+/** The service with PRODUCTION batch sizes and caps (no maxBatch override). */
 function setup(translate: (tier: SurfaceTier, texts: string[]) => Promise<SurfaceOutcome>) {
     const c = clock();
     const storage: SurfaceStorage = { get: async () => undefined, set: async () => { } };
@@ -46,8 +48,7 @@ function setup(translate: (tier: SurfaceTier, texts: string[]) => Promise<Surfac
         cache,
         now: c.now,
         schedule: c.schedule,
-        cancel: c.cancel,
-        maxBatch: 1
+        cancel: c.cancel
     });
     return { c, service };
 }
@@ -56,10 +57,12 @@ describe("surface Google bursts", () => {
     it("sends the next Google batch only after the current one has come back", async () => {
         let open = 0;
         let maxOpen = 0;
+        const batches: string[][] = [];
         const resolvers: Array<() => void> = [];
         const { c, service } = setup((_tier, texts) => {
             open++;
             maxOpen = Math.max(maxOpen, open);
+            batches.push(texts);
             return new Promise(resolve => resolvers.push(() => {
                 open--;
                 resolve(texts.map(t => ({ lang: "de", text: "F:" + t })));
@@ -68,37 +71,50 @@ describe("surface Google bursts", () => {
         service.want("Hallo Nummer 0");
         await c.advance(10_000);
         expect(resolvers).toHaveLength(1);
-        // More statuses come into view while that request is out: they wait.
-        for (let i = 1; i < 5; i++) service.want(`Hallo Nummer ${i}`);
+        // Nine more statuses come into view while that request is out: they wait.
+        for (let i = 1; i < 10; i++) service.want(`Hallo Nummer ${i}`);
         await c.advance(10_000);
-        // maxBatch 1: five texts need five requests, but only one is out.
         expect(resolvers).toHaveLength(1);
-        for (let i = 0; i < 4; i++) {
-            resolvers[i]!();
-            await c.advance(10_000);
-            expect(resolvers).toHaveLength(i + 2);
-        }
-        resolvers[4]!();
+        resolvers[0]!();
+        await c.advance(10_000);
+        expect(resolvers).toHaveLength(2);
+        resolvers[1]!();
+        await c.advance(10_000);
+        expect(resolvers).toHaveLength(3);
+        resolvers[2]!();
         await c.advance(10_000);
         expect(maxOpen).toBe(1);
-        expect(service.sent.fast).toBe(5);
+        expect(batches.map(b => b.length)).toEqual([1, 5, 4]);
     });
 
-    it("takes at most 60 Google requests a minute", async () => {
+    it("never puts more than 5 texts in one Google batch", async () => {
+        const sizes: number[] = [];
+        const { c, service } = setup(async (_tier, texts) => {
+            sizes.push(texts.length);
+            return texts.map(t => ({ lang: "de", text: "F:" + t }));
+        });
+        expect(SURFACE_MAX_FAST_BATCH).toBe(5);
+        for (let i = 0; i < 23; i++) service.want(`Hallo Nummer ${i}`);
+        await c.advance(30_000);
+        expect(sizes.reduce((a, b) => a + b, 0)).toBe(23);
+        expect(Math.max(...sizes)).toBe(5);
+    });
+
+    it("sends at most 60 texts to Google a minute, counting texts, not batches", async () => {
         const at: number[] = [];
         let now = () => 0;
         const { c, service } = setup(async (_tier, texts) => {
-            at.push(now());
+            for (const _ of texts) at.push(now());
             return texts.map(t => ({ lang: "de", text: "F:" + t }));
         });
         now = c.now;
         expect(SURFACE_MAX_FAST_PER_MINUTE).toBe(60);
         for (let i = 0; i < 100; i++) service.want(`Hallo Nummer ${i}`);
         await c.advance(30_000);
-        expect(service.sent.fast).toBe(60);
+        expect(at.length).toBe(60);
         await c.advance(150_000);
-        expect(service.sent.fast).toBe(100);
-        // No 60-second window ever holds more than 60 requests.
+        expect(at.length).toBe(100);
+        // No 60-second window ever holds more than 60 Google texts.
         for (let i = 0; i < at.length; i++) {
             expect(at.filter(t => t >= at[i]! && t < at[i]! + 60_000).length).toBeLessThanOrEqual(60);
         }

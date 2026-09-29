@@ -146,17 +146,20 @@ describe("surface service", () => {
         expect(c.pending()).toBe(0);
     });
 
-    it("fifty statuses leave in two requests per tier, not fifty", async () => {
+    it("fifty statuses: two ✦ requests, and ≈ in Google batches of at most five", async () => {
         const { service, calls, c } = setup();
         for (let i = 0; i < 50; i++) service.want(`Status Nummer ${i}`);
-        await c.advance(400);
-        await c.advance(1_500);
-        await c.advance(1_500);
+        for (let i = 0; i < 20; i++) await c.advance(1_500);
         const quality = calls.filter(x => x.tier === "quality");
-        const fast = calls.filter(x => x.tier === "fast");
         expect(quality).toHaveLength(2);
-        expect(fast).toHaveLength(2);
         expect(quality.flatMap(x => x.texts)).toHaveLength(50);
+        // ≈ alone (no ✦ to supersede it): ten Google batches of five.
+        const g = setup({ quality: () => false });
+        for (let i = 0; i < 50; i++) g.service.want(`Status Nummer ${i}`);
+        for (let i = 0; i < 20; i++) await g.c.advance(1_500);
+        const fast = g.calls.filter(x => x.tier === "fast");
+        expect(fast.flatMap(x => x.texts)).toHaveLength(50);
+        expect(fast.map(x => x.texts.length)).toEqual(Array(10).fill(5));
     });
 
     it("the same text in many places is one request, and a cached text is none", async () => {

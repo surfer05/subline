@@ -22,22 +22,29 @@ export const UPGRADE_COPY = {
     codeSubtitle: "A server code, or the code from your purchase email.",
     codePlaceholder: "Your code",
     codeSubmit: "Activate",
-    codeEmpty: "Type your code first.",
+    codeEmpty: "Type or paste a code first.",
     codeClaimed: "This code has been fully claimed.",
     codeNotFound: "That code doesn't exist.",
     codeAlready: "Already yours.",
     codeUnreachable: "Can't reach Subline right now. Try again in a minute.",
     codeRateLimited: "Too many codes from this network today. Try again tomorrow.",
-    deviceLimit: "This code is on 3 computers already. It frees up after 30 days unused, or ask us to reset it.",
+    deviceLimit: "This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub.",
+    /** The button next to the device-limit sentence: opens RESET_HELP_URL. */
+    deviceLimitButton: "GitHub",
     /** A typed license key or Subline code checked OK, before it is linked to this computer. */
-    codeConfirmTitle: "This code works",
-    codeConfirm: "Use it on this computer? Each code works on up to 3 computers.",
+    codeConfirmTitle: "Use this code?",
+    codeConfirm: "It works on up to 3 computers.",
     codeConfirmButton: "Use it",
 
     /* ---- a saved code the relay could not check yet ---- */
     /** A notice while a saved code is unconfirmed because the relay can't be reached. No Activate button. */
     checkingNotice: "Can't reach Subline to check your code. Retrying.",
     checkingNoticeButton: "OK",
+
+    /* ---- an early user's first 0.2.0 start, before the relay has answered ---- */
+    /** Instead of the activation notice while the early-user check is still out (at most a day). */
+    earlyCheckingNotice: "Checking your early-user access. This can take a minute.",
+    earlyCheckingNoticeButton: "OK",
 
     /* ---- Automatic owners: add AI ---- */
     panelTitle: "Add AI",
@@ -75,3 +82,6 @@ export const UPGRADE_COPY = {
     /** Hover text on a ≈ line waiting for Google. */
     googleBusy: "Google is busy. Subline retries by itself."
 } as const;
+
+/** Where the device-limit sentence sends the reader to ask for a reset. */
+export const RESET_HELP_URL = "https://github.com/surfer05/subline/issues";
