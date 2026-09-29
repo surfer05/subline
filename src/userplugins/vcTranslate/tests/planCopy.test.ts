@@ -91,4 +91,12 @@ describe("the Windows test round's wording", () => {
         expect(RESET_HELP_URL).toBe("https://github.com/surfer05/subline/issues");
         expect(UPGRADE_COPY.earlyCheckingNotice).toBe("Checking your early-user access. This can take a minute.");
     });
+
+    it("uses the third audit's strings: the same rate-limit sentence as the installer, and the coupon hint", async () => {
+        const { readFileSync } = await import("node:fs");
+        const installer = readFileSync(new URL("../../../../installer/src/app/codeScreen.ts", import.meta.url), "utf8");
+        expect(UPGRADE_COPY.codeRateLimited).toBe("Too many codes tried from this network today. Try again after midnight UTC.");
+        expect(installer).toContain(`errRateLimited: "${UPGRADE_COPY.codeRateLimited}"`);
+        expect(UPGRADE_COPY.couponHint).toBe("Have a coupon? Enter it on the payment page.");
+    });
 });

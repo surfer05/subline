@@ -27,7 +27,7 @@ export const UPGRADE_COPY = {
     codeNotFound: "That code doesn't exist.",
     codeAlready: "Already yours.",
     codeUnreachable: "Can't reach Subline right now. Try again in a minute.",
-    codeRateLimited: "Too many codes from this network today. Try again tomorrow.",
+    codeRateLimited: "Too many codes tried from this network today. Try again after midnight UTC.",
     deviceLimit: "This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub.",
     /** The button next to the device-limit sentence: opens RESET_HELP_URL. */
     deviceLimitButton: "GitHub",
@@ -54,6 +54,8 @@ export const UPGRADE_COPY = {
     annualName: "Annual",
     annualPrice: "$19.99 a year",
     annualNote: "2 months free",
+    /** Under the AI plans in the Add AI panel: a Dodo coupon goes on the checkout page, not in Subline. */
+    couponHint: "Have a coupon? Enter it on the payment page.",
     monthlyButton: "Monthly $1.99",
     annualButton: "Yearly $19.99 · 2 months free",
     aiNeedsAutomatic: "AI needs Automatic first.",

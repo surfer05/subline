@@ -219,7 +219,8 @@ describe("the built page", () => {
         const primaries = pricing.match(/<a class="btn btn-primary"[^>]*>[^<]*<\/a>/g) ?? [];
         expect(primaries).toEqual(['<a class="btn btn-primary" href="#downloads">Download Subline</a>']);
         const buys = pricing.match(/<a [^>]*data-buy[^>]*>[^<]*<\/a>/g) ?? [];
-        expect(buys).toHaveLength(3);
+        // Only Automatic has a button; AI is added from inside Discord.
+        expect(buys).toHaveLength(1);
         for (const buy of buys) expect(buy).toContain("btn-secondary");
         const text = pricing.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
         expect(text).toContain("Automatic $4.99 once");
@@ -247,10 +248,16 @@ describe("the built page", () => {
             expect(automatic).toMatch(/href="https:\/\/checkout\.dodopayments\.com\/buy\/pdt_\w+\?quantity=1&amp;redirect_url=/);
             expect(automatic).toContain(`redirect_url=${root}"`);
         }
-        expect(section("pricing")).toContain(
-            `https://checkout.dodopayments.com/buy/pdt_0No1xmbcAqHdYAvt1RNPR?quantity=1&amp;redirect_url=${root}`);
-        expect(section("pricing")).toContain(
-            `https://checkout.dodopayments.com/buy/pdt_0No1yAve1ozdxryVGZvf6?quantity=1&amp;redirect_url=${root}`);
+    });
+
+    it("never links the AI plans to Dodo: they say to add AI from inside Discord, and keep their prices", () => {
+        const pricing = section("pricing");
+        expect(pricing).not.toContain("pdt_0No1xmbcAqHdYAvt1RNPR");
+        expect(pricing).not.toContain("pdt_0No1yAve1ozdxryVGZvf6");
+        expect(pricing.split("<p class=\"fine\" data-ai-note>Add AI from inside Discord, after Automatic.</p>").length - 1).toBe(2);
+        const text = pricing.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+        expect(text).toContain("$1.99 /mo");
+        expect(text).toContain("$19.99 /yr");
     });
 
     it("never ships the placeholder Automatic product id: the card says Download and points to #downloads", () => {
@@ -309,7 +316,8 @@ describe("the built page", () => {
             + "AI works on the computers where you bought it or entered its code.</td>"
             + "<td>Until you ask us to delete it.</td></tr>");
         expect(rows).toContain("<tr><td>Computers</td><td>A code works on up to 3 computers. The relay keeps a scrambled id "
-            + "for each one, and when it was last used, to count them. One unused for 30 days can be replaced.</td>"
+            + "for each one, and when it was last used, to count them. One unused for 30 days can be replaced. "
+            + "If you got early-user Automatic, the relay remembers that for this computer.</td>"
             + "<td>Until you ask us to delete it.</td></tr>");
         expect(rows).toContain("<tr><td>Server codes</td><td>When you use a server code, the relay records that your install "
             + "claimed it, to count its claims. Tries from your network are counted each day to stop guessing.</td>"
@@ -328,5 +336,23 @@ describe("the v0.2.0 release notes", () => {
         expect(notes).toContain("Early users get Automatic at no charge: anyone whose Subline used ✦ AI at least once "
             + "before September 29, 2026, and every AI subscriber active at release.");
         expect(notes).not.toContain("—");
+    });
+
+    it("tell anyone who thinks they were early where to ask", () => {
+        const notes = readFileSync(join(ROOT, "docs", "release-notes", "v0.2.0.md"), "utf8");
+        expect(notes).toContain("Think you were early but Subline asks you to pay? Ask on GitHub: https://github.com/surfer05/subline/issues.");
+    });
+});
+
+describe("the v0.2.0 release day checklist", () => {
+    it("lists every release-day step in docs/RELEASING.md", () => {
+        const doc = readFileSync(join(ROOT, "docs", "RELEASING.md"), "utf8");
+        const day = doc.slice(doc.indexOf("## v0.2.0 release day"));
+        expect(day.length).toBeGreaterThan(20);
+        for (const must of [
+            "relay/wrangler.jsonc", "src/userplugins/vcTranslate/checkout.ts", "installer/src/app/activation.ts",
+            "design/site/pricing/index.html", "npx wrangler deploy", "$1.99", "2026-09-29T11:56:40Z",
+            "before", "SUBLINE_ALLOW_PLACEHOLDER", "--notes-file ../docs/release-notes/v0.2.0.md", "monthly", "payment page"
+        ]) expect(day, must).toContain(must);
     });
 });

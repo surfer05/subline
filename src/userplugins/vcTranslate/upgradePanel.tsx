@@ -36,6 +36,7 @@ export function UpgradePanelBody() {
                 <strong>{UPGRADE_COPY.annualName}</strong>
                 <span>{UPGRADE_COPY.annualPrice} <span style={MUTED}>({UPGRADE_COPY.annualNote})</span></span>
             </div>
+            <div style={{ ...MUTED, paddingTop: 8 }}>{UPGRADE_COPY.couponHint}</div>
             <div style={{ ...MUTED, paddingTop: 8 }}>{UPGRADE_COPY.panelFootnote}</div>
         </div>
     );

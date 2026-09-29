@@ -854,7 +854,11 @@ function applyStatus(res: Extract<Awaited<ReturnType<typeof Native.relayStatus>>
     } finally {
         applyingStatus = false;
     }
-    if (typeof res.automatic === "boolean") {
+    // First strike on a dead code: the answer is left out entirely, so the plan
+    // stored for the code stays as it was until the second dead answer (or a
+    // live one) settles it. A storage lag on the relay must not downgrade a
+    // paying reader for an hour.
+    if (typeof res.automatic === "boolean" && !deadPending) {
         const now = Date.now();
         // CLOCK SKEW. The relay's times are on its clock. A reader's clock
         // that runs a day fast would end Automatic a day early (and one that
@@ -1040,7 +1044,6 @@ async function submitCode(typed: string): Promise<CodeSubmitResult> {
 function statusRefusalCopy(res: Awaited<ReturnType<typeof Native.relayStatus>>): string | null {
     if (res.ok) return null;
     if (res.errorCode === "device_limit") return UPGRADE_COPY.deviceLimit;
-    if (res.errorCode === "invalid_code") return UPGRADE_COPY.codeNotFound;
     return UPGRADE_COPY.codeUnreachable;
 }
 
@@ -1136,42 +1139,19 @@ async function refreshEntitlement(): Promise<void> {
             // A dead code was dropped and nothing replaced it: ask again for
             // this install alone (its bearer is then the install id).
             if (res.deadCode !== undefined && credential !== install && savedCode() === "") void refreshEntitlement();
-        } else if (res.errorCode === "device_limit" || res.errorCode === "invalid_code") {
-            // Not a network fault: this code does not work on this computer.
+        } else if (res.errorCode === "device_limit") {
+            // Not a network fault: this code is on 3 other computers already.
+            // (A v2 status never answers 401 for a dead code: it answers 200
+            // with `deadCode`, handled in applyStatus.)
             answered = true;
             clearStatusRetry();
             takeDownCheckingNotice();
-            if (res.errorCode === "invalid_code" && credential !== install && credential === savedCode() && !deadCodeConfirmed(credential)) {
-                // The first "dead" answer for this code: keep it and what it
-                // owned, and ask again in an hour (a relay storage lag).
-                tasteLog("the relay does not know the saved code yet; asking again in an hour");
-                return;
-            }
             const before = entitlementLevel();
             setEntitlement(null);
-            if (res.errorCode === "invalid_code" && credential !== install && credential === savedCode()) {
-                // A code the relay does not know (or no longer honours): forget
-                // it, and ask again for this install alone, which may still
-                // own something through its account. That answer decides the
-                // notice.
-                applyingStatus = true;
-                try {
-                    settings.store.clearedPurchaseCode = credential;
-                    settings.store.sublineCode = "";
-                } finally {
-                    applyingStatus = false;
-                }
-                if (before !== "none") onEntitlementChanged();
-                void refreshEntitlement();
-                return;
-            }
-            if (res.errorCode === "device_limit") {
-                // The 3-computer limit: its own notice, with the GitHub link,
-                // and never the buy panel.
-                showDeviceLimitNotice();
-                if (before !== "none") onEntitlementChanged();
-            } else if (before !== "none") onEntitlementChanged();
-            else showActivationNotice();
+            // The 3-computer limit: its own notice, with the GitHub link, and
+            // never the buy panel.
+            showDeviceLimitNotice();
+            if (before !== "none") onEntitlementChanged();
             tasteLog(`the relay refused this install (${res.errorCode})`);
         } else {
             tasteLog(`what this install owns is unknown: ${res.error}`);
@@ -1185,7 +1165,7 @@ async function refreshEntitlement(): Promise<void> {
 }
 
 /** Relay refusals that are about what this install owns, not about the network. */
-const ENTITLEMENT_REFUSAL_CODES: readonly string[] = ["not_activated", "ai_required", "device_limit", "invalid_code"];
+const ENTITLEMENT_REFUSAL_CODES: readonly string[] = ["not_activated", "ai_required", "device_limit"];
 function isEntitlementRefusal(code: string | undefined): boolean {
     return code !== undefined && ENTITLEMENT_REFUSAL_CODES.includes(code);
 }
