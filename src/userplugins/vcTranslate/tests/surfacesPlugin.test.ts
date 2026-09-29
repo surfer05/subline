@@ -659,6 +659,31 @@ describe("budget and priority: messages always come first", () => {
         expect(times.filter(t => t.surface)).toEqual([]);
     });
 
+    it("a Google 429 on surfaces pauses surfaces only: the ≈ line under messages keeps coming", async () => {
+        const sent: Array<{ engine: string; surface: boolean; ids: string[]; }> = [];
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) => {
+            const ids = JSON.parse(payload).messages.map((m: any) => m.id);
+            const surface = ids[0] === "s0";
+            sent.push({ engine, surface, ids });
+            if (engine === "google" && surface) return { ok: false, error: "google: HTTP 429", retryAfterMs: 5 * 60_000 };
+            return {
+                ok: true,
+                results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "de", text: `${engine}: ${m.text}`, skip: false, ...(engine === "google" ? { conf: 0.99 } : {}) }))
+            };
+        });
+        accessory(embedMessage());
+        await settle();
+        expect(sent.filter(t => t.surface && t.engine === "google")).toHaveLength(1);
+        __stubSetSelectedChannel("c1");
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: { id: "live429", channel_id: "c1", content: "hola, ¿qué tal estáis todos?", author: { id: "u2", username: "ana" } } });
+        await settle();
+        expect(sent.some(t => t.engine === "google" && t.ids.includes("live429"))).toBe(true);
+        // Surfaces wait out their own cooldown: no second Google try yet.
+        accessory({ ...embedMessage("m2"), embeds: [{ rawTitle: "Noch eine Pizzeria am Markt", rawDescription: "" }] });
+        await settle(60_000);
+        expect(sent.filter(t => t.surface && t.engine === "google")).toHaveLength(1);
+    });
+
     it("roomy lines ask Google one text at a time", async () => {
         const times = timedAnswers();
         accessory(embedMessage());

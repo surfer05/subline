@@ -12,8 +12,11 @@
  * (`purchase.code`), and the caller saves it as the Subline code. Nobody types
  * or pastes anything.
  *
- * If the relay cannot create a session (no Dodo key configured, Dodo down, a
- * network error), the static Dodo checkout link opens instead. It carries the
+ * If the relay ANSWERS that it cannot sell this now (503 "checkout
+ * unavailable": the product is not set up, or Dodo is down), nothing opens:
+ * the reader is told buying isn't available yet. The static Dodo checkout link
+ * is only for a relay that could not be reached at all, and never while the
+ * product id is still the placeholder (it would open a 404). It carries the
  * same install hash as `metadata_install` and a `redirect_url` back to the
  * site, both documented for static links
  * (https://docs.dodopayments.com/developer-resources/integration-guide#static-payment-links),
@@ -26,12 +29,17 @@
 export type Plan = "automatic" | "monthly" | "annual";
 
 /**
- * The Dodo product for Automatic ($4.99 once). PENDING: the owner has not
- * given the live product id yet. Set it here (and only here) when it exists;
- * until then only the static fallback link is wrong, the relay checkout is
- * what normally opens.
+ * The Dodo product for Automatic ($4.99 once). Set it here (and only here).
+ * While it is still the placeholder the static link is never opened (see
+ * isConfiguredProduct), and a test refuses the placeholder in a shipped build
+ * (tests/placeholder.test.ts).
  */
 export const AUTOMATIC_PRODUCT_ID = "pdt_AUTOMATIC_PENDING";
+
+/** A real Dodo product id, not the placeholder a build ships with before the owner sets it. */
+export function isConfiguredProduct(id: string): boolean {
+    return /^pdt_[A-Za-z0-9]+$/.test(id) && !/PENDING/.test(id);
+}
 
 export const PLAN_PRODUCTS: Record<Plan, string> = {
     automatic: AUTOMATIC_PRODUCT_ID,
@@ -96,7 +104,8 @@ export interface CheckoutDeps {
     /** This install's free bearer ("free_<32hex>"). */
     bearer: () => Promise<string>;
     /** POST /v1/checkout through the main process. */
-    createCheckout: (bearer: string, plan: Plan) => Promise<{ ok: true; url: string } | { ok: false; error: string; errorCode?: string }>;
+    /** `status` is the relay's HTTP status when it answered; absent when it could not be reached. */
+    createCheckout: (bearer: string, plan: Plan) => Promise<{ ok: true; url: string } | { ok: false; error: string; errorCode?: string; status?: number }>;
     /** GET /v1/status through the main process; `purchase` once linked. */
     status: (bearer: string) => Promise<{ ok: boolean; purchase?: Purchase }>;
     openExternal: (url: string) => void;
@@ -111,8 +120,9 @@ export interface CheckoutDeps {
 export interface CheckoutFlow {
     /**
      * Open checkout for a plan and start (or restart) polling. Resolves true
-     * when a checkout page was opened, or the relay's refusal word when it
-     * refused the purchase (see CHECKOUT_REFUSALS), or false if superseded.
+     * when a checkout page was opened, the relay's refusal word when it
+     * refused the purchase (see CHECKOUT_REFUSALS), "unavailable" when buying
+     * is not possible right now (nothing opened), or false if superseded.
      */
     start: (plan: Plan) => Promise<true | false | string>;
     stop: () => void;
@@ -173,11 +183,19 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
                 return res.errorCode;
             }
             if (res.ok && isDodoCheckoutUrl(res.url)) url = res.url;
-            else log(`checkout: relay could not create a session (${res.ok ? "not a Dodo URL" : res.error}), using the static link`);
+            else if (res.ok || res.status !== undefined) {
+                // The relay answered and cannot sell this now: nothing opens.
+                log(`checkout: not available (${res.ok ? "not a Dodo URL" : res.error})`);
+                return "unavailable";
+            } else log(`checkout: relay unreachable (${res.error}), trying the static link`);
         } catch (e) {
-            log(`checkout: relay call failed (${String((e as any)?.message ?? e)}), using the static link`);
+            log(`checkout: relay call failed (${String((e as any)?.message ?? e)}), trying the static link`);
         }
         if (url === null) {
+            if (!isConfiguredProduct(PLAN_PRODUCTS[plan])) {
+                log("checkout: no product set up for this plan, not opening a static link");
+                return "unavailable";
+            }
             let hash: string | null = null;
             try { hash = await installHash(bearer); } catch { hash = null; }
             url = staticCheckoutUrl(plan, hash);

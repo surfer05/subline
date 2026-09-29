@@ -187,6 +187,31 @@ describe("the paid-only model (v2) on the wire", () => {
         expect(JSON.parse(checkout.mock.calls[0][1].body)).toEqual({ plan: "automatic" });
     });
 
+    it("sends the prior-use hint and the check-only flag only when asked, and reads the new status fields", async () => {
+        const status = ok({
+            ok: true, automatic: true, ai: false, tokenExpiresAt: 5, deadCode: " LK-OLD ", grant: "early",
+            check: { valid: true, automatic: true, ai: false }
+        });
+        const out = await fetchRelayStatus("slp_code", status as any, INSTALL, { prior: true, check: true });
+        const headers = status.mock.calls[0][1].headers;
+        expect(headers["x-subline-prior"]).toBe("1");
+        expect(headers["x-subline-check"]).toBe("1");
+        expect(out).toMatchObject({ deadCode: "LK-OLD", grant: "early", check: { valid: true, automatic: true, ai: false } });
+        const plain = ok({ ok: true, automatic: true, ai: false, tokenExpiresAt: 5, grant: "someday", check: { valid: "yes" } });
+        const out2 = await fetchRelayStatus("slp_code", plain as any, INSTALL);
+        expect(plain.mock.calls[0][1].headers["x-subline-prior"]).toBeUndefined();
+        expect(plain.mock.calls[0][1].headers["x-subline-check"]).toBeUndefined();
+        expect(out2.grant).toBeUndefined();
+        expect(out2.check).toBeUndefined();
+    });
+
+    it("files a 503 checkout unavailable under its own word, and keeps the HTTP status", async () => {
+        const checkout = refused(503, { ok: false, error: "checkout unavailable" });
+        const err: any = await fetchRelayCheckout("slp_code", "automatic", checkout as any, 10_000, INSTALL).catch(e => e);
+        expect(err.errorCode).toBe("checkout_unavailable");
+        expect(err.status).toBe(503);
+    });
+
     it("reads what the install owns, field by field, and drops anything malformed", async () => {
         const out = await fetchRelayStatus(INSTALL, ok({
             ok: true, automatic: true, ai: true, aiUntil: 1_900_000_000_000, code: " slp_x ", now: 1_800_000_000_000,

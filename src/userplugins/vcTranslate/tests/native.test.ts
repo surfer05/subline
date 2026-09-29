@@ -663,6 +663,17 @@ describe("relayCheckout: a checkout URL for this install", () => {
         expect((res as { error: string }).error).not.toContain(id);
     });
 
+    it("says whether the relay answered at all: its HTTP status on a refusal, none when unreachable", async () => {
+        const { HttpError } = await import("../httpError");
+        checkoutFetch.mockRejectedValue(Object.assign(new HttpError("relay checkout: HTTP 503", 503), { errorCode: "checkout_unavailable" }));
+        expect(await relayCheckout(EV, "slp_code", "automatic", "free_abc")).toEqual({
+            ok: false, error: "relay checkout: HTTP 503", errorCode: "checkout_unavailable", status: 503
+        });
+        checkoutFetch.mockRejectedValue(new TypeError("fetch failed"));
+        const unreachable = await relayCheckout(EV, "slp_code", "automatic", "free_abc");
+        expect(unreachable).toEqual({ ok: false, error: "fetch failed" });
+    });
+
     it("refuses an unknown plan without a request", async () => {
         checkoutFetch.mockReset();
         expect((await relayCheckout(EV, "free_abc", "lifetime")).ok).toBe(false);
@@ -690,7 +701,7 @@ describe("the paid-only model (v2) through the main process", () => {
             ok: true, plan: "", used: 0, cap: 0, automatic: true, ai: false, code: "slp_x",
             previews: { used: 1, cap: 3 }, token: "p.s", tokenExpiresAt: 99
         });
-        expect(relayStatusFetch).toHaveBeenLastCalledWith("slp_code", fetch, INSTALL);
+        expect(relayStatusFetch).toHaveBeenLastCalledWith("slp_code", fetch, INSTALL, { prior: false, check: false });
     });
 
     it("status: hands the refusal word on, and scrubs both the code and the install id", async () => {

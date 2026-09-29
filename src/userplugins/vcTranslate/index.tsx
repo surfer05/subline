@@ -32,8 +32,8 @@ import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
 import {
-    connectInstallIdSetting, installIdOnce, knownInstallId, loadLocalTasteCount, markTasteExhausted, noteTasteSpent, recordTasteQuota,
-    rolloverTasteIfNewUtcDay, TASTE_CAP, tasteBearer, tasteCap, tasteExhausted, tasteLabel, tasteRemaining
+    connectInstallIdSetting, installIdOnce, knownInstallId, loadLocalTasteCount, markPriorHintSent, markTasteExhausted, noteTasteSpent,
+    priorUseHint, recordTasteQuota, rolloverTasteIfNewUtcDay, TASTE_CAP, tasteBearer, tasteCap, tasteExhausted, tasteLabel, tasteRemaining
 } from "./taste";
 import {
     recordError, recordPluginLoaded, recordRendered, recordTranslation, resetStatusBeacon
@@ -53,7 +53,7 @@ import { createCheckoutFlow, type CheckoutFlow, type Plan } from "./checkout";
 import { normalizeTargetLang } from "./languages";
 import { openUpgrade, registerUpgradeOpener } from "./upgradeBridge";
 import { UPGRADE_COPY } from "./upgradeCopy";
-import { openActivatePanel, openCodeEntry, openUpgradePanel } from "./upgradePanel";
+import { type CodeSubmitResult, openActivatePanel, openCodeEntry, openUpgradePanel } from "./upgradePanel";
 import { createUpdateWatch, UPDATE_CHECK_INTERVAL_MS, type UpdateWatch } from "./updateNotice";
 import { SurfaceBudget } from "./surfaces/budget";
 import { SurfaceCache } from "./surfaces/cache";
@@ -482,7 +482,7 @@ function modelFor(engine: EngineId): string {
  *
  * ✦ (the relay) needs AI on the account. An Automatic owner's saved code is a
  * real Subline code, so the configured engine is "relay", but without AI there
- * is no quality tier for it: Google (≈) alone, plus the day's three ✦
+ * is no quality tier for it: Google (≈) alone, plus the day's five ✦
  * previews on rough lines (see requestPreview). Everything that reads this
  * (the quality batcher, the ⚡ label, the chat-bar indicator) then treats an
  * Automatic owner as Google-only.
@@ -522,7 +522,7 @@ function activated(): boolean {
 }
 
 /**
- * An Automatic owner with no working ✦ tier: ≈ on everything, and three ✦
+ * An Automatic owner with no working ✦ tier: ≈ on everything, and five ✦
  * previews a day on rough ≈ lines. An AI install whose code was rejected this
  * session (pinned to Google) is not this: it gets its own error, never a
  * preview nudge.
@@ -549,6 +549,35 @@ async function relayCredentials(): Promise<{ credential: string; install: string
 
 /** The notice text the activation notice is showing, "" for none. */
 let activationNoticeShown = "";
+/** Whether "Can't reach Subline to check your code. Retrying." is up. */
+let checkingNoticeShown = false;
+
+/**
+ * A saved code the relay has not confirmed, because it could not be reached
+ * (a first 0.2.0 start offline, a network fault). Never the Activate notice
+ * then: the reader has a code, and pressing Activate would sell them what
+ * they already own. A plain notice instead, and the status call keeps
+ * retrying (scheduleStatusRetry).
+ */
+function showCheckingNotice(): void {
+    if (activated() || checkingNoticeShown) return;
+    checkingNoticeShown = true;
+    showNotice(UPGRADE_COPY.checkingNotice, UPGRADE_COPY.checkingNoticeButton, popNotice);
+}
+
+/** The relay could not be reached: the checking notice with a saved code, else the activation notice. */
+function showUnreachableNotice(): void {
+    if (activated()) return;
+    if (savedCode() !== "") showCheckingNotice();
+    else showActivationNotice();
+}
+
+/** The relay answered: the checking notice has said what it had to. */
+function takeDownCheckingNotice(): void {
+    if (!checkingNoticeShown) return;
+    checkingNoticeShown = false;
+    popNotice();
+}
 
 /**
  * "Subline is not activated on this computer..." with an Activate button,
@@ -572,8 +601,12 @@ function onEntitlementChanged(): void {
         activationNoticeShown = "";
         popNotice();
     }
+    if (activated()) takeDownCheckingNotice();
     if (fastBatcher === null) return;   // stopped
-    if (!activated()) showActivationNotice();
+    // Not while a relay answer is being taken in (a dead code is dropped
+    // before the account's answer is stored), and not while a saved code
+    // waits for the relay: the answer itself decides which notice is right.
+    if (!activated() && !applyingStatus && savedCode() === "") showActivationNotice();
     rebuildBatcher();
     notifyForcedInFlight();
     const open = SelectedChannelStore.getChannelId();
@@ -662,7 +695,7 @@ function getCheckoutFlow(): CheckoutFlow {
         createCheckout: async (bearer, plan) => {
             const code = savedCode();
             const res = await Native.relayCheckout(code !== "" ? code : bearer, plan, bearer);
-            return res.ok ? { ok: true, url: res.url } : { ok: false, error: res.error, errorCode: res.errorCode };
+            return res.ok ? { ok: true, url: res.url } : { ok: false, error: res.error, errorCode: res.errorCode, status: res.status };
         },
         status: async bearer => {
             const code = savedCode();
@@ -713,25 +746,54 @@ const OFFLINE_GRACE_MS = 7 * 24 * 60 * 60_000;
  * linked purchase: it cannot say what this install owns.
  */
 function applyStatus(res: Extract<Awaited<ReturnType<typeof Native.relayStatus>>, { ok: true; }>): boolean {
-    // The code first: the answer is then stored for the code it is about.
-    const linked = res.code ?? res.purchase?.code;
-    const saved = linked !== undefined ? adoptCode(linked) : false;
+    // A DEAD code (lapsed, refunded, revoked) is forgotten here and marked as
+    // cleared, so the relay's link cannot bring it back. The relay still
+    // answers for the whole account behind this install, so an AI lapse
+    // leaves Automatic in place; clearing the code asks again with the
+    // install id (the settings handler in start()).
+    let dropped = false;
+    let saved = false;
+    applyingStatus = true;
+    try {
+        if (res.deadCode !== undefined && res.deadCode === savedCode()) {
+            settings.store.clearedPurchaseCode = res.deadCode;
+            settings.store.sublineCode = "";
+            dropped = true;
+        }
+        // The code next: the answer is then stored for the code it is about.
+        // What the relay hands back wins (it prefers the Automatic code).
+        const linked = res.code ?? res.purchase?.code;
+        saved = linked !== undefined ? adoptCode(linked) : false;
+    } finally {
+        applyingStatus = false;
+    }
     if (typeof res.automatic === "boolean") {
         const now = Date.now();
+        // CLOCK SKEW. The relay's times are on its clock. A reader's clock
+        // that runs a day fast would end Automatic a day early (and one that
+        // runs slow, a day late), so every stated time is moved onto the
+        // local clock by the difference the relay's `now` reveals.
+        const skew = res.serverNow !== undefined ? res.serverNow - now : 0;
         const holder = currentHolderNow();
         setEntitlement({
             automatic: res.automatic,
             ai: res.ai === true,
-            ...(res.aiUntil !== undefined ? { aiUntil: res.aiUntil } : {}),
+            ...(res.aiUntil !== undefined ? { aiUntil: res.aiUntil - skew } : {}),
             ...(res.token !== undefined ? { token: res.token } : {}),
-            tokenExpiresAt: res.tokenExpiresAt ?? now + OFFLINE_GRACE_MS,
+            tokenExpiresAt: res.tokenExpiresAt !== undefined ? res.tokenExpiresAt - skew : now + OFFLINE_GRACE_MS,
             checkedAt: now,
             ...(holder !== null ? { holder } : {})
         });
         if (res.previews !== undefined) recordTasteQuota(res.previews.used, res.previews.cap);
     }
-    return saved;
+    if (res.grant === "early") earlyGrantPending = true;
+    return saved || dropped;
 }
+
+/** The relay just granted the early-user Automatic: the next announcement says so. */
+let earlyGrantPending = false;
+/** True while applyStatus changes the saved code (see onEntitlementChanged). */
+let applyingStatus = false;
 
 /**
  * The fingerprint of the saved code and this install id, recorded as the
@@ -758,7 +820,10 @@ function announcePurchase(): void {
     const key = `${entitlementLevel()}:${savedCode()}`;
     if (!activated() || key === announcedPurchase) return;
     announcedPurchase = key;
-    showNotice(UPGRADE_COPY.purchasedNotice, UPGRADE_COPY.purchasedNoticeButton, popNotice);
+    // An early user did not buy anything: thank them instead.
+    const early = earlyGrantPending;
+    earlyGrantPending = false;
+    showNotice(early ? UPGRADE_COPY.earlyNotice : UPGRADE_COPY.purchasedNotice, UPGRADE_COPY.purchasedNoticeButton, popNotice);
 }
 
 /**
@@ -782,6 +847,8 @@ function startCheckout(plan: Plan): void {
             Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message: UPGRADE_COPY.checkoutOpenedToast });
         } else if (result === "automatic_required") {
             Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message: UPGRADE_COPY.aiNeedsAutomatic });
+        } else if (result === "unavailable") {
+            Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message: UPGRADE_COPY.checkoutUnavailable });
         } else if (result === "already_owned") {
             Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message: UPGRADE_COPY.alreadyAutomatic });
             void refreshEntitlement();
@@ -815,7 +882,7 @@ function redeemErrorCopy(errorCode: string | undefined): string {
  * only if it owns something. Resolves null when it worked, else the sentence
  * to show.
  */
-async function submitCode(typed: string): Promise<string | null> {
+async function submitCode(typed: string): Promise<CodeSubmitResult> {
     const text = typed.trim();
     if (text === "") return UPGRADE_COPY.codeEmpty;
     let install: string;
@@ -832,25 +899,56 @@ async function submitCode(typed: string): Promise<string | null> {
         } catch {
             return UPGRADE_COPY.codeUnreachable;
         }
-        if (!res.ok) return redeemErrorCopy(res.errorCode);
+        if (!res.ok) {
+            // "Already yours": this install owns it already, so ask what it owns.
+            if (res.errorCode === "already") void refreshEntitlement();
+            return redeemErrorCopy(res.errorCode);
+        }
         adoptCode(res.code);
         await refreshEntitlement();
         if (!activated()) return UPGRADE_COPY.codeUnreachable;
         announcePurchase();
         return null;
     }
+    // CHECK FIRST, LINK AFTER. A typed code is only checked (x-subline-check:
+    // nothing is linked, no computer slot is used), and the reader then
+    // confirms it on this computer. A mistyped code, or someone else's, never
+    // takes one of an account's 3 computers.
+    let check: Awaited<ReturnType<typeof Native.relayStatus>>;
+    try {
+        check = await Native.relayStatus(text, install, { check: true });
+    } catch {
+        return UPGRADE_COPY.codeUnreachable;
+    }
+    const refused = statusRefusalCopy(check);
+    if (refused !== null) return refused;
+    if (!check.ok || typeof check.automatic !== "boolean") return UPGRADE_COPY.codeUnreachable;
+    const valid = check.check !== undefined
+        ? check.check.valid && (check.check.automatic || check.check.ai)
+        : check.automatic || check.ai === true;
+    if (!valid) return UPGRADE_COPY.codeNotFound;
+    return { confirm: () => linkTypedCode(text, install) };
+}
+
+/** The sentence for a status call the relay refused, or null when it did not refuse. */
+function statusRefusalCopy(res: Awaited<ReturnType<typeof Native.relayStatus>>): string | null {
+    if (res.ok) return null;
+    if (res.errorCode === "device_limit") return UPGRADE_COPY.deviceLimit;
+    if (res.errorCode === "invalid_code") return UPGRADE_COPY.codeNotFound;
+    return UPGRADE_COPY.codeUnreachable;
+}
+
+/** The reader confirmed a checked code: link it to this computer and save it. */
+async function linkTypedCode(text: string, install: string): Promise<string | null> {
     let res: Awaited<ReturnType<typeof Native.relayStatus>>;
     try {
         res = await Native.relayStatus(text, install);
     } catch {
         return UPGRADE_COPY.codeUnreachable;
     }
-    if (!res.ok) {
-        if (res.errorCode === "device_limit") return UPGRADE_COPY.deviceLimit;
-        if (res.errorCode === "invalid_code") return UPGRADE_COPY.codeNotFound;
-        return UPGRADE_COPY.codeUnreachable;
-    }
-    if (typeof res.automatic !== "boolean") return UPGRADE_COPY.codeUnreachable;
+    const refused = statusRefusalCopy(res);
+    if (refused !== null) return refused;
+    if (!res.ok || typeof res.automatic !== "boolean") return UPGRADE_COPY.codeUnreachable;
     if (!res.automatic && res.ai !== true) return UPGRADE_COPY.codeNotFound;
     const before = entitlementLevel();
     // Typed by the reader, so it wins even over a code they once cleared.
@@ -907,34 +1005,60 @@ async function refreshEntitlement(): Promise<void> {
     let answered = false;
     try {
         const { credential, install } = await relayCredentials();
-        const res = await Native.relayStatus(credential, install);
+        // Until the relay has answered once, say whether this install was
+        // used before 0.2.0 (taste.ts priorUseHint). The relay checks it
+        // against its own records; it never trusts it alone.
+        const prior = await priorUseHint((settings.store as any).freeTrialStartedAt);
+        const res = await Native.relayStatus(credential, install, prior ? { prior: true } : undefined);
         if (session !== statusSession) return;
         if (res.ok) {
             answered = true;
             clearStatusRetry();
+            if (prior) markPriorHintSent();
+            takeDownCheckingNotice();
             const before = entitlementLevel();
             const saved = applyStatus(res);
             if (saved || before !== entitlementLevel()) onEntitlementChanged();
             else if (!activated()) showActivationNotice();
-            if (saved) announcePurchase();
+            if (saved || res.grant === "early") announcePurchase();
             tasteLog(`the relay says: ${entitlementLevel()}`);
+            // A dead code was dropped and nothing replaced it: ask again for
+            // this install alone (its bearer is then the install id).
+            if (res.deadCode !== undefined && credential !== install && savedCode() === "") void refreshEntitlement();
         } else if (res.errorCode === "device_limit" || res.errorCode === "invalid_code") {
             // Not a network fault: this code does not work on this computer.
             answered = true;
             clearStatusRetry();
+            takeDownCheckingNotice();
             const before = entitlementLevel();
             setEntitlement(null);
+            if (res.errorCode === "invalid_code" && credential !== install && credential === savedCode()) {
+                // A code the relay does not know (or no longer honours): forget
+                // it, and ask again for this install alone, which may still
+                // own something through its account. That answer decides the
+                // notice.
+                applyingStatus = true;
+                try {
+                    settings.store.clearedPurchaseCode = credential;
+                    settings.store.sublineCode = "";
+                } finally {
+                    applyingStatus = false;
+                }
+                if (before !== "none") onEntitlementChanged();
+                void refreshEntitlement();
+                return;
+            }
             if (res.errorCode === "device_limit") showActivationNotice(UPGRADE_COPY.deviceLimit);
             if (before !== "none") onEntitlementChanged();
             else showActivationNotice();
             tasteLog(`the relay refused this install (${res.errorCode})`);
         } else {
             tasteLog(`what this install owns is unknown: ${res.error}`);
-            if (!activated()) showActivationNotice();
+            showUnreachableNotice();
         }
     } catch {
         tasteLog("what this install owns is unknown: the status call did not complete");
-        if (session === statusSession && !activated()) showActivationNotice();
+        if (session === statusSession) showUnreachableNotice();
     }
     if (!answered && session === statusSession) scheduleStatusRetry();
 }
@@ -3213,7 +3337,7 @@ function translationLines(message: Message) {
     // above rates this Google line unreliable, never to make ≈ look worse
     // than it is. A paid install keeps the "?" it always had.
     const rough = unsure && isAutomaticOnly();
-    // An Automatic owner can ask what ✦ reads a rough line as, three times a
+    // An Automatic owner can ask what ✦ reads a rough line as, five times a
     // day. Offered once per message, and not once today's five are used.
     const offerPreview = rough && !forcing && !previews.has(message.id) && !previewAsked.has(message.id) && !tasteExhausted();
     // No label at all for "und", "zxx" or anything that names no language.
@@ -3615,6 +3739,9 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
     // Surfaces pause entirely while EITHER engine is cooling down: whatever
     // capacity is left then belongs to the conversation.
     if (!isPaidSurfaceUser() || isCoolingDown("google") || isCoolingDown("relay")) return null;
+    // Surfaces' OWN Google cooldown: a 429 on a burst of statuses must never
+    // park the ≈ line under messages (see the 429 branch below).
+    if (engine === "google" && Date.now() < surfaceGoogleCooldownUntil) return null;
     if (engine === "relay") {
         // MESSAGES FIRST. A surface request takes a rate-gate slot only when
         // no message batch is queued or waiting, never queues for one, and
@@ -3656,7 +3783,7 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
                 fallBackToGoogle(rejectedCredentialText("relay"), "key");
             }
         } else if (/\b429\b/.test(res.error)) {
-            setCooldown("google", Date.now() + (res.retryAfterMs ?? GOOGLE_COOLDOWN_MS));
+            surfaceGoogleCooldownUntil = Date.now() + (res.retryAfterMs ?? GOOGLE_COOLDOWN_MS);
         }
         return null;
     }
@@ -3669,6 +3796,9 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
         return r.conf === undefined ? { lang: r.lang, text: r.text } : { lang: r.lang, text: r.text, conf: r.conf };
     });
 }
+
+/** Until when surfaces may not ask Google (their own 429). Messages' ≈ has its own cooldown. */
+let surfaceGoogleCooldownUntil = 0;
 
 function startSurfaces(): SurfaceService {
     surfaceCache = new SurfaceCache({
@@ -4322,6 +4452,7 @@ export default definePlugin({
         void surfaceCache?.persistNow();
         surfaceCache?.clear();
         surfaceService = null;
+        surfaceGoogleCooldownUntil = 0;
         surfaceCache = null;
         surfaceBudget = null;
         setSurfaceService(null);
@@ -4338,6 +4469,9 @@ export default definePlugin({
         if (entitlementTimer !== null) clearInterval(entitlementTimer);
         entitlementTimer = null;
         activationNoticeShown = "";
+        checkingNoticeShown = false;
+        applyingStatus = false;
+        earlyGrantPending = false;
         announcedPurchase = "";
         checkoutTarget = "automatic";
         activeTargetLang = null;
