@@ -10,6 +10,7 @@
  * No browser is launched: the page is read as text.
  */
 
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +20,10 @@ import { describe, expect, it } from "vitest";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const THANKS_JS = readFileSync(join(ROOT, "design", "site", "thanks", "thanks.js"), "utf8");
 const PAGE = readFileSync(join(ROOT, "site", "index.html"), "utf8");
+const BUILD_SITE = join(ROOT, "scripts", "buildSite.mjs");
+const PLACEHOLDER = "pdt_AUTOMATIC_PENDING";
+/** The design source still has the placeholder Automatic product id. */
+const PLACEHOLDER_IN_DESIGN = readFileSync(join(ROOT, "design", "site", "pricing", "index.html"), "utf8").includes(PLACEHOLDER);
 
 type Return = { state: "ok" | "pending" | "failed"; keys: string[]; fromDiscord: boolean; fromInstaller: boolean } | null;
 const parse = new Function(`${THANKS_JS}\nreturn parseCheckoutReturn;`)() as (search: string, hash: string) => Return;
@@ -85,17 +90,18 @@ describe("the checkout return", () => {
         expect(parse("?from=discord&payment_id=pay_1&status=failed", "")).toEqual({ state: "failed", keys: [], fromDiscord: true, fromInstaller: false });
     });
 
-    it("from=discord without Dodo's parameters shows the neutral thanks view", () => {
-        expect(parse("?from=discord", "")).toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: false });
-        expect(parse("?from=discord", "#thanks")).toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: false });
-        expect(parse("?from=discord&payment_id=pay_1", "")).toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: false });
+    it("a bare from=discord or from=installer (as after a refresh) keeps its own view, in the ok state", () => {
+        expect(parse("?from=discord", "")).toEqual({ state: "ok", keys: [], fromDiscord: true, fromInstaller: false });
+        expect(parse("?from=discord", "#thanks")).toEqual({ state: "ok", keys: [], fromDiscord: true, fromInstaller: false });
+        expect(parse("?from=discord&payment_id=pay_1", "")).toEqual({ state: "ok", keys: [], fromDiscord: true, fromInstaller: false });
+        expect(parse("?from=installer", "#thanks")).toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: true });
     });
 
     it("an unrelated from= value is not a Discord return", () => {
         expect(parse("?from=twitter", "")).toBeNull();
         expect(parse("?from=installer&subscription_id=sub_1&status=active&license_key=LK-001", ""))
             .toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: true });
-        expect(parse("?from=installer", "")).toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: false });
+        expect(parse("?from=installer", "")).toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: true });
         expect(parse("?from=twitter&payment_id=pay_1&status=succeeded&license_key=LK-001", ""))
             .toEqual({ state: "ok", keys: ["LK-001"], fromDiscord: false, fromInstaller: false });
     });
@@ -160,20 +166,21 @@ describe("the built page", () => {
         const d = run("?from=discord&subscription_id=sub_1&status=active&license_key=LK-001");
         expect(d.shown).toEqual(["discord"]);
         expect(d.code).toBe("");
-        expect(d.replaced).toBe("/subline/#thanks");
+        expect(d.replaced).toBe("/subline/?from=discord#thanks");
         expect(run("?from=discord&subscription_id=sub_1&status=pending").shown).toEqual(["discord-pending"]);
         const s = run("?subscription_id=sub_1&status=active&license_key=LK-001");
         expect(s.shown).toEqual(["ok", "keys"]);
         expect(s.code).toBe("LK-001");
         expect(s.replaced).toBe("/subline/#thanks");
-        // No Dodo parameters: nothing to confirm, so the neutral view.
-        expect(run("?from=discord").shown).toEqual(["ok"]);
+        // A refresh after the clean-up: the Discord view again, in its ok state.
+        expect(run(d.replaced.slice("/subline/".length, d.replaced.indexOf("#"))).shown).toEqual(["discord"]);
         // A checkout started in the installer says to go back to it, never the code.
         const i = run("?from=installer&payment_id=pay_1&status=succeeded&license_key=LK-001");
         expect(i.shown).toEqual(["installer"]);
         expect(i.code).toBe("");
+        expect(i.replaced).toBe("/subline/?from=installer#thanks");
         expect(run("?from=installer&payment_id=pay_1&status=processing").shown).toEqual(["installer-pending"]);
-        expect(run("?from=installer").shown).toEqual(["ok"]);
+        expect(run("?from=installer").shown).toEqual(["installer"]);
     });
 
     it("has an installer view that says to go back to the installer, and its pending view", () => {
@@ -194,7 +201,8 @@ describe("the built page", () => {
     });
 
     it("drops the key from the address bar once it is read, and never sends it", () => {
-        expect(PAGE).toContain('history.replaceState(null, "", location.pathname + "#thanks")');
+        expect(PAGE).toContain('history.replaceState(null, "", location.pathname + keep + "#thanks")');
+        expect(PAGE).toContain('var keep = d ? "?from=discord" : inst ? "?from=installer" : "";');
         const script = PAGE.slice(PAGE.lastIndexOf("<script>"));
         // The only network call on the page is the GitHub release lookup.
         expect(script.match(/fetch\(/g)).toHaveLength(1);
@@ -210,7 +218,7 @@ describe("the built page", () => {
         const pricing = section("pricing");
         const primaries = pricing.match(/<a class="btn btn-primary"[^>]*>[^<]*<\/a>/g) ?? [];
         expect(primaries).toEqual(['<a class="btn btn-primary" href="#downloads">Download Subline</a>']);
-        const buys = pricing.match(/<a [^>]*data-buy[^>]*>Buy<\/a>/g) ?? [];
+        const buys = pricing.match(/<a [^>]*data-buy[^>]*>[^<]*<\/a>/g) ?? [];
         expect(buys).toHaveLength(3);
         for (const buy of buys) expect(buy).toContain("btn-secondary");
         const text = pricing.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
@@ -233,12 +241,40 @@ describe("the built page", () => {
 
     it("sends buyers back to the site root, where the thanks view reads Dodo's params", () => {
         const root = encodeURIComponent("https://surfer05.github.io/subline/");
-        expect(section("pricing")).toContain(
-            `https://checkout.dodopayments.com/buy/pdt_AUTOMATIC_PENDING?quantity=1&amp;redirect_url=${root}`);
+        if (!PLACEHOLDER_IN_DESIGN) {
+            // Once the real Automatic id is in, its card buys like the AI cards.
+            const automatic = section("pricing").match(/<a [^>]*data-buy="automatic"[^>]*>[^<]*<\/a>/)?.[0] ?? "";
+            expect(automatic).toMatch(/href="https:\/\/checkout\.dodopayments\.com\/buy\/pdt_\w+\?quantity=1&amp;redirect_url=/);
+            expect(automatic).toContain(`redirect_url=${root}"`);
+        }
         expect(section("pricing")).toContain(
             `https://checkout.dodopayments.com/buy/pdt_0No1xmbcAqHdYAvt1RNPR?quantity=1&amp;redirect_url=${root}`);
         expect(section("pricing")).toContain(
             `https://checkout.dodopayments.com/buy/pdt_0No1yAve1ozdxryVGZvf6?quantity=1&amp;redirect_url=${root}`);
+    });
+
+    it("never ships the placeholder Automatic product id: the card says Download and points to #downloads", () => {
+        expect(PAGE).not.toContain(PLACEHOLDER);
+        const automatic = section("pricing").match(/<a [^>]*data-buy="automatic"[^>]*>[^<]*<\/a>/)?.[0];
+        if (PLACEHOLDER_IN_DESIGN) {
+            expect(automatic).toBe('<a class="btn btn-secondary" data-buy="automatic" href="#downloads">Download</a>');
+        } else {
+            expect(automatic).toMatch(/href="https:\/\/checkout\.dodopayments\.com\/buy\/pdt_\w+\?/);
+            expect(automatic).toContain(">Buy</a>");
+        }
+    });
+
+    it("refuses to build the site with the placeholder unless SUBLINE_ALLOW_PLACEHOLDER=1", () => {
+        if (!PLACEHOLDER_IN_DESIGN) return;
+        const env = { ...process.env };
+        delete env.SUBLINE_ALLOW_PLACEHOLDER;
+        // --check writes nothing, so running it here is safe.
+        const refused = spawnSync(process.execPath, [BUILD_SITE, "--check"], { env, encoding: "utf8" });
+        expect(refused.status).toBe(1);
+        expect(refused.stderr).toContain("placeholder Automatic product id");
+        expect(refused.stderr).toContain("SUBLINE_ALLOW_PLACEHOLDER=1");
+        const allowed = spawnSync(process.execPath, [BUILD_SITE, "--check"], { env: { ...env, SUBLINE_ALLOW_PLACEHOLDER: "1" }, encoding: "utf8" });
+        expect(allowed.status).toBe(0);
     });
 
     it("never says free or trial anywhere a visitor can read", () => {
@@ -269,19 +305,28 @@ describe("the built page", () => {
             + "can switch on by itself. The relay reads its record of this id's first use to give early users Automatic at "
             + "no charge. Your IP is counted to stop abuse.</td>"
             + "<td>Daily counts for 2 days. First use for 90 days. The link to your purchase for 30 days.</td></tr>");
-        expect(rows).toContain("<tr><td>Your account</td><td>Your codes and the computers you use them on are linked into one "
-            + "account, so any of your codes unlocks everything you paid for. No name or email is in it.</td>"
+        expect(rows).toContain("<tr><td>Your account</td><td>Your codes and computers are linked into one account. "
+            + "AI works on the computers where you bought it or entered its code.</td>"
             + "<td>Until you ask us to delete it.</td></tr>");
         expect(rows).toContain("<tr><td>Computers</td><td>A code works on up to 3 computers. The relay keeps a scrambled id "
             + "for each one, and when it was last used, to count them. One unused for 30 days can be replaced.</td>"
             + "<td>Until you ask us to delete it.</td></tr>");
         expect(rows).toContain("<tr><td>Server codes</td><td>When you use a server code, the relay records that your install "
             + "claimed it, to count its claims. Tries from your network are counted each day to stop guessing.</td>"
-            + "<td>Claims: until you ask us to delete them. Tries: that day.</td></tr>");
+            + "<td>Claims: until you ask us to delete them. Tries: 2 days.</td></tr>");
         expect(rows).toContain("<tr><td>Your code</td><td>Unlocks Subline. The relay never sees your name or email.</td>");
         expect(rows).not.toContain("Free installs");
         for (const kept of ["<td>Messages</td>", "<td>Usernames</td>", "<td>Profiles and embeds</td>", "<td>Stats</td>"]) {
             expect(rows).toContain(kept);
         }
+    });
+});
+
+describe("the v0.2.0 release notes", () => {
+    it("say exactly who gets Automatic at no charge", () => {
+        const notes = readFileSync(join(ROOT, "docs", "release-notes", "v0.2.0.md"), "utf8");
+        expect(notes).toContain("Early users get Automatic at no charge: anyone whose Subline used ✦ AI at least once "
+            + "before September 29, 2026, and every AI subscriber active at release.");
+        expect(notes).not.toContain("—");
     });
 });
