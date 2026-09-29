@@ -18,9 +18,9 @@ export const CODE_SCREEN_COPY = {
     /** The heading of the screen. */
     title: "Activate Subline",
     /** The line under the heading. */
-    detail: "Subline is $4.99, once. Buy it here, or enter a code you have.",
+    detail: "Subline is $4.99, once. Or use a code from your server.",
     /** The filled button: opens the checkout in the browser. */
-    buy: "Buy Automatic, $4.99",
+    buy: "Buy for $4.99",
     /** The secondary button that reveals the code field. Not a flow action. */
     haveCode: "I have a code",
     /** The button under the revealed field. */
@@ -32,8 +32,8 @@ export const CODE_SCREEN_COPY = {
     /** The link to Dodo's customer portal, shown only when the portal URL is known. */
     findCode: "Find my code",
     /** The waiting screen while the purchase happens in the browser. */
-    waitingTitle: "Finish in your browser",
-    waiting: "Finish the payment in your browser. Subline carries on by itself when it is done.",
+    waitingTitle: "Finish paying in your browser",
+    waiting: "Subline carries on by itself when it's done.",
     /** Leaves the waiting screen. */
     back: "Back",
     /** The screen shown when a saved code could not be checked. */
@@ -45,7 +45,7 @@ export const CODE_SCREEN_COPY = {
     errUnreachable: "Can't reach Subline right now. Try again in a minute.",
     errDeviceLimit: "This code is already used on 3 computers.",
     errNotActive: "That code is not active.",
-    errRateLimited: "Too many codes tried from this network today. Try again tomorrow.",
+    errRateLimited: "Too many codes tried from this network today. Try again after midnight UTC.",
     errEmpty: "Type or paste a code first."
 } as const;
 

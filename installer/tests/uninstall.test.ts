@@ -372,6 +372,13 @@ describe("removePluginSettings", () => {
         expect(written.autoUpdate).toBe(false);
     });
 
+    it("removing settings also removes the install id and any code, so a reinstall starts clean", () => {
+        writeSettings({ plugins: { [PLUGIN_SETTINGS_KEY]: { installId: "0".repeat(32), sublineCode: "", clearedPurchaseCode: "LICENSE-OLD" } } });
+        removePluginSettings(settingsPath);
+        const written = JSON.parse(readFileSync(settingsPath, "utf8"));
+        expect(written.plugins[PLUGIN_SETTINGS_KEY]).toBeUndefined();
+    });
+
     it("never deletes the settings file itself", () => {
         writeSettings({ plugins: { [PLUGIN_SETTINGS_KEY]: { targetLang: "tr" } } });
         removePluginSettings(settingsPath);

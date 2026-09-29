@@ -13,7 +13,7 @@ import {
     AUTOMATIC_PRODUCT_ID, createActivationRelay, installHash, isDodoCheckoutUrl, newInstallId, promoCode,
     staticAutomaticCheckoutUrl
 } from "../src/app/activation.js";
-import { ensureInstallId, readInstallId } from "../src/app/language.js";
+import { ensureInstallId, readClearedCode, readInstallId } from "../src/app/language.js";
 
 const ID = "0123456789abcdef0123456789abcdef";
 
@@ -169,6 +169,15 @@ describe("the install id in Vencord's settings", () => {
         let generated = 0;
         expect(ensureInstallId(path, () => { generated += 1; return "f".repeat(32); })).toEqual({ ok: true, value: ID });
         expect(generated).toBe(0);
+    });
+
+    it("reads the code the reader cleared, and nothing else", () => {
+        writeFileSync(path, JSON.stringify({ plugins: { VcTranslate: { clearedPurchaseCode: " LICENSE-OLD ", sublineCode: "" } } }));
+        expect(readClearedCode(path)).toBe("LICENSE-OLD");
+        writeFileSync(path, JSON.stringify({ plugins: { VcTranslate: { clearedPurchaseCode: "" } } }));
+        expect(readClearedCode(path)).toBeNull();
+        writeFileSync(path, "not json");
+        expect(readClearedCode(path)).toBeNull();
     });
 
     it("replaces a malformed one", () => {

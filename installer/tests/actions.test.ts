@@ -32,7 +32,7 @@ describe("the action vocabulary", () => {
         expect(ACTION_LABELS["force-quit-discord"]).toMatch(/anyway/i);
         // Paid only: the activation screen leads with the purchase, and says
         // the price on the button.
-        expect(ACTION_LABELS["buy-automatic"]).toBe("Buy Automatic, $4.99");
+        expect(ACTION_LABELS["buy-automatic"]).toBe("Buy for $4.99");
         for (const label of Object.values(ACTION_LABELS)) expect(label).not.toMatch(/free|trial/i);
     });
 

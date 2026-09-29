@@ -189,9 +189,20 @@ describe("the built page", () => {
         for (const buy of buys) expect(buy).toContain("btn-secondary");
         const text = pricing.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
         expect(text).toContain("Automatic $4.99 once");
-        expect(text).toContain("$2.49 /mo");
+        expect(text).toContain("$1.99 /mo");
         expect(text).toContain("$19.99 /yr");
         expect(text.match(/Needs Automatic\./g)).toHaveLength(2);
+    });
+
+    it("uses the owner's exact pricing copy", () => {
+        const pricing = section("pricing").replace(/<span class="gl-inline">(.*?)<\/span>/g, "$1");
+        const text = pricing.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+        expect(text).toContain("Automatic puts ≈ under every message, for good. AI adds ✦ on top.");
+        expect(text).toContain("≈ on every message, profile and embed. Decodes Morse and more. 5 ✦ previews a day.");
+        expect(text).toContain("$1.99 /mo ✦ on everything. Needs Automatic. Cancel anytime.");
+        expect(text).toContain("2 months free AI yearly $19.99 /yr ✦ on everything. Needs Automatic.");
+        expect(text).toContain("Up to 2,000 ✦ a day.");
+        expect(text).not.toMatch(/2\.49|4 months/);
     });
 
     it("sends buyers back to the site root, where the thanks view reads Dodo's params", () => {
@@ -212,7 +223,10 @@ describe("the built page", () => {
             .replace(/<style[\s\S]*?<\/style>/g, " ")
             .replace(/<!--[\s\S]*?-->/g, " ")
             .replace(/<[^>]+>/g, " ");
-        expect(visible).not.toMatch(/\b(free|trial)\b/i);
+        // The one exception is the yearly badge, "2 months free", which is a
+        // discount, not a free plan. It is counted so a second "free" still fails.
+        expect(visible.match(/\b2 months free\b/g)).toHaveLength(1);
+        expect(visible.replace("2 months free", " ")).not.toMatch(/\b(free|trial)\b/i);
         expect(visible).not.toMatch(/7 days/i);
         // Settings live in Discord's own Subline section, never "Plugins".
         expect(visible).not.toMatch(/Plugins|VcTranslate/);

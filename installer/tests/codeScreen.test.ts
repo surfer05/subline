@@ -1,5 +1,5 @@
 /**
- * The activation screen is a choice: "Buy Automatic, $4.99" (the filled button)
+ * The activation screen is a choice: "Buy for $4.99" (the filled button)
  * or "I have a code", which reveals the paste field and Save. There is no skip. The renderer draws
  * it from codeScreenView, which is tested here because the renderer is the one
  * module the suite never executes.
@@ -15,7 +15,7 @@ describe("the code screen", () => {
         const view = codeScreenView({ revealed: false });
         expect(view.showField).toBe(false);
         expect(view.buttons.map(b => [b.kind, b.label, b.primary])).toEqual([
-            ["buy-automatic", "Buy Automatic, $4.99", true],
+            ["buy-automatic", "Buy for $4.99", true],
             ["reveal", "I have a code", false]
         ]);
     });
@@ -25,7 +25,7 @@ describe("the code screen", () => {
         expect(view.showField).toBe(true);
         expect(view.buttons.map(b => [b.kind, b.label, b.primary])).toEqual([
             ["set-code", "Save code", true],
-            ["buy-automatic", "Buy Automatic, $4.99", false]
+            ["buy-automatic", "Buy for $4.99", false]
         ]);
     });
 
@@ -87,5 +87,32 @@ describe("Find my code", () => {
     it("refuses an id that could change the URL's shape", () => {
         expect(portalUrl("bus/../x")).toBeNull();
         expect(portalUrl("bus?x=1")).toBeNull();
+    });
+});
+
+describe("the activation copy (the owner's exact words)", () => {
+    it("says what Subline costs and offers a server code", () => {
+        expect(CODE_SCREEN_COPY.detail).toBe("Subline is $4.99, once. Or use a code from your server.");
+        expect(CODE_SCREEN_COPY.buy).toBe("Buy for $4.99");
+        expect(CODE_SCREEN_COPY.haveCode).toBe("I have a code");
+        expect(CODE_SCREEN_COPY.whereFrom).toBe("A server code, or the code in your email from **Dodo Payments**. **Check spam.**");
+    });
+
+    it("tells the buyer to finish in the browser, and that it carries on by itself", () => {
+        expect(CODE_SCREEN_COPY.waitingTitle).toBe("Finish paying in your browser");
+        expect(CODE_SCREEN_COPY.waiting).toBe("Subline carries on by itself when it's done.");
+        expect(CODE_SCREEN_COPY.back).toBe("Back");
+    });
+
+    it("says when the per-network code limit resets", () => {
+        // The relay counts redemptions per IP per UTC day (rl:rd:<ip>:<UTC date>).
+        expect(CODE_SCREEN_COPY.errRateLimited).toBe("Too many codes tried from this network today. Try again after midnight UTC.");
+    });
+
+    it("has no em dashes and no free or trial wording", () => {
+        for (const s of Object.values(CODE_SCREEN_COPY)) {
+            expect(s).not.toContain("—");
+            expect(s).not.toMatch(/\b(free|trial)\b/i);
+        }
     });
 });
