@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 import type { CheckoutAnswer, RedeemAnswer, StatusAnswer } from "../src/app/activation.js";
 import type { AppManagementStatus } from "../src/app/appManagement.js";
 import { ACTION_LABELS, IS_PRIMARY } from "../src/app/actions.js";
-import { CODE_SCREEN_COPY } from "../src/app/codeScreen.js";
+import { CODE_SCREEN_COPY, RESET_HELP_URL } from "../src/app/codeScreen.js";
 import { InstallFlow, isConfirmedSuccess } from "../src/app/flow.js";
 import type { FlowPorts, FlowState, FlowStep, HelperEnsureReport, HelperInstallOutcome } from "../src/app/flow.js";
 import type { InstalledModBundle } from "../src/app/modInstall.js";
@@ -1411,7 +1411,12 @@ describe("the activation screen (paid only)", () => {
         expect(CODE_SCREEN_COPY.errNotFound).toBe("That code doesn't exist.");
         expect(CODE_SCREEN_COPY.errAlready).toBe("Already yours.");
         expect(CODE_SCREEN_COPY.errUnreachable).toBe("Can't reach Subline right now. Try again in a minute.");
-        expect(CODE_SCREEN_COPY.errDeviceLimit).toBe("This code is on 3 computers already. It frees up after 30 days unused, or ask us to reset it.");
+        expect(CODE_SCREEN_COPY.errDeviceLimit).toBe("This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub.");
+        expect(CODE_SCREEN_COPY.errEmpty).toBe("Type or paste a code first.");
+        // The confirm step reads the same as the plugin's confirm window.
+        expect(CODE_SCREEN_COPY.confirmTitle).toBe("Use this code?");
+        expect(CODE_SCREEN_COPY.confirm).toBe("It works on up to 3 computers.");
+        expect(CODE_SCREEN_COPY.useIt).toBe("Use it");
         expect(CODE_SCREEN_COPY.errBuyUnavailable).toBe("Buying isn't available yet. Use a code, or try again later.");
         expect(CODE_SCREEN_COPY.errCoupon).toBe("Coupons go on the payment page.");
         expect(CODE_SCREEN_COPY.waitingLate).toBe("Paid already? It can take a few minutes. Close this and reopen Subline later.");
@@ -1429,7 +1434,7 @@ describe("the activation screen (paid only)", () => {
         // Only a check so far: no slot used, nothing saved, nothing patched.
         expect(h.relayCalls).toEqual([{ kind: "status", credential: "slp_abcdefghijklmnop", installId: TEST_INSTALL_ID, check: true }]);
         expect(confirm.step).toBe("confirm-code");
-        expect(confirm.detail).toBe("This code works on this computer. Use it?");
+        expect(confirm.detail).toBe("It works on up to 3 computers.");
         expect(confirm.actions).toEqual(["use-code", "back"]);
         expect(h.codeWrites).toEqual([]);
         expect(h.patchCalls).toHaveLength(0);
@@ -1514,6 +1519,33 @@ describe("the activation screen (paid only)", () => {
         expect(next.step).toBe("choose-code");
         expect(next.error?.message).toBe(CODE_SCREEN_COPY.errDeviceLimit);
         expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("at the computer limit: no Buy, only another code, and a link to ask for a reset", async () => {
+        const h = harness({ savedCode: "slp_savedcode", relayStatus: { kind: "device_limit" } });
+        await toDetection(h);
+        const next = await h.flow.send({ type: "set-language", code: "tr" });
+        expect(next.detail).toBe(CODE_SCREEN_COPY.errDeviceLimit);
+        expect(next.actions).toEqual(["set-code"]);
+        expect(next.helpUrl).toBe("https://github.com/surfer05/subline/issues");
+        expect(RESET_HELP_URL).toBe("https://github.com/surfer05/subline/issues");
+    });
+
+    it("any other refusal keeps Buy and draws no reset link", async () => {
+        const h = harness({ relayStatus: [{ kind: "ok", automatic: false, ai: false, code: null, check: { valid: false, automatic: false, ai: false } }] });
+        await toCodeStep(h);
+        const next = await h.flow.send({ type: "set-code", code: "slp_abcdefghijklmnop" });
+        expect(next.step).toBe("choose-code");
+        expect(next.actions).toEqual(["buy-automatic", "set-code"]);
+        expect(next.helpUrl).toBeUndefined();
+    });
+
+    it("an empty code says so, in the same words as the plugin", async () => {
+        const h = harness({});
+        await toCodeStep(h);
+        const next = await h.flow.send({ type: "set-code", code: "   " });
+        expect(next.detail).toBe("Type or paste a code first.");
+        expect(h.relayCalls).toEqual([]);
     });
 
     it("an unreachable relay while checking a saved code: the retry message, never continue", async () => {

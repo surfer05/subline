@@ -120,9 +120,46 @@ function topLevelRules(sheet) {
 
 const tokens = readFileSync(join(DESIGN, "tokens.css"), "utf8").trim();
 
+/**
+ * THE AUTOMATIC PRODUCT ID PLACEHOLDER.
+ *
+ * Until the owner creates the Dodo product, design/site/pricing carries
+ * `pdt_AUTOMATIC_PENDING` in the Automatic card's Buy link. That link would be
+ * a Dodo 404, so the build never ships it:
+ *   - without SUBLINE_ALLOW_PLACEHOLDER=1 the build (and `--check`) refuses,
+ *     naming the file, so a release can never be built with it by accident;
+ *   - with it (dogfood builds), the Automatic card's button is rewritten to
+ *     point at #downloads with the text "Download", because the installer is
+ *     where Automatic is bought anyway.
+ * `--check` rebuilds the same way the build did, so run both with the same
+ * setting: with the override while the placeholder is there, plain once the
+ * real id is in. Once the real id replaces the placeholder the card links to
+ * checkout with no change here.
+ */
+const AUTOMATIC_PLACEHOLDER = "pdt_AUTOMATIC_PENDING";
+const ALLOW_PLACEHOLDER = process.env.SUBLINE_ALLOW_PLACEHOLDER === "1";
+
+function withoutPlaceholderBuy(name, body) {
+    if (!body.includes(AUTOMATIC_PLACEHOLDER)) return body;
+    if (!ALLOW_PLACEHOLDER) {
+        console.error(
+            `design/site/${name}/index.html still has the placeholder Automatic product id (${AUTOMATIC_PLACEHOLDER}). ` +
+            "Put the real Dodo product id in, or set SUBLINE_ALLOW_PLACEHOLDER=1 for a dogfood build " +
+            "(the Automatic button then points to #downloads)."
+        );
+        process.exit(1);
+    }
+    const out = body.replace(
+        /<a ([^>]*)data-buy="automatic"([^>]*)href="[^"]*pdt_AUTOMATIC_PENDING[^"]*"([^>]*)>[^<]*<\/a>/,
+        '<a $1data-buy="automatic"$2href="#downloads"$3>Download</a>'
+    );
+    // The design comment names the placeholder too; drop it from the page.
+    return out.replace(/<!--[\s\S]*?pdt_AUTOMATIC_PENDING[\s\S]*?-->\s*/g, "");
+}
+
 const parts = SECTIONS.map(name => {
     const html = readFileSync(join(DESIGN, "site", name, "index.html"), "utf8");
-    return { name, style: styleOf(html), body: bodyOf(html) };
+    return { name, style: styleOf(html), body: withoutPlaceholderBuy(name, bodyOf(html)) };
 });
 
 const page = `<!doctype html>
@@ -161,10 +198,10 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}"${HIDDEN_SECTIONS.h
 
   // Back from checkout: show the thanks view first. The key is written with
   // textContent only and never sent anywhere (no fetch, no analytics).
-  // Then the address is cut back to "#thanks" with history.replaceState, so
-  // the key does not sit in the address bar, the history list, or a link
-  // someone copies to share the page. A refresh then shows the thanks view
-  // without the key; it is also in the receipt email.
+  // Then the address is cut back to "#thanks" (keeping any from=) with
+  // history.replaceState, so the key does not sit in the address bar, the
+  // history list, or a link someone copies to share the page. A refresh then
+  // shows the same view without the key; it is also in the receipt email.
   (function () {
     var ret = parseCheckoutReturn(location.search, location.hash);
     var section = document.getElementById("thanks");
@@ -196,7 +233,10 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}"${HIDDEN_SECTIONS.h
       });
     }
     try {
-      if (location.search && history.replaceState) history.replaceState(null, "", location.pathname + "#thanks");
+      // The key and Dodo's parameters leave the address; a from= stays, so a
+      // refresh still shows "go back to Discord" (or the installer).
+      var keep = d ? "?from=discord" : inst ? "?from=installer" : "";
+      if (location.search && history.replaceState) history.replaceState(null, "", location.pathname + keep + "#thanks");
     } catch (e) { /* the view still shows */ }
   })();
 

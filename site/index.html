@@ -328,13 +328,11 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
   <span class="fine">You pay in the installer. $4.99, once.</span>
 </div>
 <div class="plans">
-  <!-- The Automatic product id is PENDING from the owner: replace
-       pdt_AUTOMATIC_PENDING below (one place on the site) once it is known. -->
   <div class="panel card" data-plan="automatic">
     <h3>Automatic</h3>
     <div class="price">$4.99<span class="per">once</span></div>
     <p><span class="gl-inline">≈</span> on every message, profile and embed. Decodes Morse and more. 5 <span class="gl-inline">✦</span> previews a day.</p>
-    <a class="btn btn-secondary" data-buy="automatic" href="https://checkout.dodopayments.com/buy/pdt_AUTOMATIC_PENDING?quantity=1&amp;redirect_url=https%3A%2F%2Fsurfer05.github.io%2Fsubline%2F">Buy</a>
+    <a class="btn btn-secondary" data-buy="automatic" href="#downloads">Download</a>
   </div>
   <div class="panel card">
     <h3>AI monthly</h3>
@@ -429,9 +427,9 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 <tr><td>Profiles and embeds</td><td>Bios and statuses of people you see, wherever you see them. Embeds, polls, topics and titles you see, from channels Subline translates.</td><td>Cached on your device for 30 days.</td></tr>
 <tr><td>Your code</td><td>Unlocks Subline. The relay never sees your name or email.</td><td>Daily counts, deleted after 2 days.</td></tr>
 <tr><td>Install id</td><td>A random id made when you install. It ties your purchase or code to this computer. If you buy from Subline, a scrambled form of it goes to Dodo with the purchase, so Subline can switch on by itself. The relay reads its record of this id's first use to give early users Automatic at no charge. Your IP is counted to stop abuse.</td><td>Daily counts for 2 days. First use for 90 days. The link to your purchase for 30 days.</td></tr>
-<tr><td>Your account</td><td>Your codes and the computers you use them on are linked into one account, so any of your codes unlocks everything you paid for. No name or email is in it.</td><td>Until you ask us to delete it.</td></tr>
+<tr><td>Your account</td><td>Your codes and computers are linked into one account. AI works on the computers where you bought it or entered its code.</td><td>Until you ask us to delete it.</td></tr>
 <tr><td>Computers</td><td>A code works on up to 3 computers. The relay keeps a scrambled id for each one, and when it was last used, to count them. One unused for 30 days can be replaced.</td><td>Until you ask us to delete it.</td></tr>
-<tr><td>Server codes</td><td>When you use a server code, the relay records that your install claimed it, to count its claims. Tries from your network are counted each day to stop guessing.</td><td>Claims: until you ask us to delete them. Tries: that day.</td></tr>
+<tr><td>Server codes</td><td>When you use a server code, the relay records that your install claimed it, to count its claims. Tries from your network are counted each day to stop guessing.</td><td>Claims: until you ask us to delete them. Tries: 2 days.</td></tr>
 <tr><td>Stats</td><td>Totals only. No text, no names.</td><td>35 days.</td></tr>
 </tbody></table>
 <ul class="off">
@@ -462,14 +460,15 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
   //
   // A checkout started from Discord returns to "?from=discord". Discord has
   // already saved the code by itself, so that view only says to go back there:
-  // no code and no downloads, even when Dodo appended a key. Without Dodo's
-  // parameters there is nothing to confirm, so "?from=discord" alone gets the
-  // neutral thanks view, like "#thanks".
+  // no code and no downloads, even when Dodo appended a key. The page cleans the
+  // address back to "?from=discord#thanks" once it has read it (the key and
+  // Dodo's parameters go, the from= stays), so "?from=discord" alone, as after a
+  // refresh, shows that same view in its ok state.
   //
   // A checkout started from the Subline installer returns to "?from=installer".
   // The installer is still open and carries on by itself once the purchase
   // lands, so that view says to go back to it, again with no code and no
-  // downloads.
+  // downloads. "?from=installer" alone shows it too, like "?from=discord".
   //
   // Returns null when this is not a return from checkout. Otherwise
   // { state: "ok" | "pending" | "failed", keys: [...], fromDiscord: bool, fromInstaller: bool }.
@@ -483,9 +482,8 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
     var fromInstaller = from === "installer";
     var isReturn = !!params && status !== "" && !!(params.get("payment_id") || params.get("subscription_id"));
     if (!isReturn) {
-      return hash === "#thanks" || fromDiscord || fromInstaller
-        ? { state: "ok", keys: [], fromDiscord: false, fromInstaller: false }
-        : null;
+      if (fromDiscord || fromInstaller) return { state: "ok", keys: [], fromDiscord: fromDiscord, fromInstaller: fromInstaller };
+      return hash === "#thanks" ? { state: "ok", keys: [], fromDiscord: false, fromInstaller: false } : null;
     }
   
     var OK = ["succeeded", "active"];
@@ -506,10 +504,10 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 
   // Back from checkout: show the thanks view first. The key is written with
   // textContent only and never sent anywhere (no fetch, no analytics).
-  // Then the address is cut back to "#thanks" with history.replaceState, so
-  // the key does not sit in the address bar, the history list, or a link
-  // someone copies to share the page. A refresh then shows the thanks view
-  // without the key; it is also in the receipt email.
+  // Then the address is cut back to "#thanks" (keeping any from=) with
+  // history.replaceState, so the key does not sit in the address bar, the
+  // history list, or a link someone copies to share the page. A refresh then
+  // shows the same view without the key; it is also in the receipt email.
   (function () {
     var ret = parseCheckoutReturn(location.search, location.hash);
     var section = document.getElementById("thanks");
@@ -541,7 +539,10 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
       });
     }
     try {
-      if (location.search && history.replaceState) history.replaceState(null, "", location.pathname + "#thanks");
+      // The key and Dodo's parameters leave the address; a from= stays, so a
+      // refresh still shows "go back to Discord" (or the installer).
+      var keep = d ? "?from=discord" : inst ? "?from=installer" : "";
+      if (location.search && history.replaceState) history.replaceState(null, "", location.pathname + keep + "#thanks");
     } catch (e) { /* the view still shows */ }
   })();
 

@@ -263,6 +263,17 @@ function renderExtra(state: FlowState): void {
             find.onclick = event => { event.preventDefault(); void api.openUrl(url); };
             field.append(find);
         }
+        if (state.helpUrl !== undefined) {
+            // The computer-limit reset request. Its text is the address, so
+            // "ask for a reset on GitHub" in the line above has a place to go.
+            const helpUrl = state.helpUrl;
+            const help = document.createElement("a");
+            help.className = "note";
+            help.href = helpUrl;
+            help.textContent = helpUrl.replace(/^https:\/\//, "");
+            help.onclick = event => { event.preventDefault(); void api.openUrl(helpUrl); };
+            field.append(help);
+        }
         extra.append(field);
         // Focus so a paste works without hunting for the field.
         setTimeout(() => input.focus(), 0);

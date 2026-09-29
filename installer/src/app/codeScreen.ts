@@ -45,7 +45,8 @@ export const CODE_SCREEN_COPY = {
     errClaimed: "This code has been fully claimed.",
     errAlready: "Already yours.",
     errUnreachable: "Can't reach Subline right now. Try again in a minute.",
-    errDeviceLimit: "This code is on 3 computers already. It frees up after 30 days unused, or ask us to reset it.",
+    /** At the limit the screen offers no Buy, and links RESET_HELP_URL under this line. */
+    errDeviceLimit: "This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub.",
     errNotActive: "That code is not active.",
     errRateLimited: "Too many codes tried from this network today. Try again after midnight UTC.",
     errEmpty: "Type or paste a code first.",
@@ -53,11 +54,19 @@ export const CODE_SCREEN_COPY = {
     errBuyUnavailable: "Buying isn't available yet. Use a code, or try again later.",
     /** Added after "doesn't exist" when the typed code looks like a Dodo coupon. */
     errCoupon: "Coupons go on the payment page.",
-    /* The confirm step after a typed code checks out. Nothing is linked until "Use it". */
+    /* The confirm step after a typed code checks out. Nothing is linked until "Use it".
+       Same words as the plugin's confirm window. */
     confirmTitle: "Use this code?",
-    confirm: "This code works on this computer. Use it?",
+    confirm: "It works on up to 3 computers.",
     useIt: "Use it"
 } as const;
+
+/**
+ * Where someone whose code is on 3 computers asks for a reset. Opened through
+ * the main process (shell:open), like "Find my code". Its link text is the
+ * address itself, so there is no extra sentence to translate or rewrite.
+ */
+export const RESET_HELP_URL = "https://github.com/surfer05/subline/issues";
 
 /**
  * The Dodo Payments business id, which the customer portal login URL needs.

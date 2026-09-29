@@ -44,7 +44,7 @@ import {
     type ActivationRelay, ACTIVATION_POLL_MS, AUTOMATIC_PRODUCT_ID, installBearer, isDodoCheckoutUrl, looksLikeCoupon, promoCode, type RedeemAnswer,
     staticAutomaticCheckoutUrl, staticCheckoutAllowed, type StatusAnswer, WAITING_HINT_AFTER_MS
 } from "./activation.js";
-import { CODE_SCREEN_COPY } from "./codeScreen.js";
+import { CODE_SCREEN_COPY, RESET_HELP_URL } from "./codeScreen.js";
 import { defaultLanguage, endonymOf, languageOptions } from "./language.js";
 import type { EnsureRelayEngineReport, LanguageOption, SetSublineCodeReport, SetTargetLanguageReport } from "./language.js";
 import type { ModBundle } from "../bundle/bundle.js";
@@ -226,6 +226,8 @@ export interface FlowState {
     languageEndonym?: string;
     permission?: AppManagementReport;
     permissionStatus?: AppManagementStatus;
+    /** A help link drawn under the detail line (the computer-limit reset). Opened through shell:open. */
+    helpUrl?: string;
     /** Deep link to the exact System Settings pane (§4). */
     permissionSettingsUrl?: string;
     bundle?: ModBundle;
@@ -1084,6 +1086,10 @@ export class InstallFlow {
      * -------------------------------------------------------------------- */
 
     private codeStep(error: PatcherError | null = null): FlowState {
+        // AT THE COMPUTER LIMIT the code is fine, it is just on 3 computers.
+        // Selling a second Automatic would not help, so there is no Buy: only
+        // the field (another code) and a link to ask for a reset.
+        const atLimit = error?.message === CODE_SCREEN_COPY.errDeviceLimit;
         return this.set(state({
             step: "choose-code",
             // Two ways forward, and no skip: buy Automatic, or enter a code.
@@ -1095,7 +1101,8 @@ export class InstallFlow {
             // NO CANCEL ON THIS SCREEN (field lesson: Cancel here read as
             // "decline the extra" and aborted whole installs). Someone who
             // truly wants out can close the window; nothing has been changed.
-            actions: ["buy-automatic", "set-code"]
+            actions: atLimit ? ["set-code"] : ["buy-automatic", "set-code"],
+            ...(atLimit ? { helpUrl: RESET_HELP_URL } : {})
         }));
     }
 
