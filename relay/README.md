@@ -63,7 +63,7 @@ v0.1.5 to v0.1.9 clients keep working until they update. Code: `src/entitle.ts`,
   base64url(HMAC-SHA256 with `ENTITLEMENT_SECRET`), valid 7 days; empty
   signature when the secret is unset. AI is enforced here either way.
 - **`POST /v1/translate` (v2).** AI: full ✦, charged to the account's AI code.
-  Automatic only: `mode:"preview"` gets 3 cut previews a day per account
+  Automatic only: `mode:"preview"` gets 5 cut previews a day per account
   (`use:pv:<account>:<day>`), anything else 402 `ai_required`. No
   entitlement: 402 `not_activated`.
 - **`POST /v1/checkout` (v2)** takes `plan: "automatic"|"monthly"|"annual"`:

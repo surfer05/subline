@@ -149,7 +149,7 @@ describe("v2 status", () => {
         const e = env(kv);
         await buy(e, A, "KEY-AUTO-1", "pdt_auto", "pay_a");
         const first = await status(e, A);
-        expect(first.body).toMatchObject({ automatic: true, ai: false, code: "KEY-AUTO-1", previews: { used: 0, cap: 3 } });
+        expect(first.body).toMatchObject({ automatic: true, ai: false, code: "KEY-AUTO-1", previews: { used: 0, cap: 5 } });
         const before = kv._puts.length;
         const again = await status(e, A, "KEY-AUTO-1");
         expect(again.body).toMatchObject({ automatic: true, ai: false });
@@ -304,7 +304,7 @@ describe("v2 translate", () => {
         expect(r.body.error).toBe("not_activated");
     });
 
-    it("Automatic gets previews only: 3 a day per account, cut on the relay", async () => {
+    it("Automatic gets previews only: 5 a day per account, cut on the relay", async () => {
         const up = stubProvider();
         const e = env(fakeKV());
         await buy(e, A, "KEY-AUTO-1", "pdt_auto", "pay_a");
@@ -313,14 +313,14 @@ describe("v2 translate", () => {
         expect(full.status).toBe(402);
         expect(full.body.error).toBe("ai_required");
         expect(up).not.toHaveBeenCalled();
-        for (let i = 0; i < 3; i++) {
-            const p = await translate(e, i === 2 ? B : A, "KEY-AUTO-1", "preview");
+        for (let i = 0; i < 5; i++) {
+            const p = await translate(e, i === 4 ? B : A, "KEY-AUTO-1", "preview");
             expect(p.status).toBe(200);
             expect(p.body.results[0].truncated).toBe(true);
         }
-        const fourth = await translate(e, A, "KEY-AUTO-1", "preview");
-        expect(fourth.status).toBe(429);
-        expect((await status(e, A, "KEY-AUTO-1")).body.previews).toEqual({ used: 3, cap: 3 });
+        const sixth = await translate(e, A, "KEY-AUTO-1", "preview");
+        expect(sixth.status).toBe(429);
+        expect((await status(e, A, "KEY-AUTO-1")).body.previews).toEqual({ used: 5, cap: 5 });
     });
 
     it("AI gets full text, charged to the AI code", async () => {

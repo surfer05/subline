@@ -2,7 +2,7 @@
  * ENTITLEMENTS (v2 clients): what an install may use, and who it belongs to.
  *
  * THE MODEL (paid only, no free tier). Automatic ($4.99 once) is Google on the
- * client plus 3 ✦ previews a day; AI (monthly/annual) is ✦ on everything, sold
+ * client plus 5 ✦ previews a day; AI (monthly/annual) is ✦ on everything, sold
  * only on top of Automatic. A v2 client says so with `x-subline-api: 2` and
  * sends its install id in `x-subline-install` on every request. Anything
  * without that header is an older client and is answered exactly as before
@@ -41,7 +41,7 @@ import { authCode, isTasteBearer, mintCode, type CodeRecord, type Env } from "./
 import { installHash } from "./checkout";
 
 export const MAX_INSTALLS = 3;
-export const PREVIEW_DAILY_CAP = 3;
+export const PREVIEW_DAILY_CAP = 5;
 export const TOKEN_TTL_MS = 7 * 86_400_000;
 export const PROMO_RE = /^[A-Z0-9]{4,16}$/;
 
