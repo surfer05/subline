@@ -6,7 +6,7 @@ import * as DataStore from "@api/DataStore";
  * Two pieces of state an install needs whatever it owns. WHO is asking: an
  * install id the relay ties purchases, promo codes and the 3-computer limit
  * to (sent as `x-subline-install`, and as the credential when no code is
- * saved). HOW MANY ✦ previews are left today: an Automatic owner gets three a
+ * saved). HOW MANY ✦ previews are left today: an Automatic owner gets five a
  * day on rough ≈ lines (see index.tsx requestPreview).
  *
  * Everything here is deliberately free of Discord and of the network, so the
@@ -24,7 +24,7 @@ import * as DataStore from "@api/DataStore";
 export const INSTALL_ID_KEY = "VcTranslate_installId";
 
 /** The day's allowance, until a relay response says otherwise. */
-export const TASTE_CAP = 3;
+export const TASTE_CAP = 5;
 
 /* ------------------------------------------------------------ install id -- */
 
@@ -90,6 +90,11 @@ function writeSettingId(id: string): void {
     try {
         if (settingId() !== id) installIdSetting?.write(id);
     } catch { /* the DataStore copy still holds it */ }
+}
+
+/** The install id, if it has been read or made this session; null before. */
+export function knownInstallId(): string | null {
+    return installId;
 }
 
 export async function installIdOnce(): Promise<string> {
@@ -261,9 +266,9 @@ export function tasteExhausted(now: number = Date.now()): boolean {
     return (used !== null && used >= cap) || localUsedToday(now) >= Math.min(cap, TASTE_CAP);
 }
 
-/** "2 of 3 left today" — what the ⚡ button says before it is pressed. */
+/** "4 left today": the hover text on the Preview ✦ link. */
 export function tasteLabel(): string {
-    return `${tasteRemaining()} of ${Math.min(cap, TASTE_CAP)} left today`;
+    return `${tasteRemaining()} left today`;
 }
 
 // v0.1.6 dropped the two taste toasts ("3 of 3 free ✦ used today." and

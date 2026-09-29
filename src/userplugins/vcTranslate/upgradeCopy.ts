@@ -7,19 +7,19 @@
 export const UPGRADE_COPY = {
     /* ---- not activated ---- */
     /** A notice that stays until dismissed, shown once per session while not activated. */
-    activateNotice: "Subline is not activated on this computer. Nothing is translated until it is.",
+    activateNotice: "Subline isn't activated on this computer yet.",
     activateButton: "Activate",
     activateTitle: "Activate Subline",
-    activateSubtitle: "Every message translated the moment it arrives.",
+    activateSubtitle: "Pay once and every message gets translated.",
     automaticName: "Automatic",
     automaticPrice: "$4.99 once",
-    automaticNote: "Every message, profile and embed, with ≈. Codes decoded.",
-    automaticButton: "Buy Automatic, $4.99",
+    automaticNote: "≈ under every message, profile and embed. Yours for good.",
+    automaticButton: "Buy for $4.99",
     enterCodeButton: "Enter a code",
 
     /* ---- entering a code (promo codes and license keys) ---- */
     codeTitle: "Enter a code",
-    codeSubtitle: "A code from your server, or from your purchase email.",
+    codeSubtitle: "A server code, or the code from your purchase email.",
     codePlaceholder: "Your code",
     codeSubmit: "Activate",
     codeEmpty: "Type your code first.",
@@ -32,14 +32,14 @@ export const UPGRADE_COPY = {
 
     /* ---- Automatic owners: add AI ---- */
     panelTitle: "Add AI",
-    panelSubtitle: "✦ AI on every message, profile and embed.",
+    panelSubtitle: "✦ reads the whole conversation, so slang and replies come out right.",
     monthlyName: "Monthly",
-    monthlyPrice: "$2.49 a month",
+    monthlyPrice: "$1.99 a month",
     annualName: "Annual",
     annualPrice: "$19.99 a year",
-    annualNote: "4 months free",
-    monthlyButton: "Monthly $2.49",
-    annualButton: "Annual $19.99",
+    annualNote: "2 months free",
+    monthlyButton: "Monthly $1.99",
+    annualButton: "Yearly $19.99 · 2 months free",
     aiNeedsAutomatic: "AI needs Automatic first.",
     alreadyAutomatic: "You already have Automatic.",
 
@@ -53,10 +53,12 @@ export const UPGRADE_COPY = {
     /* ---- ✦ previews (Automatic) ---- */
     /** The link on a rough ≈ line that asks for a ✦ preview. */
     previewAsk: "Preview ✦",
-    /** The ⚡ popover for an Automatic owner. Followed by today's count, e.g. "(2 of 3 left today)". */
-    popoverPreview: "Preview ✦",
-    /** The ⚡ popover once today's previews are used. Followed by today's count. */
+    /** The ⚡ popover for an Automatic owner. {n} is how many are left today. */
+    popoverPreview: "Preview ✦ ({n} left today)",
+    /** The ⚡ popover once today's previews are used. */
     popoverUpgrade: "Add AI ✦",
     /** The link after a ✦ preview. */
-    previewLink: "Add AI"
+    previewLink: "Add AI",
+    /** Hover text on a ≈ line waiting for Google. */
+    googleBusy: "Google is busy. Subline retries by itself."
 } as const;

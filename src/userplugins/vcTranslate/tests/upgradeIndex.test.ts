@@ -140,12 +140,12 @@ describe("the Add AI panel", () => {
         openUpgrade();
         const el = openedModals[0]!({ transitionState: 1, onClose: () => { } });
         expect(el.props.title).toBe("Add AI");
-        expect(el.props.actions.map((a: any) => a.text)).toEqual(["Monthly $2.49", "Annual $19.99"]);
+        expect(el.props.actions.map((a: any) => a.text)).toEqual(["Monthly $1.99", "Yearly $19.99 · 2 months free"]);
         const body = el.children[0].type({});
         const flat = JSON.stringify(body);
-        expect(flat).toContain("$2.49 a month");
+        expect(flat).toContain("$1.99 a month");
         expect(flat).toContain("$19.99 a year");
-        expect(flat).toContain("4 months free");
+        expect(flat).toContain("2 months free");
     });
 
     it("falls back to the pricing page once the plugin is stopped", () => {
