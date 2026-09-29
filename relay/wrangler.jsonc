@@ -66,16 +66,12 @@
     "VARIANTS": {
       "pdt_0No1xmbcAqHdYAvt1RNPR": { "plan": "monthly", "dailyCap": 2000 },
       "pdt_0No1yAve1ozdxryVGZvf6": { "plan": "annual", "dailyCap": 2000 },
-      // AUTOMATIC ($4.99 once, license key, never expires). PLACEHOLDER id until
-      // the owner creates the Dodo product: replace "pdt_AUTOMATIC_PENDING" with
-      // the real product id before selling it. Until then POST /v1/checkout for
-      // plan "automatic" treats it as not configured and answers 503 "checkout
-      // unavailable" without asking Dodo; nothing else is affected. A test
-      // (test/placeholder.test.ts) fails while it is here, unless the run sets
-      // SUBLINE_ALLOW_PLACEHOLDER=1 (dogfood builds only). dailyCap is not used
+      // AUTOMATIC ($4.99 once, license key, never expires), the live Dodo
+      // product created 2026-09-29. A test (test/placeholder.test.ts) fails if
+      // the old placeholder id ever comes back. dailyCap is not used
       // for spend (Automatic is Google on the client); its ✦ previews are
       // counted per account (5 a day, src/entitle.ts).
-      "pdt_AUTOMATIC_PENDING": { "plan": "automatic", "dailyCap": 5 }
+      "pdt_0NofMhZ4QRA71V9lJw6K7": { "plan": "automatic", "dailyCap": 5 }
     },
     // Dodo Payments API base for POST /v1/checkout and POST /admin/coupon
     // (src/checkout.ts). Live: https://live.dodopayments.com, test:

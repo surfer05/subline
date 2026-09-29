@@ -788,6 +788,20 @@ const OFFLINE_GRACE_MS = 7 * 24 * 60 * 60_000;
 export const DEAD_CODE_CONFIRM_MS = 60 * 60_000;
 let deadRecheckTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * A relay refusal (AI lapsed, not activated, a 4th computer) normally asks the
+ * relay again at once. Not while the saved code has one unconfirmed dead
+ * answer: the hourly re-check scheduled by deadCodeConfirmed owns that, and a
+ * refusal-driven status call would only repeat the first strike. Returns
+ * whether a refresh was started.
+ */
+function refreshAfterRefusal(): boolean {
+    const code = savedCode();
+    if (code !== "" && deadCodeSeen().code === code) return false;
+    void refreshEntitlement();
+    return true;
+}
+
 function deadCodeSeen(): { code: string; at: number; } {
     const v = settings.store.deadCodeSeen as { code?: unknown; at?: unknown; } | undefined;
     return typeof v?.code === "string" && typeof v?.at === "number" ? { code: v.code, at: v.at } : { code: "", at: 0 };
@@ -2054,7 +2068,7 @@ async function runTier(
                 // ask it again, and the session follows its answer. No red
                 // toast, no fallback pin: ≈ is already on screen.
                 tasteLog(`the relay refused ✦ (${res.errorCode}); asking what this install owns`);
-                void refreshEntitlement();
+                refreshAfterRefusal();
             } else if (res !== null) {
                 // Park the engine for as long as the API asked for. Still the
                 // whole point of the cooldown: retrying into a wall that just
@@ -2420,7 +2434,7 @@ async function requestPreview(message: Message, text: string, googleText: string
     }
     if (res === null || !res.ok) {
         if (res !== null && isDailyLimit(res.error)) markTasteExhausted();
-        if (res !== null && isEntitlementRefusal(res.errorCode)) void refreshEntitlement();
+        if (res !== null && isEntitlementRefusal(res.errorCode)) refreshAfterRefusal();
         tasteLog(`${message.id}: no preview (${res === null ? "IPC call rejected" : "the relay refused"})`);
         return;
     }
@@ -3874,7 +3888,7 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
     if (!res.ok) {
         surfaceDebug(`[surface] ${engine}: not ok (${beaconErrorCode(res)})`);
         if (engine === "relay" && isEntitlementRefusal(res.errorCode)) {
-            void refreshEntitlement();
+            refreshAfterRefusal();
         } else if (engine === "relay") {
             if (res.retryAfterMs) {
                 enterCooldown("relay", res.retryAfterMs, res.quotaLimitPerMinute, res.quotaModel, res.error);

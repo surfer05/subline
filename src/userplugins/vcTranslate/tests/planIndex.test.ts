@@ -885,6 +885,31 @@ describe("the audit round", () => {
         expect(settings.store.sublineCode).toBe("");
     });
 
+    it("a ✦ refusal does not ask the relay again while a dead answer is unconfirmed: the hourly re-check owns it", async () => {
+        DataStore.setEntitlementForTest({ automatic: true, ai: true, tokenExpiresAt: Date.now() + 7 * DAY, checkedAt: Date.now() });
+        settings.store.sublineCode = "LK-LAG";
+        settings.store.engine = "relay";
+        native.relayStatus.mockResolvedValue({ ...v2({ automatic: true }), deadCode: "LK-LAG" });
+        await plugin.start!();
+        await flush();
+        expect(settings.store.deadCodeSeen).toMatchObject({ code: "LK-LAG" });
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) =>
+            engine === "relay"
+                ? { ok: false, error: "relay: HTTP 402 ai_required", errorCode: "ai_required" }
+                : { ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "es", text: "hi", skip: false })) });
+        const n = native.relayStatus.mock.calls.length;
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal amigo") });
+        await vi.advanceTimersByTimeAsync(25_000);
+        await flush();
+        expect(calls("relay").length).toBeGreaterThan(0);
+        expect(native.relayStatus.mock.calls.length).toBe(n);
+        // The hourly re-check still runs, and settles it.
+        await vi.advanceTimersByTimeAsync(DEAD_CODE_CONFIRM_MS + 1_000);
+        await flush();
+        expect(native.relayStatus.mock.calls.length).toBeGreaterThan(n);
+        expect(settings.store.clearedPurchaseCode).toBe("LK-LAG");
+    });
+
     it("a saved code the relay no longer knows keeps its plan on the first strike, then is dropped and the install id alone is asked (Automatic stays)", async () => {
         DataStore.setEntitlementForTest({ automatic: true, ai: true, tokenExpiresAt: Date.now() + 7 * DAY, checkedAt: Date.now() });
         settings.store.sublineCode = "LK-REFUNDED";

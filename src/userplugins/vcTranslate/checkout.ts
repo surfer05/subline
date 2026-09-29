@@ -34,7 +34,7 @@ export type Plan = "automatic" | "monthly" | "annual";
  * isConfiguredProduct), and a test refuses the placeholder in a shipped build
  * (tests/placeholder.test.ts).
  */
-export const AUTOMATIC_PRODUCT_ID = "pdt_AUTOMATIC_PENDING";
+export const AUTOMATIC_PRODUCT_ID = "pdt_0NofMhZ4QRA71V9lJw6K7";
 
 /** A real Dodo product id, not the placeholder a build ships with before the owner sets it. */
 export function isConfiguredProduct(id: string): boolean {

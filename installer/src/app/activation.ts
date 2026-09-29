@@ -29,7 +29,7 @@ export const RELAY_URL = "https://subline-relay.rahul05alok.workers.dev";
  * nowhere else; the static fallback link below is dead until then (the relay
  * checkout, the normal path, uses the relay's own product map).
  */
-export const AUTOMATIC_PRODUCT_ID = "pdt_AUTOMATIC_PENDING";
+export const AUTOMATIC_PRODUCT_ID = "pdt_0NofMhZ4QRA71V9lJw6K7";
 
 /**
  * The placeholder the product id holds until the owner supplies the real one.
