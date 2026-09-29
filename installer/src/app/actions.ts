@@ -33,6 +33,7 @@ export const ACTION_LABELS: Record<FlowActionType, string> = {
     "set-code": CODE_SCREEN_COPY.save,
     // Paid only: buying Automatic is the default path on the activation screen.
     "buy-automatic": CODE_SCREEN_COPY.buy,
+    "use-code": CODE_SCREEN_COPY.useIt,
     back: CODE_SCREEN_COPY.back,
     // Secondary: Subline already opened the pane itself. This is for someone
     // who closed it or lost it behind another window.
@@ -70,6 +71,7 @@ const IS_PRIMARY: Record<FlowActionType, boolean> = {
     // primary only once the field is revealed (codeScreen.ts decides that).
     "set-code": false,
     "buy-automatic": true,
+    "use-code": true,
     back: false,
     "open-permission-settings": false,
     retry: true,

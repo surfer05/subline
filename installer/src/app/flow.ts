@@ -41,8 +41,8 @@ import { awaitAppManagement, isLoggedAttempt } from "./appManagement.js";
 import type { QuitReport, RunningProcess } from "./discordProcess.js";
 import { findDiscordProcesses, quitDiscord } from "./discordProcess.js";
 import {
-    type ActivationRelay, ACTIVATION_POLL_MS, installBearer, isDodoCheckoutUrl, promoCode, type RedeemAnswer,
-    staticAutomaticCheckoutUrl, type StatusAnswer
+    type ActivationRelay, ACTIVATION_POLL_MS, AUTOMATIC_PRODUCT_ID, installBearer, isDodoCheckoutUrl, looksLikeCoupon, promoCode, type RedeemAnswer,
+    staticAutomaticCheckoutUrl, staticCheckoutAllowed, type StatusAnswer, WAITING_HINT_AFTER_MS
 } from "./activation.js";
 import { CODE_SCREEN_COPY } from "./codeScreen.js";
 import { defaultLanguage, endonymOf, languageOptions } from "./language.js";
@@ -135,6 +135,8 @@ export type FlowStep =
     | "activation-waiting"
     /** A saved code could not be checked because the relay did not answer. */
     | "activation-check-failed"
+    /** A typed code checked out (without linking); the user says "Use it" before it is linked. */
+    | "confirm-code"
     /* §3 step 7 / §4. */
     | "permission-explain"
     /** One waiting screen, no timeout: it lasts until the grant or a Cancel. */
@@ -170,6 +172,7 @@ export type FlowActionType =
     | "set-language"
     | "set-code"
     | "buy-automatic"
+    | "use-code"
     | "back"
     | "open-permission-settings"
     | "retry"
@@ -189,6 +192,7 @@ export type FlowAction =
     | { type: "set-language"; code: string }
     | { type: "set-code"; code: string }
     | { type: "buy-automatic" }
+    | { type: "use-code" }
     | { type: "back" }
     | { type: "open-permission-settings" }
     | { type: "retry" }
@@ -315,6 +319,12 @@ export interface FlowPorts {
     savedInstallId(): string | null;
     /** A code the reader cleared in Subline's settings, never saved again; null for none. Read only. */
     clearedCode(): string | null;
+    /**
+     * Whether the settings show Subline was used here before (language.ts
+     * readPriorUse). Such a machine is an update: patched without the paid
+     * gate, and never given a new install id. Read only.
+     */
+    priorSublineUse(): boolean;
     /** The install id, created and written into the settings if there is none. */
     ensureInstallId(): Result<string>;
     /** The relay: checkout, status, redeem. */
@@ -323,6 +333,8 @@ export interface FlowPorts {
     openCheckout(url: string): Promise<void>;
     /** How often to ask whether a purchase has landed. Injected so tests do not wait. */
     activationPollIntervalMs?: number;
+    /** The Automatic product id for the static link. Defaults to activation.ts; injected by tests. */
+    automaticProductId?: string;
 
     patch(install: DiscordInstall, options: { modBundleDir: string; overwriteForeignMod: boolean }): Result<PatchReport>;
     /**
@@ -517,7 +529,7 @@ export class InstallFlow {
                     this.ports.log.warn("flow.overwrite-foreign-mod", {
                         mod: this.current.modName ?? null
                     });
-                    return this.checkRunning();
+                    return this.beforeQuit();
                 }
                 return this.current;
 
@@ -550,6 +562,14 @@ export class InstallFlow {
             case "choose-code":
                 if (action.type === "set-code") return this.applyCode(action.code);
                 if (action.type === "buy-automatic") return this.buyAutomatic();
+                return this.current;
+
+            case "confirm-code":
+                if (action.type === "use-code") return this.useConfirmedCode();
+                if (action.type === "back") {
+                    this.pendingCode = null;
+                    return this.codeStep();
+                }
                 return this.current;
 
             case "activation-waiting":
@@ -735,7 +755,28 @@ export class InstallFlow {
             return this.alreadyInstalled(install, installState);
         }
 
-        return this.checkRunning();
+        return this.beforeQuit();
+    }
+
+    /**
+     * Everything that is asked BEFORE Discord is closed: the reading language
+     * and activation. Order: find Discord, language, activate, quit Discord,
+     * patch. Discord is only closed once the install is activated, so someone
+     * who stops at the paid screen (or buys in a browser for a while) keeps a
+     * working Discord the whole time.
+     *
+     * A machine whose settings show Subline was used before is an UPDATE (see
+     * `priorSublineUse`): no language question, no paid gate, no new install
+     * id. The plugin settles activation inside Discord with the relay.
+     */
+    private beforeQuit(): FlowState | Promise<FlowState> {
+        if (this.ports.priorSublineUse()) {
+            this.priorUse = true;
+            this.ports.log.info("flow.prior-use", { reason: "settings show Subline was used here before" });
+            if (this.ports.hasSublineCode()) this.useSavedCode();
+            return this.checkRunning();
+        }
+        return this.languageStep();
     }
 
     /**
@@ -874,18 +915,17 @@ export class InstallFlow {
      * remains a real answer). The language, which IS saved, is never asked twice.
      */
     private afterDiscordClosed(): FlowState | Promise<FlowState> {
-        if (!this.updating) return this.languageStep();
-        if (!this.ports.hasSublineCode()) {
-            // AN UPDATE WITHOUT A CODE IS NOT GATED. Discord already runs
-            // Subline; the new mod asks for activation inside Discord itself,
-            // and it is the plugin (with its own install id) that the relay
-            // recognises as an early user. Gating here would make an early user
-            // updating by hand pay for what the relay gives them for free.
-            this.ports.log.info("flow.update-without-code", { reason: "activation is asked inside Discord" });
-            return this.permissionStep();
+        // Language and activation were settled before Discord was closed (see
+        // beforeQuit). AN UPDATE IS NOT GATED: Discord already runs Subline,
+        // the new mod asks for activation inside Discord itself, and it is the
+        // plugin (with its own install id) that the relay recognises as an
+        // early user. Gating here would make an early user updating by hand
+        // pay for what the relay gives them for free.
+        if (this.updating && this.ports.hasSublineCode()) this.useSavedCode();
+        if (this.updating || this.priorUse) {
+            this.ports.log.info("flow.update-not-gated", { withCode: this.ports.hasSublineCode(), priorUse: this.priorUse });
         }
-        // A saved code is checked with the relay before anything is written.
-        return this.checkSavedCode();
+        return this.permissionStep();
     }
 
     /**
@@ -967,15 +1007,35 @@ export class InstallFlow {
         }));
     }
 
+    /**
+     * The language is REMEMBERED here and written once the install is
+     * activated (see `activated`). Written now, it would make an abandoned
+     * run look like earlier Subline use (readPriorUse) and let the next run
+     * past the paid screen.
+     */
     private async applyLanguage(code: string): Promise<FlowState> {
-        const saved = this.ports.setLanguage(code);
-        if (!saved.ok) {
-            this.ports.log.error("language.save-failed", errorFields(saved.error));
-            return this.languageStep(saved.error);
-        }
-        this.chosenLanguage = saved.value.code;
-        this.ports.log.info("language.saved", { lang: saved.value.code, created: saved.value.created });
+        this.chosenLanguage = code;
+        this.languagePending = true;
+        this.ports.log.info("language.chosen", { lang: code });
         return this.codeStepUnlessSaved();
+    }
+
+    /**
+     * Activation confirmed. Save the language chosen on this run, then close
+     * Discord and patch.
+     */
+    private activated(): FlowState | Promise<FlowState> {
+        if (this.languagePending && this.chosenLanguage !== null) {
+            const saved = this.ports.setLanguage(this.chosenLanguage);
+            if (!saved.ok) {
+                this.ports.log.error("language.save-failed", errorFields(saved.error));
+                return this.languageStep(saved.error);
+            }
+            this.languagePending = false;
+            this.chosenLanguage = saved.value.code;
+            this.ports.log.info("language.saved", { lang: saved.value.code, created: saved.value.created });
+        }
+        return this.checkRunning();
     }
 
     /**
@@ -1060,7 +1120,7 @@ export class InstallFlow {
             this.ports.log.info("code.saved", { codeLength: saved.value.codeLength, created: saved.value.created });
         }
         this.ports.log.info("activation.confirmed", { withCode: code !== null, ai });
-        return this.permissionStep();
+        return this.activated();
     }
 
     /** What a status answer about a code means for the activation screen. */
@@ -1073,9 +1133,11 @@ export class InstallFlow {
         }
     }
 
-    private redeemError(answer: Exclude<RedeemAnswer, { kind: "ok" }>): PatcherError {
+    private redeemError(answer: Exclude<RedeemAnswer, { kind: "ok" }>, code: string): PatcherError {
         switch (answer.kind) {
-            case "not_found": return this.activationError(CODE_SCREEN_COPY.errNotFound);
+            case "not_found": return this.activationError(looksLikeCoupon(code)
+                ? `${CODE_SCREEN_COPY.errNotFound} ${CODE_SCREEN_COPY.errCoupon}`
+                : CODE_SCREEN_COPY.errNotFound);
             case "claimed": return this.activationError(CODE_SCREEN_COPY.errClaimed);
             case "already": return this.activationError(CODE_SCREEN_COPY.errAlready);
             case "rate_limited": return this.activationError(CODE_SCREEN_COPY.errRateLimited);
@@ -1100,12 +1162,42 @@ export class InstallFlow {
         if (promo !== null) {
             const redeemed = await this.ports.relay.redeem(id.value, promo);
             this.ports.log.info("activation.redeem", { result: redeemed.kind });
-            if (redeemed.kind !== "ok") return this.codeStep(this.redeemError(redeemed));
+            if (redeemed.kind !== "ok") return this.codeStep(this.redeemError(redeemed, promo));
             return this.saveConfirmedCode(redeemed.code, false);
         }
-        const answer = await this.ports.relay.status(typed, id.value);
-        this.ports.log.info("activation.code-check", { result: answer.kind, automatic: answer.kind === "ok" ? answer.automatic : null });
-        if (answer.kind === "ok" && answer.automatic) return this.saveConfirmedCode(typed, answer.ai);
+        // CHECK FIRST, LINK LATER. A check-only status judges the code without
+        // tying this computer to it, so a mistyped or borrowed code never uses
+        // up one of its 3 computers. Only "Use it" links it (useConfirmedCode).
+        const answer = await this.ports.relay.status(typed, id.value, { check: true });
+        const works = answer.kind === "ok" && (answer.check ? answer.check.valid && answer.check.automatic : answer.automatic);
+        this.ports.log.info("activation.code-check", { result: answer.kind, works });
+        if (works) {
+            this.pendingCode = typed;
+            return this.set(state({
+                step: "confirm-code",
+                detail: CODE_SCREEN_COPY.confirm,
+                actions: ["use-code", "back"]
+            }));
+        }
+        if (answer.kind === "ok") return this.codeStep(this.activationError(CODE_SCREEN_COPY.errNotActive));
+        return this.codeStep(this.statusError(answer));
+    }
+
+    /** "Use it": now the code is linked to this computer (a normal status). */
+    private async useConfirmedCode(): Promise<FlowState> {
+        const code = this.pendingCode;
+        if (code === null) return this.codeStep();
+        const id = this.ports.ensureInstallId();
+        if (!id.ok) {
+            this.ports.log.error("activation.install-id-failed", errorFields(id.error));
+            return this.codeStep(id.error);
+        }
+        const answer = await this.ports.relay.status(code, id.value);
+        this.ports.log.info("activation.code-linked", { result: answer.kind, automatic: answer.kind === "ok" ? answer.automatic : null });
+        if (answer.kind === "ok" && answer.automatic) {
+            this.pendingCode = null;
+            return this.saveConfirmedCode(code, answer.ai);
+        }
         return this.codeStep(this.statusError(answer));
     }
 
@@ -1125,17 +1217,38 @@ export class InstallFlow {
         let url: string;
         if (checkout.kind === "ok" && isDodoCheckoutUrl(checkout.url)) {
             url = checkout.url;
+        } else if (checkout.kind === "already_owned") {
+            // This install already has Automatic: ask the relay again rather
+            // than sell it twice.
+            this.ports.log.info("activation.already-owned", {});
+            const answer = await this.ports.relay.status(installBearer(id.value), id.value);
+            if (answer.kind === "ok" && answer.automatic) return this.saveConfirmedCode(answer.code, answer.ai);
+            if (answer.kind === "unreachable") return this.codeStep(this.activationError(CODE_SCREEN_COPY.errUnreachable, answer.cause));
+            return this.codeStep(this.activationError(CODE_SCREEN_COPY.errAlready));
+        } else if (checkout.kind === "network" && staticCheckoutAllowed(this.productId())) {
+            // The relay could not be reached at all: the static link still
+            // links the purchase to this install (metadata_install).
+            this.ports.log.warn("activation.checkout-fallback", { cause: checkout.cause });
+            url = staticAutomaticCheckoutUrl(id.value, this.productId());
         } else {
-            this.ports.log.warn("activation.checkout-fallback", { cause: checkout.kind === "failed" ? checkout.cause : "not a Dodo URL" });
-            url = staticAutomaticCheckoutUrl(id.value);
+            // The relay said buying is not possible, or the static link would
+            // be a dead page. Open NOTHING: never leave someone on a 404.
+            const cause = "cause" in checkout ? checkout.cause : "not a Dodo URL";
+            this.ports.log.warn("activation.checkout-unavailable", { kind: checkout.kind, cause });
+            return this.codeStep(this.activationError(
+                checkout.kind === "network" ? CODE_SCREEN_COPY.errUnreachable : CODE_SCREEN_COPY.errBuyUnavailable,
+                cause
+            ));
         }
 
-        const waiting = this.set(state({
+        let waiting = this.set(state({
             step: "activation-waiting",
             detail: CODE_SCREEN_COPY.waiting,
             busy: true,
             actions: ["back"]
         }));
+        const startedAt = this.ports.now();
+        let hinted = false;
         try {
             await this.ports.openCheckout(url);
         } catch (cause) {
@@ -1149,6 +1262,16 @@ export class InstallFlow {
             // (the browser was quicker than this screen) lands without a wait.
             if (attempts > 0) await this.ports.sleep(every);
             if (this.current !== waiting) break;
+            // After 10 minutes: say that a finished payment still lands later.
+            if (!hinted && this.ports.now() - startedAt >= WAITING_HINT_AFTER_MS) {
+                hinted = true;
+                waiting = this.set(state({
+                    step: "activation-waiting",
+                    detail: `${CODE_SCREEN_COPY.waiting}\n\n${CODE_SCREEN_COPY.waitingLate}`,
+                    busy: true,
+                    actions: ["back"]
+                }));
+            }
             const answer = await this.ports.relay.status(installBearer(id.value), id.value);
             attempts += 1;
             if (answer.kind === "ok" && answer.automatic) {
@@ -1180,7 +1303,7 @@ export class InstallFlow {
         if (answer.kind === "ok" && answer.automatic) {
             this.aiEntitled = answer.ai;
             this.useSavedCode();
-            return this.permissionStep();
+            return this.activated();
         }
         return this.codeStep(this.statusError(answer));
     }
@@ -1202,6 +1325,10 @@ export class InstallFlow {
         }
         if (answer.kind === "ok" && answer.automatic) return this.saveConfirmedCode(answer.code, answer.ai);
         return this.codeStep();
+    }
+
+    private productId(): string {
+        return this.ports.automaticProductId ?? AUTOMATIC_PRODUCT_ID;
     }
 
     private checkFailed(cause: string): FlowState {
@@ -1609,6 +1736,12 @@ export class InstallFlow {
 
     /** The relay said this install also has AI (✦). Decides what the last screen expects. */
     private aiEntitled = false;
+    /** A typed code that checked out, waiting for "Use it". Never logged. */
+    private pendingCode: string | null = null;
+    /** The language was chosen on this run and is written once activated. */
+    private languagePending = false;
+    /** The settings show Subline was used here before: an update, not gated. */
+    private priorUse = false;
 
     /**
      * This run is an update over an existing install. Language and key steps

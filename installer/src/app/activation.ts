@@ -31,8 +31,29 @@ export const RELAY_URL = "https://subline-relay.rahul05alok.workers.dev";
  */
 export const AUTOMATIC_PRODUCT_ID = "pdt_AUTOMATIC_PENDING";
 
-/** Where Dodo sends the buyer back to: the site's "go back to Subline" view. */
-export const CHECKOUT_RETURN_URL = "https://surfer05.github.io/subline/?from=discord";
+/**
+ * The placeholder the product id holds until the owner supplies the real one.
+ * A static link to it is a Dodo 404, so it is never opened (see
+ * `staticCheckoutAllowed`), and the release script refuses to build while it
+ * is anywhere in a shipped file (scripts/placeholder.mjs). Written in two
+ * pieces so this guard is not itself a match.
+ */
+export const PLACEHOLDER_PRODUCT_ID = "pdt_AUTOMATIC_" + "PENDING";
+
+/** Whether the static checkout link can be opened at all: never for the placeholder. */
+export function staticCheckoutAllowed(productId: string = AUTOMATIC_PRODUCT_ID): boolean {
+    return productId !== PLACEHOLDER_PRODUCT_ID && /^pdt_[A-Za-z0-9]+$/.test(productId);
+}
+
+/**
+ * Where Dodo sends the buyer back to: the site's "go back to the Subline
+ * installer" view. The relay's own checkout is asked for the same page with
+ * `return: "installer"`; this constant is the static link's version of it.
+ */
+export const CHECKOUT_RETURN_URL = "https://surfer05.github.io/subline/?from=installer";
+
+/** After this long on the finish-paying screen, a hint says a late purchase still lands. */
+export const WAITING_HINT_AFTER_MS = 10 * 60_000;
 
 /** How often the installer asks whether the purchase has landed. */
 export const ACTIVATION_POLL_MS = 5_000;
@@ -69,6 +90,18 @@ export function promoCode(raw: string): string | null {
     return PROMO_CODE_RE.test(code) ? code : null;
 }
 
+/**
+ * Whether a code the relay does not know as a promo code looks like one of
+ * the owner's Dodo coupons (relay/scripts/coupon.mjs: a name of 3 or more
+ * letters and digits plus a 5-character suffix from an alphabet with no 0, O,
+ * 1 or I). A coupon is typed on Dodo's payment page, not here; the screen says
+ * so as well as "doesn't exist", because a mistyped server code can look the
+ * same.
+ */
+export function looksLikeCoupon(code: string): boolean {
+    return /^[A-Z0-9]{8,16}$/.test(code) && /[A-HJ-NP-Z2-9]{5}$/.test(code);
+}
+
 /** Only an https URL on a dodopayments.com host is opened from a relay answer. */
 export function isDodoCheckoutUrl(value: unknown): value is string {
     if (typeof value !== "string") return false;
@@ -93,8 +126,15 @@ export function staticAutomaticCheckoutUrl(installId: string, productId: string 
  * Answers
  * ------------------------------------------------------------------------ */
 
+/** What a check-only status said about the code the user typed (`x-subline-check: 1`). */
+export interface CodeCheck {
+    valid: boolean;
+    automatic: boolean;
+    ai: boolean;
+}
+
 export type StatusAnswer =
-    | { kind: "ok"; automatic: boolean; ai: boolean; code: string | null }
+    | { kind: "ok"; automatic: boolean; ai: boolean; code: string | null; check?: CodeCheck | null }
     | { kind: "device_limit" }
     | { kind: "invalid" }
     | { kind: "unreachable"; cause: string };
@@ -107,15 +147,33 @@ export type RedeemAnswer =
     | { kind: "rate_limited" }
     | { kind: "unreachable"; cause: string };
 
+/**
+ * What the relay said to "make me a checkout".
+ *  - `unavailable`: the relay answered and buying is not possible (503
+ *    "checkout unavailable": the product is not set up, or Dodo is down). The
+ *    static link would be a dead end, so it is never opened after this.
+ *  - `already_owned`: 409, this install already has Automatic. Re-check status.
+ *  - `network`: the relay could not be reached at all. Only this may fall back
+ *    to the static link, and only when the product id is real.
+ *  - `failed`: any other answer.
+ */
 export type CheckoutAnswer =
     | { kind: "ok"; url: string }
+    | { kind: "unavailable"; cause: string }
+    | { kind: "already_owned" }
+    | { kind: "network"; cause: string }
     | { kind: "failed"; cause: string };
 
 export interface ActivationRelay {
-    /** POST /v1/checkout {plan:"automatic"} for this install. */
+    /** POST /v1/checkout {plan:"automatic", return:"installer"} for this install. */
     checkout(installId: string): Promise<CheckoutAnswer>;
-    /** GET /v1/status with `credential` as the bearer (a code, or the install bearer). */
-    status(credential: string, installId: string): Promise<StatusAnswer>;
+    /**
+     * GET /v1/status with `credential` as the bearer (a code, or the install
+     * bearer). `check: true` sends `x-subline-check: 1`: the relay judges the
+     * code WITHOUT linking this computer to it, so typing a code never uses up
+     * one of its 3 computers before the user says "Use it".
+     */
+    status(credential: string, installId: string, options?: { check?: boolean }): Promise<StatusAnswer>;
     /** POST /v1/redeem {code} for this install. */
     redeem(installId: string, code: string): Promise<RedeemAnswer>;
 }
@@ -140,11 +198,12 @@ export function createActivationRelay(options: {
     const base = options.baseUrl ?? RELAY_URL;
     const timeoutMs = options.timeoutMs ?? RELAY_TIMEOUT_MS;
 
-    const headers = (credential: string, installId: string, json: boolean): Record<string, string> => ({
+    const headers = (credential: string, installId: string, json: boolean, check = false): Record<string, string> => ({
         authorization: `Bearer ${credential}`,
         "x-subline-install": installBearer(installId),
         "x-subline-client": `subline-installer/${options.version}`,
         "x-subline-api": "2",
+        ...(check ? { "x-subline-check": "1" } : {}),
         ...(json ? { "content-type": "application/json" } : {})
     });
 
@@ -178,19 +237,35 @@ export function createActivationRelay(options: {
             const res = await call("/v1/checkout", {
                 method: "POST",
                 headers: headers(installBearer(installId), installId, true),
-                body: JSON.stringify({ plan: "automatic" })
+                // Back to the site's "go back to the Subline installer" view.
+                body: JSON.stringify({ plan: "automatic", return: "installer" })
             });
-            if (res.status === null) return { kind: "failed", cause: res.cause };
+            if (res.status === null) return { kind: "network", cause: res.cause };
             if (res.status === 200 && isDodoCheckoutUrl(res.body.url)) return { kind: "ok", url: res.body.url };
-            return { kind: "failed", cause: `HTTP ${res.status}${typeof res.body.error === "string" ? ` ${res.body.error}` : ""}` };
+            const cause = `HTTP ${res.status}${typeof res.body.error === "string" ? ` ${res.body.error}` : ""}`;
+            if (res.status === 409 && res.body.error === "already_owned") return { kind: "already_owned" };
+            if (res.status === 503) return { kind: "unavailable", cause };
+            return { kind: "failed", cause };
         },
 
-        async status(credential, installId) {
-            const res = await call("/v1/status", { method: "GET", headers: headers(credential, installId, false) });
+        async status(credential, installId, statusOptions) {
+            const check = statusOptions?.check === true;
+            const res = await call("/v1/status", { method: "GET", headers: headers(credential, installId, false, check) });
             if (res.status === null) return { kind: "unreachable", cause: res.cause };
             if (res.status === 200 && res.body.ok === true) {
                 const code = typeof res.body.code === "string" && res.body.code.trim() !== "" ? res.body.code.trim() : null;
-                return { kind: "ok", automatic: res.body.automatic === true, ai: res.body.ai === true, code };
+                const raw = res.body.check;
+                const parsedCheck: CodeCheck | null = check && raw !== null && typeof raw === "object"
+                    ? {
+                        valid: (raw as Record<string, unknown>).valid === true,
+                        automatic: (raw as Record<string, unknown>).automatic === true,
+                        ai: (raw as Record<string, unknown>).ai === true
+                    }
+                    : null;
+                return {
+                    kind: "ok", automatic: res.body.automatic === true, ai: res.body.ai === true, code,
+                    ...(check ? { check: parsedCheck } : {})
+                };
             }
             if (res.status === 403 && res.body.error === "device_limit") return { kind: "device_limit" };
             if (res.status === 401 || res.status === 403) return { kind: "invalid" };

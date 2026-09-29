@@ -591,3 +591,33 @@ export function readClearedCode(settingsPath: string | null): string | null {
         return null;
     }
 }
+
+/**
+ * Whether Vencord's settings show that Subline was used on this computer
+ * before: the `plugins.VcTranslate` block holds anything besides the install
+ * id. The plugin writes its settings there as soon as it runs (a reading
+ * language, a trial start, a code, a cleared code...), and the installer
+ * itself writes nothing but the install id before activation (the reading
+ * language is saved only once the install is activated), so an abandoned
+ * first run does not count.
+ *
+ * Such a machine is treated as an UPDATE: it is patched without the paid gate
+ * and no new install id is made. The plugin then asks the relay, which is what
+ * recognises an early user by the install's own record, and asks for
+ * activation inside Discord if it has to.
+ */
+export function readPriorUse(settingsPath: string | null): boolean {
+    if (settingsPath === null || !existsSync(settingsPath)) return false;
+    try {
+        const parsed: unknown = JSON.parse(readFileSync(settingsPath, "utf8"));
+        const plugins = (parsed as { plugins?: Record<string, unknown> } | null)?.plugins;
+        const plugin = plugins?.[PLUGIN_SETTINGS_KEY];
+        if (plugin === null || typeof plugin !== "object" || Array.isArray(plugin)) return false;
+        const block = plugin as Record<string, unknown>;
+        const started = block.freeTrialStartedAt;
+        if (typeof started === "number" && started > 0) return true;
+        return Object.keys(block).some(key => key !== INSTALL_ID_KEY);
+    } catch {
+        return false;
+    }
+}

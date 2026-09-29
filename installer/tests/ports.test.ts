@@ -200,7 +200,10 @@ describe("the real ports, end to end", () => {
         });
         const flow = new InstallFlow(flowPorts);
         await flow.send({ type: "next" });
-        const state = await flow.send({ type: "next" });
+        // Language and activation come first; Discord is closed only after.
+        expect((await flow.send({ type: "next" })).step).toBe("choose-language");
+        expect((await flow.send({ type: "set-language", code: "en" })).step).toBe("choose-code");
+        const state = await flow.send({ type: "buy-automatic" });
         expect(state.step).toBe("discord-running");
         expect(existsSync(RUNTIME_MOD_DIR())).toBe(false);
     });

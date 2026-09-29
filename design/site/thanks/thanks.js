@@ -15,23 +15,32 @@
 // parameters there is nothing to confirm, so "?from=discord" alone gets the
 // neutral thanks view, like "#thanks".
 //
+// A checkout started from the Subline installer returns to "?from=installer".
+// The installer is still open and carries on by itself once the purchase
+// lands, so that view says to go back to it, again with no code and no
+// downloads.
+//
 // Returns null when this is not a return from checkout. Otherwise
-// { state: "ok" | "pending" | "failed", keys: [...], fromDiscord: bool }.
+// { state: "ok" | "pending" | "failed", keys: [...], fromDiscord: bool, fromInstaller: bool }.
 // The email is never read.
 function parseCheckoutReturn(search, hash) {
   var params;
   try { params = new URLSearchParams(search || ""); } catch (e) { params = null; }
   var status = params ? (params.get("status") || "").toLowerCase() : "";
-  var fromDiscord = !!params && params.get("from") === "discord";
+  var from = params ? params.get("from") : null;
+  var fromDiscord = from === "discord";
+  var fromInstaller = from === "installer";
   var isReturn = !!params && status !== "" && !!(params.get("payment_id") || params.get("subscription_id"));
   if (!isReturn) {
-    return hash === "#thanks" || fromDiscord ? { state: "ok", keys: [], fromDiscord: false } : null;
+    return hash === "#thanks" || fromDiscord || fromInstaller
+      ? { state: "ok", keys: [], fromDiscord: false, fromInstaller: false }
+      : null;
   }
 
   var OK = ["succeeded", "active"];
   var FAILED = ["failed", "cancelled", "canceled", "expired", "requires_payment_method"];
   var state = OK.indexOf(status) >= 0 ? "ok" : FAILED.indexOf(status) >= 0 ? "failed" : "pending";
-  if (fromDiscord) return { state: state, keys: [], fromDiscord: true };
+  if (fromDiscord || fromInstaller) return { state: state, keys: [], fromDiscord: fromDiscord, fromInstaller: fromInstaller };
 
   // Only key-shaped values: this text lands on the page, and a crafted link
   // should not be able to put a sentence there.
@@ -41,5 +50,5 @@ function parseCheckoutReturn(search, hash) {
     k = k.trim();
     if (/^[A-Za-z0-9_-]{4,128}$/.test(k) && keys.indexOf(k) < 0) keys.push(k);
   });
-  return { state: state, keys: state === "failed" ? [] : keys, fromDiscord: false };
+  return { state: state, keys: state === "failed" ? [] : keys, fromDiscord: false, fromInstaller: false };
 }

@@ -173,11 +173,15 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}"${HIDDEN_SECTIONS.h
     function part(name) { return section.querySelector("[data-thanks-" + name + "]"); }
     var ok = part("ok"), pending = part("pending"), failed = part("failed");
     var dOk = part("discord"), dPending = part("discord-pending");
-    var d = ret.fromDiscord;
-    if (ok) ok.hidden = d || ret.state !== "ok";
-    if (pending) pending.hidden = d || ret.state !== "pending";
+    var iOk = part("installer"), iPending = part("installer-pending");
+    var d = ret.fromDiscord, inst = ret.fromInstaller;
+    var site = !d && !inst;
+    if (ok) ok.hidden = !site || ret.state !== "ok";
+    if (pending) pending.hidden = !site || ret.state !== "pending";
     if (dOk) dOk.hidden = !d || ret.state !== "ok";
     if (dPending) dPending.hidden = !d || ret.state !== "pending";
+    if (iOk) iOk.hidden = !inst || ret.state !== "ok";
+    if (iPending) iPending.hidden = !inst || ret.state !== "pending";
     if (failed) failed.hidden = ret.state !== "failed";
     var keysBox = part("keys"), row = part("key");
     if (keysBox && row) {

@@ -38,6 +38,9 @@
  *   · a stale bundle   — `build/mod` is gitignored and outlives branch switches;
  *                        `packaging/hooks.mjs` explains what shipping one does.
  *   · a red suite      — obvious, and still worth the ninety seconds.
+ *   · a placeholder    — the Automatic product id still "pdt_AUTOMATIC_" + "PENDING"
+ *                        anywhere shipped (scripts/placeholder.mjs). Such a build
+ *                        sells nothing. SUBLINE_ALLOW_PLACEHOLDER=1 is for dogfood.
  *
  * ---------------------------------------------------------------------------
  * WHAT IT DOES NOT DO
@@ -57,6 +60,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { computeStamp } from "../../scripts/stampBuild.mjs";
+import { ALLOW_ENV, findPlaceholders, placeholderAllowed, placeholderMessage } from "./placeholder.mjs";
 import { inspectBundleDir } from "../src/bundle/spec.ts";
 import { RELEASE_FEED_URL, RELEASE_REPOSITORY } from "../src/helper/feed.ts";
 import { assertBundleIdentity } from "../packaging/bundleIdentity.ts";
@@ -166,6 +170,13 @@ async function main() {
                 + `${dirty}\n  (--allow-dirty overrides this; do not use it for a real release.)`
             );
         }
+    }
+    // Nothing is sold while the Automatic product id is the placeholder, so no
+    // release is built with it (scripts/placeholder.mjs).
+    const placeholders = findPlaceholders(REPO_ROOT);
+    if (placeholders.length > 0) {
+        if (!placeholderAllowed()) fail(placeholderMessage(placeholders));
+        say(`   WARNING: ${ALLOW_ENV}=1, building with the placeholder product id (dogfood only).`);
     }
     say(`   commit ${capture("git", ["rev-parse", "HEAD"])}`);
     sh("node", [join(REPO_ROOT, "scripts", "stampBuild.mjs"), "--check"], REPO_ROOT);

@@ -28,6 +28,7 @@ import {
     readDiscordLocale,
     readInstallId,
     readClearedCode,
+    readPriorUse,
     readSublineCode,
     ensureRelayEngine,
     setSublineCode,
@@ -540,6 +541,7 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
         savedSublineCode: () => readSublineCode(vencordSettings),
         savedInstallId: () => readInstallId(vencordSettings),
         clearedCode: () => readClearedCode(vencordSettings),
+        priorSublineUse: () => readPriorUse(vencordSettings),
         ensureInstallId: () => ensureInstallId(vencordSettings, newInstallId),
         relay: options.relay ?? createActivationRelay({
             fetch: (url, init) => globalThis.fetch(url, init),
