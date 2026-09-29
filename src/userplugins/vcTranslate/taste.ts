@@ -150,19 +150,23 @@ export async function installIdOnce(): Promise<string> {
 /**
  * WAS THIS INSTALL USED BEFORE 0.2.0? Early users get Automatic free, and the
  * relay decides it from its own records of this install id from before its
- * launch moment. The client can only offer a hint, sent with the first v2
- * status calls until the relay has answered once (x-subline-prior): a local
- * trial start from an older build, or an install id that was in this store
- * before the installer started seeding one. The relay never trusts it alone.
+ * early-user cutoff. The client can only offer a hint (x-subline-prior): a
+ * local trial start from an older build (the hidden freeTrialStartedAt
+ * setting), or an install id that was in this store before the installer
+ * started seeding one. The relay never trusts it alone.
  *
- * Persisted as "pending" once noticed and "sent" once the relay answered, so
- * the hint survives the restart that makes the setting and the store agree.
+ * The hint is sent on every status call while the relay's answer is
+ * automatic:false and the local evidence is there, and stops for good once
+ * the relay answers automatic:true ("done"). Persisted as "pending" once
+ * noticed, so it survives the restart that makes the setting and the store
+ * agree.
  */
 export const PRIOR_USE_KEY = "VcTranslate_priorUse";
 
 async function notePriorUse(): Promise<void> {
     try {
-        if (await DataStore.get<unknown>(PRIOR_USE_KEY) !== "sent") await DataStore.set(PRIOR_USE_KEY, "pending");
+        const mark = await DataStore.get<unknown>(PRIOR_USE_KEY);
+        if (mark !== "done" && mark !== "sent") await DataStore.set(PRIOR_USE_KEY, "pending");
     } catch { /* no hint: the relay's own records still decide */ }
 }
 
@@ -170,14 +174,44 @@ async function notePriorUse(): Promise<void> {
 export async function priorUseHint(localTrialStartedAt: unknown): Promise<boolean> {
     let mark: unknown;
     try { mark = await DataStore.get<unknown>(PRIOR_USE_KEY); } catch { mark = undefined; }
-    if (mark === "sent") return false;
-    if (mark === "pending") return true;
+    if (mark === "done") return false;
+    // "sent" is what 0.2.0 release candidates wrote after any answer; it still
+    // means local evidence was found, so the hint goes on.
+    if (mark === "pending" || mark === "sent") return true;
     return typeof localTrialStartedAt === "number" && Number.isFinite(localTrialStartedAt) && localTrialStartedAt > 0;
 }
 
-/** The relay has answered a status call that carried the hint: never send it again. */
-export function markPriorHintSent(): void {
-    void DataStore.set(PRIOR_USE_KEY, "sent").catch(() => { });
+/** The relay answered automatic:true: this install needs no hint again. */
+export function markPriorHintDone(): void {
+    void DataStore.set(PRIOR_USE_KEY, "done").catch(() => { });
+}
+
+/* ------------------------------------------------ early-user checking -- */
+
+/**
+ * AN EARLY USER'S FIRST 0.2.0 START. While the relay has not answered a hinted
+ * status call, such a reader is shown "Checking your early-user access" rather
+ * than a buy prompt, for at most EARLY_CHECK_MS of retries (counted from the
+ * first hinted attempt, persisted so a restart does not reset it). A definitive
+ * automatic:false to a hinted request ends it ("over"), and so does the time
+ * limit: then the activation notice.
+ */
+export const EARLY_CHECK_KEY = "VcTranslate_earlyCheckSince";
+export const EARLY_CHECK_MS = 24 * 60 * 60_000;
+
+/** When the early-user check began (recording now if it had not), or null once it is over. */
+export async function earlyCheckSince(now: number): Promise<number | null> {
+    let v: unknown;
+    try { v = await DataStore.get<unknown>(EARLY_CHECK_KEY); } catch { v = undefined; }
+    if (v === "over") return null;
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    void DataStore.set(EARLY_CHECK_KEY, now).catch(() => { });
+    return now;
+}
+
+/** The relay gave a definitive answer to a hinted request: the check is over. */
+export function endEarlyCheck(): void {
+    void DataStore.set(EARLY_CHECK_KEY, "over").catch(() => { });
 }
 
 /** The Authorization bearer for a taste request. */

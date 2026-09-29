@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import settings from "../settings";
 import { SETTINGS_COPY } from "../settingsCopy";
 import { TASTE_CAP } from "../taste";
-import { UPGRADE_COPY } from "../upgradeCopy";
+import { RESET_HELP_URL, UPGRADE_COPY } from "../upgradeCopy";
 
 /** Every string in a (nested) copy object. */
 function strings(v: unknown): string[] {
@@ -44,7 +44,7 @@ describe("the copy after the free tier", () => {
         expect(UPGRADE_COPY.codeNotFound).toBe("That code doesn't exist.");
         expect(UPGRADE_COPY.codeAlready).toBe("Already yours.");
         expect(UPGRADE_COPY.codeUnreachable).toBe("Can't reach Subline right now. Try again in a minute.");
-        expect(UPGRADE_COPY.deviceLimit).toBe("This code is on 3 computers already. It frees up after 30 days unused, or ask us to reset it.");
+        expect(UPGRADE_COPY.deviceLimit).toBe("This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub.");
         expect(UPGRADE_COPY.automaticButton).toBe("Buy for $4.99");
         expect(UPGRADE_COPY.enterCodeButton).toBe("Enter a code");
         expect(UPGRADE_COPY.activateButton).toBe("Activate");
@@ -79,5 +79,16 @@ describe("the Windows test round's wording", () => {
 
     it("gives Automatic five ✦ previews a day", () => {
         expect(TASTE_CAP).toBe(5);
+    });
+
+    it("uses the re-audit's exact strings, matching the installer", () => {
+        expect(UPGRADE_COPY.codeConfirmTitle).toBe("Use this code?");
+        expect(UPGRADE_COPY.codeConfirm).toBe("It works on up to 3 computers.");
+        expect(UPGRADE_COPY.codeConfirmButton).toBe("Use it");
+        expect(UPGRADE_COPY.codeEmpty).toBe("Type or paste a code first.");
+        expect(UPGRADE_COPY.deviceLimit).toBe("This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub.");
+        expect(UPGRADE_COPY.deviceLimitButton).toBe("GitHub");
+        expect(RESET_HELP_URL).toBe("https://github.com/surfer05/subline/issues");
+        expect(UPGRADE_COPY.earlyCheckingNotice).toBe("Checking your early-user access. This can take a minute.");
     });
 });
