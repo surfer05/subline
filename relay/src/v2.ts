@@ -1,16 +1,19 @@
 /**
- * The v2 (paid-only) endpoints: status with entitlements and a signed token,
- * promo redemption, and the owner's promo admin. See entitle.ts for the model.
- * Legacy clients never reach this file (index.ts routes on `x-subline-api: 2`).
+ * The v2 (paid-only) endpoints: status with entitlements and a token, promo
+ * redemption, and the owner's promo and computer admin. See entitle.ts for the
+ * model. Legacy clients never reach this file (index.ts routes on
+ * `x-subline-api: 2`).
  */
-import { ipBucket, isNewClient, isTasteBearer, mintCode, type CodeRecord, type Env } from "./codes";
-import { installHash } from "./checkout";
+import { ipBucket, isNewClient, mintCode, type CodeRecord, type Env } from "./codes";
 import {
-    grantCode, installOf, previewKey, PREVIEW_DAILY_CAP, PROMO_RE, promoIndex, resolveEntitlement,
-    signToken, TOKEN_TTL_MS
+    checkCode, grantCode, installOf, previewKey, PREVIEW_DAILY_CAP, PROMO_RE, promoIndex, resolveEntitlement,
+    resetInstalls, signToken, TOKEN_TTL_MS
 } from "./entitle";
+import { REDEEM_IP_DAILY_FAILURES, REDEEM_IP_DAILY_SUCCESSES } from "./promo";
 
-export const REDEEM_IP_DAILY_CAP = 3;
+export { REDEEM_IP_DAILY_FAILURES, REDEEM_IP_DAILY_SUCCESSES };
+/** Kept for older imports: the daily cap on successful redemptions per address. */
+export const REDEEM_IP_DAILY_CAP = REDEEM_IP_DAILY_SUCCESSES;
 export const PROMO_DEFAULT_CAP = 100;
 export const PROMO_MAX_CAP = 100_000;
 
@@ -39,11 +42,32 @@ async function readCount(env: Env, key: string): Promise<number> {
     return Number.isFinite(n) ? n : 0;
 }
 
-/** GET /v1/status for a v2 client. */
+/**
+ * GET /v1/status for a v2 client.
+ *
+ * `x-subline-check: 1` with a code as the bearer: say what that code would give
+ * this install, WITHOUT linking it (no slot used, nothing written). The rest of
+ * the answer is the install's own state, also computed without writing. The
+ * client asks the user to confirm, then makes a normal status call, which links.
+ *
+ * `x-subline-prior: 1`: the client believes this install was used before
+ * 0.2.0. It only widens the early-user lookup (entitle.ts); it grants nothing
+ * without a relay record.
+ */
 export async function handleStatusV2(req: Request, env: Env, now: number): Promise<Response> {
     const id = identify(req);
     if (!id) return fail("bad request", 400);
-    const r = await resolveEntitlement(env, id.install, id.credential, now);
+    const checking = req.headers.get("x-subline-check") === "1" && !id.credential.startsWith("free_");
+    const prior = req.headers.get("x-subline-prior") === "1";
+    let check: { valid: boolean; automatic: boolean; ai: boolean } | undefined;
+    if (checking) {
+        const c = await checkCode(env, id.install, id.credential, now);
+        if (!c.ok) return fail(c.error, c.status);
+        check = { valid: c.valid, automatic: c.automatic, ai: c.ai };
+    }
+    const r = checking
+        ? await resolveEntitlement(env, id.install, id.install, now, { dryRun: true, prior })
+        : await resolveEntitlement(env, id.install, id.credential, now, { prior });
     if (!r.ok) return fail(r.error, r.status);
     let used = 0;
     if (r.automatic && !r.ai && r.acctId) {
@@ -56,7 +80,10 @@ export async function handleStatusV2(req: Request, env: Env, now: number): Promi
         automatic: r.automatic,
         ai: r.ai,
         ...(r.aiUntil !== undefined ? { aiUntil: r.aiUntil } : {}),
-        ...(r.saveCode ? { code: r.saveCode } : {}),
+        ...(r.saveCode && !checking ? { code: r.saveCode } : {}),
+        ...(r.deadCode && !checking ? { deadCode: r.deadCode } : {}),
+        ...(r.grant && !checking ? { grant: r.grant } : {}),
+        ...(check ? { check } : {}),
         previews: { used, cap: r.automatic ? PREVIEW_DAILY_CAP : 0 },
         token,
         tokenExpiresAt,
@@ -68,22 +95,63 @@ function today(now: number): string {
     return new Date(now).toISOString().slice(0, 10);
 }
 
+type IpOutcome = "ok" | "fail" | "none";
+
+/**
+ * The per-address redemption limit, counted atomically in a Promo Durable
+ * Object named for the address (IPv4, or the IPv6 /64) and the UTC day: at most
+ * REDEEM_IP_DAILY_SUCCESSES successful claims and REDEEM_IP_DAILY_FAILURES
+ * failed attempts. Every attempt takes a slot BEFORE anything else happens and
+ * gives it back with its outcome, so a concurrent burst cannot slip past.
+ * Null when there is no address (not fronted by Cloudflare): no limit.
+ */
+function ipGate(env: Env, ip: string | null, now: number) {
+    if (!ip || !env.PROMO) return null;
+    const stub = env.PROMO.get(env.PROMO.idFromName(`ip:${ipBucket(ip)}:${today(now)}`));
+    return {
+        begin: async (): Promise<boolean> => {
+            const res = await stub.fetch("https://promo.internal/ip/begin", { method: "POST", body: "{}" });
+            return ((await res.json()) as { allowed?: boolean }).allowed === true;
+        },
+        end: async (outcome: IpOutcome): Promise<void> => {
+            try {
+                await stub.fetch("https://promo.internal/ip/end", { method: "POST", body: JSON.stringify({ outcome }) });
+            } catch { /* the in-flight slot is freed when the object restarts */ }
+        }
+    };
+}
+
 /** POST /v1/redeem: a promo code grants Automatic to this install. */
 export async function handleRedeem(req: Request, env: Env, now: number): Promise<Response> {
     if (req.method !== "POST") return fail("method not allowed", 405);
     const id = identify(req);
     if (!id) return fail("bad request", 400);
+    if (!env.PROMO) return fail("unavailable", 503);
+    const gate = ipGate(env, req.headers.get("cf-connecting-ip"), now);
+    if (gate) {
+        let allowed: boolean;
+        try { allowed = await gate.begin(); } catch { return fail("unavailable", 503); }
+        if (!allowed) return fail("rate_limited", 429);
+    }
+    let outcome: IpOutcome = "none";
+    try {
+        const res = await redeemOnce(req, env, id, now);
+        outcome = res.status === 200 ? "ok"
+            : (res.status === 404 || res.status === 409 || res.status === 410) ? "fail" : "none";
+        return res;
+    } finally {
+        if (gate) await gate.end(outcome);
+    }
+}
+
+async function redeemOnce(req: Request, env: Env, id: { install: string; credential: string }, now: number): Promise<Response> {
     let body: any;
     try { body = JSON.parse(await req.text()); } catch { return fail("bad request", 400); }
     const promo = typeof body?.code === "string" ? body.code.trim().toUpperCase() : "";
     if (!PROMO_RE.test(promo)) return fail("not_found", 404);
-    if (!env.PROMO) return fail("unavailable", 503);
 
-    const ip = req.headers.get("cf-connecting-ip");
-    const ipKey = ip ? `rl:rd:${ipBucket(ip)}:${today(now)}` : null;
     let def: { cap?: number } | null;
     try {
-        if (ipKey && (await readCount(env, ipKey)) >= REDEEM_IP_DAILY_CAP) return fail("rate_limited", 429);
         const raw = await env.CODES.get(`promo:${promo}`);
         def = raw ? JSON.parse(raw) : null;
     } catch {
@@ -96,7 +164,7 @@ export async function handleRedeem(req: Request, env: Env, now: number): Promise
     if (!r.ok) return fail(r.error, r.status);
     if (r.automatic) return fail("already", 409);
 
-    const stub = env.PROMO.get(env.PROMO.idFromName(promo));
+    const stub = env.PROMO!.get(env.PROMO!.idFromName(promo));
     let claim: { result?: string };
     try {
         const res = await stub.fetch("https://promo.internal/claim", {
@@ -113,7 +181,7 @@ export async function handleRedeem(req: Request, env: Env, now: number): Promise
     // The slot is taken: mint and attach, or give the slot back.
     const code = mintCode();
     try {
-        const rec: CodeRecord = { status: "active", plan: "automatic", dailyCap: PREVIEW_DAILY_CAP, note: `promo:${promo}` };
+        const rec: CodeRecord = { status: "active", plan: "automatic", dailyCap: PREVIEW_DAILY_CAP, note: `promo:${promo}`, createdAt: now };
         await env.CODES.put(`code:${code}`, JSON.stringify(rec));
         if (!(await grantCode(env, id.install, code, promo, now))) {
             await release(stub, r.hash);
@@ -124,12 +192,6 @@ export async function handleRedeem(req: Request, env: Env, now: number): Promise
         await release(stub, r.hash);
         return fail("unavailable", 503);
     }
-    if (ipKey) {
-        try {
-            const n = await readCount(env, ipKey);
-            await env.CODES.put(ipKey, String(n + 1), { expirationTtl: 2 * 86_400 });
-        } catch { /* soft limit */ }
-    }
     return json({ ok: true, code });
 }
 
@@ -137,6 +199,15 @@ async function release(stub: DurableObjectStub, hash: string): Promise<void> {
     try {
         await stub.fetch("https://promo.internal/release", { method: "POST", body: JSON.stringify({ install: hash }) });
     } catch { /* the slot stays taken; an approximate loss of one */ }
+}
+
+/** POST /admin/reset-installs {code} (auth checked by the router). */
+export async function adminResetInstalls(env: Env, body: any): Promise<Response> {
+    const code = typeof body?.code === "string" ? body.code.trim() : "";
+    if (!code) return fail("bad request", 400);
+    const r = await resetInstalls(env, code);
+    if (!r.ok) return fail(r.error, r.status);
+    return json({ ok: true, cleared: r.cleared });
 }
 
 /** POST /admin/promo {code, cap} (auth checked by the router). */

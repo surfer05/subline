@@ -11,57 +11,94 @@
  * ACCOUNTS. One per buyer. An account joins every code linked to its installs
  * (the Automatic license key, a promo or early-user code, an AI subscription
  * key) and every install that presented one of them, at most MAX_INSTALLS.
- * What an install may use is the UNION over the account's live codes, so any
- * linked key unlocks everything the buyer owns.
+ * Automatic is the UNION over the account's live codes, so any linked key
+ * unlocks it on every one of the account's computers.
  *
- *   acct:<id>   → Account JSON (installs = install hashes, codes, flags)
+ *   acct:<id>   → Account JSON (installs, codes, lastSeen, AI installs, flags)
  *   ia:<hash>   → account id of an install
  *   ca:<code>   → account id of a code
  *
- * WRITES STAY RARE. Resolving is read-only unless something new is learnt: an
- * install or code joining an account, a purchase link, the one-time
- * grandfather or early-user grant. A status call from an install already in
- * its account writes nothing. (The relay once hit KV's daily write limit.)
+ * AI IS PER INSTALL (sharing). An install gets AI only when it bought AI itself
+ * (the checkout started on that install: paid:<hash>) or presented an AI code
+ * itself. A friend who types the owner's Automatic key gets Automatic only, and
+ * spends none of the AI code's daily cap. `aiInstalls` records the installs that
+ * earned AI by a purchase; presenting an AI code needs no record.
  *
- * GRANTS.
- *   • An AI code active on an account gives Automatic too, and the first time
- *     that is seen the account remembers it (`grandfather` = that code), so an
- *     early subscriber keeps Automatic after the subscription ends. A refund
- *     (terminal) of that code takes the grandfathered Automatic with it.
- *   • An install whose trial:<id> record is older than LAUNCH_AT existed
- *     before launch: it gets Automatic free, as an slp_ code (note "early") the
- *     app can show in settings.
+ * A DEAD CODE never locks an install out of what else it owns. When the
+ * presented code is lapsed, refunded, revoked or unknown, the account is still
+ * resolved from the install (ia:<hash>) and its live codes still count; the
+ * answer names the dead code (`deadCode`) and hands back a live code to save,
+ * the Automatic one first.
+ *
+ * COMPUTERS. At most MAX_INSTALLS per account. Each install's last-seen day is
+ * kept on the account (written at most once a day per install). A new install
+ * that would be the 4th evicts the least recently seen one if it has not been
+ * seen for EVICT_AFTER_MS; otherwise it is refused (device_limit). The owner
+ * can clear an account's computers with POST /admin/reset-installs.
+ *
+ * WRITES STAY RARE. Resolving is read-only unless something new is learnt: an
+ * install or code joining an account, a purchase link, a grant, or the first
+ * sighting of an install on a new UTC day. A second status call on the same
+ * day writes nothing. (The relay once hit KV's daily write limit.)
+ *
+ * GRANTS (both are facts about the ACCOUNT, not about any one code).
+ *   • Grandfathering: an AI code made before launch (no createdAt, or one older
+ *     than LAUNCH_AT), seen live on the account, grants Automatic for good. The
+ *     grant survives that code's cancel, expiry and refund: refunding AI takes
+ *     only AI.
+ *   • Early users: an install that was used before launch gets Automatic free,
+ *     as an slp_ code (note "early") the app can show. The evidence is a relay
+ *     record of that install id from before LAUNCH_AT: its trial:<id> record
+ *     (kept 90 days) or, when the client says it was used before
+ *     (`x-subline-prior: 1`), a usage counter or seen: marker for it dated
+ *     before launch. The client's hint alone is never enough.
  *   • Promo redemptions mint an slp_ code (plan automatic, note "promo:<CODE>").
+ *
+ * LAUNCH_AT must be a real date for grandfathering-by-date, early grants and the
+ * legacy trial cut-off (codes.ts). While it is the placeholder (or unset) all
+ * three are off: no early grants, no new-code grandfathering, trials unchanged.
  *
  * REFUNDS need nothing here: a refund revokes the code it paid for
  * (codes.ts), and the union simply stops counting that code. Refunding
  * Automatic leaves AI, refunding AI leaves Automatic.
  */
-import { authCode, isTasteBearer, mintCode, type CodeRecord, type Env } from "./codes";
+import { authCode, isTasteBearer, LAUNCH_AT_PLACEHOLDER, launchAtMs, mintCode, type CodeRecord, type Env } from "./codes";
 import { installHash } from "./checkout";
 
 export const MAX_INSTALLS = 3;
 export const PREVIEW_DAILY_CAP = 5;
 export const TOKEN_TTL_MS = 7 * 86_400_000;
 export const PROMO_RE = /^[A-Z0-9]{4,16}$/;
+const DAY_MS = 86_400_000;
+/** An install unseen this long gives up its slot to a new computer. */
+export const EVICT_AFTER_MS = 30 * DAY_MS;
 
 export interface Account {
     v: 1;
     installs: string[];
     codes: string[];
+    /** Last UTC day (epoch day number) each install was seen. */
+    seen?: Record<string, number>;
+    /** Installs that bought AI themselves (see AI IS PER INSTALL). */
+    aiInstalls?: string[];
     /** The promo this account redeemed, for per-promo stats. */
     promo?: string;
-    /** The AI code whose presence granted Automatic (see GRANTS). */
+    /** The pre-launch AI code that granted Automatic (see GRANTS). */
     grandfather?: string;
     /** An early-user code was minted for this account. */
     early?: boolean;
     created: number;
 }
 
-/** Plans that are not AI: the automatic product and the synthetic keyless plans. */
-const NOT_AI = new Set(["automatic", "taste", "trial"]);
+/**
+ * The plans that are AI, listed explicitly. "free" is the admin-minted slp_
+ * beta code (POST /admin/codes): deliberately AI, so friends set up by hand
+ * keep ✦. Everything else, including "automatic", the keyless "taste"/"trial"
+ * and any plan this list does not know, is not AI (fail closed).
+ */
+export const AI_PLANS: ReadonlySet<string> = new Set(["monthly", "annual", "paid", "lifetime", "free"]);
 export function isAiPlan(plan: CodeRecord["plan"]): boolean {
-    return !NOT_AI.has(plan ?? "free");
+    return AI_PLANS.has(plan ?? "free");
 }
 
 export function isApiV2(req: Request): boolean {
@@ -82,18 +119,24 @@ function randomId(): string {
 function today(now: number): string {
     return new Date(now).toISOString().slice(0, 10);
 }
+function epochDay(now: number): number {
+    return Math.floor(now / DAY_MS);
+}
 export function previewKey(acctId: string, now: number): string {
     return `use:pv:${acctId}:${today(now)}`;
 }
 
-/** LAUNCH_AT as epoch ms: a number, or an ISO date. NaN when unset or unreadable (no early grants). */
+/** LAUNCH_AT as epoch ms (codes.ts launchAtMs). NaN when unset or the placeholder. */
 export function launchAt(env: Env): number {
-    const raw = env.LAUNCH_AT;
-    if (raw === undefined || raw === null || raw === "") return NaN;
-    const n = Number(raw);
-    if (Number.isFinite(n)) return n;
-    const t = Date.parse(String(raw));
-    return Number.isFinite(t) ? t : NaN;
+    return launchAtMs(env);
+}
+export { LAUNCH_AT_PLACEHOLDER };
+
+export interface ResolveOptions {
+    /** Compute the answer but write nothing and mint nothing (x-subline-check). */
+    dryRun?: boolean;
+    /** The client says this install was used before 0.2.0 (x-subline-prior: 1). */
+    prior?: boolean;
 }
 
 export type Resolved =
@@ -108,10 +151,14 @@ export type Resolved =
         /** A live AI code on the account, and its record: what ✦ is charged to. */
         aiCode?: string;
         aiRec?: CodeRecord;
-        /** A code this install should save (it presented only its install id). */
+        /** A code this install should save (it presented no live code of its own). */
         saveCode?: string;
+        /** The presented code is dead (lapsed, refunded, revoked or unknown). */
+        deadCode?: string;
+        /** This answer granted early-user Automatic for the first time. */
+        grant?: "early";
     }
-    | { ok: false; error: "device_limit" | "invalid_code" | "unavailable"; status: number };
+    | { ok: false; error: "device_limit" | "unavailable"; status: number };
 
 interface Work {
     hash: string;
@@ -119,6 +166,7 @@ interface Work {
     acct: Account | null;
     dirty: boolean;
     puts: Map<string, string>;
+    deletes: Set<string>;
 }
 
 async function loadAccount(env: Env, id: string | null): Promise<Account | null> {
@@ -140,14 +188,49 @@ function ensureAccount(w: Work, now: number): Account {
     return w.acct;
 }
 
+/** When an install was last seen (epoch ms), falling back to when the account was made. */
+function lastSeen(a: Account, hash: string): number {
+    const d = a.seen?.[hash];
+    return typeof d === "number" ? d * DAY_MS : a.created;
+}
+
+/** Drop an install from an account (eviction or reset). */
+function dropInstall(a: Account, hash: string): void {
+    a.installs = a.installs.filter(h => h !== hash);
+    if (a.aiInstalls) a.aiInstalls = a.aiInstalls.filter(h => h !== hash);
+    if (a.seen) delete a.seen[hash];
+}
+
+/**
+ * Would `hash` fit on account `a`? "in" when it is already there, "free" when
+ * there is an empty slot, the hash to evict when the least recently seen
+ * install has been away EVICT_AFTER_MS, or null when all 3 are in use.
+ */
+export function slotFor(a: Account, hash: string, now: number): "in" | "free" | string | null {
+    if (a.installs.includes(hash)) return "in";
+    if (a.installs.length < MAX_INSTALLS) return "free";
+    let oldest: string | null = null;
+    for (const h of a.installs) {
+        if (oldest === null || lastSeen(a, h) < lastSeen(a, oldest)) oldest = h;
+    }
+    return oldest !== null && now - lastSeen(a, oldest) >= EVICT_AFTER_MS ? oldest : null;
+}
+
 /** Put this install in the working account. False when it would be a 4th computer. */
 function joinInstall(w: Work, now: number): boolean {
     const a = ensureAccount(w, now);
-    if (a.installs.includes(w.hash)) return true;
-    if (a.installs.length >= MAX_INSTALLS) return false;
+    const slot = slotFor(a, w.hash, now);
+    if (slot === "in") return true;
+    if (slot === null) return false;
+    if (slot !== "free") {
+        dropInstall(a, slot);
+        w.deletes.add(`ia:${slot}`);
+    }
     a.installs.push(w.hash);
+    a.seen = { ...(a.seen ?? {}), [w.hash]: epochDay(now) };
     w.dirty = true;
     w.puts.set(`ia:${w.hash}`, w.acctId!);
+    w.deletes.delete(`ia:${w.hash}`);
     return true;
 }
 
@@ -157,6 +240,13 @@ function joinCode(w: Work, code: string, now: number): void {
     a.codes.push(code);
     w.dirty = true;
     w.puts.set(`ca:${code}`, w.acctId!);
+}
+
+function markAiInstall(w: Work): void {
+    const a = w.acct!;
+    if (a.aiInstalls?.includes(w.hash)) return;
+    a.aiInstalls = [...(a.aiInstalls ?? []), w.hash];
+    w.dirty = true;
 }
 
 /**
@@ -171,9 +261,8 @@ async function adoptCodeAccount(env: Env, w: Work, code: string): Promise<void> 
     if (!other) return;
     // Leaving the old account frees its slot.
     if (w.acct && w.acctId) {
-        const i = w.acct.installs.indexOf(w.hash);
-        if (i >= 0) {
-            w.acct.installs.splice(i, 1);
+        if (w.acct.installs.includes(w.hash)) {
+            dropInstall(w.acct, w.hash);
             w.puts.set(`acct:${w.acctId}`, JSON.stringify(w.acct));
         }
     }
@@ -188,37 +277,85 @@ async function live(env: Env, code: string): Promise<CodeRecord | null> {
 }
 
 /**
+ * Was this install used before launch? Its trial:<id> record says so. With the
+ * client's prior-use hint, a usage counter or seen: marker dated before launch
+ * does too (those keep only a couple of days, so this matters right after
+ * launch). Only the days just before launch are read, and only with the hint.
+ */
+async function usedBeforeLaunch(env: Env, install: string, hash: string, start: number, prior: boolean): Promise<boolean> {
+    const trial = await env.CODES.get(`trial:${install.slice("free_".length)}`);
+    const first = trial === null ? NaN : Number(trial);
+    if (Number.isFinite(first) && first < start) return true;
+    if (!prior) return false;
+    for (let back = 0; back < 3; back++) {
+        const t = start - back * DAY_MS;
+        const day = today(t);
+        // A day that straddles launch only counts when it began before launch.
+        if (Date.parse(`${day}T00:00:00Z`) >= start) continue;
+        for (const key of [`use:${install}:${day}`, `seen:free:${day}:${hash}`, `seen:trial:${day}:${hash}`]) {
+            if (await env.CODES.get(key) !== null) return true;
+        }
+    }
+    return false;
+}
+
+/**
  * Resolve a v2 request's entitlements. `credential` is the bearer: the saved
  * code, or the install id when there is none. Writes only what is new (see the
- * header). Never throws; KV trouble is `unavailable`.
+ * header), and nothing at all with `dryRun`. Never throws; KV trouble is
+ * `unavailable`.
  */
-export async function resolveEntitlement(env: Env, install: string, credential: string | null, now: number): Promise<Resolved> {
+export async function resolveEntitlement(
+    env: Env, install: string, credential: string | null, now: number, opts: ResolveOptions = {}
+): Promise<Resolved> {
     try {
         const hash = await installHash(install);
         const iaAcct = await env.CODES.get(`ia:${hash}`);
-        const w: Work = { hash, acctId: iaAcct, acct: await loadAccount(env, iaAcct), dirty: false, puts: new Map() };
+        const w: Work = { hash, acctId: iaAcct, acct: await loadAccount(env, iaAcct), dirty: false, puts: new Map(), deletes: new Set() };
         if (!w.acct) w.acctId = null;
-        const code = credential && !credential.startsWith("free_") ? credential : null;
+        let code = credential && !credential.startsWith("free_") ? credential : null;
+        let deadCode: string | undefined;
         let saveCode: string | undefined;
+        let presentedAi = false;
 
         if (code) {
-            if (!(await live(env, code))) return { ok: false, error: "invalid_code", status: 401 };
-            await adoptCodeAccount(env, w, code);
-            if (!joinInstall(w, now)) return { ok: false, error: "device_limit", status: 403 };
-            joinCode(w, code, now);
+            const rec = await live(env, code);
+            if (!rec) {
+                // Dead: fall back to what the install itself owns.
+                deadCode = code;
+                code = null;
+            } else {
+                await adoptCodeAccount(env, w, code);
+                if (!joinInstall(w, now)) return { ok: false, error: "device_limit", status: 403 };
+                joinCode(w, code, now);
+                presentedAi = isAiPlan(rec.plan);
+            }
         }
 
         // A purchase started from this install (checkout → webhooks → paid:).
         const paidKey = await env.CODES.get(`paid:${hash}`);
-        if (paidKey && !(w.acct?.codes.includes(paidKey)) && await live(env, paidKey)) {
-            await adoptCodeAccount(env, w, paidKey);
-            if (!joinInstall(w, now)) return { ok: false, error: "device_limit", status: 403 };
-            joinCode(w, paidKey, now);
-            if (!code) saveCode = paidKey;
+        if (paidKey) {
+            const paidRec = await live(env, paidKey);
+            if (paidRec) {
+                if (!(w.acct?.codes.includes(paidKey))) {
+                    await adoptCodeAccount(env, w, paidKey);
+                    if (!joinInstall(w, now)) return { ok: false, error: "device_limit", status: 403 };
+                    joinCode(w, paidKey, now);
+                }
+                // Bought here: AI from this purchase belongs to this install.
+                if (isAiPlan(paidRec.plan) && w.acct && w.acct.installs.includes(hash)) markAiInstall(w);
+            }
+        }
+
+        // First sighting today: remember it (at most one write a day per install).
+        if (w.acct && w.acct.installs.includes(hash) && w.acct.seen?.[hash] !== epochDay(now)) {
+            w.acct.seen = { ...(w.acct.seen ?? {}), [hash]: epochDay(now) };
+            w.dirty = true;
         }
 
         // Union over the account's live codes.
-        let automatic = false, ai = false, aiUntil: number | undefined, aiCode: string | undefined, aiRec: CodeRecord | undefined;
+        const aiHere = presentedAi || !!w.acct?.aiInstalls?.includes(hash);
+        let automatic = false, aiAny = false, aiUntil: number | undefined, aiCode: string | undefined, aiRec: CodeRecord | undefined;
         let noExpiry = false;
         let firstLive: string | undefined, firstAutomatic: string | undefined;
         const newlyAi: string[] = [];
@@ -227,8 +364,9 @@ export async function resolveEntitlement(env: Env, install: string, credential: 
             if (!rec) continue;
             firstLive ??= c;
             if (isAiPlan(rec.plan)) {
-                ai = true;
-                if (!aiCode) { aiCode = c; aiRec = rec; }
+                aiAny = true;
+                // The presented AI code is what ✦ is charged to, when there is one.
+                if (!aiCode || c === credential) { aiCode = c; aiRec = rec; }
                 if (typeof rec.expiresAt === "number") aiUntil = Math.max(aiUntil ?? 0, rec.expiresAt);
                 else noExpiry = true;
                 newlyAi.push(c);
@@ -238,9 +376,11 @@ export async function resolveEntitlement(env: Env, install: string, credential: 
             }
         }
         if (noExpiry) aiUntil = undefined;
-        // Grandfathering: an AI code made before launch (no createdAt, or one
-        // older than LAUNCH_AT) gives its account Automatic, remembered once.
-        if (ai && w.acct && !w.acct.grandfather && !automatic) {
+        const ai = aiAny && aiHere;
+
+        // Grandfathering: an AI code made before launch gives its account
+        // Automatic for good, remembered once (see GRANTS).
+        if (aiAny && w.acct && !w.acct.grandfather && !automatic) {
             const start = launchAt(env);
             const created = aiRec?.createdAt;
             if (created === undefined || (Number.isFinite(start) && created < start)) {
@@ -248,50 +388,87 @@ export async function resolveEntitlement(env: Env, install: string, credential: 
                 w.dirty = true;
             }
         }
-        if (!automatic && w.acct?.grandfather) {
-            // Granted by an AI code: kept after it lapses, lost if it was refunded.
-            const raw = await env.CODES.get(`code:${w.acct.grandfather}`);
-            let refunded = !raw;
-            try { if (raw) refunded = (JSON.parse(raw) as CodeRecord).terminal === true; } catch { refunded = true; }
-            if (!refunded) automatic = true;
-        }
+        if (w.acct?.grandfather) automatic = true;
 
-        // Early users: this install existed before launch.
+        // Early users: this install was used before launch.
+        let grant: "early" | undefined;
         if (!automatic && !(w.acct?.early)) {
             const start = launchAt(env);
-            if (Number.isFinite(start)) {
-                const raw = await env.CODES.get(`trial:${install.slice("free_".length)}`);
-                const first = raw === null ? NaN : Number(raw);
-                if (Number.isFinite(first) && first < start) {
+            if (Number.isFinite(start) && await usedBeforeLaunch(env, install, hash, start, opts.prior === true)) {
+                automatic = true;
+                grant = "early";
+                if (!opts.dryRun) {
                     if (!joinInstall(w, now)) return { ok: false, error: "device_limit", status: 403 };
                     const minted = mintCode();
-                    const rec: CodeRecord = { status: "active", plan: "automatic", dailyCap: PREVIEW_DAILY_CAP, note: "early" };
+                    const rec: CodeRecord = { status: "active", plan: "automatic", dailyCap: PREVIEW_DAILY_CAP, note: "early", createdAt: now };
                     await env.CODES.put(`code:${minted}`, JSON.stringify(rec));
                     joinCode(w, minted, now);
                     w.acct!.early = true;
-                    automatic = true;
                     firstAutomatic = minted;
                     firstLive ??= minted;
                 }
             }
         }
 
-        if (!code && !saveCode && w.acct) saveCode = aiCode ?? firstAutomatic ?? firstLive;
+        // A code to save, when the install presented none that works: the
+        // Automatic one first (it never lapses), then AI if this install has it.
+        if (!code && w.acct) saveCode = firstAutomatic ?? (ai ? aiCode : undefined) ?? firstLive;
+        if (saveCode && saveCode === deadCode) saveCode = undefined;
         // Per-promo stat: an AI purchase joining an account that redeemed a promo.
-        if (w.acct?.promo && ai && paidKey && newlyAi.includes(paidKey) && w.puts.has(`ca:${paidKey}`)) {
+        if (!opts.dryRun && w.acct?.promo && aiAny && paidKey && newlyAi.includes(paidKey) && w.puts.has(`ca:${paidKey}`)) {
             await bumpPromoAi(env, w.acct.promo);
         }
 
-        if (w.dirty && w.acct && w.acctId) w.puts.set(`acct:${w.acctId}`, JSON.stringify(w.acct));
-        for (const [k, v] of w.puts) await env.CODES.put(k, v);
+        if (!opts.dryRun) {
+            if (w.dirty && w.acct && w.acctId) w.puts.set(`acct:${w.acctId}`, JSON.stringify(w.acct));
+            for (const [k, v] of w.puts) await env.CODES.put(k, v);
+            for (const k of w.deletes) await env.CODES.delete(k);
+        }
         return {
             ok: true, hash, acctId: w.acctId, acct: w.acct, automatic, ai,
             ...(ai && aiUntil !== undefined ? { aiUntil } : {}),
-            ...(aiCode ? { aiCode, aiRec } : {}),
-            ...(saveCode ? { saveCode } : {})
+            ...(ai && aiCode ? { aiCode, aiRec } : {}),
+            ...(saveCode ? { saveCode } : {}),
+            ...(deadCode ? { deadCode } : {}),
+            ...(grant ? { grant } : {})
         };
     } catch (e) {
         console.warn("entitlement lookup failed", { error: String((e as any)?.message ?? e).slice(0, 200) });
+        return { ok: false, error: "unavailable", status: 503 };
+    }
+}
+
+/**
+ * What a typed code would give this install, WITHOUT linking it: no account
+ * change, no slot used, no write (x-subline-check). `valid` is false for a
+ * dead or unknown code. A code whose account already has 3 recently seen
+ * computers (none of them this one) is a device_limit.
+ */
+export async function checkCode(
+    env: Env, install: string, code: string, now: number
+): Promise<{ ok: true; valid: boolean; automatic: boolean; ai: boolean } | { ok: false; error: "device_limit" | "unavailable"; status: number }> {
+    try {
+        const rec = await live(env, code);
+        if (!rec) return { ok: true, valid: false, automatic: false, ai: false };
+        const hash = await installHash(install);
+        const acct = await loadAccount(env, await env.CODES.get(`ca:${code}`));
+        if (acct && slotFor(acct, hash, now) === null) return { ok: false, error: "device_limit", status: 403 };
+        let automatic = rec.plan === "automatic" || !!acct?.grandfather;
+        for (const c of acct?.codes ?? []) {
+            if (automatic) break;
+            if (c === code) continue;
+            const r = await live(env, c);
+            if (r?.plan === "automatic") automatic = true;
+        }
+        const ai = isAiPlan(rec.plan);
+        // A pre-launch AI code grandfathers Automatic on first use.
+        if (ai && !automatic) {
+            const start = launchAt(env);
+            if (rec.createdAt === undefined || (Number.isFinite(start) && rec.createdAt < start)) automatic = true;
+        }
+        return { ok: true, valid: true, automatic, ai };
+    } catch (e) {
+        console.warn("code check failed", { error: String((e as any)?.message ?? e).slice(0, 200) });
         return { ok: false, error: "unavailable", status: 503 };
     }
 }
@@ -303,14 +480,33 @@ export async function resolveEntitlement(env: Env, install: string, credential: 
 export async function grantCode(env: Env, install: string, code: string, promo: string | null, now: number): Promise<boolean> {
     const hash = await installHash(install);
     const iaAcct = await env.CODES.get(`ia:${hash}`);
-    const w: Work = { hash, acctId: iaAcct, acct: await loadAccount(env, iaAcct), dirty: false, puts: new Map() };
+    const w: Work = { hash, acctId: iaAcct, acct: await loadAccount(env, iaAcct), dirty: false, puts: new Map(), deletes: new Set() };
     if (!w.acct) w.acctId = null;
     if (!joinInstall(w, now)) return false;
     joinCode(w, code, now);
     if (promo) { w.acct!.promo = promo; w.dirty = true; }
     w.puts.set(`acct:${w.acctId}`, JSON.stringify(w.acct));
     for (const [k, v] of w.puts) await env.CODES.put(k, v);
+    for (const k of w.deletes) await env.CODES.delete(k);
     return true;
+}
+
+/**
+ * POST /admin/reset-installs {code}: forget every computer on the account that
+ * owns `code`, so the owner's customer can start again on new machines. Codes
+ * and grants stay; each computer rejoins on its next status call.
+ */
+export async function resetInstalls(env: Env, code: string): Promise<{ ok: true; cleared: number } | { ok: false; error: string; status: number }> {
+    const acctId = await env.CODES.get(`ca:${code}`);
+    const acct = await loadAccount(env, acctId);
+    if (!acctId || !acct) return { ok: false, error: "no account for that code", status: 404 };
+    const cleared = acct.installs.length;
+    for (const h of acct.installs) await env.CODES.delete(`ia:${h}`);
+    acct.installs = [];
+    acct.seen = {};
+    acct.aiInstalls = [];
+    await env.CODES.put(`acct:${acctId}`, JSON.stringify(acct));
+    return { ok: true, cleared };
 }
 
 /* ------------------------------------------------------------------ token -- */
@@ -331,8 +527,15 @@ async function hmac(secret: string, data: string): Promise<string> {
 /**
  * The entitlement token: base64url(JSON payload) + "." + base64url(HMAC-SHA256
  * of that first part, keyed with ENTITLEMENT_SECRET). Without the secret the
- * signature part is empty: the client can still read its expiry, and AI is
- * enforced here on the relay either way.
+ * signature part is empty.
+ *
+ * WHAT IT PROTECTS: NOTHING ON THE CLIENT. The client cannot verify an HMAC (it
+ * does not hold the secret), and Automatic runs client-side from GPL source, so
+ * a determined user can switch it on locally whatever this says. The client
+ * uses the token only for its expiry (the 7-day offline grace). The signature
+ * lets only THIS relay recognise a token it issued, if a future endpoint ever
+ * accepts one back (verifyToken; nothing does today). Everything that costs
+ * money, AI and previews, is decided here on every request, never from a token.
  */
 export async function signToken(env: Env, p: TokenPayload): Promise<string> {
     const body = b64url(new TextEncoder().encode(JSON.stringify(p)));

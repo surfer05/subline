@@ -109,11 +109,11 @@ describe("license_key.created — create with plan/cap + reverse index (sub_id A
         // #2: a subscription-tier code is stamped a finite PROVISIONAL expiry.
         expect(rec(kv)!.expiresAt).toBe(NOW + 3 * 86_400_000);
     });
-    it("unknown product_id mints at the free cap and flags it (fail safe)", async () => {
+    it("unknown product_id fails CLOSED: the code is born revoked, flagged, and logged", async () => {
         const kv = fakeKV();
         const r = await applyMorEvent(env(kv), licenseCreated({ data: { product_id: "ghost" } }), NOW);
         expect(r.action).toBe("created_unmapped_variant");
-        expect(rec(kv)).toMatchObject({ dailyCap: 500, plan: "free" });
+        expect(rec(kv)).toMatchObject({ dailyCap: 500, plan: "free", status: "revoked" });
         expect(rec(kv)!.note).toMatch(/unmapped product/i);
     });
     it("is idempotent — same event twice yields one unchanged record", async () => {

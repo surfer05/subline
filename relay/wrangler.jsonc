@@ -69,11 +69,13 @@
       // AUTOMATIC ($4.99 once, license key, never expires). PLACEHOLDER id until
       // the owner creates the Dodo product: replace "pdt_AUTOMATIC_PENDING" with
       // the real product id before selling it. Until then POST /v1/checkout for
-      // plan "automatic" asks Dodo for a product that does not exist and answers
-      // 503 "checkout unavailable"; nothing else is affected. dailyCap is not
-      // used for spend (Automatic is Google on the client); its ✦ previews are
-      // counted per account (3 a day, src/entitle.ts).
-      "pdt_AUTOMATIC_PENDING": { "plan": "automatic", "dailyCap": 3 }
+      // plan "automatic" treats it as not configured and answers 503 "checkout
+      // unavailable" without asking Dodo; nothing else is affected. A test
+      // (test/placeholder.test.ts) fails while it is here, unless the run sets
+      // SUBLINE_ALLOW_PLACEHOLDER=1 (dogfood builds only). dailyCap is not used
+      // for spend (Automatic is Google on the client); its ✦ previews are
+      // counted per account (5 a day, src/entitle.ts).
+      "pdt_AUTOMATIC_PENDING": { "plan": "automatic", "dailyCap": 5 }
     },
     // Dodo Payments API base for POST /v1/checkout and POST /admin/coupon
     // (src/checkout.ts). Live: https://live.dodopayments.com, test:
@@ -86,15 +88,23 @@
     // subscription_id, status, license_key and email as query parameters, and
     // the site shows its thanks view when it sees them.
     "CHECKOUT_RETURN_URL": "https://surfer05.github.io/subline/",
-    // Launch of the paid-only model (v2 clients). An install whose trial:<id>
-    // record (first translate on a v0.1.6+ client) is OLDER than this gets
-    // Automatic free as an early user, minted as an slp_ code it can show in
-    // settings. Epoch ms or an ISO date. Move it to the actual release moment
-    // before deploying for launch. Empty: no early-user grants.
-    "LAUNCH_AT": "2026-09-28T00:00:00Z"
-    // ENTITLEMENT_SECRET (a secret, `wrangler secret put ENTITLEMENT_SECRET`,
-    // e.g. openssl rand -hex 32) signs the v2 entitlement token. Without it the
-    // token goes out unsigned and AI is still enforced here.
+    // Launch of the paid-only model (v2 clients), epoch ms or an ISO date. THE
+    // RELEASE STEP REPLACES THIS PLACEHOLDER with the publish moment. While it
+    // is "SET_AT_RELEASE" (or empty) everything keyed on launch is OFF:
+    //   • early users: an install with a relay record from before this moment
+    //     (its trial:<id>, or with the client's prior-use hint a usage counter or
+    //     seen: marker) gets Automatic free, minted as an slp_ code;
+    //   • grandfathering by date: an AI code created before this moment gives
+    //     its account Automatic for good (codes with no createdAt are pre-v2 and
+    //     always count);
+    //   • the legacy cut-off: after this moment an older (0.1.x) client with an
+    //     id the relay never trialled gets the taste allowance, not a new trial.
+    "LAUNCH_AT": "SET_AT_RELEASE"
+    // ENTITLEMENT_SECRET (optional secret, `wrangler secret put
+    // ENTITLEMENT_SECRET`) signs the v2 entitlement token. It protects nothing
+    // on the client (the client cannot verify it; Automatic runs client-side);
+    // it only lets this relay recognise its own tokens. AI and previews are
+    // decided here on every request, with or without it.
   },
   // PROMO: one Durable Object per promo code, the exact claim counter behind
   // "the first 100 installs" (src/promo.ts). Migration v2 creates the class.

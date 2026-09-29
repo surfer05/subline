@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { applyMorEvent, type Env } from "../src/codes";
 import { installHash } from "../src/checkout";
-import { signToken, verifyToken, MAX_INSTALLS } from "../src/entitle";
-import { applyClaim, Promo } from "../src/promo";
+import { isAiPlan, launchAt, signToken, verifyToken, MAX_INSTALLS } from "../src/entitle";
+import { applyClaim, applyIpBegin, applyIpEnd, Promo, REDEEM_IP_DAILY_FAILURES, REDEEM_IP_DAILY_SUCCESSES } from "../src/promo";
 import { codeRec, fakeBudget, fakeKV } from "./kv-mock";
 
 // ===========================================================================
@@ -135,7 +135,9 @@ describe("v2 status", () => {
     });
 
     it("an older client (no x-subline-api) gets exactly the old answer", async () => {
-        const e = env(fakeKV());
+        // Before launch (LAUNCH_AT still the placeholder) an older client is
+        // answered exactly as before, trial and all.
+        const e = env(fakeKV(), { LAUNCH_AT: "SET_AT_RELEASE" });
         const res = await worker.fetch(new Request("https://relay/v1/status", {
             headers: { authorization: `Bearer ${A}`, "x-subline-client": "vcTranslate/0.1.9", "x-subline-install": A }
         }), e, ctx);
@@ -202,10 +204,14 @@ describe("accounts and the 3-computer limit", () => {
         expect((await status(e, B, "KEY-AUTO-1")).body.automatic).toBe(true);
     });
 
-    it("an unknown or revoked code is invalid_code", async () => {
+    it("an unknown or revoked code is named as dead, and the install still answers for itself", async () => {
         const e = env(fakeKV({ "code:DEAD": codeRec({ status: "revoked" }) }));
-        expect((await status(e, A, "NOPE-NOPE")).body.error).toBe("invalid_code");
-        expect((await status(e, A, "DEAD")).status).toBe(401);
+        const unknown = await status(e, A, "NOPE-NOPE");
+        expect(unknown.status).toBe(200);
+        expect(unknown.body).toMatchObject({ automatic: false, ai: false, deadCode: "NOPE-NOPE" });
+        const revoked = await status(e, A, "DEAD");
+        expect(revoked.body).toMatchObject({ automatic: false, deadCode: "DEAD" });
+        expect(revoked.body.code).toBeUndefined();
     });
 
     it("an AI purchase joins the same account: the union unlocks both", async () => {
@@ -216,8 +222,9 @@ describe("accounts and the 3-computer limit", () => {
         const s = await status(e, A, "KEY-AUTO-1");
         expect(s.body).toMatchObject({ automatic: true, ai: true });
         expect(s.body.aiUntil).toBeGreaterThan(NOW);
-        // Another computer with only the Automatic key also gets AI.
-        expect((await status(e, B, "KEY-AUTO-1")).body).toMatchObject({ automatic: true, ai: true });
+        // Another computer with only the Automatic key gets Automatic, not AI:
+        // AI stays with the install that bought it (see the sharing tests).
+        expect((await status(e, B, "KEY-AUTO-1")).body).toMatchObject({ automatic: true, ai: false });
     });
 });
 
@@ -242,7 +249,7 @@ describe("refunds take away only what they paid for", () => {
 });
 
 describe("launch grants", () => {
-    it("an AI code from before launch gets Automatic, kept after it lapses, lost on a refund", async () => {
+    it("an AI code from before launch gets Automatic for good: kept after it lapses and after a refund", async () => {
         const kv = fakeKV({
             "code:OLD-AI": codeRec({ plan: "monthly", dailyCap: 2000, expiresAt: NOW + 86_400_000, mor_order_id: "pay_old", orderRef: "sub_old" }),
             "order:pay_old": "OLD-AI"
@@ -253,9 +260,9 @@ describe("launch grants", () => {
         const rec = JSON.parse(kv._dump()["code:OLD-AI"]!);
         await kv.put("code:OLD-AI", JSON.stringify({ ...rec, expiresAt: NOW - 1000 }));
         expect((await status(e, A)).body).toMatchObject({ automatic: true, ai: false });
-        // Refunded: both go.
+        // Refunded: the refund takes AI (already gone); the grant on the account stays.
         await applyMorEvent(e, { type: "refund.succeeded", data: { payment_id: "pay_old" } }, NOW);
-        expect((await status(e, A)).body).toMatchObject({ automatic: false, ai: false });
+        expect((await status(e, A)).body).toMatchObject({ automatic: true, ai: false });
     });
 
     it("an AI code bought after launch is not grandfathered", async () => {
@@ -526,5 +533,448 @@ describe("POST /admin/promo and promo stats", () => {
         const res = await worker.fetch(new Request("https://relay/admin/stats", { headers: { authorization: "Bearer admintok" } }), e, ctx);
         const body = await res.json() as any;
         expect(body.promos).toEqual([{ code: "LEAKCLUB", cap: 10, redemptions: 2, aiPurchases: 1 }]);
+    });
+});
+
+// ===========================================================================
+//  Audit round (2026-09-29).
+// ===========================================================================
+
+const statusH = async (e: Env, install: string, bearer: string | undefined, extra: Record<string, string>) => {
+    const res = await worker.fetch(new Request("https://relay/v1/status", { headers: v2Headers(install, bearer, extra) }), e, ctx);
+    return { status: res.status, body: await res.json() as any };
+};
+const checkoutV2 = async (e: Env, install: string, plan: string, bearer = install, extra: Record<string, unknown> = {}) => {
+    const res = await worker.fetch(new Request("https://relay/v1/checkout", {
+        method: "POST", headers: v2Headers(install, bearer), body: JSON.stringify({ plan, ...extra })
+    }), e, ctx);
+    return { status: res.status, body: await res.json() as any };
+};
+const legacyStatus = async (e: Env, install: string) => {
+    const res = await worker.fetch(new Request("https://relay/v1/status", {
+        headers: { authorization: `Bearer ${install}`, "x-subline-client": "vcTranslate/0.1.9" }
+    }), e, ctx);
+    return await res.json() as any;
+};
+const day = (t: number) => new Date(t).toISOString().slice(0, 10);
+
+describe("checkout: the placeholder product and the installer return", () => {
+    let calls: any[] = [];
+    const mockDodo = () => {
+        calls = [];
+        vi.stubGlobal("fetch", vi.fn(async (url: string, init: any) => {
+            calls.push({ url, body: JSON.parse(init.body) });
+            return new Response(JSON.stringify({ session_id: "cks_1", checkout_url: "https://checkout.dodopayments.com/session/cks_1" }), { status: 200 });
+        }));
+    };
+
+    it("treats the placeholder Automatic id as not configured: 503, and Dodo is never asked", async () => {
+        mockDodo();
+        const e = env(fakeKV(), { VARIANTS: { ...VARIANTS, pdt_auto: undefined, pdt_AUTOMATIC_PENDING: { plan: "automatic", dailyCap: 5 } } as any });
+        const r = await checkoutV2(e, A, "automatic");
+        expect(r.status).toBe(503);
+        expect(r.body.error).toBe("checkout unavailable");
+        expect(calls).toHaveLength(0);
+    });
+
+    it("returns to the installer's page when the installer asks, and to Discord's otherwise", async () => {
+        mockDodo();
+        const e = env(fakeKV());
+        await checkoutV2(e, A, "automatic", A, { return: "installer" });
+        expect(new URL(calls[0].body.return_url).searchParams.get("from")).toBe("installer");
+        mockDodo();
+        await checkoutV2(e, B, "automatic");
+        expect(new URL(calls[0].body.return_url).searchParams.get("from")).toBe("discord");
+    });
+
+    it("already owned stays 409", async () => {
+        mockDodo();
+        const e = env(fakeKV());
+        await buy(e, A, "KEY-AUTO-1", "pdt_auto", "pay_a");
+        await status(e, A);
+        expect((await checkoutV2(e, A, "automatic", "KEY-AUTO-1")).status).toBe(409);
+    });
+});
+
+describe("legacy clients after launch (item 3)", () => {
+    it("a new id gets the taste allowance, never a new trial, and nothing is written", async () => {
+        const kv = countingKV();
+        const body = await legacyStatus(env(kv), A);
+        expect(body).toMatchObject({ plan: "taste", cap: 3 });
+        expect(body.trialProvisional).toBeUndefined();
+        expect(kv._puts).toEqual([]);
+    });
+
+    it("a trial that started before launch keeps running out naturally", async () => {
+        const e = env(fakeKV({ [`trial:${"a".repeat(32)}`]: String(NOW - 2 * 86_400_000) }));
+        const body = await legacyStatus(e, A);
+        expect(body).toMatchObject({ plan: "trial", cap: 300 });
+        expect(body.trialEndsAt).toBe(NOW - 2 * 86_400_000 + 7 * 86_400_000);
+    });
+
+    it("before launch (placeholder) a new id still gets a trial, as today", async () => {
+        const body = await legacyStatus(env(fakeKV(), { LAUNCH_AT: "SET_AT_RELEASE" }), A);
+        expect(body).toMatchObject({ plan: "trial", cap: 300, trialProvisional: true });
+    });
+});
+
+describe("promo attempts per address, counted in the Durable Object (item 4)", () => {
+    const setup = async (cap = 100) => {
+        const e = env(fakeKV());
+        expect((await adminPromo(e, { code: "LEAKCLUB", cap })).status).toBe(200);
+        return e;
+    };
+    const installs = (n: number, from = 0) => Array.from({ length: n }, (_, i) => "free_" + (i + from).toString(16).padStart(32, "0"));
+
+    it("3 successful claims a day, then rate_limited", async () => {
+        const e = await setup();
+        const ip = "203.0.113.9";
+        const [a, b, c, d] = installs(4);
+        for (const i of [a!, b!, c!]) expect((await redeem(e, i, "LEAKCLUB", ip)).status).toBe(200);
+        expect((await redeem(e, d!, "LEAKCLUB", ip)).body.error).toBe("rate_limited");
+        // Another address is unaffected.
+        expect((await redeem(e, d!, "LEAKCLUB", "198.51.100.7")).status).toBe(200);
+    });
+
+    it("10 failed attempts a day, then rate_limited, even for a real code", async () => {
+        const e = await setup();
+        const ip = "203.0.113.10";
+        for (let i = 0; i < 10; i++) expect((await redeem(e, A, "NOPE" + i + "XYZ", ip)).status).toBe(404);
+        const eleventh = await redeem(e, A, "LEAKCLUB", ip);
+        expect(eleventh.status).toBe(429);
+        expect(eleventh.body.error).toBe("rate_limited");
+    });
+
+    it("an IPv6 /64 is one address", async () => {
+        const e = await setup();
+        const [a, b, c, d] = installs(4, 100);
+        await redeem(e, a!, "LEAKCLUB", "2001:db8:1:2::1");
+        await redeem(e, b!, "LEAKCLUB", "2001:db8:1:2::2");
+        await redeem(e, c!, "LEAKCLUB", "2001:db8:1:2:aaaa::3");
+        expect((await redeem(e, d!, "LEAKCLUB", "2001:db8:1:2:ffff::9")).status).toBe(429);
+    });
+
+    it("a concurrent burst of real claims gets exactly 3 through", async () => {
+        const e = await setup();
+        const out = await Promise.all(installs(20, 200).map(i => redeem(e, i, "LEAKCLUB", "203.0.113.11")));
+        expect(out.filter(r => r.status === 200)).toHaveLength(3);
+        expect(out.filter(r => r.status === 429)).toHaveLength(17);
+    });
+
+    it("a concurrent burst of bad codes counts at most 10 failures", async () => {
+        const e = await setup();
+        const ip = "203.0.113.12";
+        const first = await Promise.all(Array.from({ length: 30 }, (_, i) => redeem(e, A, "BAD" + i + "CODE", ip)));
+        const tried = first.filter(r => r.status === 404).length;
+        expect(tried).toBeGreaterThan(0);
+        expect(tried).toBeLessThanOrEqual(10);
+        // Keep going one by one: the total that ever reaches the lookup is 10.
+        let more = 0;
+        for (let i = 0; i < 20; i++) if ((await redeem(e, A, "MORE" + i + "BAD", ip)).status === 404) more++;
+        expect(tried + more).toBe(10);
+    });
+
+    it("the begin/end decision is exact", () => {
+        const s = { ok: 0, fail: 0, inflight: 0 };
+        expect(applyIpBegin(s)).toBe(true);
+        expect(applyIpBegin(s)).toBe(true);
+        expect(applyIpBegin(s)).toBe(true);
+        expect(applyIpBegin(s)).toBe(false); // 3 in flight fill the success allowance
+        applyIpEnd(s, "none");
+        expect(s).toEqual({ ok: 0, fail: 0, inflight: 2 });
+        applyIpEnd(s, "ok");
+        applyIpEnd(s, "fail");
+        expect(s).toEqual({ ok: 1, fail: 1, inflight: 0 });
+        expect(REDEEM_IP_DAILY_SUCCESSES).toBe(3);
+        expect(REDEEM_IP_DAILY_FAILURES).toBe(10);
+    });
+});
+
+describe("AI plans are listed, unknown products fail closed (item 5)", () => {
+    it("lists AI plans explicitly; admin free-plan beta codes are AI on purpose", () => {
+        for (const p of ["monthly", "annual", "paid", "lifetime", "free"] as const) expect(isAiPlan(p)).toBe(true);
+        for (const p of ["automatic", "taste", "trial"] as const) expect(isAiPlan(p)).toBe(false);
+        expect(isAiPlan("mystery" as any)).toBe(false);
+    });
+
+    it("a license key for an unknown product entitles to nothing and is logged", async () => {
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const e = env(fakeKV());
+        await buy(e, A, "KEY-GHOST", "pdt_ghost", "pay_g");
+        expect(warn.mock.calls.some(c => String(c[0]).includes("unmapped product"))).toBe(true);
+        warn.mockRestore();
+        const s = await status(e, A, "KEY-GHOST");
+        expect(s.body).toMatchObject({ automatic: false, ai: false, deadCode: "KEY-GHOST" });
+    });
+});
+
+describe("a dead AI code never takes Automatic (item 6)", () => {
+    const setupOwner = async () => {
+        const e = env(fakeKV());
+        await buy(e, A, "KEY-AUTO-1", "pdt_auto", "pay_a");
+        await status(e, A);
+        await buy(e, A, "KEY-AI-1", "pdt_month", "pay_m", "sub_m");
+        const s = await status(e, A, "KEY-AI-1");
+        expect(s.body).toMatchObject({ automatic: true, ai: true });
+        return e;
+    };
+
+    it("cancel: after the period ends AI goes, Automatic stays, and the Automatic code is handed back", async () => {
+        const e = await setupOwner();
+        await applyMorEvent(e, { type: "subscription.cancelled", data: { subscription_id: "sub_m", next_billing_date: new Date(NOW - 1000).toISOString() } }, NOW);
+        const s = await status(e, A, "KEY-AI-1");
+        expect(s.body).toMatchObject({ automatic: true, ai: false, deadCode: "KEY-AI-1", code: "KEY-AUTO-1" });
+    });
+
+    it("expiry: the same", async () => {
+        const e = await setupOwner();
+        await applyMorEvent(e, { type: "subscription.expired", data: { subscription_id: "sub_m" } }, NOW);
+        const s = await status(e, A, "KEY-AI-1");
+        expect(s.body).toMatchObject({ automatic: true, ai: false, deadCode: "KEY-AI-1", code: "KEY-AUTO-1" });
+    });
+
+    it("refund: the same", async () => {
+        const e = await setupOwner();
+        await applyMorEvent(e, { type: "refund.succeeded", data: { payment_id: "pay_m" } }, NOW);
+        const s = await status(e, A, "KEY-AI-1");
+        expect(s.body).toMatchObject({ automatic: true, ai: false, deadCode: "KEY-AI-1", code: "KEY-AUTO-1" });
+    });
+
+    it("prefers the Automatic code over a live AI code when handing one back", async () => {
+        const e = await setupOwner();
+        const s = await status(e, A, "NOT-A-CODE");
+        expect(s.body).toMatchObject({ automatic: true, ai: true, deadCode: "NOT-A-CODE", code: "KEY-AUTO-1" });
+    });
+
+    it("grandfathered Automatic survives a subscription.expired webhook", async () => {
+        const kv = fakeKV({
+            "code:OLD-AI": codeRec({ plan: "monthly", dailyCap: 2000, expiresAt: NOW + 86_400_000, mor_order_id: "pay_old", mor_subscription_id: "sub_old", orderRef: "sub_old" }),
+            "order:sub_old": "OLD-AI", "order:pay_old": "OLD-AI"
+        });
+        const e = env(kv);
+        expect((await status(e, A, "OLD-AI")).body).toMatchObject({ automatic: true, ai: true });
+        await applyMorEvent(e, { type: "subscription.expired", data: { subscription_id: "sub_old" } }, NOW);
+        expect((await status(e, A, "OLD-AI")).body).toMatchObject({ automatic: true, ai: false, deadCode: "OLD-AI" });
+    });
+});
+
+describe("early users (items 7/8)", () => {
+    const aHash = async () => installHash(A);
+
+    it("a pre-launch usage counter counts, but only with the prior-use hint", async () => {
+        const before = day(LAUNCH - 3_600_000 * 20);
+        const seed = { [`use:${A}:${before}`]: "2" };
+        expect((await status(env(fakeKV(seed)), A)).body.automatic).toBe(false);
+        const withHint = await statusH(env(fakeKV(seed)), A, undefined, { "x-subline-prior": "1" });
+        expect(withHint.body).toMatchObject({ automatic: true, grant: "early" });
+        expect(withHint.body.code).toMatch(/^slp_/);
+    });
+
+    it("a pre-launch seen: marker counts with the hint", async () => {
+        const before = day(LAUNCH - 86_400_000);
+        const seed = { [`seen:free:${before}:${await aHash()}`]: "1" };
+        const r = await statusH(env(fakeKV(seed)), A, undefined, { "x-subline-prior": "1" });
+        expect(r.body).toMatchObject({ automatic: true, grant: "early" });
+    });
+
+    it("the hint alone grants nothing, and a record from after launch does not count", async () => {
+        const plain = await statusH(env(fakeKV()), A, undefined, { "x-subline-prior": "1" });
+        expect(plain.body).toMatchObject({ automatic: false });
+        expect(plain.body.grant).toBeUndefined();
+        const after = { [`use:${A}:${day(NOW + 3_600_000)}`]: "2" };
+        expect((await statusH(env(fakeKV(after)), A, undefined, { "x-subline-prior": "1" })).body.automatic).toBe(false);
+    });
+
+    it("grant:early is on the first granting answer only", async () => {
+        const e = env(fakeKV({ [`trial:${"a".repeat(32)}`]: String(LAUNCH - 5000) }));
+        expect((await status(e, A)).body.grant).toBe("early");
+        expect((await status(e, A)).body.grant).toBeUndefined();
+    });
+
+    it("while LAUNCH_AT is the placeholder there are no early grants", async () => {
+        const e = env(fakeKV({ [`trial:${"a".repeat(32)}`]: String(NOW - 30 * 86_400_000) }), { LAUNCH_AT: "SET_AT_RELEASE" });
+        expect((await status(e, A)).body.automatic).toBe(false);
+        expect(launchAt(e)).toBeNaN();
+    });
+});
+
+describe("computer slots with last-seen (item 9)", () => {
+    afterEach(() => { vi.useRealTimers(); });
+
+    it("writes the last-seen day at most once a day per install", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(NOW);
+        const kv = countingKV();
+        const e = env(kv);
+        await buy(e, A, "KEY-AUTO-1", "pdt_auto", "pay_a");
+        await status(e, A);
+        const n = kv._puts.length;
+        await status(e, A, "KEY-AUTO-1");
+        await status(e, A, "KEY-AUTO-1");
+        expect(kv._puts.length).toBe(n);
+        vi.setSystemTime(NOW + 86_400_000);
+        await status(e, A, "KEY-AUTO-1");
+        expect(kv._puts.slice(n)).toEqual([expect.stringMatching(/^acct:/)]);
+    });
+
+    it("a 4th computer is refused while all 3 were seen in the last 30 days", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(NOW);
+        const e = env(fakeKV());
+        await buy(e, A, "KEY-AUTO-1", "pdt_auto", "pay_a");
+        await status(e, A);
+        await status(e, B, "KEY-AUTO-1");
+        await status(e, C, "KEY-AUTO-1");
+        vi.setSystemTime(NOW + 29 * 86_400_000);
+        const d = await status(e, D, "KEY-AUTO-1");
+        expect(d.status).toBe(403);
+        expect(d.body.error).toBe("device_limit");
+    });
+
+    it("the least recently seen computer gives up its slot after 30 days unseen", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(NOW);
+        const kv = fakeKV();
+        const e = env(kv);
+        await buy(e, A, "KEY-AUTO-1", "pdt_auto", "pay_a");
+        await status(e, A);
+        await status(e, B, "KEY-AUTO-1");
+        vi.setSystemTime(NOW + 10 * 86_400_000);
+        await status(e, C, "KEY-AUTO-1");
+        await status(e, A, "KEY-AUTO-1");   // A seen again on day 10
+        vi.setSystemTime(NOW + 31 * 86_400_000);
+        // B was last seen on day 0: 31 days unseen, so D takes its slot.
+        expect((await status(e, D, "KEY-AUTO-1")).body.automatic).toBe(true);
+        expect(kv._dump()[`ia:${await installHash(B)}`]).toBeUndefined();
+        // B coming back is now the 4th, and A, C, D were all seen recently.
+        expect((await status(e, B, "KEY-AUTO-1")).status).toBe(403);
+    });
+
+    it("POST /admin/reset-installs frees an account's computers", async () => {
+        const e = env(fakeKV());
+        await buy(e, A, "KEY-AUTO-1", "pdt_auto", "pay_a");
+        await status(e, A);
+        await status(e, B, "KEY-AUTO-1");
+        await status(e, C, "KEY-AUTO-1");
+        expect((await status(e, D, "KEY-AUTO-1")).status).toBe(403);
+        const reset = (token: string, body: any) => worker.fetch(new Request("https://relay/admin/reset-installs", {
+            method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body)
+        }), e, ctx);
+        expect((await reset("wrong", { code: "KEY-AUTO-1" })).status).toBe(401);
+        expect((await reset("admintok", { code: "NOPE" })).status).toBe(404);
+        const ok = await reset("admintok", { code: "KEY-AUTO-1" });
+        expect(await ok.json()).toEqual({ ok: true, cleared: 3 });
+        expect((await status(e, D, "KEY-AUTO-1")).body.automatic).toBe(true);
+    });
+});
+
+describe("AI stays with the install that bought it (item 10)", () => {
+    const setupOwner = async () => {
+        stubProvider();
+        const kv = fakeKV();
+        const e = env(kv);
+        await buy(e, A, "KEY-AUTO-1", "pdt_auto", "pay_a");
+        await status(e, A);
+        await buy(e, A, "KEY-AI-1", "pdt_month", "pay_m", "sub_m");
+        expect((await status(e, A, "KEY-AUTO-1")).body).toMatchObject({ automatic: true, ai: true });
+        return { e, kv };
+    };
+
+    it("a friend who enters the owner's Automatic key gets Automatic only and spends no AI", async () => {
+        const { e, kv } = await setupOwner();
+        const friend = await status(e, B, "KEY-AUTO-1");
+        expect(friend.body).toMatchObject({ automatic: true, ai: false });
+        expect(friend.body.aiUntil).toBeUndefined();
+        const r = await translate(e, B, "KEY-AUTO-1");
+        expect(r.status).toBe(402);
+        expect(r.body.error).toBe("ai_required");
+        expect(kv._dump()[`use:KEY-AI-1:${day(Date.now())}`]).toBeUndefined();
+        // Previews work, per account.
+        expect((await translate(e, B, "KEY-AUTO-1", "preview")).status).toBe(200);
+    });
+
+    it("the buyer keeps AI with the Automatic key as its bearer", async () => {
+        const { e } = await setupOwner();
+        expect((await translate(e, A, "KEY-AUTO-1")).status).toBe(200);
+    });
+
+    it("entering the AI key itself gives AI on that computer", async () => {
+        const { e } = await setupOwner();
+        expect((await status(e, C, "KEY-AI-1")).body).toMatchObject({ automatic: true, ai: true });
+    });
+
+    it("a friend who buys AI from their own computer gets AI there", async () => {
+        const { e } = await setupOwner();
+        await status(e, B, "KEY-AUTO-1");
+        await buy(e, B, "KEY-AI-2", "pdt_month", "pay_m2", "sub_m2");
+        expect((await status(e, B, "KEY-AUTO-1")).body).toMatchObject({ automatic: true, ai: true });
+    });
+});
+
+describe("checking a typed code (x-subline-check)", () => {
+    it("says what it would give without linking anything or writing", async () => {
+        const kv = countingKV();
+        const e = env(kv);
+        await buy(e, A, "KEY-AUTO-1", "pdt_auto", "pay_a");
+        await status(e, A);
+        const n = kv._puts.length;
+        const acctBefore = kv._dump()[`acct:${kv._dump()[`ia:${await installHash(A)}`]}`];
+        const r = await statusH(e, B, "KEY-AUTO-1", { "x-subline-check": "1" });
+        expect(r.status).toBe(200);
+        expect(r.body.check).toEqual({ valid: true, automatic: true, ai: false });
+        expect(r.body).toMatchObject({ automatic: false, ai: false });
+        expect(r.body.code).toBeUndefined();
+        expect(kv._puts.length).toBe(n);
+        expect(kv._dump()[`acct:${kv._dump()[`ia:${await installHash(A)}`]}`]).toBe(acctBefore);
+        expect(kv._dump()[`ia:${await installHash(B)}`]).toBeUndefined();
+        // Confirming links it.
+        expect((await status(e, B, "KEY-AUTO-1")).body.automatic).toBe(true);
+    });
+
+    it("a dead or unknown code is not valid; an AI code says ai", async () => {
+        const e = env(fakeKV({ "code:NEW-AI": codeRec({ plan: "monthly", createdAt: NOW, expiresAt: NOW + 86_400_000 }) }));
+        expect((await statusH(e, A, "NOPE-NOPE", { "x-subline-check": "1" })).body.check).toEqual({ valid: false, automatic: false, ai: false });
+        expect((await statusH(e, A, "NEW-AI", { "x-subline-check": "1" })).body.check).toEqual({ valid: true, automatic: false, ai: true });
+    });
+
+    it("is a device_limit when the code's account has 3 recent computers, still with no writes", async () => {
+        const kv = countingKV();
+        const e = env(kv);
+        await buy(e, A, "KEY-AUTO-1", "pdt_auto", "pay_a");
+        await status(e, A);
+        await status(e, B, "KEY-AUTO-1");
+        await status(e, C, "KEY-AUTO-1");
+        const n = kv._puts.length;
+        const r = await statusH(e, D, "KEY-AUTO-1", { "x-subline-check": "1" });
+        expect(r.status).toBe(403);
+        expect(r.body.error).toBe("device_limit");
+        expect(kv._puts.length).toBe(n);
+    });
+});
+
+describe("KV writes per call (pinned)", () => {
+    it("redeem: the code, the install and code index, and the account; 4 in all", async () => {
+        const kv = countingKV();
+        const e = env(kv);
+        expect((await adminPromo(e, { code: "LEAKCLUB", cap: 10 })).status).toBe(200);
+        const n = kv._puts.length;
+        expect((await redeem(e, A, "LEAKCLUB", "203.0.113.20")).status).toBe(200);
+        const w = kv._puts.slice(n);
+        expect(w).toHaveLength(4);
+        expect(w.filter(k => k.startsWith("code:slp_"))).toHaveLength(1);
+        expect(w.some(k => k.startsWith("rl:"))).toBe(false); // the address count lives in the DO now
+    });
+
+    it("status for nothing owned: none; known install, same day: none; check: none", async () => {
+        const kv = countingKV();
+        const e = env(kv);
+        await status(e, A);
+        expect(kv._puts).toEqual([]);
+        await buy(e, A, "KEY-AUTO-1", "pdt_auto", "pay_a");
+        await status(e, A);
+        const n = kv._puts.length;
+        await status(e, A, "KEY-AUTO-1");
+        await statusH(e, B, "KEY-AUTO-1", { "x-subline-check": "1" });
+        expect(kv._puts.length).toBe(n);
     });
 });

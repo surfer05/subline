@@ -39,12 +39,19 @@ export const DEFAULT_CHECKOUT_RETURN_URL = "https://surfer05.github.io/subline/"
  * downloads. Added with the URL API, so a CHECKOUT_RETURN_URL that already has
  * a query keeps it. A malformed override falls back to the default.
  */
-export function discordReturnUrl(configured: string | undefined): string {
+export function discordReturnUrl(configured: string | undefined, from: "discord" | "installer" = "discord"): string {
     let u: URL;
     try { u = new URL(configured || DEFAULT_CHECKOUT_RETURN_URL); } catch { u = new URL(DEFAULT_CHECKOUT_RETURN_URL); }
-    u.searchParams.set("from", "discord");
+    u.searchParams.set("from", from);
     return u.toString();
 }
+
+/**
+ * The Automatic product id wrangler.jsonc ships with until the owner creates
+ * the real Dodo product. Checkout treats it as not configured (503, and Dodo is
+ * never asked), and a test refuses to ship it (see test/placeholder.test.ts).
+ */
+export const AUTOMATIC_PRODUCT_PLACEHOLDER = "pdt_AUTOMATIC_PENDING";
 
 /** Session rows only need to outlive the session itself (24 h by default). */
 export const CHECKOUT_TTL_S = 2 * 86_400;
@@ -75,6 +82,7 @@ export function productFor(env: Env, plan: string): string | null {
     if (typeof table === "string") { try { table = JSON.parse(table); } catch { table = undefined; } }
     if (!table || typeof table !== "object") return null;
     for (const id of Object.keys(table)) {
+        if (id === AUTOMATIC_PRODUCT_PLACEHOLDER) continue;
         if (variantConfig(env, id).plan === plan) return id;
     }
     return null;
@@ -154,14 +162,18 @@ async function handleCheckoutV2(req: Request, env: Env, now: number): Promise<Re
     if (!r.ok) return fail(r.error, r.status);
     if (plan === "automatic" && r.automatic) return fail("already_owned", 409);
     if (plan !== "automatic" && !r.automatic) return fail("automatic_required", 403);
-    return createSession(env, r.hash, productId, now, req.headers.get("cf-connecting-ip"));
+    // The installer asks to come back to a "go back to the installer" page.
+    const from = body?.return === "installer" ? "installer" : "discord";
+    return createSession(env, r.hash, productId, now, req.headers.get("cf-connecting-ip"), from);
 }
 
 /**
  * Rate-limit, then ask Dodo for a checkout session tied to this install hash.
  * Shared by the legacy and the v2 checkout.
  */
-async function createSession(env: Env, hash: string, productId: string, now: number, ip: string | null): Promise<Response> {
+async function createSession(
+    env: Env, hash: string, productId: string, now: number, ip: string | null, from: "discord" | "installer" = "discord"
+): Promise<Response> {
     const hour = Math.floor(now / HOUR_MS);
     try {
         if (ip && !(await underHourly(env, `rl:coip:${ipBucket(ip)}:${hour}`, CHECKOUT_IP_PER_HOUR))) {
@@ -177,7 +189,7 @@ async function createSession(env: Env, hash: string, productId: string, now: num
 
     const payload: Record<string, unknown> = {
         product_cart: [{ product_id: productId, quantity: 1 }],
-        return_url: discordReturnUrl(env.CHECKOUT_RETURN_URL),
+        return_url: discordReturnUrl(env.CHECKOUT_RETURN_URL, from),
         feature_flags: { redirect_immediately: true },
         metadata: { install: hash }
     };

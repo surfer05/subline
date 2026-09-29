@@ -27,6 +27,7 @@ translation** to Subline clients presenting an opaque per-user **code**.
 | `POST /admin/coupon` | `Bearer <ADMIN_TOKEN>` | `{name}` → a single-use 100%-off code for 3 monthly cycles |
 | `POST /v1/redeem` (v2) | code or install + `x-subline-install` | `{code}` → `{ok,code}`: a promo code grants Automatic |
 | `POST /admin/promo` | `Bearer <ADMIN_TOKEN>` | `{code, cap}` → a server promo code, Automatic for the first `cap` installs |
+| `POST /admin/reset-installs` | `Bearer <ADMIN_TOKEN>` | `{code}` → frees the computers on the account that owns `code` |
 
 Responses use the plugin's exact `NativeResponse` shape, so the client `relay`
 engine needs no reshaping.
@@ -36,55 +37,100 @@ engine needs no reshaping.
 A v2 client sends `x-subline-api: 2` and its install id in
 `x-subline-install: free_<32 hex>` on every request; the bearer is its saved
 code, or the install id when it has none. Requests WITHOUT `x-subline-api: 2`
-are answered exactly as before (taste, trial, previews, purchase links), so
-v0.1.5 to v0.1.9 clients keep working until they update. Code: `src/entitle.ts`,
+are answered as before (taste, trial, previews, purchase links), so v0.1.5 to
+v0.1.9 clients keep working until they update, with one change after launch:
+an id the relay has never trialled gets the taste allowance, not a new trial
+(a trial already running runs out on its own). Code: `src/entitle.ts`,
 `src/v2.ts`, `src/promo.ts`.
 
 - **Plans.** Automatic ($4.99 once, VARIANTS plan `automatic`, a license key
-  that never expires) and AI (monthly/annual), sold only on top of Automatic.
-  The Automatic product id in `wrangler.jsonc` is a PLACEHOLDER
-  (`pdt_AUTOMATIC_PENDING`) until the owner creates the Dodo product.
+  that never expires) and AI, sold only on top of Automatic. The AI plans are
+  listed explicitly: `monthly`, `annual`, `paid`, `lifetime`, and `free`, which
+  is the admin-minted `slp_` beta code (`POST /admin/codes`), deliberately AI so
+  friends set up by hand keep ✦. Every other plan is not AI.
+- **Unknown products fail closed.** A license key for a product id missing from
+  VARIANTS is stored revoked, with a note naming the product, and logged. It
+  entitles to nothing (it used to mint a free-cap code, which counted as AI).
+- **The Automatic product id** in `wrangler.jsonc` is a PLACEHOLDER
+  (`pdt_AUTOMATIC_PENDING`) until the owner creates the Dodo product. Checkout
+  treats it as not configured (503 `checkout unavailable`, Dodo is never
+  asked). `test/placeholder.test.ts` fails while it, or the `LAUNCH_AT`
+  placeholder, is in `wrangler.jsonc`; dogfood runs set
+  `SUBLINE_ALLOW_PLACEHOLDER=1` to skip it.
 - **Accounts.** `acct:<id>` joins a buyer's codes and installs; `ia:<hash>` and
-  `ca:<code>` point at it. What an install may use is the union over the
-  account's live codes. At most **3 installs** per account; a 4th gets 403
-  `device_limit`. A purchase made from an install (`paid:<hash>`, the same
-  checkout link as v1) joins that install's account on its next status.
-- **Grants.** An AI code made before launch (no `createdAt`, or older than
-  `LAUNCH_AT`) gives its account Automatic, kept after the subscription lapses
-  and lost if that code is refunded. An install whose `trial:<id>` record is
-  older than `LAUNCH_AT` gets Automatic free as an early user (an `slp_` code,
-  note `early`).
+  `ca:<code>` point at it. Automatic is the union over the account's live
+  codes, on every computer of the account.
+- **AI stays with the computer that bought it.** An install gets AI only when
+  the AI checkout started on it (`paid:<hash>`, recorded in the account's
+  `aiInstalls`) or it presented an AI code itself. A friend who types the
+  owner's Automatic key gets Automatic only and spends none of the AI code's
+  daily cap.
+- **A dead code never locks an install out.** When the presented code is
+  lapsed, refunded, revoked or unknown, the account is still resolved from the
+  install; the answer carries `deadCode` and hands back a live code to save,
+  the Automatic one first. (v2 status no longer answers 401 `invalid_code`.)
+- **Computers.** At most **3 installs** per account. Each install's last-seen
+  day is kept on the account (written at most once a day per install). A 4th
+  install takes the slot of the least recently seen one if it has not been
+  seen for 30 days; otherwise 403 `device_limit`. The owner clears an
+  account's computers with `node scripts/reset-installs.mjs <code>`
+  (`POST /admin/reset-installs {code}`, ADMIN_TOKEN).
+- **Grants are facts about the account.** An AI code made before launch (no
+  `createdAt`, or older than `LAUNCH_AT`) gives its account Automatic for good:
+  it survives that code's cancel, expiry and refund (refunding AI takes only
+  AI). An install used before launch gets Automatic free as an early user (an
+  `slp_` code, note `early`, and `grant:"early"` on that first answer). The
+  evidence is a relay record of that install id from before `LAUNCH_AT`: its
+  `trial:<id>`, or, when the client sends `x-subline-prior: 1`, a usage
+  counter (`use:free_<id>:<day>`) or `seen:` marker dated before launch. The
+  hint alone grants nothing.
 - **Refunds** revoke the code they paid for; the union simply stops counting it.
   Refunding Automatic leaves AI, refunding AI leaves Automatic.
 - **`GET /v1/status` (v2)** →
-  `{ok, automatic, ai, aiUntil?, code?, previews:{used,cap}, token, tokenExpiresAt, now}`.
-  `code` is a code the install should save (only when it presented its
-  install id). `token` is base64url(JSON `{v,i,a,ai,exp}`) + "." +
-  base64url(HMAC-SHA256 with `ENTITLEMENT_SECRET`), valid 7 days; empty
-  signature when the secret is unset. AI is enforced here either way.
+  `{ok, automatic, ai, aiUntil?, code?, deadCode?, grant?, previews:{used,cap}, token, tokenExpiresAt, now}`.
+  With `x-subline-check: 1` and a typed code as the bearer it answers what that
+  code would give, `check:{valid, automatic, ai}`, without linking it: no slot
+  used and nothing written (403 `device_limit` if its account has 3 recent
+  computers). The rest of that answer is the install's own state.
+- **The token** is base64url(JSON `{v,i,a,ai,exp}`) + "." + base64url(HMAC-SHA256
+  with `ENTITLEMENT_SECRET`), valid 7 days; empty signature when the secret is
+  unset. It protects nothing on the client: the client cannot verify it and
+  Automatic runs client-side. The client uses only its expiry (the offline
+  grace). AI and previews are decided here on every request.
 - **`POST /v1/translate` (v2).** AI: full ✦, charged to the account's AI code.
   Automatic only: `mode:"preview"` gets 5 cut previews a day per account
   (`use:pv:<account>:<day>`), anything else 402 `ai_required`. No
   entitlement: 402 `not_activated`.
-- **`POST /v1/checkout` (v2)** takes `plan: "automatic"|"monthly"|"annual"`:
-  AI without Automatic is 403 `automatic_required`, Automatic twice is 409
-  `already_owned`.
+- **`POST /v1/checkout` (v2)** takes `plan: "automatic"|"monthly"|"annual"`, and
+  `return: "installer"` to come back to the site with `from=installer` (default
+  `from=discord`). AI without Automatic is 403 `automatic_required`, Automatic
+  twice is 409 `already_owned`.
 - **Promo codes.** `node scripts/promo.mjs LEAKCLUB 100` (ADMIN_TOKEN from the
   environment) creates `promo:<CODE>`: 4 to 16 uppercase letters or digits,
   refused if it is already a working code. `POST /v1/redeem {code}` answers
   200 `{ok, code:"slp_..."}` (a new Subline code, plan automatic, note
   `promo:<CODE>`), 404 `not_found`, 410 `claimed`, 409 `already`, 429
-  `rate_limited` (3 per address a day), 503 `unavailable`. The cap is counted
-  by one `Promo` Durable Object per code, so 100 is exactly 100, one per
-  install. `/admin/stats` adds `promos: [{code, cap, redemptions, aiPurchases}]`.
-- **KV writes.** A status call from an install already in its account writes
-  nothing. Writes happen only when something is learnt: an install or code
-  joining an account (`acct:`, `ia:`, `ca:`), a grandfather or early grant,
-  a redemption (`code:`, account rows, the per-address counter). A preview
-  writes its day counter; AI writes the code's counters as v1 does.
+  `rate_limited`, 503 `unavailable`. The cap is counted by one `Promo` Durable
+  Object per code, so 100 is exactly 100, one per install.
+- **Attempts per address.** A `Promo` object named for the address (IPv4, or
+  the IPv6 /64) and the UTC day counts every redemption attempt before any
+  lookup: at most 3 successful claims and 10 failed attempts (unknown code,
+  fully claimed, already yours). In-flight attempts count against both, so a
+  concurrent burst cannot slip past. A refused attempt is not counted. The
+  object clears itself two days later. Reset: 00:00 UTC.
+- **KV writes.** Status for an install that owns nothing: none. A status call
+  from an install already in its account: none on the same UTC day, one
+  (`acct:`) on the first call of a new day. A typed-code check: none. Otherwise
+  writes happen only when something is learnt: an install or code joining an
+  account (`acct:`, `ia:`, `ca:`), a grant (early: the new code plus the
+  account rows). A redemption writes 4 (`code:`, `ia:`, `ca:`, `acct:`). A
+  preview writes its day counter; AI writes the code's counters as v1 does.
+  These counts are pinned by tests.
 - **Deploy.** Migration `v2` creates the `Promo` class. Optional secret:
-  `npx wrangler secret put ENTITLEMENT_SECRET` (`openssl rand -hex 32`). Var
-  `LAUNCH_AT` (epoch ms or ISO date): move it to the real launch moment.
+  `npx wrangler secret put ENTITLEMENT_SECRET`. Var `LAUNCH_AT` ships as the
+  placeholder `SET_AT_RELEASE`; the release step sets the publish moment
+  (epoch ms or ISO date). While it is the placeholder, early grants,
+  grandfathering by date and the legacy trial cut-off are all off.
 
 ## The taste tier (keyless installs)
 

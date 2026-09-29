@@ -254,6 +254,14 @@ function trialKey(bearer: string): string {
 export async function resolveFreePlan(env: Env, bearer: string, now: number): Promise<FreePlan> {
     const raw = await env.CODES.get(trialKey(bearer));
     const stored = raw === null ? NaN : Number(raw);
+    // AFTER LAUNCH (LAUNCH_AT set and past) no NEW trial starts on this legacy
+    // path: 0.2.0 has no free tier, so an older client with an id the relay has
+    // never trialled gets the taste allowance only, and nothing is written. A
+    // trial already running keeps its 7 days and runs out naturally.
+    const launch = launchAtMs(env);
+    if (!Number.isFinite(stored) && Number.isFinite(launch) && now >= launch) {
+        return { record: tasteRecord(), trialActive: false, trialEndsAt: now, provisional: false };
+    }
     const provisional = !Number.isFinite(stored);
     const firstSeen = provisional ? now : stored;
     const trialEndsAt = firstSeen + TRIAL_MS;
@@ -921,6 +929,7 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
         // refund/dispute (which carry ONLY payment_id).
         const joinIds = [...new Set([subId, payId].filter(Boolean))];
         const cfg = variantConfig(env, asStr(data.product_id));
+        if (!cfg.mapped) console.warn("license key for an unmapped product: created revoked, no entitlement", { product: asStr(data.product_id).slice(0, 40) });
         // #5: a PAID/subscription key with NO join id at all can be filed under
         // no order:<id> index, so a later refund/expire could never find it — an
         // un-revokable paid code. Refuse to mint (Dodo retries; a well-formed
@@ -941,7 +950,9 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
         // supersedes it forward-only. Lifetime/free codes stay never-expiring.
         const provisional = isSubscription ? now + SUBSCRIPTION_GRACE_MS : undefined;
         const rec: CodeRecord = {
-            status: existing?.status === "revoked" ? "revoked" : "active",
+            // An unmapped product FAILS CLOSED: the code exists (so a later refund or a
+            // support look-up can find it) but is born revoked and entitles to nothing.
+            status: existing?.status === "revoked" || !cfg.mapped ? "revoked" : "active",
             dailyCap: cfg.dailyCap,
             plan: cfg.plan,
             mor_order_id: payId || undefined,               // the payment join id
@@ -952,7 +963,7 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
             revokedAt: existing?.revokedAt,
             createdAt: existing ? existing.createdAt : now,
             // Unmapped product is a config error: fail safe on the cap AND flag it.
-            note: cfg.mapped ? existing?.note : `unmapped product_id — capped at free default (${FREE_FALLBACK_CAP}/day)`,
+            note: cfg.mapped ? existing?.note : `unmapped product_id ${asStr(data.product_id).slice(0, 40)}: no entitlement`,
         };
         // Fold in any lifecycle state that arrived before this key, draining the
         // pending row for EACH join id (see ORDER-INDEPENDENCE). A refund that
@@ -1030,4 +1041,21 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
     // handled no-op (2xx). NEVER a throw — a throw becomes a 500 and, worse, must
     // never be able to turn a deny into an allow.
     return { action: "ignored" };
+}
+
+/** The value wrangler.jsonc ships LAUNCH_AT with. The release step replaces it. */
+export const LAUNCH_AT_PLACEHOLDER = "SET_AT_RELEASE";
+
+/**
+ * LAUNCH_AT as epoch ms: a number, or an ISO date. NaN when unset, still the
+ * placeholder, or unreadable. Everything keyed on launch (early grants,
+ * grandfathering by date, the legacy trial cut-off) is off while it is NaN.
+ */
+export function launchAtMs(env: Env): number {
+    const raw = env.LAUNCH_AT;
+    if (raw === undefined || raw === null || raw === "" || raw === LAUNCH_AT_PLACEHOLDER) return NaN;
+    const n = Number(raw);
+    if (Number.isFinite(n)) return n;
+    const t = Date.parse(String(raw));
+    return Number.isFinite(t) ? t : NaN;
 }

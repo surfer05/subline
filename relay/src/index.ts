@@ -25,7 +25,7 @@ import {
 import { translateWithFallback, toPreview, type BatchRequest, type TranslateError, type Provider } from "./translate";
 import { record, type Outcome } from "./metrics";
 import { installOf, isApiV2, PREVIEW_DAILY_CAP, resolveEntitlement } from "./entitle";
-import { createPromo, handleRedeem, handleStatusV2, promoStats } from "./v2";
+import { adminResetInstalls, createPromo, handleRedeem, handleStatusV2, promoStats } from "./v2";
 import { bumpStat, markActive, safely, clampDays, readStats } from "./stats";
 import { createCoupon, handleCheckout, purchaseFor } from "./checkout";
 export { Budget } from "./budget";
@@ -305,7 +305,7 @@ async function serveBatch(
 /**
  * /v1/translate for a v2 (paid-only) client. ✦ needs AI and is charged to the
  * account's live AI code. An Automatic owner without AI gets ✦ PREVIEWS only
- * (3 a day per account, cut on the relay). Nothing else is served: no
+ * (5 a day per account, cut on the relay). Nothing else is served: no
  * entitlement is 402 not_activated. The trial and taste tiers do not exist for
  * a v2 client.
  */
@@ -322,7 +322,7 @@ async function translateV2(env: Env, ctx: ExecutionContext, done: Done, req: Req
     const batch = body as BatchRequest;
     const r = await resolveEntitlement(env, install, credential, now);
     if (!r.ok) {
-        const outcome: Outcome = r.error === "device_limit" ? "device_limit" : r.error === "invalid_code" ? "unknown_code" : "capacity";
+        const outcome: Outcome = r.error === "device_limit" ? "device_limit" : "capacity";
         return done(fail(r.error, r.status), outcome, credential, 0);
     }
     if (r.ai && r.aiCode && r.aiRec) {
@@ -448,6 +448,17 @@ export default {
         if (url.pathname === "/v1/redeem") {
             if (!isApiV2(req)) return fail("bad request", 400);
             return handleRedeem(req, env, Date.now());
+        }
+
+        // ---- POST /admin/reset-installs — free an account's computers ------
+        if (url.pathname === "/admin/reset-installs") {
+            if (req.method !== "POST") return fail("method not allowed", 405);
+            const token = bearer(req);
+            if (!env.ADMIN_TOKEN) return fail("admin disabled", 503);
+            if (!token || !(await timingSafeEqual(token, env.ADMIN_TOKEN))) return fail("unauthorized", 401);
+            const body = await readBody(req);
+            if (!body) return fail("bad request", 400);
+            return adminResetInstalls(env, body);
         }
 
         // ---- POST /admin/promo — create a promo code (ADMIN_TOKEN) ---------
