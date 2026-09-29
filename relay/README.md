@@ -127,10 +127,15 @@ an id the relay has never trialled gets the taste allowance, not a new trial
   preview writes its day counter; AI writes the code's counters as v1 does.
   These counts are pinned by tests.
 - **Deploy.** Migration `v2` creates the `Promo` class. Optional secret:
-  `npx wrangler secret put ENTITLEMENT_SECRET`. Var `LAUNCH_AT` ships as the
-  placeholder `SET_AT_RELEASE`; the release step sets the publish moment
-  (epoch ms or ISO date). While it is the placeholder, early grants,
-  grandfathering by date and the legacy trial cut-off are all off.
+  `npx wrangler secret put ENTITLEMENT_SECRET`. Var `LAUNCH_AT` (epoch ms or
+  ISO date) is set to the moment the early-user fix went live; the release
+  step may move it to the publish moment, but safety no longer depends on it.
+  It drives grandfathering by date and the legacy trial cut-off (both off
+  while it is the placeholder `SET_AT_RELEASE`).
+- **Early users** are judged against a FIXED cutoff, `EARLY_CUTOFF_MS` =
+  2026-09-29T00:00:00Z in `src/entitle.ts`, never `LAUNCH_AT`: a `trial:`
+  record dated before it, or (with the client's prior-use hint) a `use:` or
+  `seen:` marker for a UTC day that ended before it.
 
 ## The taste tier (keyless installs)
 

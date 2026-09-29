@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { applyMorEvent, type Env } from "../src/codes";
 import { installHash } from "../src/checkout";
-import { isAiPlan, launchAt, signToken, verifyToken, MAX_INSTALLS } from "../src/entitle";
+import { EARLY_CUTOFF_MS as CUTOFF, isAiPlan, launchAt, signToken, verifyToken, MAX_INSTALLS } from "../src/entitle";
 import { applyClaim, applyIpBegin, applyIpEnd, Promo, REDEEM_IP_DAILY_FAILURES, REDEEM_IP_DAILY_SUCCESSES } from "../src/promo";
 import { codeRec, fakeBudget, fakeKV } from "./kv-mock";
 
@@ -271,7 +271,7 @@ describe("launch grants", () => {
     });
 
     it("an install that existed before launch gets Automatic as an early user, once", async () => {
-        const kv = countingKV({ [`trial:${"a".repeat(32)}`]: String(LAUNCH - 5000) });
+        const kv = countingKV({ [`trial:${"a".repeat(32)}`]: String(CUTOFF - 5000) });
         const e = env(kv);
         const first = await status(e, A);
         expect(first.body.automatic).toBe(true);
@@ -284,11 +284,13 @@ describe("launch grants", () => {
         expect(kv._puts.length).toBe(n);
     });
 
-    it("no early grant for an install first seen after launch, or with LAUNCH_AT unset", async () => {
-        const seed = { [`trial:${"a".repeat(32)}`]: String(LAUNCH + 5000) };
-        expect((await status(env(fakeKV(seed)), A)).body.automatic).toBe(false);
-        const old = { [`trial:${"a".repeat(32)}`]: String(LAUNCH - 5000) };
-        expect((await status(env(fakeKV(old), { LAUNCH_AT: "" }), A)).body.automatic).toBe(false);
+    it("early evidence counts only before the fixed cutoff, whatever LAUNCH_AT says", async () => {
+        // A trial started after the cutoff never counts, even with LAUNCH_AT still in the future.
+        const seed = { [`trial:${"a".repeat(32)}`]: String(CUTOFF + 5000) };
+        expect((await status(env(fakeKV(seed), { LAUNCH_AT: String(NOW + 10 * 86_400_000) }), A)).body.automatic).toBe(false);
+        // A trial from before the cutoff counts, with LAUNCH_AT unset.
+        const old = { [`trial:${"a".repeat(32)}`]: String(CUTOFF - 5000) };
+        expect((await status(env(fakeKV(old), { LAUNCH_AT: "" }), A)).body.automatic).toBe(true);
     });
 });
 
@@ -762,7 +764,7 @@ describe("early users (items 7/8)", () => {
     const aHash = async () => installHash(A);
 
     it("a pre-launch usage counter counts, but only with the prior-use hint", async () => {
-        const before = day(LAUNCH - 3_600_000 * 20);
+        const before = day(CUTOFF - 3_600_000 * 20);
         const seed = { [`use:${A}:${before}`]: "2" };
         expect((await status(env(fakeKV(seed)), A)).body.automatic).toBe(false);
         const withHint = await statusH(env(fakeKV(seed)), A, undefined, { "x-subline-prior": "1" });
@@ -771,7 +773,7 @@ describe("early users (items 7/8)", () => {
     });
 
     it("a pre-launch seen: marker counts with the hint", async () => {
-        const before = day(LAUNCH - 86_400_000);
+        const before = day(CUTOFF - 36 * 3_600_000);
         const seed = { [`seen:free:${before}:${await aHash()}`]: "1" };
         const r = await statusH(env(fakeKV(seed)), A, undefined, { "x-subline-prior": "1" });
         expect(r.body).toMatchObject({ automatic: true, grant: "early" });
@@ -781,19 +783,19 @@ describe("early users (items 7/8)", () => {
         const plain = await statusH(env(fakeKV()), A, undefined, { "x-subline-prior": "1" });
         expect(plain.body).toMatchObject({ automatic: false });
         expect(plain.body.grant).toBeUndefined();
-        const after = { [`use:${A}:${day(NOW + 3_600_000)}`]: "2" };
+        const after = { [`use:${A}:${day(CUTOFF + 3_600_000)}`]: "2" };
         expect((await statusH(env(fakeKV(after)), A, undefined, { "x-subline-prior": "1" })).body.automatic).toBe(false);
     });
 
     it("grant:early is on the first granting answer only", async () => {
-        const e = env(fakeKV({ [`trial:${"a".repeat(32)}`]: String(LAUNCH - 5000) }));
+        const e = env(fakeKV({ [`trial:${"a".repeat(32)}`]: String(CUTOFF - 5000) }));
         expect((await status(e, A)).body.grant).toBe("early");
         expect((await status(e, A)).body.grant).toBeUndefined();
     });
 
-    it("while LAUNCH_AT is the placeholder there are no early grants", async () => {
-        const e = env(fakeKV({ [`trial:${"a".repeat(32)}`]: String(NOW - 30 * 86_400_000) }), { LAUNCH_AT: "SET_AT_RELEASE" });
-        expect((await status(e, A)).body.automatic).toBe(false);
+    it("early grants do not depend on LAUNCH_AT, even while it is the placeholder", async () => {
+        const e = env(fakeKV({ [`trial:${"a".repeat(32)}`]: String(CUTOFF - 30 * 86_400_000) }), { LAUNCH_AT: "SET_AT_RELEASE" });
+        expect((await status(e, A)).body.automatic).toBe(true);
         expect(launchAt(e)).toBeNaN();
     });
 });

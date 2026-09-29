@@ -88,18 +88,18 @@
     // subscription_id, status, license_key and email as query parameters, and
     // the site shows its thanks view when it sees them.
     "CHECKOUT_RETURN_URL": "https://surfer05.github.io/subline/",
-    // Launch of the paid-only model (v2 clients), epoch ms or an ISO date. THE
-    // RELEASE STEP REPLACES THIS PLACEHOLDER with the publish moment. While it
-    // is "SET_AT_RELEASE" (or empty) everything keyed on launch is OFF:
-    //   • early users: an install with a relay record from before this moment
-    //     (its trial:<id>, or with the client's prior-use hint a usage counter or
-    //     seen: marker) gets Automatic free, minted as an slp_ code;
+    // Launch of the paid-only model (v2 clients), epoch ms or an ISO date. Set to
+    // the moment the fixed early-user cutoff went live, so the legacy path stops
+    // starting trials from now on. The release step may move it to the publish
+    // moment; that is no longer needed for safety. Early users do NOT depend on
+    // it: they are judged against the fixed EARLY_CUTOFF_MS (2026-09-29T00:00Z)
+    // in src/entitle.ts. While it is "SET_AT_RELEASE" (or empty) these are OFF:
     //   • grandfathering by date: an AI code created before this moment gives
     //     its account Automatic for good (codes with no createdAt are pre-v2 and
     //     always count);
     //   • the legacy cut-off: after this moment an older (0.1.x) client with an
     //     id the relay never trialled gets the taste allowance, not a new trial.
-    "LAUNCH_AT": "SET_AT_RELEASE"
+    "LAUNCH_AT": "2026-09-29T11:56:40Z"
     // ENTITLEMENT_SECRET (optional secret, `wrangler secret put
     // ENTITLEMENT_SECRET`) signs the v2 entitlement token. It protects nothing
     // on the client (the client cannot verify it; Automatic runs client-side);

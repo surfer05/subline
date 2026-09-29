@@ -277,21 +277,31 @@ async function live(env: Env, code: string): Promise<CodeRecord | null> {
 }
 
 /**
- * Was this install used before launch? Its trial:<id> record says so. With the
- * client's prior-use hint, a usage counter or seen: marker dated before launch
- * does too (those keep only a couple of days, so this matters right after
- * launch). Only the days just before launch are read, and only with the hint.
+ * THE EARLY-USER CUTOFF, fixed and already past. Early-user evidence counts
+ * only when it predates this moment, never LAUNCH_AT: LAUNCH_AT moves with the
+ * release, and anything written between the cutoff and a later LAUNCH_AT
+ * (for example a trial started by a fresh random id today) must not be able to
+ * mint a free Automatic code.
  */
-async function usedBeforeLaunch(env: Env, install: string, hash: string, start: number, prior: boolean): Promise<boolean> {
+export const EARLY_CUTOFF_MS = Date.parse("2026-09-29T00:00:00Z");
+
+/**
+ * Was this install used before the early-user cutoff? Its trial:<id> record,
+ * dated before the cutoff, says so. With the client's prior-use hint, a usage
+ * counter or seen: marker does too, but only for a UTC day that ENDED before
+ * the cutoff (those keep only a couple of days, so this matters only right
+ * after the cutoff). Only the three whole days before the cutoff are read.
+ */
+async function usedBeforeCutoff(env: Env, install: string, hash: string, prior: boolean, cutoff: number = EARLY_CUTOFF_MS): Promise<boolean> {
     const trial = await env.CODES.get(`trial:${install.slice("free_".length)}`);
     const first = trial === null ? NaN : Number(trial);
-    if (Number.isFinite(first) && first < start) return true;
+    if (Number.isFinite(first) && first < cutoff) return true;
     if (!prior) return false;
-    for (let back = 0; back < 3; back++) {
-        const t = start - back * DAY_MS;
-        const day = today(t);
-        // A day that straddles launch only counts when it began before launch.
-        if (Date.parse(`${day}T00:00:00Z`) >= start) continue;
+    for (let back = 1; back <= 3; back++) {
+        const dayStart = Math.floor(cutoff / DAY_MS) * DAY_MS - back * DAY_MS;
+        // The whole UTC day must have ended before the cutoff.
+        if (dayStart + DAY_MS > cutoff) continue;
+        const day = today(dayStart);
         for (const key of [`use:${install}:${day}`, `seen:free:${day}:${hash}`, `seen:trial:${day}:${hash}`]) {
             if (await env.CODES.get(key) !== null) return true;
         }
@@ -390,11 +400,11 @@ export async function resolveEntitlement(
         }
         if (w.acct?.grandfather) automatic = true;
 
-        // Early users: this install was used before launch.
+        // Early users: this install was used before the fixed early-user
+        // cutoff (never LAUNCH_AT, see EARLY_CUTOFF_MS).
         let grant: "early" | undefined;
         if (!automatic && !(w.acct?.early)) {
-            const start = launchAt(env);
-            if (Number.isFinite(start) && await usedBeforeLaunch(env, install, hash, start, opts.prior === true)) {
+            if (await usedBeforeCutoff(env, install, hash, opts.prior === true)) {
                 automatic = true;
                 grant = "early";
                 if (!opts.dryRun) {
