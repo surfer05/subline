@@ -28,6 +28,7 @@ translation** to Subline clients presenting an opaque per-user **code**.
 | `POST /v1/redeem` (v2) | code or install + `x-subline-install` | `{code}` → `{ok,code}`: a promo code grants Automatic |
 | `POST /admin/promo` | `Bearer <ADMIN_TOKEN>` | `{code, cap}` → a server promo code, Automatic for the first `cap` installs |
 | `POST /admin/reset-installs` | `Bearer <ADMIN_TOKEN>` | `{code}` → frees the computers on the account that owns `code` |
+| `POST /admin/reissue` | `Bearer <ADMIN_TOKEN>` | `{code}` → for a leaked key: revokes `code`, mints a new `slp_` code on the same account with the same record, points the purchase's `order:` index at it, and clears every computer; returns `{ok, code}` (`scripts/reissue.mjs <code>`) |
 
 Responses use the plugin's exact `NativeResponse` shape, so the client `relay`
 engine needs no reshaping.
@@ -39,8 +40,14 @@ A v2 client sends `x-subline-api: 2` and its install id in
 code, or the install id when it has none. Requests WITHOUT `x-subline-api: 2`
 are answered as before (taste, trial, previews, purchase links), so v0.1.5 to
 v0.1.9 clients keep working until they update, with one change after launch:
-an id the relay has never trialled gets the taste allowance, not a new trial
-(a trial already running runs out on its own). Code: `src/entitle.ts`,
+the old free tier (taste, trial, previews) goes only to a `free_` id with a
+`trial:` record dated before the early-user cutoff (2026-09-29T00:00Z), and a
+running trial of such an id runs out on its own. Every other `free_` id
+(a fresh one, one whose trial began after the cutoff, a header-less 0.1.5
+client) gets `402 {ok:false,error:"not activated"}` on translate, and legacy
+status keeps its shape with `plan:"taste", used:0, cap:0` (plus
+`trialEndsAt: now` and `now` for a header'd client). Paid codes are unaffected.
+Before `LAUNCH_AT` (or while it is the placeholder) nothing changes. Code: `src/entitle.ts`,
 `src/v2.ts`, `src/promo.ts`.
 
 - **Plans.** Automatic ($4.99 once, VARIANTS plan `automatic`, a license key
@@ -78,12 +85,14 @@ an id the relay has never trialled gets the taste allowance, not a new trial
 - **Grants are facts about the account.** An AI code made before launch (no
   `createdAt`, or older than `LAUNCH_AT`) gives its account Automatic for good:
   it survives that code's cancel, expiry and refund (refunding AI takes only
-  AI). An install used before launch gets Automatic free as an early user (an
-  `slp_` code, note `early`, and `grant:"early"` on that first answer). The
-  evidence is a relay record of that install id from before `LAUNCH_AT`: its
-  `trial:<id>`, or, when the client sends `x-subline-prior: 1`, a usage
-  counter (`use:free_<id>:<day>`) or `seen:` marker dated before launch. The
-  hint alone grants nothing.
+  AI). This is intended: it is a gift to people who paid before launch, so a
+  refunded pre-launch AI code keeps its Automatic. An install used before the
+  fixed early-user cutoff (2026-09-29T00:00Z, never `LAUNCH_AT`) gets Automatic
+  free as an early user (an `slp_` code, note `early`, and `grant:"early"` on
+  that first answer). The evidence is its `trial:<id>` dated before the
+  cutoff, or, when the client sends `x-subline-prior: 1`, a usage counter
+  (`use:free_<id>:<day>`) or `seen:` marker for a UTC day that ended before the
+  cutoff. The hint alone grants nothing.
 - **Refunds** revoke the code they paid for; the union simply stops counting it.
   Refunding Automatic leaves AI, refunding AI leaves Automatic.
 - **`GET /v1/status` (v2)** →
@@ -114,8 +123,10 @@ an id the relay has never trialled gets the taste allowance, not a new trial
   Object per code, so 100 is exactly 100, one per install.
 - **Attempts per address.** A `Promo` object named for the address (IPv4, or
   the IPv6 /64) and the UTC day counts every redemption attempt before any
-  lookup: at most 3 successful claims and 10 failed attempts (unknown code,
-  fully claimed, already yours). In-flight attempts count against both, so a
+  lookup: at most 3 successful claims and 20 failed attempts. Only a wrong
+  code (404) is a failed attempt; "already yours" (409) and "fully claimed"
+  (410) are honest answers about a real code and count nothing, to spare
+  shared networks. In-flight attempts count against both, so a
   concurrent burst cannot slip past. A refused attempt is not counted. The
   object clears itself two days later. Reset: 00:00 UTC.
 - **KV writes.** Status for an install that owns nothing: none. A status call

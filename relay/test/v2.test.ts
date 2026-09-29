@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { applyMorEvent, type Env } from "../src/codes";
 import { installHash } from "../src/checkout";
-import { EARLY_CUTOFF_MS as CUTOFF, isAiPlan, launchAt, signToken, verifyToken, MAX_INSTALLS } from "../src/entitle";
+import { EARLY_CUTOFF_MS as CUTOFF, isAiPlan, launchAt, signToken, usedBeforeCutoff, verifyToken, MAX_INSTALLS } from "../src/entitle";
 import { applyClaim, applyIpBegin, applyIpEnd, Promo, REDEEM_IP_DAILY_FAILURES, REDEEM_IP_DAILY_SUCCESSES } from "../src/promo";
 import { codeRec, fakeBudget, fakeKV } from "./kv-mock";
 
@@ -598,25 +598,72 @@ describe("checkout: the placeholder product and the installer return", () => {
     });
 });
 
-describe("legacy clients after launch (item 3)", () => {
-    it("a new id gets the taste allowance, never a new trial, and nothing is written", async () => {
+describe("legacy clients after launch (items 3 and re-audit 3)", () => {
+    // Fixed clock: a day after the early-user cutoff, launched 12 hours after it.
+    const T = CUTOFF + 86_400_000;
+    const launched = { LAUNCH_AT: String(CUTOFF + 12 * 3_600_000) };
+    const trialAt = (t: number) => ({ [`trial:${"a".repeat(32)}`]: String(t) });
+    const legacyTranslate = async (e: Env, install: string, headers: Record<string, string> = { "x-subline-client": "vcTranslate/0.1.9" }) => {
+        const res = await worker.fetch(new Request("https://relay/v1/translate", {
+            method: "POST", headers: { authorization: `Bearer ${install}`, ...headers },
+            body: JSON.stringify({ messages: [{ id: "0", author: "a", text: "hola que tal amigo" }], context: [], targetLang: "en" })
+        }), e, ctx);
+        return { status: res.status, body: await res.json() as any };
+    };
+    const legacyStatusBare = async (e: Env, install: string) => {
+        const res = await worker.fetch(new Request("https://relay/v1/status", { headers: { authorization: `Bearer ${install}` } }), e, ctx);
+        return await res.json() as any;
+    };
+    beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(T); });
+    afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+    it("a new id gets nothing: status keeps its shape with cap 0, translate is 402, nothing is written", async () => {
+        const up = stubProvider();
         const kv = countingKV();
-        const body = await legacyStatus(env(kv), A);
-        expect(body).toMatchObject({ plan: "taste", cap: 3 });
+        const e = env(kv, launched);
+        const body = await legacyStatus(e, A);
+        expect(body).toMatchObject({ ok: true, plan: "taste", used: 0, cap: 0, trialEndsAt: T, now: T });
         expect(body.trialProvisional).toBeUndefined();
+        expect(Object.keys(await legacyStatusBare(e, A)).sort()).toEqual(["cap", "ok", "plan", "resetsInMs", "used"]);
+        const r = await legacyTranslate(e, A);
+        expect(r.status).toBe(402);
+        expect(r.body).toEqual({ ok: false, error: "not activated" });
+        // Header-less (0.1.5) and preview presses are refused too.
+        expect((await legacyTranslate(e, A, {})).status).toBe(402);
+        expect(up).not.toHaveBeenCalled();
         expect(kv._puts).toEqual([]);
     });
 
-    it("a trial that started before launch keeps running out naturally", async () => {
-        const e = env(fakeKV({ [`trial:${"a".repeat(32)}`]: String(NOW - 2 * 86_400_000) }));
-        const body = await legacyStatus(e, A);
-        expect(body).toMatchObject({ plan: "trial", cap: 300 });
-        expect(body.trialEndsAt).toBe(NOW - 2 * 86_400_000 + 7 * 86_400_000);
+    it("an id whose trial began after the cutoff is refused, even mid-trial", async () => {
+        stubProvider();
+        const e = env(fakeKV(trialAt(CUTOFF + 3_600_000)), launched);
+        expect((await legacyStatus(e, A)).cap).toBe(0);
+        expect((await legacyTranslate(e, A)).status).toBe(402);
     });
 
-    it("before launch (placeholder) a new id still gets a trial, as today", async () => {
-        const body = await legacyStatus(env(fakeKV(), { LAUNCH_AT: "SET_AT_RELEASE" }), A);
-        expect(body).toMatchObject({ plan: "trial", cap: 300, trialProvisional: true });
+    it("a real early user (trial before the cutoff) keeps the old allowance until it runs out", async () => {
+        stubProvider();
+        const e = env(fakeKV(trialAt(CUTOFF - 2 * 86_400_000)), launched);
+        const body = await legacyStatus(e, A);
+        expect(body).toMatchObject({ plan: "trial", cap: 300 });
+        expect(body.trialEndsAt).toBe(CUTOFF - 2 * 86_400_000 + 7 * 86_400_000);
+        expect((await legacyTranslate(e, A)).status).toBe(200);
+    });
+
+    it("paid codes are not affected", async () => {
+        stubProvider();
+        const e = env(fakeKV({ "code:OLD-AI": codeRec({ plan: "monthly", dailyCap: 2000, expiresAt: T + 86_400_000 }) }), launched);
+        expect((await legacyTranslate(e, "OLD-AI")).status).toBe(200);
+    });
+
+    it("before launch (or with the placeholder) every id is served exactly as before", async () => {
+        stubProvider();
+        const before = env(fakeKV(), { LAUNCH_AT: String(T + 3_600_000) });
+        expect(await legacyStatus(before, A)).toMatchObject({ plan: "trial", cap: 300, trialProvisional: true });
+        expect((await legacyTranslate(before, A)).status).toBe(200);
+        const bare = await legacyStatusBare(env(fakeKV(), { LAUNCH_AT: "SET_AT_RELEASE" }), A);
+        expect(bare).toMatchObject({ ok: true, plan: "taste", used: 0, cap: 3 });
+        expect(Object.keys(bare).sort()).toEqual(["cap", "ok", "plan", "resetsInMs", "used"]);
     });
 });
 
@@ -638,13 +685,27 @@ describe("promo attempts per address, counted in the Durable Object (item 4)", (
         expect((await redeem(e, d!, "LEAKCLUB", "198.51.100.7")).status).toBe(200);
     });
 
-    it("10 failed attempts a day, then rate_limited, even for a real code", async () => {
+    it("20 failed attempts a day, then rate_limited, even for a real code", async () => {
         const e = await setup();
         const ip = "203.0.113.10";
-        for (let i = 0; i < 10; i++) expect((await redeem(e, A, "NOPE" + i + "XYZ", ip)).status).toBe(404);
-        const eleventh = await redeem(e, A, "LEAKCLUB", ip);
-        expect(eleventh.status).toBe(429);
-        expect(eleventh.body.error).toBe("rate_limited");
+        for (let i = 0; i < 20; i++) expect((await redeem(e, A, "NOPE" + i + "XYZ", ip)).status).toBe(404);
+        const next = await redeem(e, A, "LEAKCLUB", ip);
+        expect(next.status).toBe(429);
+        expect(next.body.error).toBe("rate_limited");
+    });
+
+    it("only a wrong code (404) counts as a failed try: already yours (409) and fully claimed (410) do not", async () => {
+        const e = await setup(1);
+        const ip = "203.0.113.20";
+        // One real claim fills the cap of 1 (success 1 of 3).
+        expect((await redeem(e, A, "LEAKCLUB", ip)).status).toBe(200);
+        // "Already yours" and "fully claimed", many times over, count nothing.
+        for (let i = 0; i < 25; i++) expect((await redeem(e, A, "LEAKCLUB", ip)).status).toBe(409);
+        const [b] = installs(1, 300);
+        for (let i = 0; i < 25; i++) expect((await redeem(e, b!, "LEAKCLUB", ip)).status).toBe(410);
+        // So wrong codes still get their full 20.
+        for (let i = 0; i < 20; i++) expect((await redeem(e, b!, "NOPE" + i + "ABC", ip)).status).toBe(404);
+        expect((await redeem(e, b!, "NOPE99ABC", ip)).status).toBe(429);
     });
 
     it("an IPv6 /64 is one address", async () => {
@@ -663,17 +724,17 @@ describe("promo attempts per address, counted in the Durable Object (item 4)", (
         expect(out.filter(r => r.status === 429)).toHaveLength(17);
     });
 
-    it("a concurrent burst of bad codes counts at most 10 failures", async () => {
+    it("a concurrent burst of bad codes counts at most 20 failures", async () => {
         const e = await setup();
         const ip = "203.0.113.12";
-        const first = await Promise.all(Array.from({ length: 30 }, (_, i) => redeem(e, A, "BAD" + i + "CODE", ip)));
+        const first = await Promise.all(Array.from({ length: 50 }, (_, i) => redeem(e, A, "BAD" + i + "CODE", ip)));
         const tried = first.filter(r => r.status === 404).length;
         expect(tried).toBeGreaterThan(0);
-        expect(tried).toBeLessThanOrEqual(10);
-        // Keep going one by one: the total that ever reaches the lookup is 10.
+        expect(tried).toBeLessThanOrEqual(20);
+        // Keep going one by one: the total that ever reaches the lookup is 20.
         let more = 0;
-        for (let i = 0; i < 20; i++) if ((await redeem(e, A, "MORE" + i + "BAD", ip)).status === 404) more++;
-        expect(tried + more).toBe(10);
+        for (let i = 0; i < 40; i++) if ((await redeem(e, A, "MORE" + i + "BAD", ip)).status === 404) more++;
+        expect(tried + more).toBe(20);
     });
 
     it("the begin/end decision is exact", () => {
@@ -688,7 +749,7 @@ describe("promo attempts per address, counted in the Durable Object (item 4)", (
         applyIpEnd(s, "fail");
         expect(s).toEqual({ ok: 1, fail: 1, inflight: 0 });
         expect(REDEEM_IP_DAILY_SUCCESSES).toBe(3);
-        expect(REDEEM_IP_DAILY_FAILURES).toBe(10);
+        expect(REDEEM_IP_DAILY_FAILURES).toBe(20);
     });
 });
 
@@ -777,6 +838,21 @@ describe("early users (items 7/8)", () => {
         const seed = { [`seen:free:${before}:${await aHash()}`]: "1" };
         const r = await statusH(env(fakeKV(seed)), A, undefined, { "x-subline-prior": "1" });
         expect(r.body).toMatchObject({ automatic: true, grant: "early" });
+    });
+
+    it("a day marker counts only when its whole UTC day ended before the cutoff", async () => {
+        const hash = await installHash(A);
+        // A cutoff in the middle of a day: that day's markers do not count.
+        const midday = Date.parse("2026-09-20T12:00:00Z");
+        const same = fakeKV({ [`use:${A}:2026-09-20`]: "1", [`seen:free:2026-09-20:${hash}`]: "1" });
+        expect(await usedBeforeCutoff({ CODES: same } as any, A, hash, true, midday)).toBe(false);
+        // The day before, which ended before the cutoff, does.
+        const prev = fakeKV({ [`use:${A}:2026-09-19`]: "1" });
+        expect(await usedBeforeCutoff({ CODES: prev } as any, A, hash, true, midday)).toBe(true);
+        // A midnight cutoff: the day that ends exactly at it counts.
+        expect(await usedBeforeCutoff({ CODES: fakeKV({ [`use:${A}:2026-09-28`]: "1" }) } as any, A, hash, true, CUTOFF)).toBe(true);
+        // Without the hint, markers never count.
+        expect(await usedBeforeCutoff({ CODES: prev } as any, A, hash, false, midday)).toBe(false);
     });
 
     it("the hint alone grants nothing, and a record from after launch does not count", async () => {
@@ -978,5 +1054,79 @@ describe("KV writes per call (pinned)", () => {
         await status(e, A, "KEY-AUTO-1");
         await statusH(e, B, "KEY-AUTO-1", { "x-subline-check": "1" });
         expect(kv._puts.length).toBe(n);
+    });
+});
+
+describe("POST /admin/reissue (leaked keys)", () => {
+    const reissue = (e: Env, body: any, token = "admintok") => worker.fetch(new Request("https://relay/admin/reissue", {
+        method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body)
+    }), e, ctx);
+    const owner = async () => {
+        const kv = fakeKV();
+        const e = env(kv);
+        await buy(e, A, "KEY-AUTO-1", "pdt_auto", "pay_a");
+        await status(e, A);
+        await buy(e, A, "KEY-AI-1", "pdt_month", "pay_m", "sub_m");
+        expect((await status(e, A, "KEY-AI-1")).body).toMatchObject({ automatic: true, ai: true });
+        // The key leaks and a stranger uses it on B.
+        expect((await status(e, B, "KEY-AI-1")).body).toMatchObject({ automatic: true, ai: true });
+        return { e, kv };
+    };
+
+    it("needs the admin token, a known code, and a live one", async () => {
+        const { e } = await owner();
+        expect((await reissue(e, { code: "KEY-AI-1" }, "wrong")).status).toBe(401);
+        expect((await reissue(e, { code: "NOPE" })).status).toBe(404);
+        expect((await reissue(e, {})).status).toBe(400);
+        // A refunded code is dead: there is nothing to reissue.
+        await applyMorEvent(e, { type: "refund.succeeded", data: { payment_id: "pay_a" } }, NOW);
+        expect((await reissue(e, { code: "KEY-AUTO-1" })).status).toBe(409);
+        expect((await reissue(e, { code: "KEY-AI-1" })).status).toBe(200);
+        // The old code has left the account, so a second reissue finds nothing.
+        expect((await reissue(e, { code: "KEY-AI-1" })).status).toBe(404);
+    });
+
+    it("kills the old code, clears the computers, and the new code carries the same entitlements", async () => {
+        const { e, kv } = await owner();
+        const before = JSON.parse(kv._dump()["code:KEY-AI-1"]!);
+        const res = await reissue(e, { code: "KEY-AI-1" });
+        const { ok, code } = await res.json() as any;
+        expect(ok).toBe(true);
+        expect(code).toMatch(/^slp_[a-z2-7]{16}$/);
+
+        // Same record apart from the note; the old one is revoked.
+        const after = JSON.parse(kv._dump()[`code:${code}`]!);
+        expect(after).toMatchObject({ status: "active", plan: before.plan, dailyCap: before.dailyCap, expiresAt: before.expiresAt, createdAt: before.createdAt });
+        expect(JSON.parse(kv._dump()["code:KEY-AI-1"]!).status).toBe("revoked");
+
+        // Every computer is forgotten.
+        const acctId = kv._dump()[`ca:${code}`]!;
+        const acct = JSON.parse(kv._dump()[`acct:${acctId}`]!);
+        expect(acct.installs).toEqual([]);
+        expect(acct.aiInstalls).toEqual([]);
+        expect(acct.codes).toContain(code);
+        expect(acct.codes).not.toContain("KEY-AI-1");
+        expect(kv._dump()["ca:KEY-AI-1"]).toBeUndefined();
+        for (const i of [A, B]) expect(kv._dump()[`ia:${await installHash(i)}`]).toBeUndefined();
+
+        // The stranger with the old code gets nothing, reported as a dead code.
+        const stranger = await status(e, B, "KEY-AI-1");
+        expect(stranger.body).toMatchObject({ automatic: false, ai: false, deadCode: "KEY-AI-1" });
+        expect(stranger.body.code).toBeUndefined();
+
+        // The owner types the new code: AI and Automatic, as before.
+        expect((await status(e, A, code)).body).toMatchObject({ automatic: true, ai: true });
+    });
+
+    it("renewals and refunds still reach the new code", async () => {
+        const { e, kv } = await owner();
+        const { code } = await (await reissue(e, { code: "KEY-AI-1" })).json() as any;
+        expect(kv._dump()["order:sub_m"]).toBe(code);
+        expect(kv._dump()["order:pay_m"]).toBe(code);
+        const later = NOW + 40 * 86_400_000;
+        await applyMorEvent(e, { type: "subscription.renewed", data: { subscription_id: "sub_m", next_billing_date: new Date(later).toISOString() } }, NOW);
+        expect(JSON.parse(kv._dump()[`code:${code}`]!).expiresAt).toBe(later);
+        await applyMorEvent(e, { type: "refund.succeeded", data: { payment_id: "pay_m" } }, NOW);
+        expect(JSON.parse(kv._dump()[`code:${code}`]!).status).toBe("revoked");
     });
 });

@@ -24,8 +24,8 @@ import {
 } from "./codes";
 import { translateWithFallback, toPreview, type BatchRequest, type TranslateError, type Provider } from "./translate";
 import { record, type Outcome } from "./metrics";
-import { installOf, isApiV2, PREVIEW_DAILY_CAP, resolveEntitlement } from "./entitle";
-import { adminResetInstalls, createPromo, handleRedeem, handleStatusV2, promoStats } from "./v2";
+import { installOf, isApiV2, legacyFreeAllowed, PREVIEW_DAILY_CAP, resolveEntitlement } from "./entitle";
+import { adminReissue, adminResetInstalls, createPromo, handleRedeem, handleStatusV2, promoStats } from "./v2";
 import { bumpStat, markActive, safely, clampDays, readStats } from "./stats";
 import { createCoupon, handleCheckout, purchaseFor } from "./checkout";
 export { Budget } from "./budget";
@@ -366,6 +366,12 @@ export default {
             }
 
             const now = Date.now();
+            // After LAUNCH_AT the legacy free tier is gone except for real
+            // early users (see legacyFreeAllowed). Refused before anything is
+            // parsed, reserved or written.
+            if (!(await legacyFreeAllowed(env, code, now))) {
+                return done(fail("not activated", 402), "trial_ended", code, 0, "taste");
+            }
             const body = await readBody(req);
             const authPlan = auth.record.plan ?? "free";
             if (body === null) return done(fail("payload too large or malformed", 413), "too_large", code, 0, authPlan);
@@ -423,6 +429,13 @@ export default {
             // trialEndsAt = now + 7 days) so the plugin can say "trial: 7 days
             // left" at startup; the trial is written on its first successful
             // translate.
+            // After LAUNCH_AT, a free_ id that is not a real early user keeps the
+            // same response shape but nothing to spend: plan taste, cap 0, and
+            // for a header'd client a trial that ended now. Still read-only.
+            if (!(await legacyFreeAllowed(env, code, now))) {
+                const shut: Record<string, unknown> = { ok: true, plan: "taste", used: 0, cap: 0, resetsInMs: (await usage(env, code!, tasteRecord(), now)).resetsInMs };
+                return json(isNewClient(req.headers.get("x-subline-client")) ? { ...shut, trialEndsAt: now, now } : shut);
+            }
             const { record: rec, free, newClient } = await keylessPlan(env, req, code, auth.record, now);
             const u = await usage(env, code!, rec, now);
             const base: Record<string, unknown> = { ok: true, plan: rec.plan ?? "free", ...u };
@@ -459,6 +472,17 @@ export default {
             const body = await readBody(req);
             if (!body) return fail("bad request", 400);
             return adminResetInstalls(env, body);
+        }
+
+        // ---- POST /admin/reissue — replace a leaked code (ADMIN_TOKEN) -------
+        if (url.pathname === "/admin/reissue") {
+            if (req.method !== "POST") return fail("method not allowed", 405);
+            const token = bearer(req);
+            if (!env.ADMIN_TOKEN) return fail("admin disabled", 503);
+            if (!token || !(await timingSafeEqual(token, env.ADMIN_TOKEN))) return fail("unauthorized", 401);
+            const body = await readBody(req);
+            if (!body) return fail("bad request", 400);
+            return adminReissue(env, body, Date.now());
         }
 
         // ---- POST /admin/promo — create a promo code (ADMIN_TOKEN) ---------

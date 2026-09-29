@@ -22,7 +22,7 @@
  */
 
 export const REDEEM_IP_DAILY_SUCCESSES = 3;
-export const REDEEM_IP_DAILY_FAILURES = 10;
+export const REDEEM_IP_DAILY_FAILURES = 20;
 
 export interface PromoState { claimed: number; installs: Set<string> }
 export type ClaimResult = "ok" | "claimed" | "already";

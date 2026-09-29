@@ -7,7 +7,7 @@
 import { ipBucket, isNewClient, mintCode, type CodeRecord, type Env } from "./codes";
 import {
     checkCode, grantCode, installOf, previewKey, PREVIEW_DAILY_CAP, PROMO_RE, promoIndex, resolveEntitlement,
-    resetInstalls, signToken, TOKEN_TTL_MS
+    reissueCode, resetInstalls, signToken, TOKEN_TTL_MS
 } from "./entitle";
 import { REDEEM_IP_DAILY_FAILURES, REDEEM_IP_DAILY_SUCCESSES } from "./promo";
 
@@ -136,8 +136,10 @@ export async function handleRedeem(req: Request, env: Env, now: number): Promise
     let outcome: IpOutcome = "none";
     try {
         const res = await redeemOnce(req, env, id, now);
-        outcome = res.status === 200 ? "ok"
-            : (res.status === 404 || res.status === 409 || res.status === 410) ? "fail" : "none";
+        // Only a wrong code (404) is a failed try: that is what guessing looks
+        // like. "Already yours" (409) and "fully claimed" (410) are honest
+        // outcomes of a real code and never count against a shared network.
+        outcome = res.status === 200 ? "ok" : res.status === 404 ? "fail" : "none";
         return res;
     } finally {
         if (gate) await gate.end(outcome);
@@ -208,6 +210,15 @@ export async function adminResetInstalls(env: Env, body: any): Promise<Response>
     const r = await resetInstalls(env, code);
     if (!r.ok) return fail(r.error, r.status);
     return json({ ok: true, cleared: r.cleared });
+}
+
+/** POST /admin/reissue {code} (auth checked by the router): see reissueCode. */
+export async function adminReissue(env: Env, body: any, now: number): Promise<Response> {
+    const code = typeof body?.code === "string" ? body.code.trim() : "";
+    if (!code) return fail("bad request", 400);
+    const r = await reissueCode(env, code, now);
+    if (!r.ok) return fail(r.error, r.status);
+    return json({ ok: true, code: r.code });
 }
 
 /** POST /admin/promo {code, cap} (auth checked by the router). */

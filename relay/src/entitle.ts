@@ -286,13 +286,32 @@ async function live(env: Env, code: string): Promise<CodeRecord | null> {
 export const EARLY_CUTOFF_MS = Date.parse("2026-09-29T00:00:00Z");
 
 /**
+ * THE LEGACY (0.1.x, no `x-subline-api: 2`) FREE TIER AFTER LAUNCH. Before
+ * LAUNCH_AT (or while it is unset) every free_ id is served as it always was.
+ * From LAUNCH_AT on, the old taste/trial allowance goes only to an id with a
+ * trial record dated before the fixed early-user cutoff: a real early user
+ * whose client has not updated yet. Anyone else (a fresh random id, an id whose
+ * trial began after the cutoff, a header-less 0.1.5 client) gets nothing:
+ * legacy translate answers 402 "not activated", legacy status reports cap 0.
+ * Paid codes are never affected. One KV read, only for a free_ id after launch.
+ */
+export async function legacyFreeAllowed(env: Env, bearer: string | null, now: number): Promise<boolean> {
+    if (!isTasteBearer(bearer)) return true;
+    const launch = launchAtMs(env);
+    if (!Number.isFinite(launch) || now < launch) return true;
+    const raw = await env.CODES.get(`trial:${bearer!.slice("free_".length)}`);
+    const first = raw === null ? NaN : Number(raw);
+    return Number.isFinite(first) && first < EARLY_CUTOFF_MS;
+}
+
+/**
  * Was this install used before the early-user cutoff? Its trial:<id> record,
  * dated before the cutoff, says so. With the client's prior-use hint, a usage
  * counter or seen: marker does too, but only for a UTC day that ENDED before
  * the cutoff (those keep only a couple of days, so this matters only right
  * after the cutoff). Only the three whole days before the cutoff are read.
  */
-async function usedBeforeCutoff(env: Env, install: string, hash: string, prior: boolean, cutoff: number = EARLY_CUTOFF_MS): Promise<boolean> {
+export async function usedBeforeCutoff(env: Env, install: string, hash: string, prior: boolean, cutoff: number = EARLY_CUTOFF_MS): Promise<boolean> {
     const trial = await env.CODES.get(`trial:${install.slice("free_".length)}`);
     const first = trial === null ? NaN : Number(trial);
     if (Number.isFinite(first) && first < cutoff) return true;
@@ -389,7 +408,9 @@ export async function resolveEntitlement(
         const ai = aiAny && aiHere;
 
         // Grandfathering: an AI code made before launch gives its account
-        // Automatic for good, remembered once (see GRANTS).
+        // Automatic for good, remembered once (see GRANTS). INTENDED: the grant
+        // is a gift to people who paid before launch and it survives that AI
+        // code's refund, cancel and expiry. Refunding AI takes only AI.
         if (aiAny && w.acct && !w.acct.grandfather && !automatic) {
             const start = launchAt(env);
             const created = aiRec?.createdAt;
@@ -517,6 +538,43 @@ export async function resetInstalls(env: Env, code: string): Promise<{ ok: true;
     acct.aiInstalls = [];
     await env.CODES.put(`acct:${acctId}`, JSON.stringify(acct));
     return { ok: true, cleared };
+}
+
+/**
+ * POST /admin/reissue {code}: for a leaked key. The old code is revoked, a new
+ * slp_ code takes its place on the same account with the same record (plan,
+ * daily cap, expiry, notes such as promo:/early, createdAt, so grandfathering
+ * by date is unchanged), and every computer on the account is forgotten, so
+ * whoever holds the old code gets nothing (v2 status reports it as deadCode)
+ * while the owner types the new one. The purchase's webhook reverse index
+ * (order:<subscription or payment id>) is pointed at the new code, so renewals
+ * and refunds keep reaching it. A dead code cannot be reissued.
+ */
+export async function reissueCode(env: Env, code: string, now: number): Promise<{ ok: true; code: string } | { ok: false; error: string; status: number }> {
+    const acctId = await env.CODES.get(`ca:${code}`);
+    const acct = await loadAccount(env, acctId);
+    if (!acctId || !acct) return { ok: false, error: "no account for that code", status: 404 };
+    const rec = await live(env, code);
+    if (!rec) return { ok: false, error: "that code is not live", status: 409 };
+
+    const fresh = mintCode();
+    const note = rec.note ? `${rec.note}; reissued` : "reissued";
+    await env.CODES.put(`code:${fresh}`, JSON.stringify({ ...rec, status: "active", note }));
+    for (const id of new Set([rec.mor_subscription_id, rec.orderRef, rec.mor_order_id].filter((x): x is string => !!x))) {
+        if (await env.CODES.get(`order:${id}`) === code) await env.CODES.put(`order:${id}`, fresh);
+    }
+    await env.CODES.put(`ca:${fresh}`, acctId);
+    await env.CODES.delete(`ca:${code}`);
+    await env.CODES.put(`code:${code}`, JSON.stringify({ ...rec, status: "revoked", revokedAt: now, note: "reissued" }));
+
+    acct.codes = acct.codes.map(c => c === code ? fresh : c);
+    if (acct.grandfather === code) acct.grandfather = fresh;
+    for (const h of acct.installs) await env.CODES.delete(`ia:${h}`);
+    acct.installs = [];
+    acct.seen = {};
+    acct.aiInstalls = [];
+    await env.CODES.put(`acct:${acctId}`, JSON.stringify(acct));
+    return { ok: true, code: fresh };
 }
 
 /* ------------------------------------------------------------------ token -- */
