@@ -10,10 +10,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
-    AUTOMATIC_PRODUCT_ID, createActivationRelay, installHash, isDodoCheckoutUrl, newInstallId, promoCode,
-    staticAutomaticCheckoutUrl
+    AUTOMATIC_PRODUCT_ID, createActivationRelay, installHash, isDodoCheckoutUrl, looksLikeCoupon, newInstallId,
+    PLACEHOLDER_PRODUCT_ID, promoCode, staticAutomaticCheckoutUrl, staticCheckoutAllowed
 } from "../src/app/activation.js";
-import { ensureInstallId, readClearedCode, readInstallId } from "../src/app/language.js";
+import { ensureInstallId, readClearedCode, readInstallId, readPriorUse } from "../src/app/language.js";
 
 const ID = "0123456789abcdef0123456789abcdef";
 
@@ -37,7 +37,8 @@ describe("the relay client", () => {
         expect(await relay.checkout(ID)).toEqual({ kind: "ok", url: "https://checkout.dodopayments.com/session/cks_1" });
         expect(sent[0]!.url).toBe("https://subline-relay.rahul05alok.workers.dev/v1/checkout");
         expect(sent[0]!.method).toBe("POST");
-        expect(JSON.parse(sent[0]!.body!)).toEqual({ plan: "automatic" });
+        // The site sends the buyer back to its "go back to the installer" view.
+        expect(JSON.parse(sent[0]!.body!)).toEqual({ plan: "automatic", return: "installer" });
         expect(sent[0]!.headers).toEqual({
             authorization: `Bearer free_${ID}`,
             "x-subline-install": `free_${ID}`,
@@ -49,8 +50,25 @@ describe("the relay client", () => {
 
     it("checkout: a URL that is not Dodo's, or an error, is a failure", async () => {
         expect((await relayAnswering(200, { ok: true, url: "https://evil.example/" }).relay.checkout(ID)).kind).toBe("failed");
+        expect((await relayAnswering(400, { ok: false, error: "bad request" }).relay.checkout(ID)).kind).toBe("failed");
+    });
+
+    it("checkout: 503 is \"buying unavailable\", 409 is already owned, a network error is its own answer", async () => {
         expect(await relayAnswering(503, { ok: false, error: "checkout unavailable" }).relay.checkout(ID))
-            .toEqual({ kind: "failed", cause: "HTTP 503 checkout unavailable" });
+            .toEqual({ kind: "unavailable", cause: "HTTP 503 checkout unavailable" });
+        expect(await relayAnswering(409, { ok: false, error: "already_owned" }).relay.checkout(ID)).toEqual({ kind: "already_owned" });
+        const down = createActivationRelay({ version: "0.2.0", fetch: async () => { throw new Error("ECONNRESET"); } });
+        expect(await down.checkout(ID)).toEqual({ kind: "network", cause: "ECONNRESET" });
+    });
+
+    it("status check: x-subline-check: 1 is sent, and the check verdict is read", async () => {
+        const { relay, sent } = relayAnswering(200, { ok: true, automatic: false, ai: false, check: { valid: true, automatic: true, ai: false } });
+        expect(await relay.status("LK-1", ID, { check: true }))
+            .toEqual({ kind: "ok", automatic: false, ai: false, code: null, check: { valid: true, automatic: true, ai: false } });
+        expect(sent[0]!.headers["x-subline-check"]).toBe("1");
+        const plain = relayAnswering(200, { ok: true, automatic: true, ai: false });
+        await plain.relay.status("LK-1", ID);
+        expect(plain.sent[0]!.headers["x-subline-check"]).toBeUndefined();
     });
 
     it("status: bearer is the credential given, the install header is the install", async () => {
@@ -123,13 +141,30 @@ describe("codes and links", () => {
         expect(isDodoCheckoutUrl(null)).toBe(false);
     });
 
-    it("the static link carries the Automatic product, the install hash and the Discord return", () => {
-        const url = new URL(staticAutomaticCheckoutUrl(ID));
-        expect(AUTOMATIC_PRODUCT_ID).toBe("pdt_AUTOMATIC_PENDING");
-        expect(url.origin + url.pathname).toBe(`https://checkout.dodopayments.com/buy/${AUTOMATIC_PRODUCT_ID}`);
+    it("the static link carries the Automatic product, the install hash and the installer return", () => {
+        const url = new URL(staticAutomaticCheckoutUrl(ID, "pdt_Real123"));
+        expect(url.origin + url.pathname).toBe("https://checkout.dodopayments.com/buy/pdt_Real123");
         expect(url.searchParams.get("quantity")).toBe("1");
         expect(url.searchParams.get("metadata_install")).toBe(installHash(ID));
-        expect(url.searchParams.get("redirect_url")).toBe("https://surfer05.github.io/subline/?from=discord");
+        expect(url.searchParams.get("redirect_url")).toBe("https://surfer05.github.io/subline/?from=installer");
+        expect(new URL(staticAutomaticCheckoutUrl(ID)).pathname).toBe(`/buy/${AUTOMATIC_PRODUCT_ID}`);
+    });
+
+    it("the static link is never allowed for the placeholder product id", () => {
+        expect(staticCheckoutAllowed(PLACEHOLDER_PRODUCT_ID)).toBe(false);
+        expect(staticCheckoutAllowed("pdt_Real123")).toBe(true);
+        expect(staticCheckoutAllowed("")).toBe(false);
+        expect(staticCheckoutAllowed("not-a-product")).toBe(false);
+    });
+
+    it("recognises the shape of the owner's Dodo coupons, not short server codes", () => {
+        // relay/scripts/coupon.mjs: a name plus 5 characters with no 0, O, 1 or I.
+        expect(looksLikeCoupon("SURFERK7Q2M")).toBe(true);
+        expect(looksLikeCoupon("RAHUL05K7Q2M")).toBe(true);
+        expect(looksLikeCoupon("MYSRV")).toBe(false);
+        expect(looksLikeCoupon("LEAKCLUB")).toBe(true);
+        expect(looksLikeCoupon("SERVER01")).toBe(false);
+        expect(looksLikeCoupon("slp_abcdefghijk")).toBe(false);
     });
 
     it("hashes the full bearer like the relay and the plugin do", () => {
@@ -169,6 +204,22 @@ describe("the install id in Vencord's settings", () => {
         let generated = 0;
         expect(ensureInstallId(path, () => { generated += 1; return "f".repeat(32); })).toEqual({ ok: true, value: ID });
         expect(generated).toBe(0);
+    });
+
+    it("sees earlier Subline use in the settings, but not an install id alone", () => {
+        expect(readPriorUse(path)).toBe(false);
+        writeFileSync(path, JSON.stringify({ plugins: { VcTranslate: { installId: ID } } }));
+        expect(readPriorUse(path)).toBe(false);
+        writeFileSync(path, JSON.stringify({ plugins: { VcTranslate: { installId: ID, freeTrialStartedAt: 1_700_000_000_000 } } }));
+        expect(readPriorUse(path)).toBe(true);
+        writeFileSync(path, JSON.stringify({ plugins: { VcTranslate: { targetLang: "tr" } } }));
+        expect(readPriorUse(path)).toBe(true);
+        writeFileSync(path, JSON.stringify({ plugins: { VcTranslate: { clearedPurchaseCode: "X" } } }));
+        expect(readPriorUse(path)).toBe(true);
+        writeFileSync(path, JSON.stringify({ plugins: { Other: { targetLang: "tr" } } }));
+        expect(readPriorUse(path)).toBe(false);
+        writeFileSync(path, "not json");
+        expect(readPriorUse(path)).toBe(false);
     });
 
     it("reads the code the reader cleared, and nothing else", () => {

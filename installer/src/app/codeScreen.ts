@@ -34,6 +34,8 @@ export const CODE_SCREEN_COPY = {
     /** The waiting screen while the purchase happens in the browser. */
     waitingTitle: "Finish paying in your browser",
     waiting: "Subline carries on by itself when it's done.",
+    /** Added to the finish-paying screen after 10 minutes. */
+    waitingLate: "Paid already? It can take a few minutes. Close this and reopen Subline later.",
     /** Leaves the waiting screen. */
     back: "Back",
     /** The screen shown when a saved code could not be checked. */
@@ -43,10 +45,18 @@ export const CODE_SCREEN_COPY = {
     errClaimed: "This code has been fully claimed.",
     errAlready: "Already yours.",
     errUnreachable: "Can't reach Subline right now. Try again in a minute.",
-    errDeviceLimit: "This code is already used on 3 computers.",
+    errDeviceLimit: "This code is on 3 computers already. It frees up after 30 days unused, or ask us to reset it.",
     errNotActive: "That code is not active.",
     errRateLimited: "Too many codes tried from this network today. Try again after midnight UTC.",
-    errEmpty: "Type or paste a code first."
+    errEmpty: "Type or paste a code first.",
+    /** The relay answered "checkout unavailable": nothing is opened. */
+    errBuyUnavailable: "Buying isn't available yet. Use a code, or try again later.",
+    /** Added after "doesn't exist" when the typed code looks like a Dodo coupon. */
+    errCoupon: "Coupons go on the payment page.",
+    /* The confirm step after a typed code checks out. Nothing is linked until "Use it". */
+    confirmTitle: "Use this code?",
+    confirm: "This code works on this computer. Use it?",
+    useIt: "Use it"
 } as const;
 
 /**

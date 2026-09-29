@@ -20,7 +20,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const THANKS_JS = readFileSync(join(ROOT, "design", "site", "thanks", "thanks.js"), "utf8");
 const PAGE = readFileSync(join(ROOT, "site", "index.html"), "utf8");
 
-type Return = { state: "ok" | "pending" | "failed"; keys: string[]; fromDiscord: boolean } | null;
+type Return = { state: "ok" | "pending" | "failed"; keys: string[]; fromDiscord: boolean; fromInstaller: boolean } | null;
 const parse = new Function(`${THANKS_JS}\nreturn parseCheckoutReturn;`)() as (search: string, hash: string) => Return;
 
 function section(id: string): string {
@@ -39,20 +39,20 @@ describe("the checkout return", () => {
 
     it("shows the key Dodo appended to a subscription return", () => {
         expect(parse("?subscription_id=sub_1&status=active&license_key=LK-001&email=a%40b.c", ""))
-            .toEqual({ state: "ok", keys: ["LK-001"], fromDiscord: false });
+            .toEqual({ state: "ok", keys: ["LK-001"], fromDiscord: false, fromInstaller: false });
     });
 
     it("shows every key when there are several, in order, without repeats", () => {
         expect(parse("?payment_id=pay_1&status=succeeded&license_key=LK-001,LK-002,LK-001", ""))
-            .toEqual({ state: "ok", keys: ["LK-001", "LK-002"], fromDiscord: false });
+            .toEqual({ state: "ok", keys: ["LK-001", "LK-002"], fromDiscord: false, fromInstaller: false });
     });
 
     it("thanks without a key when the product issued none", () => {
-        expect(parse("?payment_id=pay_1&status=succeeded", "")).toEqual({ state: "ok", keys: [], fromDiscord: false });
+        expect(parse("?payment_id=pay_1&status=succeeded", "")).toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: false });
     });
 
     it("says plainly when the payment failed, and shows no key", () => {
-        expect(parse("?payment_id=pay_1&status=failed&license_key=LK-001", "")).toEqual({ state: "failed", keys: [], fromDiscord: false });
+        expect(parse("?payment_id=pay_1&status=failed&license_key=LK-001", "")).toEqual({ state: "failed", keys: [], fromDiscord: false, fromInstaller: false });
         expect(parse("?subscription_id=sub_1&status=cancelled", "")?.state).toBe("failed");
     });
 
@@ -67,34 +67,37 @@ describe("the checkout return", () => {
     });
 
     it("opens on #thanks with no key", () => {
-        expect(parse("", "#thanks")).toEqual({ state: "ok", keys: [], fromDiscord: false });
+        expect(parse("", "#thanks")).toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: false });
     });
 
     it("a checkout from Discord says go back to Discord, and never puts the key on the page", () => {
         expect(parse("?from=discord&subscription_id=sub_1&status=active&license_key=LK-001", ""))
-            .toEqual({ state: "ok", keys: [], fromDiscord: true });
-        expect(parse("?from=discord&payment_id=pay_1&status=succeeded", "")).toEqual({ state: "ok", keys: [], fromDiscord: true });
+            .toEqual({ state: "ok", keys: [], fromDiscord: true, fromInstaller: false });
+        expect(parse("?from=discord&payment_id=pay_1&status=succeeded", "")).toEqual({ state: "ok", keys: [], fromDiscord: true, fromInstaller: false });
     });
 
     it("a pending checkout from Discord says it is being confirmed", () => {
-        expect(parse("?from=discord&subscription_id=sub_1&status=pending", "")).toEqual({ state: "pending", keys: [], fromDiscord: true });
+        expect(parse("?from=discord&subscription_id=sub_1&status=pending", "")).toEqual({ state: "pending", keys: [], fromDiscord: true, fromInstaller: false });
         expect(parse("?from=discord&payment_id=pay_1&status=processing", "")?.state).toBe("pending");
     });
 
     it("a failed checkout from Discord still says it failed", () => {
-        expect(parse("?from=discord&payment_id=pay_1&status=failed", "")).toEqual({ state: "failed", keys: [], fromDiscord: true });
+        expect(parse("?from=discord&payment_id=pay_1&status=failed", "")).toEqual({ state: "failed", keys: [], fromDiscord: true, fromInstaller: false });
     });
 
     it("from=discord without Dodo's parameters shows the neutral thanks view", () => {
-        expect(parse("?from=discord", "")).toEqual({ state: "ok", keys: [], fromDiscord: false });
-        expect(parse("?from=discord", "#thanks")).toEqual({ state: "ok", keys: [], fromDiscord: false });
-        expect(parse("?from=discord&payment_id=pay_1", "")).toEqual({ state: "ok", keys: [], fromDiscord: false });
+        expect(parse("?from=discord", "")).toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: false });
+        expect(parse("?from=discord", "#thanks")).toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: false });
+        expect(parse("?from=discord&payment_id=pay_1", "")).toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: false });
     });
 
     it("an unrelated from= value is not a Discord return", () => {
         expect(parse("?from=twitter", "")).toBeNull();
+        expect(parse("?from=installer&subscription_id=sub_1&status=active&license_key=LK-001", ""))
+            .toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: true });
+        expect(parse("?from=installer", "")).toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: false });
         expect(parse("?from=twitter&payment_id=pay_1&status=succeeded&license_key=LK-001", ""))
-            .toEqual({ state: "ok", keys: ["LK-001"], fromDiscord: false });
+            .toEqual({ state: "ok", keys: ["LK-001"], fromDiscord: false, fromInstaller: false });
     });
 });
 
@@ -140,7 +143,7 @@ describe("the built page", () => {
         expect(start).toBeGreaterThanOrEqual(0);
         const iife = script.slice(start, script.indexOf("})();", start) + 5);
         const run = (search: string) => {
-            const names = ["ok", "pending", "failed", "discord", "discord-pending", "keys", "key"];
+            const names = ["ok", "pending", "failed", "discord", "discord-pending", "installer", "installer-pending", "keys", "key"];
             const parts: Record<string, any> = {};
             const codeNode = { textContent: "" };
             for (const n of names) parts[n] = { hidden: true, parentNode: { insertBefore() {} } };
@@ -165,6 +168,29 @@ describe("the built page", () => {
         expect(s.replaced).toBe("/subline/#thanks");
         // No Dodo parameters: nothing to confirm, so the neutral view.
         expect(run("?from=discord").shown).toEqual(["ok"]);
+        // A checkout started in the installer says to go back to it, never the code.
+        const i = run("?from=installer&payment_id=pay_1&status=succeeded&license_key=LK-001");
+        expect(i.shown).toEqual(["installer"]);
+        expect(i.code).toBe("");
+        expect(run("?from=installer&payment_id=pay_1&status=processing").shown).toEqual(["installer-pending"]);
+        expect(run("?from=installer").shown).toEqual(["ok"]);
+    });
+
+    it("has an installer view that says to go back to the installer, and its pending view", () => {
+        const thanks = section("thanks");
+        const block = (attr: string) => {
+            const start = thanks.indexOf(`<div ${attr} hidden>`);
+            expect(start, attr).toBeGreaterThanOrEqual(0);
+            return thanks.slice(start, thanks.indexOf("</div>", start));
+        };
+        const installer = block("data-thanks-installer");
+        expect(installer).toContain("<h2 class=\"sec\">You're all set.</h2>");
+        expect(installer).toContain("<p class=\"lead\">Go back to the Subline installer. It carries on by itself.</p>");
+        expect(installer).toContain("<p class=\"fine\">Your code is also in your email.</p>");
+        expect(installer).not.toMatch(/data-dl|data-thanks-code|data-thanks-copy/);
+        const pending = block("data-thanks-installer-pending");
+        expect(pending.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "))
+            .toContain("Payment is being confirmed. The Subline installer carries on by itself, usually within a few minutes.");
     });
 
     it("drops the key from the address bar once it is read, and never sends it", () => {
@@ -240,12 +266,18 @@ describe("the built page", () => {
         const rows = section("privacy").replace(/<span class="gl-inline">(.*?)<\/span>/g, "$1");
         expect(rows).toContain("<tr><td>Install id</td><td>A random id made when you install. It ties your purchase or code "
             + "to this computer. If you buy from Subline, a scrambled form of it goes to Dodo with the purchase, so Subline "
-            + "can switch on by itself. Your IP is counted to stop abuse.</td>"
-            + "<td>Daily counts for 2 days. The link to your purchase for 30 days.</td></tr>");
+            + "can switch on by itself. The relay reads its record of this id's first use to give early users Automatic at "
+            + "no charge. Your IP is counted to stop abuse.</td>"
+            + "<td>Daily counts for 2 days. First use for 90 days. The link to your purchase for 30 days.</td></tr>");
+        expect(rows).toContain("<tr><td>Your account</td><td>Your codes and the computers you use them on are linked into one "
+            + "account, so any of your codes unlocks everything you paid for. No name or email is in it.</td>"
+            + "<td>Until you ask us to delete it.</td></tr>");
         expect(rows).toContain("<tr><td>Computers</td><td>A code works on up to 3 computers. The relay keeps a scrambled id "
-            + "for each one to count them.</td><td>As long as the code works.</td></tr>");
+            + "for each one, and when it was last used, to count them. One unused for 30 days can be replaced.</td>"
+            + "<td>Until you ask us to delete it.</td></tr>");
         expect(rows).toContain("<tr><td>Server codes</td><td>When you use a server code, the relay records that your install "
-            + "used it, to count its claims.</td><td>As long as the code runs.</td></tr>");
+            + "claimed it, to count its claims. Tries from your network are counted each day to stop guessing.</td>"
+            + "<td>Claims: until you ask us to delete them. Tries: that day.</td></tr>");
         expect(rows).toContain("<tr><td>Your code</td><td>Unlocks Subline. The relay never sees your name or email.</td>");
         expect(rows).not.toContain("Free installs");
         for (const kept of ["<td>Messages</td>", "<td>Usernames</td>", "<td>Profiles and embeds</td>", "<td>Stats</td>"]) {

@@ -76,6 +76,7 @@ const STEP_TITLES: Record<FlowState["step"], string> = {
     "choose-code": CODE_SCREEN_COPY.title,
     "activation-waiting": CODE_SCREEN_COPY.waitingTitle,
     "activation-check-failed": CODE_SCREEN_COPY.checkTitle,
+    "confirm-code": CODE_SCREEN_COPY.confirmTitle,
     "permission-explain": "macOS needs your permission",
     "permission-waiting": "Turn on Subline",
     "permission-failed": "Could not check permission",
