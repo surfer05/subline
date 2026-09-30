@@ -6,17 +6,18 @@
  *     pnpm release              macOS only, signed and notarized
  *     pnpm release --win        add the (unsigned) Windows installer
  *     pnpm release --dry-run    everything except the two signing steps
+ *     pnpm release --skip-patch-check   skip the live Discord patch check (offline only)
  *
  * ---------------------------------------------------------------------------
  * THE STEPS THAT NEED THE USER'S CREDENTIALS ARE MARKED, AND ONLY THOSE
  * ---------------------------------------------------------------------------
  *
- * Two of the nine steps touch a credential, and both read it from the
+ * Two of the steps touch a credential, and both read it from the
  * environment at the moment it is used:
  *
- *   [SIGNING]      step 5 — electron-builder signs with the Developer ID
+ *   [SIGNING]      step 6 — electron-builder signs with the Developer ID
  *                  certificate in the login keychain (or CSC_LINK/CSC_KEY_PASSWORD)
- *   [NOTARIZING]   step 5's afterSign hook and step 8 — `xcrun notarytool`, using
+ *   [NOTARIZING]   step 6's afterSign hook and step 9 — `xcrun notarytool`, using
  *                  APPLE_KEYCHAIN_PROFILE (recommended) or an API key or an
  *                  app-specific password
  *
@@ -41,6 +42,10 @@
  *   · a placeholder    — the Automatic product id still "pdt_AUTOMATIC_" + "PENDING"
  *                        anywhere shipped (scripts/placeholder.mjs). Such a build
  *                        sells nothing. SUBLINE_ALLOW_PLACEHOLDER=1 is for dogfood.
+ *   · a stale patch    — a Vencord or Subline webpack patch that no longer applies
+ *                        to Discord's live bundle (scripts/checkPatches.mjs, run
+ *                        right after build:mod). --skip-patch-check exists for
+ *                        an offline build; never for a real release.
  *
  * ---------------------------------------------------------------------------
  * WHAT IT DOES NOT DO
@@ -104,7 +109,8 @@ const options = {
     windows: has("--win"),
     dryRun: has("--dry-run"),
     skipTests: has("--skip-tests"),
-    allowDirty: has("--allow-dirty")
+    allowDirty: has("--allow-dirty"),
+    skipPatchCheck: has("--skip-patch-check")
 };
 
 let step = 0;
@@ -192,6 +198,18 @@ async function main() {
     sh("pnpm", ["build:mod"]);
 
     /* -------------------------------------------------------------------- */
+    // Every webpack patch that ships (the Vencord plugins build:mod keeps, and
+    // Subline's own) against Discord's CURRENT public bundle. A patch that no
+    // longer applies only logs a warning in the user's DevTools, and the feature
+    // is silently gone: v0.2.0 shipped with no message popover buttons that way.
+    heading("Check every shipped patch against Discord's live web bundle");
+    if (options.skipPatchCheck) {
+        say("   SKIPPED (--skip-patch-check). Nothing proves these patches still apply to today's Discord.");
+    } else {
+        sh("node", [join(REPO_ROOT, "scripts", "checkPatches.mjs")], REPO_ROOT);
+    }
+
+    /* -------------------------------------------------------------------- */
     heading("Check the bundle is the build this checkout produces");
     const stamp = computeStamp();
     const identity = assertBundleIdentity({
@@ -208,7 +226,7 @@ async function main() {
 
     /* -------------------------------------------------------------------- */
     heading("Package macOS", options.dryRun ? "" : "[SIGNING] [NOTARIZING]");
-    // `release/` is cleared first. Step 9 lists everything in it and step 10
+    // `release/` is cleared first. Step 10 lists everything in it and step 11
     // prints that list as a `gh release create` command — so a stale DMG from a
     // previous version sitting in there is how the wrong file gets uploaded.
     rmSync(OUT_DIR, { recursive: true, force: true });
