@@ -155,5 +155,38 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
             match: /(?<=\(0,\i\.jsx\)\(\i\.R,\{children:)(\i)(?=\?\?\(0,\i\.jsx\)\("span",\{className:\i\.\i,children:\i\}\))/,
             replace: "$self.replyQuoteChildren($1,arguments[0])"
         }]
+    },
+    {
+        surface: "profile bio in the full profile (modal): line under the bio",
+        source: "written against the current bundle (UserProfileModalV2 renders the bio renderer directly, not the About Me wrapper the popout uses)",
+        find: "friendsSinceDate:",
+        replacement: [{
+            match: /(?<=hideHeading:!\i,headingIcon:\i,children:\i\?\(0,\i\.jsx\)\(\i,\{displayProfile:\i,className:\i\.\i\}\):)(\(0,\i\.jsx\)\(\i\.\i,\{userBio:(\i),setLineClamp:!1\}\))/,
+            replace: "$self.bioWithLine($1,$2)"
+        }]
+    },
+    {
+        surface: "profile bio in the DM side profile (non-redesign layout): line under the bio, both About Me sites",
+        source: "written against the current bundle (the DM side panel module; its redesign branch uses the About Me wrapper and is covered by the popout patch)",
+        find: "DMSidePanelWishlistItemCard",
+        replacement: [
+            {
+                match: /(?<=headingColor:"text-strong",children:)(\(0,\i\.jsx\)\(\i\.A,\{userBio:(\i\?\.bio),userId:\i\.id,animateOnHoverOrFocusOnly:!0,isHoveringOrFocusing:\i\}\))/,
+                replace: "$self.bioWithLine($1,$2)"
+            },
+            {
+                match: /(?<=headingColor:"text-strong",children:)(\(0,\i\.jsx\)\(\i\.A,\{userId:\i\.id,userBio:(\i\.bio),isHoveringOrFocusing:\i,animateOnHoverOrFocusOnly:!0\}\))/,
+                replace: "$self.bioWithLine($1,$2)"
+            }
+        ]
+    },
+    {
+        surface: "profile bio in the minimal user popout: line under the bio",
+        source: "written against the current bundle (a popout variant that renders the bio renderer directly)",
+        find: "setLineClamp:!1,textColor:\"text-strong\"}",
+        replacement: [{
+            match: /(\(0,\i\.jsx\)\(\i\.E,\{userId:\i\.id,userBio:(\i\?\.bio),setLineClamp:!1,textColor:"text-strong"\}\))/,
+            replace: "$self.bioWithLine($1,$2)"
+        }]
     }
 ];

@@ -100,6 +100,17 @@ describe("a short foreign message that starts with a mention", () => {
             });
         }
 
+        it(`${label}, Google below its gate (skip, reason unsure): ✦ still runs and its line is stored`, async () => {
+            answer({ lang: "ceb" }, "translate");
+            const base = native.translateBatch.getMockImplementation()!;
+            native.translateBatch.mockImplementation(async (engine: string, k: string, payload: string, ...rest: unknown[]) => engine === "google"
+                ? { ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, skip: true, reason: "unsure" })) }
+                : (base as any)(engine, k, payload, ...rest));
+            const stored = await send(content);
+            expect(native.translateBatch.mock.calls.map(c => c[0])).toContain("relay");
+            expect(stored).toMatchObject({ via: "relay", text: "@danna move down" });
+        });
+
         it(`${label}: only a ✦ skip leaves it blank, and it retracts even a confident ≈ line`, async () => {
             answer({ lang: "ceb", conf: 0.95 }, "skip");
             const stored = await send(content);

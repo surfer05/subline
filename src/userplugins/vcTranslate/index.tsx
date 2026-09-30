@@ -3911,7 +3911,9 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
     return texts.map((_, i) => {
         const r = byId.get(`s${i}`);
         if (r === undefined || "failed" in r) return "fail";
-        if (r.skip) return "skip";
+        // Google below its confidence gate is not a verdict: "unsure" caches
+        // nothing and leaves ✦ to decide (see SurfaceService.flush).
+        if (r.skip) return r.reason === "unsure" ? "unsure" : "skip";
         if (r.truncated) return "fail";
         return r.conf === undefined ? { lang: r.lang, text: r.text } : { lang: r.lang, text: r.text, conf: r.conf };
     });
@@ -4287,6 +4289,19 @@ export default definePlugin({
     // would have had there: null where the patch appends a child, and the
     // original child where it wraps one.
     renderBioLine: (props: any) => isPaidSurfaceUser() ? <BioLine {...(props ?? {})} /> : null,
+    // The profile modal, the DM side profile (non-redesign) and the minimal
+    // popout render the bio renderer directly, so the About Me hook above
+    // never runs there. This wraps that one element: Discord's own bio, then
+    // the line under it. Discord's element unchanged for anyone not paid,
+    // for an empty bio, or on any throw.
+    bioWithLine: (original: unknown, userBio: unknown) => {
+        try {
+            if (!isPaidSurfaceUser() || typeof userBio !== "string" || userBio.trim() === "") return original;
+            return <>{original}<BioLine userBio={userBio} /></>;
+        } catch {
+            return original;
+        }
+    },
     // Props for Discord's OverflowTooltip around a stage topic or a thread
     // title: exactly { children } as Discord had it for anyone not paid.
     // Paid: the in-place translation, and an aria-label that is always a

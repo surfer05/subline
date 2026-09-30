@@ -25,7 +25,7 @@ import { __reset as __resetMessagePopover } from "./stubs/api-messagepopover";
 import { __resetSettings } from "./stubs/api-settings";
 import {
     __resetWebpackCommon, __stubMarkAsDm, __stubSetChannel, __stubSetChannelName, __stubSetSelectedChannel, __stubSetUser, FluxDispatcher, stubMessages, shownToasts, stubActivities, stubMessageById, stubProfiles
-} from "./stubs/webpack-common";
+, React } from "./stubs/webpack-common";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -193,6 +193,7 @@ describe("an install that owns nothing sees no change", () => {
         expect(P.stageTopicProps(title, GUILD_CHANNEL)).toEqual({ children: title });
         expect(P.forumTitleChildren(ORIGINAL, { ...GUILD_CHANNEL, name: "Hilfe beim Kochen" })).toBe(ORIGINAL);
         expect(P.onboardingHeading(ORIGINAL, { title: "Was spielst du gern?", options: [] })).toBe(ORIGINAL);
+        expect(P.bioWithLine(ORIGINAL, "Ich liebe Pizza")).toBe(ORIGINAL);
         expect(P.statusTextChildren(ORIGINAL, "Bin gleich zurück")).toBe(ORIGINAL);
         expect(P.forumTagChildren("Hilfe gesucht")).toBe("Hilfe gesucht");
         expect(P.statusBubbleChildren("Bin gleich zurück")).toBe("Bin gleich zurück");
@@ -360,6 +361,43 @@ describe("a paid install", () => {
         const out = text(bioLine({ userId: "u1", userBio: "Ich liebe Pizza und lange Spaziergänge" }));
         expect(out).toContain("✦ de · sharp: Ich liebe Pizza und lange Spaziergänge");
         expect(out).not.toContain("Bin gleich zurück");
+    });
+
+    it("the profile modal, DM side profile and minimal popout bio (bioWithLine): Discord's bio, then the line", async () => {
+        const bio = "Ich liebe Pizza und lange Spaziergänge";
+        deep(P.bioWithLine(ORIGINAL, bio));
+        await settle();
+        const node = deep(P.bioWithLine(ORIGINAL, bio));
+        // Discord's own element comes first, unchanged; the line follows it.
+        expect(node.children[0]).toEqual(ORIGINAL);
+        expect(P.bioWithLine(ORIGINAL, bio).children[0]).toBe(ORIGINAL);
+        expect(text(node.children.slice(1))).toContain("✦ de · sharp: " + bio);
+        // An empty or missing bio keeps Discord's element as it was.
+        expect(P.bioWithLine(ORIGINAL, "")).toBe(ORIGINAL);
+        expect(P.bioWithLine(ORIGINAL, undefined)).toBe(ORIGINAL);
+    });
+
+    it("bioWithLine fails safe: anything that throws hands back Discord's element", () => {
+        const spy = vi.spyOn(React, "createElement").mockImplementation(() => { throw new Error("boom"); });
+        try {
+            expect(P.bioWithLine(ORIGINAL, "Ich liebe Pizza")).toBe(ORIGINAL);
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    it("a bio Google is unsure about (Asturian read as es at 0.83) still gets its ✦ line, and no skip is cached", async () => {
+        const bio = "Toi nun ye mas que una cuenta más";
+        native.translateBatch.mockImplementation(async (engine: string, _key: string, payload: string) => ({
+            ok: true,
+            results: JSON.parse(payload).messages.map((m: any) => engine === "google"
+                ? { id: m.id, skip: true, reason: "unsure" }
+                : { id: m.id, lang: "ast", text: `sharp: ${m.text}`, skip: false })
+        }));
+        bioLine({ userId: "u1", userBio: bio });
+        await settle();
+        expect(surfaceCalls("relay").length).toBeGreaterThan(0);
+        expect(text(bioLine({ userId: "u1", userBio: bio }))).toContain(`sharp: ${bio}`);
     });
 
     it("a line whose language the engine could not name shows no language label", async () => {

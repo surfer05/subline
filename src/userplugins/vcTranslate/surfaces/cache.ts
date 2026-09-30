@@ -34,7 +34,13 @@ export interface SurfaceEntry {
     at: number;
 }
 
-export const SURFACE_CACHE_KEY = "VcTranslate_surfaceCache";
+/**
+ * v2 (0.2.1): 0.2.0 cached Google's low-confidence "unsure" answers as
+ * "not foreign" and never asked ✦ again. The first load of v2 migrates the old
+ * key keeping only real translations, and drops every skip-only entry.
+ */
+export const SURFACE_CACHE_KEY = "VcTranslate_surfaceCache_v2";
+export const SURFACE_CACHE_LEGACY_KEY = "VcTranslate_surfaceCache";
 export const SURFACE_CACHE_MAX_ENTRIES = 2_000;
 export const SURFACE_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export const SURFACE_PERSIST_DELAY_MS = 2_000;
@@ -122,7 +128,7 @@ export class SurfaceCache {
     }
 
     /** Merge a verdict into an entry. A ✦ is never replaced by ≈. */
-    put(key: string, patch: { fast?: SurfaceTranslation; quality?: SurfaceTranslation; skip?: true }): SurfaceEntry {
+    put(key: string, patch: { fast?: SurfaceTranslation; quality?: SurfaceTranslation; skip?: true; retract?: true }): SurfaceEntry {
         const prev = this.map.get(key);
         const next: SurfaceEntry = { ...(prev ?? {}), at: this.opts.now() };
         if (patch.quality) {
@@ -130,6 +136,10 @@ export class SurfaceCache {
             delete next.skip;
         }
         if (patch.fast && !next.quality) next.fast = patch.fast;
+        // A ✦ skip (`retract`) removes a ≈ line already cached: ✦ decided
+        // the text needs no translation, and a ≈ guess must not stay on screen.
+        // It never removes a ✦ line.
+        if (patch.skip && patch.retract && !next.quality) delete next.fast;
         if (patch.skip && !next.quality && !next.fast) next.skip = true;
         this.map.delete(key);
         this.map.set(key, next);
@@ -168,8 +178,20 @@ export class SurfaceCache {
     /** Load from disk. Entries set this session win. Never rejects. */
     async load(): Promise<void> {
         let stored: unknown;
+        let migrated = false;
         try {
             stored = await this.opts.storage.get(SURFACE_CACHE_KEY);
+            if (!Array.isArray(stored)) {
+                // First start on v2: take the old cache's real translations
+                // only. Skip-only entries may be a stale "unsure" (see above).
+                const legacy = await this.opts.storage.get(SURFACE_CACHE_LEGACY_KEY);
+                if (Array.isArray(legacy)) {
+                    stored = legacy.filter(row => Array.isArray(row) && row.length === 2 && isEntry(row[1])
+                        && ((row[1] as SurfaceEntry).fast !== undefined || (row[1] as SurfaceEntry).quality !== undefined))
+                        .map(row => [row[0], { ...(row[1] as SurfaceEntry), skip: undefined }]);
+                    migrated = true;
+                }
+            }
         } catch {
             return;
         }
@@ -190,6 +212,11 @@ export class SurfaceCache {
         for (const [k, v] of loaded) if (!inSession.has(k)) this.map.set(k, v);
         for (const [k, v] of session) this.map.set(k, v);
         this.evict();
+        if (migrated) {
+            this.schedulePersist();
+            // The old key is not read again; empty it so it holds nothing.
+            this.writes = this.writes.then(() => this.opts.storage.set(SURFACE_CACHE_LEGACY_KEY, [])).catch(() => { });
+        }
     }
 
     /** Drop everything in memory (stop()). Disk is untouched. */

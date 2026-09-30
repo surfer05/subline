@@ -25,7 +25,7 @@ import { normalizeSurfaceText, type SurfaceCache, type SurfaceEntry, surfaceKey 
 export type SurfaceTier = "fast" | "quality";
 
 /** One text's verdict from an engine, in request order. */
-export type SurfaceVerdict = { lang: string; text: string; conf?: number } | "skip" | "fail";
+export type SurfaceVerdict = { lang: string; text: string; conf?: number } | "skip" | "unsure" | "fail";
 
 /**
  * What `translate` returns: a verdict per text, in order, or `null` for "not
@@ -296,8 +296,21 @@ export class SurfaceService {
                 this.retryAt[tier].set(key, now + (this.deps.notNowRetryMs ?? SURFACE_NOT_NOW_RETRY_MS));
             } else if (verdict === "fail") {
                 this.retryAt[tier].set(key, now + (this.deps.failRetryMs ?? SURFACE_FAIL_RETRY_MS));
+            } else if (verdict === "unsure") {
+                // Google was not sure what language this is. That is no
+                // verdict about the text: nothing is cached, the other tier is
+                // not cancelled (✦ decides), and ≈ is not asked again until
+                // the fail retry, so a render loop cannot re-send it.
+                this.retryAt[tier].set(key, now + (this.deps.failRetryMs ?? SURFACE_FAIL_RETRY_MS));
             } else if (verdict === "skip") {
-                this.deps.cache.put(key, { skip: true });
+                // A real verdict: Google saw the reader's own language or
+                // handed the text back unchanged, or ✦ decided it needs no
+                // translation. A ✦ skip retracts a ≈ line already cached
+                // (bias to silence, the same rule as messages); a ≈ skip never
+                // removes a ✦ line. Either way this tier is not asked again
+                // before the fail retry, even if the entry is evicted.
+                this.deps.cache.put(key, tier === "quality" ? { skip: true, retract: true } : { skip: true });
+                this.retryAt[tier].set(key, now + (this.deps.failRetryMs ?? SURFACE_FAIL_RETRY_MS));
                 // Not foreign after all: the other tier need not be asked.
                 this.pending.fast.delete(key);
                 this.pending.quality.delete(key);

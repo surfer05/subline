@@ -135,5 +135,37 @@ export const BUNDLE_SITES: Array<{ patch: number; replacement: number; module: s
         "sites": [
             "(0,l.jsx)(g.R,{children:h??(0,l.jsx)(\"span\",{className:F.MK,children:u})"
         ]
+    },
+    {
+        "patch": 10,
+        "replacement": 0,
+        "module": "808261",
+        "sites": [
+            "hideHeading:!i,headingIcon:c,children:i?(0,t.jsx)(nh,{displayProfile:l,className:nv.u}):(0,t.jsx)(nl.A,{userBio:r,setLineClamp:!1})"
+        ]
+    },
+    {
+        "patch": 11,
+        "replacement": 0,
+        "module": "741919",
+        "sites": [
+            "headingColor:\"text-strong\",children:(0,l.jsx)(ax.A,{userBio:d?.bio,userId:n.id,animateOnHoverOrFocusOnly:!0,isHoveringOrFocusing:g})"
+        ]
+    },
+    {
+        "patch": 11,
+        "replacement": 1,
+        "module": "741919",
+        "sites": [
+            "headingColor:\"text-strong\",children:(0,l.jsx)(ax.A,{userId:n.id,userBio:i.bio,isHoveringOrFocusing:r,animateOnHoverOrFocusOnly:!0})"
+        ]
+    },
+    {
+        "patch": 12,
+        "replacement": 0,
+        "module": "634409",
+        "sites": [
+            "(0,d.jsx)(_.E,{userId:i.id,userBio:K?.bio,setLineClamp:!1,textColor:\"text-strong\"})"
+        ]
     }
 ];

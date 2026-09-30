@@ -28,7 +28,7 @@ describe("translateWithGoogle", () => {
     it("marks messages already in the target language as skipped", async () => {
         const fetchImpl = vi.fn().mockResolvedValue(okResponse("hello", "en"));
         const [result] = await translateWithGoogle(req(["hello"]), fetchImpl as any);
-        expect(result).toEqual({ id: "0", skip: true });
+        expect(result).toEqual({ id: "0", skip: true, reason: "target" });
     });
 
     it("returns the translation string verbatim", async () => {
@@ -304,13 +304,13 @@ describe("translateWithGoogle — pass-through detection", () => {
         // Google misdetects English slang and echoes it back verbatim.
         const fetchImpl = vi.fn().mockResolvedValue(okResponse("hbu", "fy"));
         const [result] = await translateWithGoogle(req(["hbu"]), fetchImpl as any);
-        expect(result).toEqual({ id: "0", skip: true });
+        expect(result).toEqual({ id: "0", skip: true, reason: "same" });
     });
 
     it("ignores case and spacing when comparing", async () => {
         const fetchImpl = vi.fn().mockResolvedValue(okResponse("  U2   <2 ", "zh-CN"));
         const [result] = await translateWithGoogle(req(["u2 <2"]), fetchImpl as any);
-        expect(result).toEqual({ id: "0", skip: true });
+        expect(result).toEqual({ id: "0", skip: true, reason: "same" });
     });
 
     it("still returns a real translation when the text actually changed", async () => {
@@ -351,7 +351,7 @@ describe("source language and detection confidence", () => {
         // wrong one asserts a meaning the speaker never had.
         const fetchImpl = vi.fn().mockResolvedValue(okResponse("it is", "ha", 0.21705426));
         const [result] = await translateWithGoogle(req(["ne"]), fetchImpl as any);
-        expect(result).toEqual({ id: "0", skip: true });
+        expect(result).toEqual({ id: "0", skip: true, reason: "unsure" });
     });
 
     it("shows a HIGH-confidence translation and passes its confidence through", async () => {

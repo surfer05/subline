@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-    normalizeSurfaceText, SURFACE_CACHE_KEY, SurfaceCache, surfaceKey, type SurfaceStorage
+    normalizeSurfaceText, SURFACE_CACHE_KEY, SURFACE_CACHE_LEGACY_KEY, SurfaceCache, surfaceKey, type SurfaceStorage
 } from "../surfaces/cache";
 import {
     appliedTagNames, customStatusText, embedTexts, forwardTexts, messageSurfaceTexts, onboardingPromptTexts, pollTexts,
@@ -125,6 +125,45 @@ describe("surface cache", () => {
         expect(next.size).toBe(1);
     });
 
+    it("a ✦ skip retracts a cached ≈ line, but never a ✦ line", () => {
+        const { cache } = setup();
+        cache.put("a", { fast: { lang: "ast", text: "F" } });
+        cache.put("a", { skip: true, retract: true });
+        expect(cache.get("a")).toMatchObject({ skip: true });
+        expect(cache.get("a")?.fast).toBeUndefined();
+        cache.put("b", { quality: { lang: "ast", text: "Q" } });
+        cache.put("b", { skip: true, retract: true });
+        expect(cache.get("b")).toMatchObject({ quality: { text: "Q" } });
+        expect(cache.get("b")?.skip).toBeUndefined();
+        // A ≈ skip (no retract) leaves a ≈ line alone.
+        cache.put("c", { fast: { lang: "de", text: "F" } });
+        cache.put("c", { skip: true });
+        expect(cache.get("c")?.fast?.text).toBe("F");
+    });
+
+    it("v2: the first load takes only real translations from the old cache and empties it", async () => {
+        const { storage, c, mem } = setup();
+        expect(SURFACE_CACHE_KEY).toBe("VcTranslate_surfaceCache_v2");
+        mem.set(SURFACE_CACHE_LEGACY_KEY, [
+            ["stale", { at: c.now(), skip: true }],
+            ["f", { at: c.now(), fast: { lang: "de", text: "rough" } }],
+            ["q", { at: c.now(), quality: { lang: "de", text: "sharp" } }]
+        ]);
+        const cache = new SurfaceCache({ storage, now: c.now, schedule: c.schedule, cancel: c.cancel });
+        await cache.load();
+        expect(cache.get("stale")).toBeUndefined();
+        expect(cache.get("f")?.fast?.text).toBe("rough");
+        expect(cache.get("q")?.quality?.text).toBe("sharp");
+        await c.advance(2_000);
+        await cache.persistNow();
+        expect((mem.get(SURFACE_CACHE_KEY) as unknown[]).length).toBe(2);
+        expect(mem.get(SURFACE_CACHE_LEGACY_KEY)).toEqual([]);
+        // A later start reads v2 only.
+        const again = new SurfaceCache({ storage, now: c.now, schedule: c.schedule, cancel: c.cancel });
+        await again.load();
+        expect(again.size).toBe(2);
+    });
+
     it("keeps an entry set this session over the disk copy", async () => {
         const { storage, c, mem } = setup();
         mem.set(SURFACE_CACHE_KEY, [["k", { at: c.now(), fast: { lang: "de", text: "old" } }]]);
@@ -196,6 +235,40 @@ describe("surface service", () => {
         await c.advance(1_500);
         expect(calls.map(x => x.tier)).toEqual(["fast"]);
         expect(service.want("ok ok ok")).toBeNull();
+    });
+
+    it("Google 'unsure' is no verdict: nothing cached, ✦ still asked and wins, ≈ not re-sent", async () => {
+        const text = "Toi nun ye mas que una cuenta más";
+        const { service, calls, c, cache } = setup({
+            translate: async (tier, texts) => texts.map(t => tier === "fast" ? "unsure" as const : { lang: "ast", text: `Q:${t}` })
+        });
+        service.want(text);
+        await c.advance(400);
+        expect(calls.map(x => x.tier)).toEqual(["fast"]);
+        expect(cache.get(surfaceKey(text, "en"))).toBeUndefined();
+        expect(service.want(text)).toBeNull();
+        await c.advance(1_500);
+        expect(calls.map(x => x.tier)).toEqual(["fast", "quality"]);
+        expect(service.want(text)).toMatchObject({ quality: { text: `Q:${text}` } });
+        for (let i = 0; i < 5; i++) { service.want(text); await c.advance(2_000); }
+        expect(calls.filter(x => x.tier === "fast")).toHaveLength(1);
+    });
+
+    it("a ✦ skip after ≈ landed retracts ≈ and is not asked again on every render", async () => {
+        const text = "Guten Morgen zusammen";
+        const { service, calls, c } = setup({
+            translate: async (tier, texts) => texts.map(t => tier === "quality" ? "skip" as const : { lang: "de", text: `F:${t}`, conf: 0.99 })
+        });
+        service.want(text);
+        await c.advance(400);
+        expect(service.want(text)).toMatchObject({ fast: { text: `F:${text}` } });
+        await c.advance(1_500);
+        expect(calls.map(x => x.tier)).toEqual(["fast", "quality"]);
+        for (let i = 0; i < 5; i++) {
+            expect(service.want(text)).toBeNull();
+            await c.advance(2_000);
+        }
+        expect(calls.filter(x => x.tier === "quality")).toHaveLength(1);
     });
 
     it("'not now' retries after a minute; a failure waits ten", async () => {

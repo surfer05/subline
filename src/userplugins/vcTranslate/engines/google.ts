@@ -131,14 +131,16 @@ async function translateOne(
     // low-confidence line can be marked for the reader.
     const confidences = body.detectedLanguages?.srclangsConfidences;
     const conf = Array.isArray(confidences) && typeof confidences[0] === "number" ? confidences[0] : undefined;
-    if (detected === targetLang) return { id: msg.id, skip: true };
+    if (detected === targetLang) return { id: msg.id, skip: true, reason: "target" };
 
     // A translation Google built on a low-confidence detection is a guess, and
     // a wrong subtitle asserts a meaning the speaker never had — so below the
     // gate we show NOTHING and let the quality tier's pass fill it in. Only when
     // a confidence was actually reported: a pinned/undetected request carries
     // none, and there is then nothing to be unsure of, so it still translates.
-    if (conf !== undefined && conf < GOOGLE_MIN_CONFIDENCE) return { id: msg.id, skip: true };
+    // "unsure" is not a verdict about the text, only about this detection:
+    // callers must not cache it as "not foreign" or cancel the quality tier.
+    if (conf !== undefined && conf < GOOGLE_MIN_CONFIDENCE) return { id: msg.id, skip: true, reason: "unsure" };
 
     const text = body.translation.trim();
     if (text.length === 0) throw new MessageError("google: empty translation");
@@ -149,7 +151,7 @@ async function translateOne(
     // through untouched. The detected-language check above does not catch it,
     // because the bogus detection is not the target language — so without
     // this we render a subtitle identical to the message it sits under.
-    if (isSameText(text, msg.text)) return { id: msg.id, skip: true };
+    if (isSameText(text, msg.text)) return { id: msg.id, skip: true, reason: "same" };
 
     return { id: msg.id, lang: detected, text, skip: false, conf };
 }

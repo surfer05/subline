@@ -198,6 +198,8 @@ export const SHORT_TEXT_MAX = 12;
 // message silently vanishing from the results with no marker at all — the
 // renderer would then show nothing forever and re-request it on every open).
 // It mirrors `StoredTranslation`'s `{ failed: true }` shape in store.ts.
+export type SkipReason = "target" | "same" | "unsure";
+
 export type Result =
     // `conf` is Google's own detection confidence, passed through so the
     // renderer can mark a translation it should not be trusted. Absent for the
@@ -208,7 +210,12 @@ export type Result =
     // first few words of the ✦ translation, not all of it, and must never be
     // stored or shown as a full translation.
     | { id: string; lang: string; text: string; skip: false; conf?: number; truncated?: boolean }
-    | { id: string; skip: true }
+    // `reason` is set by Google only. "target": it detected the reader's own
+    // language; "same": it handed the text back unchanged; "unsure": its
+    // detection was below the confidence gate. Only "unsure" is not a verdict
+    // about the text: nothing may be cached or cancelled on it. The LLM
+    // engines never set a reason; their skip is a decision.
+    | { id: string; skip: true; reason?: SkipReason }
     // `transport` marks a failure that never REACHED a verdict: a 429 that
     // survived the retry, a 5xx, a network drop, for THIS message while its
     // batch-mates went through. It is a fact about the moment, not the
