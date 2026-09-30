@@ -7,6 +7,7 @@
         "stamp": "node scripts/stampBuild.mjs",
         "stamp:check": "node scripts/stampBuild.mjs --check",
         "build:site": "node scripts/buildSite.mjs",
-        "check:design": "node scripts/buildSite.mjs --check"
+        "check:design": "node scripts/buildSite.mjs --check",
+        "check:patches": "node scripts/checkPatches.mjs"
     }
 }

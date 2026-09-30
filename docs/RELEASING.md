@@ -178,19 +178,43 @@ read from the environment at the moment it is used.
 |---|---|---|
 | 1 | Preflight: clean tree, current build stamp, both test suites, typecheck | |
 | 2 | `build:mod` — Vencord at the pinned commit + the plugin | |
-| 3 | Check the bundle's build id is the one this checkout produces | |
-| 4 | `build:app` — compile the Electron app | |
-| 5 | `electron-builder --mac` → signs, then `afterSign` notarizes and staples the `.app` | **yes** |
-| 6 | `electron-builder --win` (with `--win`) — unsigned, deliberately | |
-| 7 | `ditto` the mod bundle into `subline-mod-<buildId>.zip` | |
-| 8 | Notarize and staple each `.dmg` | **yes** |
-| 9 | Write `subline-release.json` and `SHA256SUMS` | |
-| 10 | Delete the unpacked `release/mac*/Subline.app` and `release/win-unpacked/` copies (Spotlight indexes them), then print the publish command | |
+| 3 | `scripts/checkPatches.mjs` — every shipped webpack patch against Discord's live bundle (see "Patch check" below) | |
+| 4 | Check the bundle's build id is the one this checkout produces | |
+| 5 | `build:app` — compile the Electron app | |
+| 6 | `electron-builder --mac` → signs, then `afterSign` notarizes and staples the `.app` | **yes** |
+| 7 | `electron-builder --win` (with `--win`) — unsigned, deliberately | |
+| 8 | `ditto` the mod bundle into `subline-mod-<buildId>.zip` | |
+| 9 | Notarize and staple each `.dmg` | **yes** |
+| 10 | Write `subline-release.json` and `SHA256SUMS` | |
+| 11 | Delete the unpacked `release/mac*/Subline.app` and `release/win-unpacked/` copies (Spotlight indexes them), then print the publish command | |
 
 Flags: `--win`, `--dry-run` (everything but the two signing steps), `--skip-tests`,
+`--skip-patch-check` (skips step 3; for an offline build only, never a real release),
 `--allow-dirty` (never for a real release — the build id is a digest of the
 plugin's sources, so a dirty tree produces an id that names a tree existing on
 one laptop).
+
+### Patch check
+
+`pnpm check:patches` (repo root; `scripts/checkPatches.mjs`) fetches Discord's
+public web bundle from `https://discord.com/app` with no login (the initial
+scripts plus every lazily loaded chunk the webpack runtime lists, a few hundred
+MB into a temporary directory that is deleted afterwards) and checks every
+webpack patch that ships: the Vencord plugins `buildMod.mjs` keeps (`_api`,
+`_core`, `clientTheme`, taken from `installer/build/vencord` after the source
+rewrites) and Subline's own (`src/userplugins/vcTranslate`). It mirrors
+Vencord: `\i` and `#{intl::KEY}` are canonicalised the same way, a `find` must
+hit exactly one module (an `all` patch any number), a non-global `match` must
+occur exactly once, a global one at least once (or exactly `expect` times), and
+replacements run in order. Plugins Vencord would not start are listed as
+`(off)` and never fail the check. It prints a table and exits 1 on any failure.
+
+It needs `installer/build/vencord` (run `pnpm build:mod` first) and about
+1 GB of memory; it takes about a minute, most of it downloading.
+`pnpm release` runs it right after `build:mod` and stops if it fails. When it
+fails, Discord has changed under a patch: fix the patch (or move the Vencord
+pin, `installer/vencord.pin.json`, to an upstream commit that fixed it) and
+re-run. v0.2.0 shipped without message popover buttons because nothing ran this.
 
 ### Doing it by hand
 

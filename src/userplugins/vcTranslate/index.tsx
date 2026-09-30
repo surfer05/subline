@@ -2831,7 +2831,11 @@ function contextBefore(message: any, size: number): { author: string; text: stri
     const channelId = message?.channel_id;
     if (typeof channelId !== "string") return [];
 
-    const store = MessageStore.getMessages(channelId);
+    // `as any`: Vencord 1.15.9's discord-types dropped toArray() from the
+    // declared ChannelMessages type, but Discord's class still has it (checked
+    // against the public bundle: toArray(){return[...this._array]}). The
+    // typeof check below keeps a real removal from throwing.
+    const store = MessageStore.getMessages(channelId) as any;
     if (!store || typeof store.toArray !== "function") return [];
 
     let all: any[];
@@ -2954,7 +2958,8 @@ function catchUp(channelId: string, opts: CatchUpOptions = {}) {
     const count = settings.store.catchUpCount;
     if (count <= 0) return;
 
-    const store = MessageStore.getMessages(channelId);
+    // `as any`: see contextBefore (toArray is real, just no longer declared).
+    const store = MessageStore.getMessages(channelId) as any;
     if (!store || typeof store.toArray !== "function") {
         // Not necessarily an error -- a channel with no messages loaded yet
         // legitimately has nothing to iterate. But if the store or method

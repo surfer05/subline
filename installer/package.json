@@ -28,7 +28,8 @@
         "test:watch": "vitest",
         "typecheck": "tsc --noEmit && tsc -p tsconfig.renderer.json",
         "mutate": "node scripts/mutate.mjs",
-        "build:site": "node ../scripts/buildSite.mjs"
+        "build:site": "node ../scripts/buildSite.mjs",
+        "check:patches": "node ../scripts/checkPatches.mjs"
     },
     "//engines": "buildMod.mjs imports src/bundle/spec.ts directly, so that the checks the build runs and the checks the installer runs are the same code. packaging/hooks.mjs does the same. Node strips TypeScript types without a flag from 22.18 on.",
     "engines": {
