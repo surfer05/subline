@@ -400,6 +400,35 @@ describe("a paid install", () => {
         expect(text(bioLine({ userId: "u1", userBio: bio }))).toContain(`sharp: ${bio}`);
     });
 
+    it("a romanized status Google hands back unchanged (\"same\") still gets ✦, shown in place", async () => {
+        const status = "kya scene hai aaj raat";
+        native.translateBatch.mockImplementation(async (engine: string, _key: string, payload: string) => ({
+            ok: true,
+            results: JSON.parse(payload).messages.map((m: any) => engine === "google"
+                ? { id: m.id, skip: true, reason: "same" }
+                : { id: m.id, lang: "hi", text: `sharp: ${m.text}`, skip: false })
+        }));
+        stubActivities.set("u1", [{ type: 4, state: status }]);
+        decorator("u1");
+        await settle();
+        expect(surfaceCalls("relay").length).toBeGreaterThan(0);
+        expectInPlace(decorator("u1"), status, `sharp: ${status}`);
+    });
+
+    it("a romanized bio Google hands back unchanged (\"same\") still gets its ✦ line, and no skip is cached", async () => {
+        const bio = "bhai kya scene hai aaj raat, chal milte hain";
+        native.translateBatch.mockImplementation(async (engine: string, _key: string, payload: string) => ({
+            ok: true,
+            results: JSON.parse(payload).messages.map((m: any) => engine === "google"
+                ? { id: m.id, skip: true, reason: "same" }
+                : { id: m.id, lang: "hi", text: `sharp: ${m.text}`, skip: false })
+        }));
+        bioLine({ userId: "u1", userBio: bio });
+        await settle();
+        expect(surfaceCalls("relay").length).toBeGreaterThan(0);
+        expect(text(bioLine({ userId: "u1", userBio: bio }))).toContain(`sharp: ${bio}`);
+    });
+
     it("a line whose language the engine could not name shows no language label", async () => {
         native.translateBatch.mockImplementation(async (engine: string, _key: string, payload: string) => ({
             ok: true,

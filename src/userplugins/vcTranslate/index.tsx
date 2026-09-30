@@ -3912,8 +3912,12 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
         const r = byId.get(`s${i}`);
         if (r === undefined || "failed" in r) return "fail";
         // Google below its confidence gate is not a verdict: "unsure" caches
-        // nothing and leaves ✦ to decide (see SurfaceService.flush).
-        if (r.skip) return r.reason === "unsure" ? "unsure" : "skip";
+        // nothing and leaves ✦ to decide (see SurfaceService.flush). Neither
+        // is "same" (Google handed the text back unchanged): that is Google
+        // giving up on romanized text, exactly as the message pipeline reads
+        // it, so a romanized bio or status still gets its ✦ turn. Only a
+        // "target" skip (already in the reader's language) is a verdict.
+        if (r.skip) return r.reason === "unsure" || r.reason === "same" ? "unsure" : "skip";
         if (r.truncated) return "fail";
         return r.conf === undefined ? { lang: r.lang, text: r.text } : { lang: r.lang, text: r.text, conf: r.conf };
     });
