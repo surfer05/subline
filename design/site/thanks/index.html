@@ -34,6 +34,9 @@ a:hover{color:var(--fg)}
 .keyrow code{flex:1 1 240px;min-width:0;overflow-wrap:anywhere;user-select:all}
 .keyrow .btn{font-size:14px;padding:8px 16px}
 .thanks-cta{display:flex;gap:12px;flex-wrap:wrap;margin-top:22px}
+details.thanks-fallback{margin-top:18px;max-width:560px}
+details.thanks-fallback summary{cursor:pointer;font-size:14px;color:var(--muted)}
+details.thanks-fallback summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 </style>
 </head>
 <body>
@@ -60,26 +63,32 @@ a:hover{color:var(--fg)}
   <p class="kicker">Thanks</p>
   <h2 class="sec">You're all set.</h2>
   <p class="lead">Go back to Discord. Subline is already on.</p>
-  <p class="fine">Your code is also in your email.</p>
+  <p class="fine">Your code is also in your email from Dodo Payments.</p>
 </div>
 <div data-thanks-discord-pending hidden>
   <p class="kicker">Thanks</p>
   <h2 class="sec">Payment is being confirmed.</h2>
   <p class="lead">Subline switches on in Discord by itself, usually within a few minutes.</p>
-  <p class="fine">Your code is also in your email.</p>
+  <p class="fine">Your code is also in your email from Dodo Payments.</p>
 </div>
 <div data-thanks-installer hidden>
   <p class="kicker">Thanks</p>
   <h2 class="sec">You're all set.</h2>
   <p class="lead">Go back to the Subline installer. It carries on by itself.</p>
-  <p class="fine">Your code is also in your email.</p>
+  <p class="fine">Your code is also in your email from Dodo Payments.</p>
 </div>
 <div data-thanks-installer-pending hidden>
   <p class="kicker">Thanks</p>
   <h2 class="sec">Payment is being confirmed.</h2>
   <p class="lead">The Subline installer carries on by itself, usually within a few minutes.</p>
-  <p class="fine">Your code is also in your email.</p>
+  <p class="fine">Your code is also in your email from Dodo Payments.</p>
 </div>
+<details class="thanks-fallback" data-thanks-fallback hidden>
+  <summary>Not on after a few minutes?</summary>
+  <p class="fine" data-thanks-fallback-discord>If Subline isn't on in a few minutes, paste this code in Subline → Settings → Enter a code.</p>
+  <p class="fine" data-thanks-fallback-installer hidden>If the installer doesn't carry on in a few minutes, choose Enter a code and paste this code.</p>
+  <div class="panel keyrow"><code class="mono" data-thanks-fallback-code>ABCD-1234-EFGH-5678</code><button class="btn btn-secondary" type="button" data-thanks-fallback-copy>Copy</button></div>
+</details>
 <div data-thanks-failed hidden>
   <p class="kicker">Checkout</p>
   <h2 class="sec">Payment didn't go through.</h2>

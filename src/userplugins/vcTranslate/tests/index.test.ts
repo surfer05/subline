@@ -935,6 +935,25 @@ describe("a rate-limited LLM leaves the reader the fast tier's Google line", () 
         expect(shownToasts[0].message).not.toMatch(/\d+[sm]\b/);
     });
 
+    it("says next month, not a duration, when an optional monthly AI allowance is gone", async () => {
+        useGemini();
+        respondByEngine({
+            gemini: {
+                ok: false, error: "relay: HTTP 429 monthly limit reached",
+                retryAfterMs: 12 * 24 * 60 * 60 * 1_000
+            },
+            google: googleTranslated("1")
+        });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+
+        expect(shownToasts).toHaveLength(1);
+        expect(shownToasts[0].message)
+            .toBe("This month's ✦ allowance is used up. ≈ keeps working. ✦ is back next month.");
+        expect(shownToasts[0].type).toBe("MESSAGE");
+    });
+
     it("retunes the rate gate from the quota the 429 reported", async () => {
         // The compiled-in guess is exactly that — a guess about someone else's
         // project. A response that states the real ceiling wins.

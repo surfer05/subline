@@ -5,6 +5,7 @@ import { installHash } from "../src/checkout";
 import { EARLY_CUTOFF_MS as CUTOFF, isAiPlan, launchAt, signToken, usedBeforeCutoff, verifyToken, MAX_INSTALLS } from "../src/entitle";
 import { applyClaim, applyIpBegin, applyIpEnd, Promo, REDEEM_IP_DAILY_FAILURES, REDEEM_IP_DAILY_SUCCESSES } from "../src/promo";
 import { codeRec, fakeBudget, fakeKV } from "./kv-mock";
+import { dayRowKey } from "../src/budget";
 
 // ===========================================================================
 //  v2: the paid-only model. Automatic ($4.99 once), AI on top, promo codes,
@@ -60,8 +61,14 @@ function countingKV(seed: Record<string, string> = {}) {
     return kv as KV & { _puts: string[] };
 }
 
+// One Budget object per KV (one global object in production): per-code ✦
+// counters live there, so every env built on one KV must share it.
+const budgets = new WeakMap<object, ReturnType<typeof fakeBudget>>();
+const budgetOf = (kv: any) => { let b = budgets.get(kv); if (!b) { b = fakeBudget(); budgets.set(kv, b); } return b; };
+/** Today's ✦ count for a code (or "pv:<account>"), as the Budget object holds it. */
+const usedToday = (kv: any, code: string) => budgetOf(kv).count(dayRowKey(code, Date.now()));
 const env = (kv: any, over: Partial<Env> = {}): Env => ({
-    CODES: kv, GROQ_KEY: "gk", ADMIN_TOKEN: "admintok", MODEL: "m", BUDGET: fakeBudget().ns,
+    CODES: kv, GROQ_KEY: "gk", ADMIN_TOKEN: "admintok", MODEL: "m", BUDGET: budgetOf(kv).ns,
     VARIANTS, DODO_API_KEY: "dodo_secret", PROMO: fakePromo(), LAUNCH_AT: String(LAUNCH), ...over
 });
 const ctx = { waitUntil: (_: Promise<unknown>) => {}, passThroughOnException: () => {} } as unknown as ExecutionContext;
@@ -343,8 +350,7 @@ describe("v2 translate", () => {
         const r = await translate(e, A, "KEY-AUTO-1");
         expect(r.status).toBe(200);
         expect(r.body.results[0].text).toBe("hi how are you today my friend");
-        const day = new Date(Date.now()).toISOString().slice(0, 10);
-        expect(Number(kv._dump()[`use:KEY-AI-1:${day}`])).toBeGreaterThan(0);
+        expect(usedToday(kv, "KEY-AI-1")).toBeGreaterThan(0);
     });
 
     it("a 4th computer is refused", async () => {
@@ -966,7 +972,7 @@ describe("AI stays with the install that bought it (item 10)", () => {
         const r = await translate(e, B, "KEY-AUTO-1");
         expect(r.status).toBe(402);
         expect(r.body.error).toBe("ai_required");
-        expect(kv._dump()[`use:KEY-AI-1:${day(Date.now())}`]).toBeUndefined();
+        expect(usedToday(kv, "KEY-AI-1")).toBe(0);
         // Previews work, per account.
         expect((await translate(e, B, "KEY-AUTO-1", "preview")).status).toBe(200);
     });

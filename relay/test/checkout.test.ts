@@ -142,9 +142,30 @@ describe("POST /v1/checkout", () => {
         expect(res.status).toBe(503);
     });
 
-    it("limits one install to 6 an hour", async () => {
+    it("a repeat click reopens the SAME checkout: one Dodo session, one URL", async () => {
         const kv = fakeKV();
-        for (let i = 0; i < 6; i++) expect((await worker.fetch(checkoutReq("monthly", FREE), env(kv), ctx)).status).toBe(200);
+        let n = 0;
+        vi.stubGlobal("fetch", vi.fn(async (url: string, init: any) => {
+            calls.push({ url: String(url), init });
+            n++;
+            return new Response(JSON.stringify({ session_id: "cks_" + n, checkout_url: "https://checkout.dodopayments.com/session/cks_" + n }), { status: 200 });
+        }));
+        calls = [];
+        const a: any = await (await worker.fetch(checkoutReq("monthly", FREE), env(kv), ctx)).json();
+        const b: any = await (await worker.fetch(checkoutReq("monthly", FREE), env(kv), ctx)).json();
+        expect(b.url).toBe(a.url);
+        expect(calls).toHaveLength(1);
+        expect(kv._opts(Object.keys(kv._dump()).find(k => k.startsWith("open:"))!)).toEqual({ expirationTtl: 30 * 60 });
+        // Another plan is its own checkout.
+        const c: any = await (await worker.fetch(checkoutReq("annual", FREE), env(kv), ctx)).json();
+        expect(c.url).not.toBe(a.url);
+    });
+
+    it("limits one install to 6 new sessions an hour", async () => {
+        const kv = fakeKV();
+        // Each open checkout expires (as after 30 minutes), so every click asks Dodo.
+        const expire = () => { for (const k of Object.keys(kv._dump())) if (k.startsWith("open:")) void kv.delete(k); };
+        for (let i = 0; i < 6; i++) { expect((await worker.fetch(checkoutReq("monthly", FREE), env(kv), ctx)).status).toBe(200); expire(); }
         const res = await worker.fetch(checkoutReq("monthly", FREE), env(kv), ctx);
         expect(res.status).toBe(429);
         const body: any = await res.json();
@@ -273,16 +294,23 @@ describe("webhook linking: purchase → install", () => {
         expect(kv._dump()[`paid:${hash}`]).toBe(KEY);
     });
 
-    it("a KV failure while linking never breaks minting", async () => {
+    it("WORST CASE: a KV failure while linking still mints, then throws so Dodo retries, and the retry links", async () => {
         const kv = fakeKV({ [`inst:${PAY}`]: hash });
         const put = kv.put.bind(kv);
+        let down = true;
         (kv as any).put = async (k: string, v: string, o?: any) => {
-            if (k.startsWith("paid:")) throw new Error("kv down");
+            if (down && k.startsWith("paid:")) throw new Error("kv down");
             return put(k, v, o);
         };
-        const r = await applyMorEvent(env(kv), licenseCreated(), NOW);
-        expect(r.action).toBe("created");
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        await expect(applyMorEvent(env(kv), licenseCreated(), NOW)).rejects.toThrow("kv down");
         expect(kv._dump()[`code:${KEY}`]).toBeDefined();
+        down = false;
+        expect((await applyMorEvent(env(kv), licenseCreated(), NOW)).action).toBe("created");
+        expect(kv._dump()[`paid:${hash}`]).toBe(KEY);
+        // The key never reaches a log line.
+        expect(JSON.stringify((console.warn as any).mock.calls)).not.toContain(KEY);
+        vi.restoreAllMocks();
     });
 });
 

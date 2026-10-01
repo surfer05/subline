@@ -174,6 +174,7 @@ export type RedeemAnswer =
     | { kind: "claimed" }
     | { kind: "already" }
     | { kind: "rate_limited" }
+    | { kind: "net_limited" }
     | { kind: "unreachable"; cause: string };
 
 /**
@@ -182,6 +183,9 @@ export type RedeemAnswer =
  *    "checkout unavailable": the product is not set up, or Dodo is down). The
  *    static link would be a dead end, so it is never opened after this.
  *  - `already_owned`: 409, this install already has Automatic. Re-check status.
+ *  - `purchase_pending`: 409, a payment for Automatic from this install is
+ *    still being confirmed. Nothing is opened (buying again would charge
+ *    twice); the screen waits for it like after a checkout.
  *  - `network`: the relay could not be reached at all. Only this may fall back
  *    to the static link, and only when the product id is real.
  *  - `failed`: any other answer.
@@ -190,6 +194,7 @@ export type CheckoutAnswer =
     | { kind: "ok"; url: string }
     | { kind: "unavailable"; cause: string }
     | { kind: "already_owned" }
+    | { kind: "purchase_pending" }
     | { kind: "network"; cause: string }
     | { kind: "failed"; cause: string };
 
@@ -273,6 +278,7 @@ export function createActivationRelay(options: {
             if (res.status === 200 && isDodoCheckoutUrl(res.body.url)) return { kind: "ok", url: res.body.url };
             const cause = `HTTP ${res.status}${typeof res.body.error === "string" ? ` ${res.body.error}` : ""}`;
             if (res.status === 409 && res.body.error === "already_owned") return { kind: "already_owned" };
+            if (res.status === 409 && res.body.error === "purchase_pending") return { kind: "purchase_pending" };
             if (res.status === 503) return { kind: "unavailable", cause };
             return { kind: "failed", cause };
         },
@@ -315,7 +321,9 @@ export function createActivationRelay(options: {
                 case "not_found": return { kind: "not_found" };
                 case "claimed": return { kind: "claimed" };
                 case "already": return { kind: "already" };
-                case "rate_limited": return { kind: "rate_limited" };
+                // Too many claims of this promo from one network: the relay
+                // keeps "rate_limited" for older clients and says why in `reason`.
+                case "rate_limited": return res.body.reason === "net_limited" ? { kind: "net_limited" } : { kind: "rate_limited" };
                 default: return { kind: "unreachable", cause: `HTTP ${res.status}` };
             }
         }

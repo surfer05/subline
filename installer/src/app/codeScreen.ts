@@ -49,6 +49,10 @@ export const CODE_SCREEN_COPY = {
     errDeviceLimit: "This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub.",
     errNotActive: "That code is not active.",
     errRateLimited: "Too many codes tried from this network today. Try again after midnight UTC.",
+    /** A promo code allows only a few claims from one network. */
+    errNetLimited: "This code has reached its limit on your network.",
+    /** Buy was pressed while a payment from this computer is still being confirmed. */
+    purchasePending: "Your payment is still being confirmed. It switches on by itself.",
     errEmpty: "Type or paste a code first.",
     /** The relay answered "checkout unavailable": nothing is opened. */
     errBuyUnavailable: "Buying isn't available yet. Use a code, or try again later.",

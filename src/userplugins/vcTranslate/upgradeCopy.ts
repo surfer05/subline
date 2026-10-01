@@ -28,6 +28,8 @@ export const UPGRADE_COPY = {
     codeAlready: "Already yours.",
     codeUnreachable: "Can't reach Subline right now. Try again in a minute.",
     codeRateLimited: "Too many codes tried from this network today. Try again after midnight UTC.",
+    /** A promo code allows only a few claims from one network. */
+    codeNetLimited: "This code has reached its limit on your network.",
     deviceLimit: "This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub.",
     /** The button next to the device-limit sentence: opens RESET_HELP_URL. */
     deviceLimitButton: "GitHub",
@@ -64,6 +66,8 @@ export const UPGRADE_COPY = {
     annualButton: "Yearly $19.99 · 2 months free",
     aiNeedsAutomatic: "AI needs Automatic first.",
     alreadyAutomatic: "You already have Automatic.",
+    /** Buy or Add AI while a payment from this install is still being confirmed. */
+    purchasePending: "Your payment is still being confirmed. It switches on by itself.",
     /** The relay answered that it cannot sell this right now (no product set up, or the shop is down). */
     checkoutUnavailable: "Buying isn't available yet. Use a code, or try again later.",
 

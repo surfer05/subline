@@ -20,23 +20,38 @@
  */
 import {
     authCode, reserve, refund, usage, mintCode, applyMorEvent, rpmLimitFor, costFor, budgetCostFor,
-    isTasteBearer, isNewClient, resolveFreePlan, startTrial, tasteRecord, type Env, type CodeRecord, type FreePlan
+    isTasteBearer, isNewClient, resolveFreePlan, startTrial, tasteRecord, freezeAtFor,
+    type Env, type CodeRecord, type FreePlan
 } from "./codes";
-import { translateWithFallback, toPreview, type BatchRequest, type TranslateError, type Provider } from "./translate";
+import { translateWithFallback, toPreview, type BatchRequest, type FallbackError, type Provider, type Result } from "./translate";
 import { record, type Outcome } from "./metrics";
 import { installOf, isApiV2, legacyFreeAllowed, PREVIEW_DAILY_CAP, resolveEntitlement } from "./entitle";
 import { adminReissue, adminResetInstalls, createPromo, handleRedeem, handleStatusV2, promoStats } from "./v2";
 import { bumpStat, markActive, safely, clampDays, readStats } from "./stats";
 import { createCoupon, handleCheckout, purchaseFor } from "./checkout";
+import { readCapped } from "./body";
 export { Budget } from "./budget";
 export { Promo } from "./promo";
 
 const MAX_MESSAGES = 40;     // client's QUALITY_MAX_BATCH is 25; headroom, not unbounded
 const MAX_CONTEXT = 12;      // client's context ring is 8; a big context is a cost-inflation vector
-const MAX_BODY_BYTES = 32_768;
+/** Covers a full batch from a v0.2.0 client already in the field (no byte
+ *  budget of its own: 25 long CJK messages ran to ~34 KB and every message in
+ *  it was refused). Newer clients split at ~30 KB (fitRequest.ts). Kept
+ *  moderate on purpose: a preview is counted per message, so a much bigger body
+ *  would let one counted preview carry far more upstream spend. */
+const MAX_BODY_BYTES = 131_072;
 const MAX_TEXT_CHARS = 4_000;
+/** A context line only steers the model; its first part does that. */
+const MAX_CONTEXT_TEXT_CHARS = 1_000;
+const MAX_AUTHOR_CHARS = 100;
+/** Context characters in all; the oldest lines go first past this. */
+const MAX_CONTEXT_CHARS = 6_000;
 const MAX_TARGET_CHARS = 40; // a language name; anything longer is an injection payload
-const GROQ_TIMEOUT_MS = 20_000;
+/** The whole upstream budget of one request: the primary gets at most
+ *  PRIMARY_TIMEOUT_MS (translate.ts) of it, the fallback the rest (13 s or
+ *  more). The plugin waits 30 s for the relay. */
+const REQUEST_TIMEOUT_MS = 22_000;
 const GROQ_FALLBACK_MODEL = "openai/gpt-oss-120b";
 
 /** Resolve which upstream answers this request, as an explicit Provider.kind —
@@ -125,26 +140,56 @@ function decodeSecret(secret: string): Uint8Array {
     return out;
 }
 
-function validBatch(v: unknown): v is BatchRequest {
-    if (!v || typeof v !== "object") return false;
+/** A checked batch: what goes upstream, plus the ids refused on their own. */
+export interface NormalizedBatch { batch: BatchRequest; tooLong: string[] }
+
+/**
+ * Check a batch's SHAPE and bound what it costs, refusing as little as
+ * possible. A malformed body is null (400). Otherwise:
+ *   - a message over MAX_TEXT_CHARS is answered {id, failed:true} on its own
+ *     (tooLong) instead of failing every message beside it;
+ *   - context is never a reason to refuse: each line is clipped, only the
+ *     newest MAX_CONTEXT lines are kept, and the oldest go until the context
+ *     fits MAX_CONTEXT_CHARS. A long post sitting in the client's 8-line ring
+ *     used to fail every following batch in that channel.
+ * Clipping context only steers the model less; it never changes what a
+ * translation is labelled.
+ */
+export function normalizeBatch(v: unknown): NormalizedBatch | null {
+    if (!v || typeof v !== "object") return null;
     const b = v as any;
-    if (!Array.isArray(b.messages) || !Array.isArray(b.context) || typeof b.targetLang !== "string") return false;
+    if (!Array.isArray(b.messages) || !Array.isArray(b.context) || typeof b.targetLang !== "string") return null;
     // Target language is untrusted and interpolated into the prompt: bound it
     // hard. A real target is a short name/code with no line breaks; anything
     // else is an injection attempt (translate.ts also enc()-escapes it).
-    if (b.targetLang.length === 0 || b.targetLang.length > MAX_TARGET_CHARS) return false;
-    if (/[\u0000-\u001f]/.test(b.targetLang)) return false;
-    if (b.context.length > MAX_CONTEXT) return false;
-    if (b.messages.length === 0 || b.messages.length > MAX_MESSAGES) return false;
+    if (b.targetLang.length === 0 || b.targetLang.length > MAX_TARGET_CHARS) return null;
+    if (/[\u0000-\u001f]/.test(b.targetLang)) return null;
+    if (b.messages.length === 0 || b.messages.length > MAX_MESSAGES) return null;
+    const messages: BatchRequest["messages"] = [];
+    const tooLong: string[] = [];
     for (const m of b.messages) {
-        if (!m || typeof m.id !== "string" || typeof m.text !== "string") return false;
-        if (m.text.length > MAX_TEXT_CHARS) return false;
+        if (!m || typeof m.id !== "string" || typeof m.text !== "string") return null;
+        if (m.author !== undefined && typeof m.author !== "string") return null;
+        if (m.text.length > MAX_TEXT_CHARS) { tooLong.push(m.id); continue; }
+        messages.push({ id: m.id, text: m.text, ...(m.author !== undefined ? { author: clip(m.author, MAX_AUTHOR_CHARS) } : {}) });
     }
     for (const c of b.context) {
-        if (!c || typeof c.text !== "string" || typeof c.author !== "string") return false;
-        if (c.text.length > MAX_TEXT_CHARS) return false;
+        if (!c || typeof c.text !== "string" || typeof c.author !== "string") return null;
     }
-    return true;
+    let context: BatchRequest["context"] = b.context.slice(-MAX_CONTEXT).map((c: any) => ({
+        author: clip(c.author, MAX_AUTHOR_CHARS),
+        text: c.text.length > MAX_CONTEXT_TEXT_CHARS ? clip(c.text, MAX_CONTEXT_TEXT_CHARS) + "…" : c.text
+    }));
+    const size = (cs: BatchRequest["context"]) => cs.reduce((n, c) => n + c.text.length + c.author.length, 0);
+    while (context.length > 0 && size(context) > MAX_CONTEXT_CHARS) context = context.slice(1);
+    return { batch: { messages, context, targetLang: b.targetLang }, tooLong };
+}
+
+/** The first `max` UTF-16 units of `s`, never splitting a surrogate pair. */
+function clip(s: string, max: number): string {
+    if (s.length <= max) return s;
+    const code = s.charCodeAt(max - 1);
+    return s.slice(0, code >= 0xd800 && code <= 0xdbff ? max - 1 : max);
 }
 
 /**
@@ -176,13 +221,35 @@ async function keylessPlan(
     }
 }
 
+/** The JSON body, or null when it is over MAX_BODY_BYTES (real bytes, read
+ *  with a running count so an oversized body is never buffered whole) or is
+ *  not JSON. */
 async function readBody(req: Request): Promise<unknown | null> {
-    const buf = await req.arrayBuffer();
-    if (buf.byteLength > MAX_BODY_BYTES) return null; // real bytes, not UTF-16 chars
+    const buf = await readCapped(req, MAX_BODY_BYTES);
+    if (buf === null) return null;
     try { return JSON.parse(new TextDecoder().decode(buf)); } catch { return null; }
 }
 
-type Done = (r: Response, outcome: Outcome, code: string | null, msgs: number, plan?: string | null) => Response;
+type Done = (r: Response, outcome: Outcome, code: string | null, msgs: number, plan?: string | null, detail?: string) => Response;
+
+/** The metric label for a failed upstream call, from BOTH providers' statuses:
+ *  a billing (402) or key (401/403) fault on either one is the owner's alarm,
+ *  even when the other one's error is what the user is answered with. */
+function upstreamLabel(err: FallbackError): Outcome {
+    const s = [err.status, err.primaryStatus];
+    if (s.includes(402)) return "relay_credit";
+    if (s.some(x => x === 401 || x === 403)) return "relay_key_fail";
+    return "upstream_error";
+}
+
+/** Put the results back in the client's order, with the messages that were
+ *  refused on their own (too long) answered failed. */
+function withRefused(order: string[], results: Result[], tooLong: string[]): Result[] {
+    if (tooLong.length === 0) return results;
+    const byId = new Map(results.map(r => [r.id, r] as const));
+    for (const id of tooLong) byId.set(id, { id, failed: true });
+    return order.map(id => byId.get(id) ?? { id, failed: true });
+}
 
 /**
  * Reserve, translate, answer: the shared tail of /v1/translate once the
@@ -192,17 +259,24 @@ type Done = (r: Response, outcome: Outcome, code: string | null, msgs: number, p
  */
 async function serveBatch(
     env: Env, ctx: ExecutionContext, done: Done, req: Request, code: string | null, rec: CodeRecord,
-    batch: BatchRequest, preview: boolean, free: FreePlan | null, newClient: boolean, now: number,
+    norm: NormalizedBatch, order: string[], preview: boolean, free: FreePlan | null, newClient: boolean, now: number,
     v2: boolean = false
 ): Promise<Response> {
     const plan = rec.plan ?? "free";
+    const { batch, tooLong } = norm;
+    // Every message was too long on its own: nothing to send, nothing charged.
+    if (batch.messages.length === 0) {
+        const ok = { ok: true, results: withRefused(order, [], tooLong), rpmLimit: rpmLimitFor(rec) };
+        return done(json(newClient ? { ...ok, now } : ok), "too_large", code, 0, plan);
+    }
     const promptChars =
         batch.context.reduce((n, c) => n + c.text.length + c.author.length, 0) +
         batch.messages.reduce((n, m) => n + m.text.length + (m.author?.length ?? 0), 0) +
         batch.targetLang.length;
     // Two units: `cost` is the per-bearer daily count the client sees
-    // (messages only for taste/trial), `budgetCost` is the real spend the
-    // global guard and the trial's per-IP cost cap are charged.
+    // (messages only for taste/trial, one per ordinary message for a code),
+    // `budgetCost` is the real spend the global guard, the monthly allowance
+    // and the trial's per-IP cost cap are charged.
     const cost = costFor(rec, batch.messages.length, promptChars);
     const budgetCost = budgetCostFor(batch.messages.length, promptChars);
     // The per-IP taste/trial ceiling needs the caller's address, and ONLY
@@ -215,13 +289,12 @@ async function serveBatch(
 
     const res = await reserve(env, code!, rec, cost, now, tasteIp, budgetCost);
     if (!res.ok) {
-        // A keyless request whose limit counters could not be written
-        // (KV failing) is refused CLOSED, before any spend (see reserve).
+        // Counters or the budget could not be reached: refused CLOSED,
+        // before any spend (see reserve).
         if (res.reason === "unavailable") {
             return done(fail("temporarily unavailable", 503, res.retryAfterMs), "capacity", code, 0, plan);
         }
         const status = 429; // cap_exceeded / rate_limited / capacity all park the engine
-        const label = res.reason === "capacity" ? "capacity" : res.reason;
         if (res.reason === "rate_limited") {
             // State the ceiling that was hit, in the field the plugin's
             // rate gate already learns from (native.ts →
@@ -230,12 +303,15 @@ async function serveBatch(
             return done(json({
                 ok: false, error: "slow down", retryAfterMs: res.retryAfterMs,
                 quotaLimitPerMinute: rpmLimitFor(rec)
-            }, status), label as Outcome, code, 0, plan);
+            }, status), "rate_limited", code, 0, plan);
+        }
+        if (res.reason === "month_cap_exceeded") {
+            return done(fail("monthly limit reached", status, res.retryAfterMs), "month_cap_exceeded", code, 0, plan);
         }
         return done(fail(
             res.reason === "cap_exceeded" ? "daily limit reached" : "temporarily unavailable",
             status, res.retryAfterMs
-        ), label as Outcome, code, 0, plan);
+        ), res.reason as Outcome, code, 0, plan);
     }
 
     // Every KV write that is not a spend counter happens only from here
@@ -253,16 +329,23 @@ async function serveBatch(
     ctx.waitUntil(safely(() => markActive(env, code!, rec.plan, now)));
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), GROQ_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let primaryFail: number | "throw" | null = null;
     try {
         const { primary, fallback } = providers(env);
-        const full = await translateWithFallback(batch, primary, fallback, controller.signal);
+        const full = await translateWithFallback(batch, primary, fallback, controller.signal, {
+            onPrimaryFail: s => { primaryFail = s ?? "throw"; }
+        });
         clearTimeout(timer);
+        // The primary failed and the fallback saved the request: still worth
+        // a row, so a primary that is out of credit (402) or has a dead key
+        // (401) is countable while users never notice.
+        if (primaryFail !== null) ctx.waitUntil(record(env, "primary_fail", code, 0, plan, String(primaryFail)));
         // Preview: cut on the server, so a request that asks for a
         // preview never gets the full text back. Only a v0.1.6 client
         // asks; a legacy (v0.1.5) free_ press sends no mode and still
         // gets full ✦ text within its 3-a-day taste allowance.
-        const results = preview ? toPreview(full) : full;
+        const results = withRefused(order, preview ? toPreview(full) : full, tooLong);
         if (preview) ctx.waitUntil(safely(() => bumpStat(env, now, "previews")));
         // `rpmLimit` rides every success so the plugin's rate gate can
         // tune itself to this code's ceiling without ever hitting it.
@@ -273,32 +356,35 @@ async function serveBatch(
         return done(json(newClient ? { ...ok, now } : ok), "ok", code, cost, plan);
     } catch (e) {
         clearTimeout(timer);
-        const err = e as TranslateError;
-        const timedOut = controller.signal.aborted || err.status === 504;
-        // Refund only when the call genuinely did not spend. A timeout
-        // reached Groq and may have billed, so it stays charged — which
-        // also stops a client forcing slow batches to burn the key for
-        // free while their daily cap never advances.
-        if (!timedOut && err.status !== 401 && err.status !== 403) {
-            ctx.waitUntil(refund(env, code!, cost, now, tasteIp, rec.plan, budgetCost));
+        const err = (e ?? {}) as FallbackError;
+        // Only a request whose OWN time budget ran out counts as a timeout:
+        // the last call reached a provider and may have billed, so it stays
+        // charged (which also stops a client forcing slow batches to burn
+        // the key for free). A primary that hit its own deadline and was
+        // followed by a fallback that failed fast is refunded.
+        const timedOut = controller.signal.aborted || err.timedOut === true || err.status === 504;
+        const keyFault = err.status === 401 || err.status === 403;
+        if (!timedOut && !keyFault) {
+            ctx.waitUntil(refund(env, code!, cost, now, tasteIp, plan, budgetCost));
         }
-        // The relay's OWN key failing (401/403 from an upstream) is a
-        // SERVER fault, never surfaced as "your code is bad".
-        if (err.status === 401 || err.status === 403) {
-            return done(fail("translation service unavailable", 503), "relay_key_fail", code, 0, plan);
-        }
-        // 402 = OpenRouter is out of credits. The relay's BILLING
-        // problem, and by now the Groq fallback has already been tried
-        // and failed too (translateWithFallback runs first). Same
-        // user-facing answer as a dead key — never "your code is bad" —
-        // with its own metric label so a billing alarm is countable.
-        if (err.status === 402) {
-            return done(fail("translation service unavailable", 503), "relay_credit", code, 0, plan);
+        const label = upstreamLabel(err);
+        // The relay's OWN key failing (401/403) or its credit running out
+        // (402) is a SERVER fault, never surfaced as "your code is bad".
+        if (keyFault || err.status === 402) {
+            return done(fail("translation service unavailable", 503), label, code, 0, plan);
         }
         if (err.status === 429) {
-            return done(fail("translation service busy", 429, err.retryAfterMs ?? 30_000), "upstream_error", code, 0, plan);
+            return done(fail("translation service busy", 429, err.retryAfterMs ?? 30_000), label, code, 0, plan);
         }
-        return done(fail("translation service unavailable", 503, 15_000), "upstream_error", code, 0, plan);
+        if (timedOut) {
+            // The request ran out of time. It stays charged (see above), so
+            // the client must not re-send it at once: a 5xx is retried once by
+            // the plugin (native.ts isRetryable) and would be charged again for
+            // the same outage. A 429 is never retried there; it parks ✦ for
+            // retryAfterMs while the ≈ line stays on screen.
+            return done(fail("translation service busy", 429, 60_000), label === "upstream_error" ? "upstream_timeout" : label, code, 0, plan);
+        }
+        return done(fail("translation service unavailable", 503, 15_000), label, code, 0, plan);
     }
 }
 
@@ -318,8 +404,9 @@ async function translateV2(env: Env, ctx: ExecutionContext, done: Done, req: Req
     const now = Date.now();
     const body = await readBody(req);
     if (body === null) return done(fail("payload too large or malformed", 413), "too_large", credential, 0);
-    if (!validBatch(body)) return done(fail("bad request", 400), "bad_payload", credential, 0);
-    const batch = body as BatchRequest;
+    const norm = normalizeBatch(body);
+    if (!norm) return done(fail("bad request", 400), "bad_payload", credential, 0);
+    const order = (body as any).messages.map((m: any) => m.id as string);
     const r = await resolveEntitlement(env, install, credential, now);
     if (!r.ok) {
         const outcome: Outcome = r.error === "device_limit" ? "device_limit" : "capacity";
@@ -327,14 +414,101 @@ async function translateV2(env: Env, ctx: ExecutionContext, done: Done, req: Req
     }
     if (r.ai && r.aiCode && r.aiRec) {
         const preview = (body as any).mode === "preview";
-        return serveBatch(env, ctx, done, req, r.aiCode, r.aiRec, batch, preview, null, true, now, true);
+        return serveBatch(env, ctx, done, req, r.aiCode, r.aiRec, norm, order, preview, null, true, now, true);
     }
     if (!r.automatic || !r.acctId) return done(fail("not_activated", 402), "not_activated", credential, 0);
     if ((body as any).mode !== "preview") return done(fail("ai_required", 402), "ai_required", credential, 0);
     // The account's previews: a synthetic taste-shaped record on its own
-    // counter (use:pv:<account>:<day>), fail-closed like every keyless count.
+    // counter ("pv:<account>", counted in the Budget object, see reserve).
     const pvRec: CodeRecord = { status: "active", plan: "taste", dailyCap: PREVIEW_DAILY_CAP };
-    return serveBatch(env, ctx, done, req, "pv:" + r.acctId, pvRec, batch, true, null, true, now, true);
+    return serveBatch(env, ctx, done, req, "pv:" + r.acctId, pvRec, norm, order, true, null, true, now, true);
+}
+
+/** /v1/translate for an older (0.1.x) client: a code or a free_ id. */
+async function translateLegacy(env: Env, ctx: ExecutionContext, done: Done, req: Request): Promise<Response> {
+    const code = bearer(req);
+
+    const auth = await authCode(env, code);
+    if (!auth.ok) {
+        const map = { no_code: 401, unknown_code: 401, revoked: 401, expired: 401 } as const;
+        // A distinct, actionable reason so the client can tell "renew your
+        // subscription" (expired) apart from "this code is wrong" (unknown).
+        const msg =
+            auth.reason === "expired" ? "code expired or subscription lapsed" :
+            auth.reason === "revoked" ? "code revoked" :
+            "invalid or missing code";
+        return done(fail(msg, map[auth.reason]), auth.reason, code, 0);
+    }
+
+    const now = Date.now();
+    // After LAUNCH_AT the legacy free tier is gone except for real
+    // early users (see legacyFreeAllowed). Refused before anything is
+    // parsed, reserved or written.
+    if (!(await legacyFreeAllowed(env, code, now))) {
+        return done(fail("not activated", 402), "trial_ended", code, 0, "taste");
+    }
+    const body = await readBody(req);
+    const authPlan = auth.record.plan ?? "free";
+    if (body === null) return done(fail("payload too large or malformed", 413), "too_large", code, 0, authPlan);
+    const norm = normalizeBatch(body);
+    if (!norm) return done(fail("bad request", 400), "bad_payload", code, 0, authPlan);
+    const order = (body as any).messages.map((m: any) => m.id as string);
+    // `mode` is a v0.1.6 hint; any other value (or none) is legacy.
+    const mode = (body as any).mode;
+    // "preview" is honoured only for a keyless install; a real code has
+    // paid for full text and always gets it.
+    const preview = mode === "preview" && isTasteBearer(code);
+    // A PREVIEW IS ALWAYS THE TASTE ALLOWANCE (3 a day), whatever the
+    // id's trial state: it never reads trial:<id> and never starts a
+    // trial. Otherwise an id whose trial never started (or whose record
+    // lapsed) would be resolved as a provisional 300-a-day trial and
+    // its "3 previews a day" would not be 3.
+    const { record: rec, free, freeFailed, newClient } = preview
+        ? { record: tasteRecord(), free: null, freeFailed: false, newClient: isNewClient(req.headers.get("x-subline-client")) }
+        : await keylessPlan(env, req, code, auth.record, now);
+    const plan = rec.plan ?? "free";
+    // "auto" = the plugin translating on its own, which is the trial's
+    // feature. Once the trial is over, refuse it BEFORE reserving, so an
+    // automatic press can never spend the 3 taste messages the user
+    // meant to press by hand. Only a new client (free !== null) is told;
+    // a legacy client never sends a mode, and one that did gets taste.
+    if (mode === "auto" && free && !free.trialActive) {
+        return done(json({ ok: false, error: "trial ended", trialEndsAt: free.trialEndsAt, now }, 402), "trial_ended", code, 0, plan);
+    }
+    // The trial lookup itself failed, so this bearer may or may not still
+    // be in its trial. Refuse an automatic press with a plain 503 and
+    // spend nothing: an outage must never let auto-translate drain the 3
+    // messages the user meant to press by hand, and it must never TELL a
+    // user mid-trial that their trial ended (a 402 is reserved for an
+    // ending the relay actually has on record). A hand press still gets
+    // taste below.
+    if (mode === "auto" && freeFailed) {
+        return done(fail("temporarily unavailable", 503, 60_000), "capacity", code, 0, plan);
+    }
+    return serveBatch(env, ctx, done, req, code, rec, norm, order, preview, free, newClient, now);
+}
+
+/** Owner check for the /admin/* routes: null when allowed, else the refusal. */
+async function adminRefusal(req: Request, env: Env, method: string): Promise<Response | null> {
+    if (req.method !== method) return fail("method not allowed", 405);
+    const token = bearer(req);
+    if (!env.ADMIN_TOKEN) return fail("admin disabled", 503);
+    if (!token || !(await timingSafeEqual(token, env.ADMIN_TOKEN))) return fail("unauthorized", 401);
+    return null;
+}
+
+/** The global budget as the owner sees it: spent units, the freeze point, and
+ *  the share free traffic may use. Null when the object cannot be reached. */
+async function budgetView(env: Env): Promise<{ total: number; freezeAt: number; freeFreezeAt: number; frozen: boolean } | null> {
+    try {
+        const st = await (await env.BUDGET.get(env.BUDGET.idFromName("global")).fetch("https://budget.internal/status")).json() as { total?: number };
+        const total = typeof st.total === "number" ? st.total : 0;
+        const freezeAt = freezeAtFor(env, false);
+        return { total, freezeAt, freeFreezeAt: freezeAtFor(env, true), frozen: total >= freezeAt };
+    } catch (e) {
+        console.warn("admin: budget status failed", { error: String((e as any)?.message ?? e).slice(0, 200) });
+        return null;
+    }
 }
 
 export default {
@@ -342,74 +516,26 @@ export default {
         const url = new URL(req.url);
         // `plan` rides every metric row so the taste tier is countable: how many
         // keyless installs tasted the AI tier, and how many hit the wall.
-        const done = (r: Response, outcome: Outcome, code: string | null, msgs: number, plan?: string | null) => {
-            ctx.waitUntil(record(env, outcome, code, msgs, plan));
+        const done: Done = (r, outcome, code, msgs, plan, detail) => {
+            ctx.waitUntil(record(env, outcome, code, msgs, plan, detail));
             return r;
         };
 
         // ---- POST /v1/translate — the hot path ----------------------------
         if (url.pathname === "/v1/translate") {
             if (req.method !== "POST") return fail("method not allowed", 405);
-            if (isApiV2(req)) return translateV2(env, ctx, done, req);
-            const code = bearer(req);
-
-            const auth = await authCode(env, code);
-            if (!auth.ok) {
-                const map = { no_code: 401, unknown_code: 401, revoked: 401, expired: 401 } as const;
-                // A distinct, actionable reason so the client can tell "renew your
-                // subscription" (expired) apart from "this code is wrong" (unknown).
-                const msg =
-                    auth.reason === "expired" ? "code expired or subscription lapsed" :
-                    auth.reason === "revoked" ? "code revoked" :
-                    "invalid or missing code";
-                return done(fail(msg, map[auth.reason]), auth.reason, code, 0);
+            try {
+                return await (isApiV2(req) ? translateV2(env, ctx, done, req) : translateLegacy(env, ctx, done, req));
+            } catch (e) {
+                // Anything unexpected (a KV read in authCode or resolve, a
+                // future bug) is a JSON 503 with a metric row and the cause
+                // logged, never Cloudflare's bare error page.
+                const code = bearer(req);
+                let msg = String((e as any)?.message ?? e).slice(0, 200);
+                if (code) msg = msg.split(code).join("<redacted>");
+                console.warn("translate failed unexpectedly", { error: msg });
+                return done(fail("temporarily unavailable", 503, 60_000), "capacity", code, 0);
             }
-
-            const now = Date.now();
-            // After LAUNCH_AT the legacy free tier is gone except for real
-            // early users (see legacyFreeAllowed). Refused before anything is
-            // parsed, reserved or written.
-            if (!(await legacyFreeAllowed(env, code, now))) {
-                return done(fail("not activated", 402), "trial_ended", code, 0, "taste");
-            }
-            const body = await readBody(req);
-            const authPlan = auth.record.plan ?? "free";
-            if (body === null) return done(fail("payload too large or malformed", 413), "too_large", code, 0, authPlan);
-            if (!validBatch(body)) return done(fail("bad request", 400), "bad_payload", code, 0, authPlan);
-            const batch = body as BatchRequest;
-            // `mode` is a v0.1.6 hint; any other value (or none) is legacy.
-            const mode = (body as any).mode;
-            // "preview" is honoured only for a keyless install; a real code has
-            // paid for full text and always gets it.
-            const preview = mode === "preview" && isTasteBearer(code);
-            // A PREVIEW IS ALWAYS THE TASTE ALLOWANCE (3 a day), whatever the
-            // id's trial state: it never reads trial:<id> and never starts a
-            // trial. Otherwise an id whose trial never started (or whose record
-            // lapsed) would be resolved as a provisional 300-a-day trial and
-            // its "3 previews a day" would not be 3.
-            const { record: rec, free, freeFailed, newClient } = preview
-                ? { record: tasteRecord(), free: null, freeFailed: false, newClient: isNewClient(req.headers.get("x-subline-client")) }
-                : await keylessPlan(env, req, code, auth.record, now);
-            const plan = rec.plan ?? "free";
-            // "auto" = the plugin translating on its own, which is the trial's
-            // feature. Once the trial is over, refuse it BEFORE reserving, so an
-            // automatic press can never spend the 3 taste messages the user
-            // meant to press by hand. Only a new client (free !== null) is told;
-            // a legacy client never sends a mode, and one that did gets taste.
-            if (mode === "auto" && free && !free.trialActive) {
-                return done(json({ ok: false, error: "trial ended", trialEndsAt: free.trialEndsAt, now }, 402), "trial_ended", code, 0, plan);
-            }
-            // The trial lookup itself failed, so this bearer may or may not still
-            // be in its trial. Refuse an automatic press with a plain 503 and
-            // spend nothing: an outage must never let auto-translate drain the 3
-            // messages the user meant to press by hand, and it must never TELL a
-            // user mid-trial that their trial ended (a 402 is reserved for an
-            // ending the relay actually has on record). A hand press still gets
-            // taste below.
-            if (mode === "auto" && freeFailed) {
-                return done(fail("temporarily unavailable", 503, 60_000), "capacity", code, 0, plan);
-            }
-            return serveBatch(env, ctx, done, req, code, rec, batch, preview, free, newClient, now);
         }
 
         // ---- GET /v1/status — usage for the settings pane -----------------
@@ -520,7 +646,34 @@ export default {
             if (!env.ADMIN_TOKEN) return fail("admin disabled", 503);
             if (!token || !(await timingSafeEqual(token, env.ADMIN_TOKEN))) return fail("unauthorized", 401);
             const days = clampDays(url.searchParams.get("days"));
-            return json({ ok: true, approximate: true, days: await readStats(env, days, Date.now()), promos: await promoStats(env) });
+            return json({
+                ok: true, approximate: true, days: await readStats(env, days, Date.now()), promos: await promoStats(env),
+                // The money ceiling, so a freeze is seen coming (see budget.ts).
+                budget: await budgetView(env)
+            });
+        }
+
+        // ---- GET /admin/budget, POST /admin/budget/reset (ADMIN_TOKEN) -----
+        // The global budget total and its freeze point; reset starts a fresh
+        // window at once, with no deploy (raising GLOBAL_BUDGET_MESSAGES also
+        // unfreezes, see budget.ts).
+        if (url.pathname === "/admin/budget") {
+            const refused = await adminRefusal(req, env, "GET");
+            if (refused) return refused;
+            const view = await budgetView(env);
+            return view ? json({ ok: true, ...view }) : fail("budget unavailable", 503);
+        }
+        if (url.pathname === "/admin/budget/reset") {
+            const refused = await adminRefusal(req, env, "POST");
+            if (refused) return refused;
+            try {
+                await env.BUDGET.get(env.BUDGET.idFromName("global")).fetch("https://budget.internal/reset", { method: "POST" });
+            } catch (e) {
+                console.warn("admin: budget reset failed", { error: String((e as any)?.message ?? e).slice(0, 200) });
+                return fail("budget unavailable", 503);
+            }
+            console.warn("admin: global budget reset");
+            return json({ ok: true, ...(await budgetView(env)) });
         }
 
         // ---- POST /admin/codes — mint / revoke (ADMIN_TOKEN gated) --------
@@ -539,12 +692,21 @@ export default {
                 // would therefore be unreadable dead state that silently looks
                 // like a 3/day install, so refuse it rather than pretend.
                 if (code.startsWith("free_")) return fail("free_ is reserved for the taste tier", 400);
+                // Never overwrite a code that exists: minting over a customer's
+                // license key would drop its expiry, terminal flag and purchase
+                // ids, and could turn a refunded key active for good.
+                if (await env.CODES.get(`code:${code}`)) return fail("that code already exists", 409);
+                const orderRef = typeof body.orderRef === "string" ? body.orderRef : undefined;
+                // Nor point a real purchase's refund and renewal index elsewhere.
+                if (orderRef && await env.CODES.get(`order:${orderRef}`)) return fail("that orderRef already exists", 409);
+                const capN = body.dailyCap === undefined ? 500 : Math.floor(Number(body.dailyCap));
+                if (!Number.isFinite(capN) || capN < 1 || capN > 10_000) return fail("dailyCap must be 1 to 10000", 400);
                 const rec: CodeRecord = {
                     status: "active",
-                    dailyCap: Number(body.dailyCap) || 500,
+                    dailyCap: capN,
                     plan: body.plan === "paid" ? "paid" : "free",
                     note: typeof body.note === "string" ? body.note.slice(0, 120) : undefined,
-                    orderRef: typeof body.orderRef === "string" ? body.orderRef : undefined
+                    orderRef
                 };
                 await env.CODES.put(`code:${code}`, JSON.stringify(rec));
                 if (rec.orderRef) await env.CODES.put(`order:${rec.orderRef}`, code);
@@ -575,8 +737,8 @@ export default {
             // Read the RAW bytes and sign THOSE — the HMAC covers the exact body
             // Dodo signed; re-serialising parsed JSON would change bytes and never
             // match. (Read BEFORE any JSON.parse.)
-            const rawBuf = await req.arrayBuffer();
-            if (rawBuf.byteLength > MAX_BODY_BYTES) return fail("payload too large", 413);
+            const rawBuf = await readCapped(req, MAX_BODY_BYTES);
+            if (rawBuf === null) return fail("payload too large", 413);
             const raw = new TextDecoder().decode(rawBuf);
 
             // Standard Webhooks headers. ALL three are required — a missing one is

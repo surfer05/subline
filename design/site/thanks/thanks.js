@@ -10,8 +10,10 @@
 // "#thanks" alone also shows the view, with no key.
 //
 // A checkout started from Discord returns to "?from=discord". Discord has
-// already saved the code by itself, so that view only says to go back there:
-// no code and no downloads, even when Dodo appended a key. The page cleans the
+// already saved the code by itself, so that view says to go back there, with
+// no downloads. The key Dodo appended is offered only as a collapsed fallback
+// (fallbackKeys), in case the purchase has not switched on after a few
+// minutes: a buyer must never be left with a payment and nothing to type. The page cleans the
 // address back to "?from=discord#thanks" once it has read it (the key and
 // Dodo's parameters go, the from= stays), so "?from=discord" alone, as after a
 // refresh, shows that same view in its ok state.
@@ -22,7 +24,8 @@
 // downloads. "?from=installer" alone shows it too, like "?from=discord".
 //
 // Returns null when this is not a return from checkout. Otherwise
-// { state: "ok" | "pending" | "failed", keys: [...], fromDiscord: bool, fromInstaller: bool }.
+// { state: "ok" | "pending" | "failed", keys: [...], fromDiscord: bool, fromInstaller: bool },
+// plus fallbackKeys: [...] on a Discord or installer return that carried a key.
 // The email is never read.
 function parseCheckoutReturn(search, hash) {
   var params;
@@ -40,7 +43,6 @@ function parseCheckoutReturn(search, hash) {
   var OK = ["succeeded", "active"];
   var FAILED = ["failed", "cancelled", "canceled", "expired", "requires_payment_method"];
   var state = OK.indexOf(status) >= 0 ? "ok" : FAILED.indexOf(status) >= 0 ? "failed" : "pending";
-  if (fromDiscord || fromInstaller) return { state: state, keys: [], fromDiscord: fromDiscord, fromInstaller: fromInstaller };
 
   // Only key-shaped values: this text lands on the page, and a crafted link
   // should not be able to put a sentence there.
@@ -50,5 +52,11 @@ function parseCheckoutReturn(search, hash) {
     k = k.trim();
     if (/^[A-Za-z0-9_-]{4,128}$/.test(k) && keys.indexOf(k) < 0) keys.push(k);
   });
-  return { state: state, keys: state === "failed" ? [] : keys, fromDiscord: false, fromInstaller: false };
+  if (state === "failed") keys = [];
+  if (fromDiscord || fromInstaller) {
+    var out = { state: state, keys: [], fromDiscord: fromDiscord, fromInstaller: fromInstaller };
+    if (keys.length > 0) out.fallbackKeys = keys;
+    return out;
+  }
+  return { state: state, keys: keys, fromDiscord: false, fromInstaller: false };
 }

@@ -1261,6 +1261,7 @@ export class InstallFlow {
             case "claimed": return this.activationError(CODE_SCREEN_COPY.errClaimed);
             case "already": return this.activationError(CODE_SCREEN_COPY.errAlready);
             case "rate_limited": return this.activationError(CODE_SCREEN_COPY.errRateLimited);
+            case "net_limited": return this.activationError(CODE_SCREEN_COPY.errNetLimited);
             case "unreachable": return this.activationError(CODE_SCREEN_COPY.errUnreachable, answer.cause);
         }
     }
@@ -1348,9 +1349,15 @@ export class InstallFlow {
         this.set(state({ step: "choose-code", detail: CODE_SCREEN_COPY.openingCheckout, busy: true, actions: [] }));
         const checkout = await this.ports.relay.checkout(id.value);
         if (this.aborted) return this.current;
-        let url: string;
+        // null: nothing to open, only wait (a payment is already on its way).
+        let url: string | null;
         if (checkout.kind === "ok" && isDodoCheckoutUrl(checkout.url)) {
             url = checkout.url;
+        } else if (checkout.kind === "purchase_pending") {
+            // A payment from this computer is still being confirmed. Selling
+            // again would charge twice: open nothing and wait for it.
+            this.ports.log.info("activation.purchase-pending", {});
+            url = null;
         } else if (checkout.kind === "already_owned") {
             // This install already has Automatic: ask the relay again rather
             // than sell it twice.
@@ -1372,18 +1379,21 @@ export class InstallFlow {
             ));
         }
 
+        const waitingDetail = url === null ? CODE_SCREEN_COPY.purchasePending : CODE_SCREEN_COPY.waiting;
         let waiting = this.set(state({
             step: "activation-waiting",
-            detail: CODE_SCREEN_COPY.waiting,
+            detail: waitingDetail,
             busy: true,
             actions: ["back"]
         }));
         const startedAt = this.ports.now();
         let hinted = false;
-        try {
-            await this.ports.openCheckout(url);
-        } catch (cause) {
-            this.ports.log.warn("activation.open-failed", { cause: String(cause) });
+        if (url !== null) {
+            try {
+                await this.ports.openCheckout(url);
+            } catch (cause) {
+                this.ports.log.warn("activation.open-failed", { cause: String(cause) });
+            }
         }
 
         const every = this.ports.activationPollIntervalMs ?? ACTIVATION_POLL_MS;
@@ -1415,7 +1425,7 @@ export class InstallFlow {
                 hinted = true;
                 waiting = this.set(state({
                     step: "activation-waiting",
-                    detail: `${CODE_SCREEN_COPY.waiting}\n\n${CODE_SCREEN_COPY.waitingLate}`,
+                    detail: `${waitingDetail}\n\n${CODE_SCREEN_COPY.waitingLate}`,
                     busy: true,
                     actions: ["back"]
                 }));

@@ -25,7 +25,7 @@ const PLACEHOLDER = "pdt_AUTOMATIC_PENDING";
 /** The design source still has the placeholder Automatic product id. */
 const PLACEHOLDER_IN_DESIGN = readFileSync(join(ROOT, "design", "site", "pricing", "index.html"), "utf8").includes(PLACEHOLDER);
 
-type Return = { state: "ok" | "pending" | "failed"; keys: string[]; fromDiscord: boolean; fromInstaller: boolean } | null;
+type Return = { state: "ok" | "pending" | "failed"; keys: string[]; fromDiscord: boolean; fromInstaller: boolean; fallbackKeys?: string[] } | null;
 const parse = new Function(`${THANKS_JS}\nreturn parseCheckoutReturn;`)() as (search: string, hash: string) => Return;
 
 function section(id: string): string {
@@ -75,9 +75,12 @@ describe("the checkout return", () => {
         expect(parse("", "#thanks")).toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: false });
     });
 
-    it("a checkout from Discord says go back to Discord, and never puts the key on the page", () => {
+    it("a checkout from Discord says go back to Discord; its key is only a collapsed fallback", () => {
         expect(parse("?from=discord&subscription_id=sub_1&status=active&license_key=LK-001", ""))
-            .toEqual({ state: "ok", keys: [], fromDiscord: true, fromInstaller: false });
+            .toEqual({ state: "ok", keys: [], fromDiscord: true, fromInstaller: false, fallbackKeys: ["LK-001"] });
+        // A failed payment offers no key at all.
+        expect(parse("?from=discord&payment_id=pay_1&status=failed&license_key=LK-001", ""))
+            .toEqual({ state: "failed", keys: [], fromDiscord: true, fromInstaller: false });
         expect(parse("?from=discord&payment_id=pay_1&status=succeeded", "")).toEqual({ state: "ok", keys: [], fromDiscord: true, fromInstaller: false });
     });
 
@@ -100,7 +103,7 @@ describe("the checkout return", () => {
     it("an unrelated from= value is not a Discord return", () => {
         expect(parse("?from=twitter", "")).toBeNull();
         expect(parse("?from=installer&subscription_id=sub_1&status=active&license_key=LK-001", ""))
-            .toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: true });
+            .toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: true, fallbackKeys: ["LK-001"] });
         expect(parse("?from=installer", "")).toEqual({ state: "ok", keys: [], fromDiscord: false, fromInstaller: true });
         expect(parse("?from=twitter&payment_id=pay_1&status=succeeded&license_key=LK-001", ""))
             .toEqual({ state: "ok", keys: ["LK-001"], fromDiscord: false, fromInstaller: false });
@@ -134,13 +137,13 @@ describe("the built page", () => {
         const discord = block("data-thanks-discord");
         expect(discord).toContain("<h2 class=\"sec\">You're all set.</h2>");
         expect(discord).toContain("<p class=\"lead\">Go back to Discord. Subline is already on.</p>");
-        expect(discord).toContain("<p class=\"fine\">Your code is also in your email.</p>");
+        expect(discord).toContain("<p class=\"fine\">Your code is also in your email from Dodo Payments.</p>");
         expect(discord.match(/<p /g)).toHaveLength(3); // the kicker, the one line, the email line
         expect(discord).not.toMatch(/data-dl|data-thanks-code|data-thanks-copy/);
         const pending = block("data-thanks-discord-pending");
         expect(pending.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "))
             .toContain("Payment is being confirmed. Subline switches on in Discord by itself, usually within a few minutes.");
-        expect(pending).toContain("<p class=\"fine\">Your code is also in your email.</p>");
+        expect(pending).toContain("<p class=\"fine\">Your code is also in your email from Dodo Payments.</p>");
     });
 
     it("shows only the Discord view on a Discord return, and only the code view on a site return", () => {
@@ -149,11 +152,16 @@ describe("the built page", () => {
         expect(start).toBeGreaterThanOrEqual(0);
         const iife = script.slice(start, script.indexOf("})();", start) + 5);
         const run = (search: string) => {
-            const names = ["ok", "pending", "failed", "discord", "discord-pending", "installer", "installer-pending", "keys", "key"];
+            const names = ["ok", "pending", "failed", "discord", "discord-pending", "installer", "installer-pending", "keys", "key", "fallback"];
             const parts: Record<string, any> = {};
             const codeNode = { textContent: "" };
             for (const n of names) parts[n] = { hidden: true, parentNode: { insertBefore() {} } };
             parts.key.querySelector = (sel: string) => sel === "[data-thanks-code]" ? codeNode : { addEventListener() {} };
+            const fbNodes: Record<string, any> = {
+                "[data-thanks-fallback-discord]": { hidden: false }, "[data-thanks-fallback-installer]": { hidden: true },
+                "[data-thanks-fallback-code]": { textContent: "" }, "[data-thanks-fallback-copy]": { addEventListener() {} }
+            };
+            parts.fallback.querySelector = (sel: string) => fbNodes[sel] ?? null;
             const section = { hidden: true, querySelector: (sel: string) => parts[sel.slice("[data-thanks-".length, -1)] ?? null };
             const doc = { getElementById: (id: string) => id === "thanks" ? section : null };
             const loc = { search, hash: "", pathname: "/subline/" };
@@ -161,11 +169,20 @@ describe("the built page", () => {
             const hist = { replaceState: (_a: unknown, _b: string, url: string) => { replaced = url; } };
             new Function("location", "document", "history", "parseCheckoutReturn", "copyText", iife)(loc, doc, hist, parse, () => {});
             const shown = names.filter(n => !parts[n].hidden && n !== "key");
-            return { shown, code: codeNode.textContent, replaced };
+            return {
+                shown, code: codeNode.textContent, replaced,
+                fallbackCode: parts.fallback.hidden ? "" : fbNodes["[data-thanks-fallback-code]"].textContent,
+                fallbackLine: parts.fallback.hidden ? null : fbNodes["[data-thanks-fallback-discord]"].hidden ? "installer" : "discord"
+            };
         };
         const d = run("?from=discord&subscription_id=sub_1&status=active&license_key=LK-001");
-        expect(d.shown).toEqual(["discord"]);
+        expect(d.shown).toEqual(["discord", "fallback"]);
         expect(d.code).toBe("");
+        // The key only in the collapsed fallback, with the Discord sentence.
+        expect(d.fallbackCode).toBe("LK-001");
+        expect(d.fallbackLine).toBe("discord");
+        // No key in the address: no fallback.
+        expect(run("?from=discord&subscription_id=sub_1&status=active").shown).toEqual(["discord"]);
         expect(d.replaced).toBe("/subline/?from=discord#thanks");
         expect(run("?from=discord&subscription_id=sub_1&status=pending").shown).toEqual(["discord-pending"]);
         const s = run("?subscription_id=sub_1&status=active&license_key=LK-001");
@@ -176,8 +193,10 @@ describe("the built page", () => {
         expect(run(d.replaced.slice("/subline/".length, d.replaced.indexOf("#"))).shown).toEqual(["discord"]);
         // A checkout started in the installer says to go back to it, never the code.
         const i = run("?from=installer&payment_id=pay_1&status=succeeded&license_key=LK-001");
-        expect(i.shown).toEqual(["installer"]);
+        expect(i.shown).toEqual(["installer", "fallback"]);
         expect(i.code).toBe("");
+        expect(i.fallbackCode).toBe("LK-001");
+        expect(i.fallbackLine).toBe("installer");
         expect(i.replaced).toBe("/subline/?from=installer#thanks");
         expect(run("?from=installer&payment_id=pay_1&status=processing").shown).toEqual(["installer-pending"]);
         expect(run("?from=installer").shown).toEqual(["installer"]);
@@ -193,7 +212,7 @@ describe("the built page", () => {
         const installer = block("data-thanks-installer");
         expect(installer).toContain("<h2 class=\"sec\">You're all set.</h2>");
         expect(installer).toContain("<p class=\"lead\">Go back to the Subline installer. It carries on by itself.</p>");
-        expect(installer).toContain("<p class=\"fine\">Your code is also in your email.</p>");
+        expect(installer).toContain("<p class=\"fine\">Your code is also in your email from Dodo Payments.</p>");
         expect(installer).not.toMatch(/data-dl|data-thanks-code|data-thanks-copy/);
         const pending = block("data-thanks-installer-pending");
         expect(pending.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "))
@@ -236,7 +255,7 @@ describe("the built page", () => {
         expect(text).toContain("≈ on every message, profile and embed. Decodes Morse and more. 5 ✦ previews a day.");
         expect(text).toContain("$1.99 /mo ✦ on everything. Needs Automatic. Cancel anytime.");
         expect(text).toContain("2 months free AI yearly $19.99 /yr ✦ on everything. Needs Automatic.");
-        expect(text).toContain("Up to 2,000 ✦ a day.");
+        expect(text).toContain("Up to 2,000 ✦ a day. Very long messages count as more than one.");
         expect(text).not.toMatch(/2\.49|4 months/);
     });
 

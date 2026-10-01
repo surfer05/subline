@@ -18,7 +18,15 @@ export type Outcome =
     | "trial_ended"
     // v2 (paid-only) refusals: no entitlement, Automatic without AI asking
     // for full ✦, and a 4th computer on one account.
-    | "not_activated" | "ai_required" | "device_limit";
+    | "not_activated" | "ai_required" | "device_limit"
+    // An AI code used up its optional monthly allowance (AI_MONTHLY_CAP).
+    | "month_cap_exceeded"
+    // The primary provider failed and the fallback answered. The detail blob
+    // holds the primary's status (402 = out of credit, 401 = dead key), so a
+    // primary outage is countable while users still get translations.
+    | "primary_fail"
+    // The request's whole time budget ran out (both providers slow).
+    | "upstream_timeout";
 
 /** A non-reversible short fingerprint of the code, so per-code volume can be
  *  seen in analytics without storing the credential. */
@@ -35,11 +43,12 @@ async function fingerprint(code: string | null): Promise<string> {
  *  authenticated has no plan and records "-". Not identity — a tier name. */
 export type PlanLabel = string | null | undefined;
 
-export async function record(env: Env, outcome: Outcome, code: string | null, messages: number, plan?: PlanLabel): Promise<void> {
+/** `detail` is a short machine label (an upstream status), never user text. */
+export async function record(env: Env, outcome: Outcome, code: string | null, messages: number, plan?: PlanLabel, detail?: string): Promise<void> {
     if (!env.METRICS) return;
     try {
         env.METRICS.writeDataPoint({
-            blobs: [outcome, await fingerprint(code), plan || "-"],
+            blobs: [outcome, await fingerprint(code), plan || "-", ...(detail ? [detail.slice(0, 32)] : [])],
             doubles: [messages],
             indexes: [outcome]
         });

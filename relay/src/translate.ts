@@ -232,14 +232,16 @@ function parseRows(content: string, req: BatchRequest): Result[] {
             catch { throw { status: 502 } as TranslateError; }
         }
     }
-    const rows: unknown[] = Array.isArray(parsed) ? parsed
-        : Array.isArray((parsed as any)?.translations) ? (parsed as any).translations
-        : [];
-
     const byId = new Map<string, any>();
-    for (const r of rows) {
+    for (const r of rowsOf(parsed)) {
         if (r && typeof r === "object" && "id" in r) byId.set(String((r as any).id), r);
     }
+    // Parseable JSON in the wrong shape ({"foo":1}, ids keyed in an object)
+    // answers NOTHING that was asked. That is an upstream failure, not a batch
+    // of per-message verdicts: a 502 gives the fallback provider its turn and,
+    // if that fails too, refunds the user. A partial match is kept as it is:
+    // the matched rows are good translations. Never logged (user text).
+    if (!req.messages.some(m => byId.has(m.id))) throw { status: 502 } as TranslateError;
     return req.messages.map(({ id, text: source }): Result => {
         const r = byId.get(id);
         if (!r) return { id, failed: true };
@@ -249,6 +251,19 @@ function parseRows(content: string, req: BatchRequest): Result[] {
         if (text.trim() === "" || lang === "") return { id, failed: true };
         return { id, lang, text: restoreLineBreaks(text, source), skip: false };
     });
+}
+
+/** The rows of a parsed reply: a bare array, {translations:[...]}, or, as a
+ *  tolerance, an object whose ONLY array-valued property holds them (a model
+ *  that wrote {"results":[...]}). Content stays strict: ids are still matched
+ *  and lang/text still required by the caller. */
+function rowsOf(parsed: unknown): unknown[] {
+    if (Array.isArray(parsed)) return parsed;
+    if (!parsed || typeof parsed !== "object") return [];
+    const o = parsed as Record<string, unknown>;
+    if (Array.isArray(o.translations)) return o.translations;
+    const arrays = Object.values(o).filter(Array.isArray);
+    return arrays.length === 1 ? arrays[0] as unknown[] : [];
 }
 
 const REASONING_CONTROLS = { reasoning_effort: "low", reasoning_format: "hidden" } as const;
@@ -431,21 +446,90 @@ export async function translate(req: BatchRequest, provider: Provider, signal?: 
     return parseRows(content, req);
 }
 
+/** The primary provider's own deadline when a fallback exists. A degraded
+ *  primary (answers slower than this, or hanging) gives up here, so the
+ *  fallback still has the rest of the request's time budget. */
+export const PRIMARY_TIMEOUT_MS = 9_000;
+
+/** What translateWithFallback throws. `status` and `retryAfterMs` are the LAST
+ *  attempt's (what the user's retry should follow); `primaryStatus` is the
+ *  primary's when a fallback also ran (undefined for a network error or a
+ *  timeout); `timedOut` is set only when the request's own time budget ran out,
+ *  i.e. the final attempt was cut off and may have been billed. */
+export interface FallbackError { status?: number; retryAfterMs?: number; primaryStatus?: number; timedOut?: boolean }
+
+export interface FallbackOptions {
+    /** Override PRIMARY_TIMEOUT_MS (tests). */
+    primaryTimeoutMs?: number;
+    /** Called once when the primary fails, before the fallback runs. */
+    onPrimaryFail?: (status: number | undefined) => void;
+}
+
+function statusOf(e: unknown): number | undefined {
+    const s = (e as any)?.status;
+    return typeof s === "number" ? s : undefined;
+}
+
+function failure(e: unknown, extra: Partial<FallbackError>): FallbackError {
+    const out: FallbackError = { ...extra };
+    const status = statusOf(e);
+    if (status !== undefined) out.status = status;
+    const ra = (e as any)?.retryAfterMs;
+    if (typeof ra === "number") out.retryAfterMs = ra;
+    return out;
+}
+
 /** Try the primary provider (OpenRouter by default); on ANY upstream failure —
- *  rate limit, overload, out of credits (402), or even a bad primary key — fall
- *  back to a second provider (the direct Groq key) so a paying user still gets a
- *  translation. The fallback
- *  shares the caller's abort signal, so once the request's time budget is spent
- *  (signal already aborted) we surface the primary error instead of starting a
- *  second call that can only abort. With no fallback configured this is just
- *  `translate`. */
+ *  rate limit, overload, out of credits (402), a bad primary key, or the
+ *  primary's own deadline (PRIMARY_TIMEOUT_MS) — fall back to a second provider
+ *  (the direct Groq key) so a paying user still gets a translation.
+ *
+ *  TIME. `signal` is the whole request's budget. The primary gets
+ *  min(PRIMARY_TIMEOUT_MS, that budget); the fallback gets whatever is left. A
+ *  primary that hangs no longer eats the whole budget and leaves the healthy
+ *  fallback unused (each such batch was charged and then retried by the
+ *  client). Only when the request's own budget is spent is the fallback not
+ *  started.
+ *
+ *  OBSERVABILITY. A primary failure is always logged with its status (never the
+ *  text), and reported through `onPrimaryFail`, so an out-of-credit (402) or a
+ *  dead key (401) on the primary is visible even while the fallback hides it
+ *  from users. With no fallback configured this is just `translate`. */
 export async function translateWithFallback(
-    req: BatchRequest, primary: Provider, fallback: Provider | null, signal?: AbortSignal
+    req: BatchRequest, primary: Provider, fallback: Provider | null, signal?: AbortSignal, opts: FallbackOptions = {}
 ): Promise<Result[]> {
+    if (!fallback) {
+        try { return await translate(req, primary, signal); }
+        catch (e) {
+            console.warn("provider failed, no fallback configured", { kind: primary.kind, status: statusOf(e) ?? "throw", aborted: !!signal?.aborted });
+            throw failure(e, { timedOut: !!signal?.aborted });
+        }
+    }
+    const own = new AbortController();
+    const timer = setTimeout(() => own.abort(), opts.primaryTimeoutMs ?? PRIMARY_TIMEOUT_MS);
+    const onOuter = () => own.abort();
+    if (signal?.aborted) own.abort();
+    else signal?.addEventListener("abort", onOuter, { once: true });
+    let primaryStatus: number | undefined;
     try {
-        return await translate(req, primary, signal);
+        return await translate(req, primary, own.signal);
     } catch (e) {
-        if (!fallback || signal?.aborted) throw e;
+        primaryStatus = statusOf(e);
+        console.warn("primary provider failed, using fallback", {
+            kind: primary.kind,
+            status: primaryStatus ?? "throw",
+            aborted: !!signal?.aborted,
+            primaryTimedOut: own.signal.aborted && !signal?.aborted
+        });
+        try { opts.onPrimaryFail?.(primaryStatus); } catch { /* metrics only */ }
+        if (signal?.aborted) throw failure(e, { timedOut: true });
+    } finally {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onOuter);
+    }
+    try {
         return await translate(req, fallback, signal);
+    } catch (f) {
+        throw failure(f, { primaryStatus, timedOut: !!signal?.aborted });
     }
 }

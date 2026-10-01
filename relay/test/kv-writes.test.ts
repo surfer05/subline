@@ -111,13 +111,12 @@ describe("fix 1: status is read-only; a KV write failure never fails a request",
         const { e } = makeEnv(kv);
         const r = await press(e, PAID, { ip: IP });
         expect(r.status).toBe(200);
-        expect(r.body).toMatchObject({ ok: true, used: 2, cap: 1500, rpmLimit: 60 });
+        expect(r.body).toMatchObject({ ok: true, used: 1, cap: 1500, rpmLimit: 60 });
         expect(r.body.results).toEqual([{ id: "0", lang: "es", text: "hello", skip: false }]);
         await expect(settle()).resolves.toBeUndefined();
-        // The failure is logged with its cause, never with the code or address.
-        expect(warn).toHaveBeenCalled();
+        // Nothing on the hot path writes KV any more (the counters live in the
+        // Budget object); whatever is logged never names the code or address.
         const logged = JSON.stringify(warn.mock.calls);
-        expect(logged).toContain("KV put failed: 503");
         expect(logged).not.toContain(PAID);
         expect(logged).not.toContain(IP);
     });
@@ -157,7 +156,7 @@ describe("fix 1: status is read-only; a KV write failure never fails a request",
         stubProvider();
         const kv = countingKV();
         const { e, budget } = makeEnv(kv);
-        budget.frozen = true;
+        budget.total = 1_000_000_000; // spent past any freeze point
         for (const r of [
             await press(e, ID_A, { client: true, ip: IP }),
             await press(e, ID_B, { ip: IP }),
@@ -194,15 +193,36 @@ describe("fix 1: status is read-only; a KV write failure never fails a request",
 
 // ---------------------------------------------------------------------------
 describe("fix 2: rl: is skipped only where the daily cap makes it unreachable", () => {
-    it("taste (cap 3 < rpm 20) writes no rl:, trial and paid still do", async () => {
+    it("taste (cap 3 < rpm 20) writes no rl:, a legacy trial does, a paid code writes NO KV at all", async () => {
         const kv = countingKV();
         const { e } = makeEnv(kv);
         await reserve(e, ID_A, tasteRecord(), 1, T0);
         expect(kv._puts.some(k => k.startsWith("rl:"))).toBe(false);
         await reserve(e, ID_B, trialRecord(), 1, T0);
         expect(kv._puts.filter(k => k.startsWith("rl:"))).toEqual([`rl:${ID_B}:${Math.floor(T0 / 60_000)}`]);
+        const before = kv._puts.length;
         await reserve(e, PAID, { status: "active", plan: "monthly", dailyCap: 1500 }, 1, T0);
-        expect(kv._puts.filter(k => k.startsWith("rl:"))).toHaveLength(2);
+        expect(kv._puts.slice(before)).toEqual([]);
+    });
+
+    it("WORST CASE: 10 paid translates in one minute write only the once-a-day markers to KV", async () => {
+        stubProvider();
+        const kv = countingKV({ [`code:${PAID}`]: codeRec({ plan: "monthly", dailyCap: 1500 }) });
+        const { e } = makeEnv(kv);
+        for (let i = 0; i < 10; i++) expect((await press(e, PAID)).status).toBe(200);
+        await settle();
+        expect(kv._puts.sort()).toEqual([`seen:paid:${D0}:${(kv._puts.find(k => k.startsWith("seen:")) ?? "").split(":").pop()}`, `stat:${D0}:paid_active`].sort());
+        expect(kv._puts.length).toBeLessThanOrEqual(2);
+    });
+
+    it("the paid rate limit still bites at 60 a minute, counted in the Budget object", async () => {
+        const kv = countingKV();
+        const { e } = makeEnv(kv);
+        const rec = { status: "active" as const, plan: "monthly" as const, dailyCap: 100_000 };
+        for (let i = 0; i < 60; i++) expect(await reserve(e, PAID, rec, 1, T0)).toMatchObject({ ok: true });
+        expect(await reserve(e, PAID, rec, 1, T0)).toMatchObject({ ok: false, reason: "rate_limited" });
+        expect(await reserve(e, PAID, rec, 1, T0 + 60_000)).toMatchObject({ ok: true });
+        expect(kv._puts).toEqual([]);
     });
 
     it("the trial rate limit still bites at 20 a minute", async () => {
@@ -256,8 +276,8 @@ describe("fix 2: rl: is skipped only where the daily cap makes it unreachable", 
             "trial translate (subsequent)": ["rl", "use", "use:ipt", "use:iptc"],
             "taste preview, v0.1.6 (1st of day)": ["seen:free", "stat:free_active", "stat:previews", "use", "use:ip"],
             "taste preview, v0.1.6 (repeat)": ["stat:previews", "use", "use:ip"],
-            "paid translate (1st of day)": ["rl", "seen:paid", "stat:paid_active", "use"],
-            "paid translate (repeat)": ["rl", "use"],
+            "paid translate (1st of day)": ["seen:paid", "stat:paid_active"],
+            "paid translate (repeat)": [],
             "status legacy": [],
             "status v0.1.6 fresh id": [],
             "status v0.1.6 known id": [],

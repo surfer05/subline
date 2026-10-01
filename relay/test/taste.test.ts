@@ -126,9 +126,10 @@ describe("taste auth: a synthetic record, never a KV row", () => {
         // messages only: a 4000-char message costs exactly 1.
         expect(costFor(tasteRecord(), 1, 4000)).toBe(1);
         expect(costFor(tasteRecord(), 3, 12000)).toBe(3);
-        // a real code keeps the prompt-size surcharge, unchanged.
+        // a real code pays a surcharge only past 1,000 prompt chars a message.
         const paid: CodeRecord = { status: "active", plan: "monthly", dailyCap: 1500 };
-        expect(costFor(paid, 1, 4000)).toBe(5);
+        expect(costFor(paid, 1, 4000)).toBe(4);
+        expect(costFor(paid, 1, 900)).toBe(1);
     });
 });
 
@@ -312,8 +313,8 @@ describe("a real code is untouched, and free_ can never be minted", () => {
         stubProvider();
         const kv = fakeKV({ "code:slp_real": codeRec({ dailyCap: 500, plan: "monthly" }) });
         const r = await press(env(kv), "slp_real", ["x".repeat(4000)]);
-        // 1 message + ceil((4000 + "a" + "en")/1000) = 1 + 5
-        expect(r.body).toMatchObject({ ok: true, used: 6, cap: 500, rpmLimit: 60 });
+        // 1 message + ceil((4000 + "a" + "en" - 1000)/1000) = 1 + 4
+        expect(r.body).toMatchObject({ ok: true, used: 5, cap: 500, rpmLimit: 60 });
     });
 
     it("POST /admin/codes refuses to mint a free_ code", async () => {

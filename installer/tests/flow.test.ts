@@ -1320,6 +1320,20 @@ describe("the activation screen (paid only)", () => {
         expect(state.step).toBe("done");
     });
 
+    it("a payment still being confirmed (409 purchase_pending): opens nothing and waits for it", async () => {
+        const script: { relayStatus: any } = { relayStatus: { kind: "ok", automatic: false, ai: false, code: null } };
+        const h = harness({ relayCheckout: { kind: "purchase_pending" }, automaticProductId: "pdt_Real123", ...script });
+        h.ports.activationPollIntervalMs = 1;
+        await toCodeStep(h);
+        const pending = h.flow.send({ type: "buy-automatic" });
+        for (let i = 0; i < 50 && h.flow.state.step !== "activation-waiting"; i++) await new Promise(r => setTimeout(r, 1));
+        expect(h.flow.state.step).toBe("activation-waiting");
+        expect(h.flow.state.detail).toBe("Your payment is still being confirmed. It switches on by itself.");
+        expect(h.opened).toEqual([]);
+        await h.flow.send({ type: "back" });
+        await pending;
+    });
+
     it("a checkout URL that is not Dodo's is never opened", async () => {
         const h = harness({ relayCheckout: { kind: "ok", url: "https://evil.example/pay" }, automaticProductId: "pdt_Real123" });
         await toCodeStep(h);
@@ -1375,6 +1389,7 @@ describe("the activation screen (paid only)", () => {
         [{ kind: "not_found" }, CODE_SCREEN_COPY.errNotFound],
         [{ kind: "claimed" }, CODE_SCREEN_COPY.errClaimed],
         [{ kind: "rate_limited" }, CODE_SCREEN_COPY.errRateLimited],
+        [{ kind: "net_limited" }, CODE_SCREEN_COPY.errNetLimited],
         [{ kind: "unreachable", cause: "fetch failed" }, CODE_SCREEN_COPY.errUnreachable]
     ];
     for (const [answer, message] of redeemErrors) {

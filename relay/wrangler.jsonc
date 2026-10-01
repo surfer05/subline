@@ -51,7 +51,16 @@
     // was ~$0.04-0.07/1k; Gemini 3.8 Flash is ~2-3x that per unit, so 400,000
     // units is now a ~$30-60 launch wall depending on output length. Raise it
     // deliberately after watching real spend vs the cost-units in metrics.
+    // The freeze is derived from this number on every request, so raising it
+    // unfreezes at once. GET /admin/budget (and /admin/stats) show the total;
+    // POST /admin/budget/reset starts a fresh window with no deploy. Free
+    // traffic (previews) stops at 90% of it, so paying AI users keep the rest.
     "GLOBAL_BUDGET_MESSAGES": "400000",
+    // AI_MONTHLY_CAP (optional, unset = off): a monthly allowance per AI
+    // subscription code, in the same spend units, counted per UTC month. A
+    // pricing call for the owner: at ~$0.07 per 1k units, 20000 keeps a maxed
+    // subscriber near $1.40 a month against $1.67 net. If you set it, change
+    // the site's "Up to 2,000 ✦ a day" copy to match before deploying.
     // Dodo Payments product_id → { plan, dailyCap }. The webhook maps each paid
     // license key to a plan + fair-use cap by its data.product_id. These are the
     // LIVE Dodo product ids as of 2026-09-21: the two products actually on sale,

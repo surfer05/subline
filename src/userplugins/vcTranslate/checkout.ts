@@ -50,9 +50,10 @@ export const PLAN_PRODUCTS: Record<Plan, string> = {
 /**
  * Relay refusals that mean "this purchase is not for you", not "the relay is
  * down": the static link must NOT open for them, or a static link would sell
- * what the relay just refused (AI without Automatic, Automatic twice).
+ * what the relay just refused (AI without Automatic, Automatic twice, or a
+ * second purchase while the first payment is still being confirmed).
  */
-export const CHECKOUT_REFUSALS = new Set(["automatic_required", "already_owned"]);
+export const CHECKOUT_REFUSALS = new Set(["automatic_required", "already_owned", "purchase_pending"]);
 
 /**
  * Where Dodo sends the buyer after paying: the site root, marked as a checkout
@@ -172,6 +173,7 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
     };
 
     const start = async (plan: Plan) => {
+        const wasPolling = timer !== null;
         stop();
         const gen = generation;
         const bearer = await deps.bearer();
@@ -180,6 +182,16 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
             const res = await deps.createCheckout(bearer, plan);
             if (!res.ok && res.errorCode !== undefined && CHECKOUT_REFUSALS.has(res.errorCode)) {
                 log(`checkout: the relay refused this plan (${res.errorCode})`);
+                // A payment from this install is still being confirmed: open
+                // nothing, and keep (or start) waiting for it. An existing
+                // poll keeps its deadlines; it is not restarted.
+                if (res.errorCode === "purchase_pending" && gen === generation) {
+                    if (!wasPolling) {
+                        deadline = now() + POLL_FOR_MS;
+                        slowDeadline = now() + SLOW_POLL_FOR_MS;
+                    }
+                    schedule(gen, bearer);
+                }
                 return res.errorCode;
             }
             if (res.ok && isDodoCheckoutUrl(res.url)) url = res.url;

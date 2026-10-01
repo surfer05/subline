@@ -122,9 +122,6 @@ function today(now: number): string {
 function epochDay(now: number): number {
     return Math.floor(now / DAY_MS);
 }
-export function previewKey(acctId: string, now: number): string {
-    return `use:pv:${acctId}:${today(now)}`;
-}
 
 /** LAUNCH_AT as epoch ms (codes.ts launchAtMs). NaN when unset or the placeholder. */
 export function launchAt(env: Env): number {
@@ -389,9 +386,13 @@ export async function resolveEntitlement(
         }
 
         // First sighting today: remember it (at most one write a day per install).
+        // This is the ONLY change on most calls, and it is not essential: a
+        // missed seen day just means the next call tries again. So it marks
+        // `seenDirty`, not `dirty`, and its write is best-effort below.
+        let seenDirty = false;
         if (w.acct && w.acct.installs.includes(hash) && w.acct.seen?.[hash] !== epochDay(now)) {
             w.acct.seen = { ...(w.acct.seen ?? {}), [hash]: epochDay(now) };
-            w.dirty = true;
+            seenDirty = true;
         }
 
         // Union over the account's live codes.
@@ -468,9 +469,23 @@ export async function resolveEntitlement(
         }
 
         if (!opts.dryRun) {
-            if (w.dirty && w.acct && w.acctId) w.puts.set(`acct:${w.acctId}`, JSON.stringify(w.acct));
-            for (const [k, v] of w.puts) await env.CODES.put(k, v);
-            for (const k of w.deletes) await env.CODES.delete(k);
+            // ESSENTIAL writes (an install or code joining, a grant, a purchase
+            // link): a failure is a 503, because the answer depends on them.
+            const essential = w.dirty || w.puts.size > 0 || w.deletes.size > 0;
+            if (essential) {
+                if ((w.dirty || seenDirty) && w.acct && w.acctId) w.puts.set(`acct:${w.acctId}`, JSON.stringify(w.acct));
+                for (const [k, v] of w.puts) await env.CODES.put(k, v);
+                for (const k of w.deletes) await env.CODES.delete(k);
+            } else if (seenDirty && w.acct && w.acctId) {
+                // SEEN ONLY: best-effort. When KV writes run out (the Free
+                // plan's daily limit) or blip, this used to turn every status
+                // and every AI translate into 503 for the rest of the UTC day.
+                try {
+                    await env.CODES.put(`acct:${w.acctId}`, JSON.stringify(w.acct));
+                } catch (e) {
+                    console.warn("seen marker write failed, continuing", { error: String((e as any)?.message ?? e).slice(0, 200) });
+                }
+            }
         }
         return {
             ok: true, hash, acctId: w.acctId, acct: w.acct, automatic, ai,

@@ -102,6 +102,38 @@ describe("the checkout flow", () => {
         });
     }
 
+    it("a payment still being confirmed (purchase_pending): opens nothing, never the static link, and waits for it", async () => {
+        const d = deps({
+            createCheckout: vi.fn(async () => ({ ok: false as const, error: "relay checkout: HTTP 409 purchase_pending", errorCode: "purchase_pending", status: 409 })) as any
+        });
+        const flow = createCheckoutFlow(d);
+        expect(await flow.start("annual")).toBe("purchase_pending");
+        expect(d.openExternal).not.toHaveBeenCalled();
+        expect(flow.isPolling()).toBe(true);
+        await vi.advanceTimersByTimeAsync(POLL_EVERY_MS);
+        expect(d.status).toHaveBeenCalledTimes(1);
+    });
+
+    it("purchase_pending while already waiting keeps the first wait's deadlines", async () => {
+        let pending = false;
+        const d = deps({
+            createCheckout: vi.fn(async () => pending
+                ? { ok: false as const, error: "relay checkout: HTTP 409 purchase_pending", errorCode: "purchase_pending", status: 409 }
+                : { ok: true as const, url: SESSION_URL }) as any
+        });
+        const flow = createCheckoutFlow(d);
+        await flow.start("monthly");
+        await vi.advanceTimersByTimeAsync(POLL_FOR_MS - POLL_EVERY_MS);
+        pending = true;
+        expect(await flow.start("annual")).toBe("purchase_pending");
+        expect(d.openExternal).toHaveBeenCalledTimes(1);
+        // Past the first 30 minutes: the slow cadence, not a fresh fast phase.
+        const before = d.status.mock.calls.length;
+        await vi.advanceTimersByTimeAsync(2 * POLL_EVERY_MS);
+        await vi.advanceTimersByTimeAsync(SLOW_POLL_EVERY_MS);
+        expect(d.status.mock.calls.length - before).toBeLessThanOrEqual(2);
+    });
+
     it("never opens the static link for a product that is still the placeholder", async () => {
         expect(isConfiguredProduct(PLAN_PRODUCTS.monthly)).toBe(true);
         expect(isConfiguredProduct("pdt_SOMETHING_PENDING")).toBe(false);

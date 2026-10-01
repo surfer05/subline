@@ -64,7 +64,10 @@ export function relayHeaders(credential: string, install?: string, json = false,
  */
 function withErrorCode<E extends Error>(err: E, body: any): E {
     if (!body || typeof body.error !== "string") return err;
-    if (/^[a-z_]{1,40}$/.test(body.error)) (err as any).errorCode = body.error;
+    // A promo claimed too often from one network: the relay keeps the older
+    // word ("rate_limited") and says why in `reason`.
+    if (body.error === "rate_limited" && body.reason === "net_limited") (err as any).errorCode = "net_limited";
+    else if (/^[a-z_]{1,40}$/.test(body.error)) (err as any).errorCode = body.error;
     else if (body.error === "checkout unavailable") (err as any).errorCode = "checkout_unavailable";
     return err;
 }

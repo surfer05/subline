@@ -57,6 +57,8 @@ describe("the relay client", () => {
         expect(await relayAnswering(503, { ok: false, error: "checkout unavailable" }).relay.checkout(ID))
             .toEqual({ kind: "unavailable", cause: "HTTP 503 checkout unavailable" });
         expect(await relayAnswering(409, { ok: false, error: "already_owned" }).relay.checkout(ID)).toEqual({ kind: "already_owned" });
+        // A payment still being confirmed: its own answer, never "failed" (which could fall back to a link).
+        expect(await relayAnswering(409, { ok: false, error: "purchase_pending" }).relay.checkout(ID)).toEqual({ kind: "purchase_pending" });
         const down = createActivationRelay({ version: "0.2.0", fetch: async () => { throw new Error("ECONNRESET"); } });
         expect(await down.checkout(ID)).toEqual({ kind: "network", cause: "ECONNRESET" });
     });
@@ -99,6 +101,8 @@ describe("the relay client", () => {
             expect((await relayAnswering(status, { ok: false, error }).relay.redeem(ID, "X1Y2")).kind).toBe(error);
         }
         expect((await relayAnswering(503, { ok: false, error: "unavailable" }).relay.redeem(ID, "X1Y2")).kind).toBe("unreachable");
+        // Too many claims of a promo from one network: the relay says why in `reason`.
+        expect((await relayAnswering(429, { ok: false, error: "rate_limited", reason: "net_limited" }).relay.redeem(ID, "X1Y2")).kind).toBe("net_limited");
     });
 
     it("a network failure is unreachable, with the cause and never the code", async () => {

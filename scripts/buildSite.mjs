@@ -220,6 +220,21 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}"${HIDDEN_SECTIONS.h
     if (iOk) iOk.hidden = !inst || ret.state !== "ok";
     if (iPending) iPending.hidden = !inst || ret.state !== "pending";
     if (failed) failed.hidden = ret.state !== "failed";
+    // A Discord or installer return that carried a key: offer it collapsed,
+    // only as the way out if the purchase has not switched on by itself.
+    var fb = part("fallback");
+    if (fb) {
+      var fk = (d || inst) && ret.state !== "failed" && ret.fallbackKeys && ret.fallbackKeys.length ? ret.fallbackKeys[0] : null;
+      fb.hidden = !fk;
+      if (fk) {
+        var fbD = fb.querySelector("[data-thanks-fallback-discord]"), fbI = fb.querySelector("[data-thanks-fallback-installer]");
+        if (fbD) fbD.hidden = !d;
+        if (fbI) fbI.hidden = !inst;
+        var fbCode = fb.querySelector("[data-thanks-fallback-code]"), fbBtn = fb.querySelector("[data-thanks-fallback-copy]");
+        if (fbCode) fbCode.textContent = fk;
+        if (fbCode && fbBtn) fbBtn.addEventListener("click", function () { copyText(fk, fbCode, fbBtn); });
+      }
+    }
     var keysBox = part("keys"), row = part("key");
     if (keysBox && row) {
       keysBox.hidden = ret.keys.length === 0;

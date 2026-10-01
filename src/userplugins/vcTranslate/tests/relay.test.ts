@@ -256,6 +256,9 @@ describe("the paid-only model (v2) on the wire", () => {
             await expect(fetchRelayRedeem(INSTALL, "SERVER5", refused(status, { ok: false, error }) as any)).rejects.toMatchObject({ errorCode: error });
         }
         await expect(fetchRelayRedeem(INSTALL, "SERVER5", ok({ ok: true }) as any)).rejects.toThrow(/relay redeem: HTTP 200/);
+        // Too many claims of the promo from this network: the reason, not the older word.
+        await expect(fetchRelayRedeem(INSTALL, "SERVER5", refused(429, { ok: false, error: "rate_limited", reason: "net_limited" }) as any))
+            .rejects.toMatchObject({ errorCode: "net_limited" });
     });
 });
 

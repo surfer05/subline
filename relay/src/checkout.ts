@@ -28,6 +28,7 @@
  */
 import { ipBucket, isNewClient, isTasteBearer, variantConfig, type CodeRecord, type Env } from "./codes";
 import { installOf, isApiV2, resolveEntitlement } from "./entitle";
+import { readCappedText, SMALL_BODY_BYTES } from "./body";
 
 export const DEFAULT_DODO_API_BASE = "https://live.dodopayments.com";
 export const DEFAULT_CHECKOUT_RETURN_URL = "https://surfer05.github.io/subline/";
@@ -59,6 +60,9 @@ export const AUTOMATIC_PRODUCT_PLACEHOLDER = ["pdt", "AUTOMATIC", "PENDING"].joi
 export const CHECKOUT_TTL_S = 2 * 86_400;
 /** Same lifetime as the webhook pending rows: bridges out-of-order delivery. */
 export const INST_TTL_S = 3 * 86_400;
+/** A repeat click reopens the same checkout for this long (well under the
+ *  session's own 24 h lifetime). */
+export const OPEN_SESSION_TTL_S = 30 * 60;
 /** Long enough for an install that was offline when the purchase landed. */
 export const PAID_TTL_S = 30 * 86_400;
 
@@ -121,8 +125,10 @@ export async function handleCheckout(req: Request, env: Env, now: number = Date.
     const bearer = h.startsWith("Bearer ") ? h.slice(7).trim() : "";
     if (!isTasteBearer(bearer)) return fail("bad request", 400);
     if (!isNewClient(req.headers.get("x-subline-client"))) return fail("bad request", 400);
+    const text = await readCappedText(req, SMALL_BODY_BYTES);
+    if (text === null) return fail("payload too large", 413);
     let body: any;
-    try { body = JSON.parse(await req.text()); } catch { return fail("bad request", 400); }
+    try { body = JSON.parse(text); } catch { return fail("bad request", 400); }
     const plan = body?.plan;
     if (plan !== "monthly" && plan !== "annual") return fail("bad request", 400);
 
@@ -150,8 +156,10 @@ async function handleCheckoutV2(req: Request, env: Env, now: number): Promise<Re
     const credential = h.startsWith("Bearer ") ? h.slice(7).trim() : "";
     if (!install || !credential || !isNewClient(req.headers.get("x-subline-client"))) return fail("bad request", 400);
     if (credential.startsWith("free_") && credential !== install) return fail("bad request", 400);
+    const text = await readCappedText(req, SMALL_BODY_BYTES);
+    if (text === null) return fail("payload too large", 413);
     let body: any;
-    try { body = JSON.parse(await req.text()); } catch { return fail("bad request", 400); }
+    try { body = JSON.parse(text); } catch { return fail("bad request", 400); }
     const plan = body?.plan;
     if (plan !== "automatic" && plan !== "monthly" && plan !== "annual") return fail("bad request", 400);
     if (!env.DODO_API_KEY) return fail("checkout unavailable", 503);
@@ -164,6 +172,17 @@ async function handleCheckoutV2(req: Request, env: Env, now: number): Promise<Re
     if (!r.ok) return fail(r.error, r.status);
     if (plan === "automatic" && r.automatic) return fail("already_owned", 409);
     if (plan !== "automatic" && !r.automatic) return fail("automatic_required", 403);
+    // A purchase of this kind is already on its way for this install (a
+    // payment or subscription event named it, see linkFromLifecycle) but has
+    // not switched on yet: a slow bank mandate, a late webhook. Selling it
+    // again would charge twice (and for AI, start a second subscription).
+    const kind: PurchaseKind = plan === "automatic" ? "automatic" : "ai";
+    if (!(kind === "automatic" ? r.automatic : r.ai)) {
+        let pending = false;
+        try { pending = (await env.CODES.get(buyingKey(r.hash, kind))) !== null; }
+        catch (e) { console.warn("checkout: pending purchase lookup failed, continuing", { error: cause(e) }); }
+        if (pending) return fail("purchase_pending", 409);
+    }
     // The installer asks to come back to a "go back to the installer" page.
     const from = body?.return === "installer" ? "installer" : "discord";
     return createSession(env, r.hash, productId, now, req.headers.get("cf-connecting-ip"), from);
@@ -176,6 +195,16 @@ async function handleCheckoutV2(req: Request, env: Env, now: number): Promise<Re
 async function createSession(
     env: Env, hash: string, productId: string, now: number, ip: string | null, from: "discord" | "installer" = "discord"
 ): Promise<Response> {
+    // A second click within OPEN_SESSION_TTL_S reopens the SAME checkout, so a
+    // buyer who clicks again while the first one is still loading, or comes
+    // back to it, cannot end up holding two payable sessions.
+    const openKey = `open:${hash}:${productId}:${from}`;
+    try {
+        const open = await env.CODES.get(openKey);
+        if (open && /^https:\/\//.test(open)) return json({ ok: true, url: open });
+    } catch (e) {
+        console.warn("checkout: open session lookup failed, continuing", { error: cause(e) });
+    }
     const hour = Math.floor(now / HOUR_MS);
     try {
         if (ip && !(await underHourly(env, `rl:coip:${ipBucket(ip)}:${hour}`, CHECKOUT_IP_PER_HOUR))) {
@@ -228,14 +257,54 @@ async function createSession(
             console.warn("checkout: session row write failed", { error: cause(e) });
         }
     }
+    try {
+        await env.CODES.put(openKey, url, { expirationTtl: OPEN_SESSION_TTL_S });
+    } catch (e) {
+        console.warn("checkout: open session row write failed", { error: cause(e) });
+    }
     return json({ ok: true, url });
 }
 
 /* --------------------------------------------------------------- linking -- */
 
+/** Which kind of purchase a payment or subscription event is about. */
+export type PurchaseKind = "ai" | "automatic";
+
+/**
+ * `buying:<hash>:<kind>` → {plan, at}: a purchase of this kind is on its way for
+ * this install. Written from the first payment or subscription event that names
+ * the install, so a second checkout for the same kind is refused with 409
+ * purchase_pending until it switches on (see handleCheckoutV2). Kept as long as
+ * the inst: rows; a failed or cancelled payment removes it.
+ */
+export function buyingKey(hash: string, kind: PurchaseKind): string {
+    return `buying:${hash}:${kind}`;
+}
+
+/** Events that end a purchase attempt without a purchase. */
+const PURCHASE_ENDED = new Set([
+    "payment.failed", "payment.cancelled", "subscription.failed", "subscription.cancelled", "subscription.expired"
+]);
+
+function purchaseKind(env: Env, name: string, data: any): { kind: PurchaseKind; plan: string | null } {
+    const pid = typeof data?.product_id === "string" ? data.product_id
+        : Array.isArray(data?.product_cart) && typeof data.product_cart[0]?.product_id === "string" ? data.product_cart[0].product_id
+        : "";
+    const plan = pid ? variantConfig(env, pid).plan ?? null : null;
+    const isSub = name.startsWith("subscription.") || (typeof data?.subscription_id === "string" && data.subscription_id !== "");
+    return { kind: isSub || plan === "monthly" || plan === "annual" ? "ai" : "automatic", plan };
+}
+
 /**
  * A payment.* or subscription.* event: record which install it belongs to and,
- * if the key already exists, hand it to that install. Never throws.
+ * if the key already exists, hand it to that install.
+ *
+ * THROWS ON A KV FAILURE, on purpose. This is the only place a one-time
+ * purchase learns its install (only payment.succeeded carries the metadata),
+ * so a write that fails here must make the webhook answer 500 and Dodo retry
+ * (every write is an idempotent overwrite). Swallowing it once left a paid
+ * buyer with nothing switched on. A missing or malformed install hash is not a
+ * failure: there is simply nothing to link.
  */
 export async function linkFromLifecycle(env: Env, name: string, data: any): Promise<void> {
     try {
@@ -247,6 +316,9 @@ export async function linkFromLifecycle(env: Env, name: string, data: any): Prom
             if (row && HASH_RE.test(row)) hash = row;
         }
         if (!hash) return;
+        const { kind, plan } = purchaseKind(env, name, data);
+        if (PURCHASE_ENDED.has(name)) await env.CODES.delete(buyingKey(hash, kind));
+        else await env.CODES.put(buyingKey(hash, kind), JSON.stringify({ plan, at: Date.now() }), { expirationTtl: INST_TTL_S });
         const ids = [data?.payment_id, data?.subscription_id]
             .filter((x: unknown): x is string => typeof x === "string" && x !== "");
         for (const id of ids) await env.CODES.put(`inst:${id}`, hash, { expirationTtl: INST_TTL_S });
@@ -262,11 +334,16 @@ export async function linkFromLifecycle(env: Env, name: string, data: any): Prom
             }
         }
     } catch (e) {
-        console.warn("purchase link (lifecycle) failed", { error: cause(e) });
+        console.warn("purchase link (lifecycle) failed, webhook will be retried", { event: name, error: cause(e) });
+        throw e;
     }
 }
 
-/** license_key.created: if an install is already known for this purchase, hand it the key. Never throws. */
+/**
+ * license_key.created: if an install is already known for this purchase, hand
+ * it the key. THROWS ON A KV FAILURE (see linkFromLifecycle), so the webhook
+ * answers 500 and Dodo retries; the key itself never reaches a log line.
+ */
 export async function linkFromKey(env: Env, key: string, joinIds: string[]): Promise<void> {
     try {
         // Called after the order: rows are written. Look for the install, then
@@ -282,7 +359,26 @@ export async function linkFromKey(env: Env, key: string, joinIds: string[]): Pro
             }
         }
     } catch (e) {
-        console.warn("purchase link (key) failed", { error: cause(e) });
+        const msg = key ? cause(e).split(key).join("<redacted>") : cause(e);
+        console.warn("purchase link (key) failed, webhook will be retried", { error: msg });
+        throw e;
+    }
+}
+
+/**
+ * A refund or a lost dispute: the purchase it paid for is over, so a new one
+ * of either kind may be bought from that install at once. Best-effort: a
+ * failure only keeps the pending marker until it expires.
+ */
+export async function clearBuying(env: Env, paymentId: string): Promise<void> {
+    if (!paymentId) return;
+    try {
+        const hash = await env.CODES.get(`inst:${paymentId}`);
+        if (!hash || !HASH_RE.test(hash)) return;
+        await env.CODES.delete(buyingKey(hash, "ai"));
+        await env.CODES.delete(buyingKey(hash, "automatic"));
+    } catch (e) {
+        console.warn("purchase pending marker clear failed", { error: cause(e) });
     }
 }
 

@@ -1011,6 +1011,10 @@ function startCheckout(plan: Plan): void {
         } else if (result === "already_owned") {
             Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message: UPGRADE_COPY.alreadyAutomatic });
             void refreshEntitlement();
+        } else if (result === "purchase_pending") {
+            // Nothing opened: buying again would charge twice. The flow keeps
+            // asking the relay, so it switches on by itself when it lands.
+            Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message: UPGRADE_COPY.purchasePending });
         }
     });
 }
@@ -1041,6 +1045,7 @@ function redeemErrorCopy(errorCode: string | undefined): string {
         case "not_found": return UPGRADE_COPY.codeNotFound;
         case "already": return UPGRADE_COPY.codeAlready;
         case "rate_limited": return UPGRADE_COPY.codeRateLimited;
+        case "net_limited": return UPGRADE_COPY.codeNetLimited;
         case "device_limit": return UPGRADE_COPY.deviceLimit;
         default: return UPGRADE_COPY.codeUnreachable;
     }
@@ -1627,7 +1632,7 @@ function enterCooldown(
     const cooldownMs = Math.max(asked, rateGateSettings().refillMs);
     setCooldown(engine, Date.now() + cooldownMs);
 
-    announceCooldownOnce(engine, cooldownMs, quotaModel, isDailyLimit(errorText));
+    announceCooldownOnce(engine, cooldownMs, quotaModel, isDailyLimit(errorText), isMonthlyLimit(errorText));
 }
 
 /**
@@ -1640,6 +1645,11 @@ function enterCooldown(
  */
 function isDailyLimit(errorText: string | undefined): boolean {
     return typeof errorText === "string" && /daily limit reached/i.test(errorText);
+}
+
+/** The relay's optional monthly AI allowance is spent ("monthly limit reached"). */
+function isMonthlyLimit(errorText: string | undefined): boolean {
+    return typeof errorText === "string" && /monthly limit reached/i.test(errorText);
 }
 
 /**
@@ -1677,7 +1687,7 @@ function isDailyLimit(errorText: string | undefined): boolean {
 const QUIET_COOLDOWN_MS = 60_000;
 
 function announceCooldownOnce(
-    engine: LlmEngineId, cooldownMs: number, quotaModel?: string, dailyLimit = false
+    engine: LlmEngineId, cooldownMs: number, quotaModel?: string, dailyLimit = false, monthlyLimit = false
 ): void {
     const { label } = LLM_ENGINES[engine];
 
@@ -1691,6 +1701,8 @@ function announceCooldownOnce(
             + "settings to try another. Translations are using Google (≈) meanwhile.";
     } else if (dailyLimit) {
         message = "Today's ✦ allowance is used up. ≈ keeps working. ✦ is back tomorrow.";
+    } else if (monthlyLimit) {
+        message = "This month's ✦ allowance is used up. ≈ keeps working. ✦ is back next month.";
     } else if (cooldownMs <= QUIET_COOLDOWN_MS) {
         // Say nothing, and stay unannounced: this is the common case, and it is
         // over before a toast would have finished fading in.

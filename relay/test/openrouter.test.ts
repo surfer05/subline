@@ -209,11 +209,12 @@ describe("translateWithFallback: OpenRouter primary, direct Groq key second", ()
         expect(urls[1]).toContain("groq.com");
     });
 
-    it("rethrows the 402 when the Groq fallback also fails", async () => {
+    it("when both fail, answers with the Groq fallback's 429 and keeps the primary's 402 as primaryStatus", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
         vi.stubGlobal("fetch", vi.fn(async (url: string) =>
             url === OR ? errBody(402) : errBody(429)));
         await expect(translateWithFallback(req(["hola"]), openrouter(), groqProvider))
-            .rejects.toMatchObject({ status: 429 });
+            .rejects.toMatchObject({ status: 429, primaryStatus: 402 });
     });
 });
 

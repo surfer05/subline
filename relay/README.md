@@ -376,16 +376,31 @@ ceiling), paid 1,500/day. Global freeze at 1.4M messages ≈ $45. Change
   stop at `GLOBAL_BUDGET_MESSAGES` no matter the concurrency. The migration in
   `wrangler.jsonc` creates it on first deploy; SQLite-backed DOs run on the
   Workers free plan.
-- **Per-code daily caps stay in KV** — soft fairness limits, bounded by the
-  atomic global guard, so a slight concurrent over-count costs pennies not
-  dollars.
+- **Per-code counters live in the same Durable Object.** The daily cap, the
+  optional monthly allowance (`AI_MONTHLY_CAP`) and the per-minute rate of
+  paid codes and v2 previews are checked inside the one budget call each
+  request already makes: exact, and no KV write per request. Only the legacy
+  0.1.x keyless tiers still count in KV. KV still takes purchase, account and
+  once-a-day stats writes, so **run the relay on Workers Paid** before launch:
+  the Free plan's 1,000 KV writes a day are not enough for webhooks and
+  accounts at scale. A failed write of the daily "seen" marker never fails a
+  request.
+- **The freeze is derived, not stored.** Raising `GLOBAL_BUDGET_MESSAGES`
+  unfreezes at once; `GET /admin/budget` shows the total and
+  `POST /admin/budget/reset` starts a fresh window (both need ADMIN_TOKEN).
 - **The relay owns the model and prompt, and every untrusted field is escaped**
   (message text, author, context, AND targetLang) — a crafted request cannot
   inject a prompt or turn the relay into a general Groq proxy. Payloads are
-  capped: 40 messages, 12 context entries, 4k chars/field, 32KB body, 40-char
-  target; `cost` folds prompt size in so a huge context cannot be billed as one.
-- **A Groq timeout is truly cancelled** (AbortController) and stays charged, so a
-  client cannot force slow batches to burn the key for free.
+  capped: 40 messages, 4k chars a message (a longer one fails alone), context
+  clipped to 1k chars a line and 6k in all (never a refusal), a 128 KB body read
+  with a running byte count, 40-char target; `cost` charges prompt text past
+  1k chars a message, so a huge context cannot be billed as one.
+- **Each provider has its own deadline.** The primary gets 9 s of the 22 s
+  request budget, so a hanging primary still leaves the fallback time to
+  answer. A request whose whole budget runs out stays charged (the last call
+  may have billed) and is answered 429 with a 60 s wait, so the client does not
+  re-send it at once. A primary failure is always logged with its status, and a
+  fallback save is a `primary_fail` metric row.
 - `translate.ts` mirrors the plugin's `engines/llmShared.ts` + `engines/groq.ts`.
   The drift-guard test fails if the prompt's load-bearing rules change; keep them
   in sync.

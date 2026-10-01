@@ -1,20 +1,19 @@
 /**
  * Auth, per-code fair-use metering, and the global budget kill-switch.
  *
- * STORAGE: Cloudflare KV. KV is simple, free-tier, and self-expiring, which is
- * right for a friends beta. Its one weakness — no atomic read-modify-write, so
- * two concurrent requests for the SAME code can both read `used=N` and both
- * write `N+cost`, slightly undercounting — is deliberately tolerated here for
- * two reasons: (1) a client sends only ~2-3 quality requests/minute
- * (QUALITY_DEBOUNCE_MS = 20s), so same-code concurrency is rare; (2) the thing
- * that actually protects the ~$50 budget is the GLOBAL cumulative counter
- * below, which is slack-tolerant by nature. When precise per-code accounting
- * matters (paid tier, fairness), swap this module for one Durable Object per
- * code — the router only calls authCode/reserve/refund, so nothing else moves.
+ * STORAGE. Code records, purchase rows and accounts live in Cloudflare KV.
+ * The per-request COUNTERS of paid codes and v2 previews (daily count, the
+ * optional monthly allowance, requests a minute) live in the Budget Durable
+ * Object, checked and counted in the same call that charges the global budget
+ * (see budget.ts and reserve below): exact under concurrency, and no KV write
+ * per request, so the relay does not run into KV's write limits as it grows.
+ * Only the legacy 0.1.x keyless tiers (taste, trial) still count in KV, with
+ * their per-address ceilings, exactly as before.
  */
 
 import { bumpStat } from "./stats";
-import { linkFromKey, linkFromLifecycle } from "./checkout";
+import { linkFromKey, linkFromLifecycle, clearBuying } from "./checkout";
+import { dayRowKey, monthRowKey, type ReserveReq, type ReserveRes } from "./budget";
 
 export interface Env {
     CODES: KVNamespace;
@@ -73,6 +72,12 @@ export interface Env {
     /** Launch moment (epoch ms or ISO date). An install whose trial:<id>
      *  record is older gets Automatic free as an early user. Unset: no grants. */
     LAUNCH_AT?: string;
+    /** Optional monthly allowance per AI subscription code (monthly/annual), in
+     *  budget spend units (budgetCostFor), counted per UTC calendar month in the
+     *  Budget Durable Object. Unset, empty or not a positive number: no monthly
+     *  allowance (the daily cap and the global budget still apply). A pricing
+     *  call for the owner: see wrangler.jsonc. */
+    AI_MONTHLY_CAP?: string;
 }
 
 export interface CodeRecord {
@@ -345,11 +350,11 @@ export async function authCode(env: Env, code: string | null): Promise<AuthOutco
 
 export type ReserveOutcome =
     | { ok: true; used: number; cap: number }
-    | { ok: false; reason: "cap_exceeded" | "rate_limited" | "capacity" | "unavailable"; retryAfterMs: number; used?: number; cap?: number };
+    | { ok: false; reason: "cap_exceeded" | "month_cap_exceeded" | "rate_limited" | "capacity" | "unavailable"; retryAfterMs: number; used?: number; cap?: number };
 
 /**
- * RESERVE BEFORE SPEND. The cap is checked and the spend committed to KV
- * BEFORE Groq is called, so a normal upstream failure (which then refunds)
+ * RESERVE BEFORE SPEND. The cap is checked and the spend committed BEFORE the
+ * model is called, so a normal upstream failure (which then refunds)
  * never overspends, and the reserve is the safe direction for the budget.
  */
 /**
@@ -372,8 +377,12 @@ export function rpmLimitFor(rec: CodeRecord): number {
  * What one batch costs against the per-bearer DAILY CAP (the used/cap the client
  * sees).
  *
- * A CODE is charged messages plus a prompt-size surcharge, so a client cannot
- * buy cheap tokens by stuffing huge texts into few messages. A TASTE install is
+ * A CODE is charged one unit per message, plus a surcharge only for prompt text
+ * beyond PROMPT_CHARS_PER_MESSAGE per message, so a client cannot buy cheap
+ * tokens by stuffing huge texts into few messages. The allowance is what makes
+ * "up to 2,000 ✦ a day" true in ordinary live chat: one short message with the
+ * 8-line context ring costs exactly 1, where the old whole-prompt surcharge
+ * charged it 2 and a subscriber ran out at about 1,000. A TASTE install is
  * charged MESSAGES ONLY: its cap is 3, and "3 free translations" has to mean 3
  * presses whatever the length, or the nudge ("2 of 3 left today") lies. The
  * money side of a long keyless message is not lost: the global budget and the
@@ -381,13 +390,20 @@ export function rpmLimitFor(rec: CodeRecord): number {
  */
 export function costFor(rec: CodeRecord, messages: number, promptChars: number): number {
     // A trial is the same keyless install, so it keeps the same honest unit.
-    return rec.plan === "taste" || rec.plan === "trial" ? messages : budgetCostFor(messages, promptChars);
+    if (rec.plan === "taste" || rec.plan === "trial") return messages;
+    const extra = Math.max(0, promptChars - PROMPT_CHARS_PER_MESSAGE * messages);
+    return messages + Math.ceil(extra / 1000);
 }
+
+/** Prompt characters (message, context, names) one ✦ message may carry before
+ *  it counts as more than one. Covers a message with the client's full 8-line
+ *  context ring of ordinary chat lines. */
+export const PROMPT_CHARS_PER_MESSAGE = 1_000;
 
 /** What one batch really costs in SPEND units, whatever the plan: messages plus
  *  one unit per started 1,000 prompt chars. This is what the global Budget guard
- *  is charged for every plan (for a code it equals costFor), so a keyless
- *  install's messages-only daily count can never hide real spend from the
+ *  is charged for every plan, so neither a keyless install's messages-only count
+ *  nor a code's per-message allowance (costFor) can hide real spend from the
  *  money ceiling. */
 export function budgetCostFor(messages: number, promptChars: number): number {
     return messages + Math.ceil(promptChars / 1000);
@@ -417,6 +433,20 @@ export function ipBucket(ip: string): string {
     const full = [...head, ...Array(halves.length === 2 ? missing : 0).fill("0"), ...tail];
     if (!full.every(h => /^[0-9a-f]{1,4}$/.test(h))) return raw;
     return full.slice(0, 4).map(h => h.replace(/^0+(?=.)/, "")).join(":") + "::/64";
+}
+
+/**
+ * A WIDER network key than ipBucket, for limits a scripted user must not be
+ * able to multiply cheaply: IPv4 is cut to its /24, IPv6 to its /48. A /48 is
+ * what one tunnel or VPS customer is routinely handed (65,536 /64s), so a /64
+ * limit alone does not stop one person. Unparseable input is its own bucket.
+ */
+export function ipBucketWide(ip: string): string {
+    const b = ipBucket(ip);
+    const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}$/.exec(b);
+    if (v4) return `${v4[1]}.${v4[2]}.${v4[3]}.0/24`;
+    if (b.endsWith("::/64")) return b.slice(0, -"::/64".length).split(":").slice(0, 3).join(":") + "::/48";
+    return b;
 }
 
 /** One per-address ceiling: its counter key, its limit, and which unit it
@@ -455,160 +485,230 @@ async function softPut(env: Env, key: string, value: string, ttlS: number, where
     }
 }
 
+/**
+ * WHERE A BEARER'S COUNTERS LIVE. The legacy keyless tiers (0.1.x taste and
+ * trial, closed to new ids after launch) keep their KV counters and per-address
+ * ceilings exactly as before. Every other bearer, paid and AI codes and a v2
+ * account's previews ("pv:<account>"), is counted inside the Budget Durable
+ * Object, in the same call that charges the global budget: zero KV writes per
+ * request (see budget.ts).
+ */
+export function countsInKv(code: string, rec: Pick<CodeRecord, "plan">): boolean {
+    return (rec.plan === "taste" || rec.plan === "trial") && !code.startsWith("pv:");
+}
+
+/** Taste, trial and preview traffic: what does not come from a paid AI plan. */
+function isFreeTraffic(rec: Pick<CodeRecord, "plan">): boolean {
+    return rec.plan === "taste" || rec.plan === "trial";
+}
+
+/** The share of the global budget that free traffic (taste, trial, previews)
+ *  may spend. The rest is kept for paying AI users, so free usage can never
+ *  freeze a subscriber. */
+export const FREE_BUDGET_SHARE = 0.9;
+
+/** The global freeze point for this request. */
+export function freezeAtFor(env: Env, free: boolean): number {
+    const all = Number(env.GLOBAL_BUDGET_MESSAGES) || DEFAULT_GLOBAL_FREEZE;
+    return free ? Math.ceil(all * FREE_BUDGET_SHARE) : all;
+}
+
+const SUBSCRIPTION_AI = new Set(["monthly", "annual"]);
+
+/** The monthly allowance (spend units) for this plan, or null when there is none. */
+export function monthlyCapFor(env: Env, plan: CodeRecord["plan"]): number | null {
+    if (!SUBSCRIPTION_AI.has(plan ?? "")) return null;
+    const n = Number(env.AI_MONTHLY_CAP);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+function msUntilNextUtcMonth(now: number): number {
+    const d = new Date(now);
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1) - now;
+}
+
+function budgetStub(env: Env): DurableObjectStub {
+    return env.BUDGET.get(env.BUDGET.idFromName("global"));
+}
+
+/** An error's message for a log line, with the code and address cut out. */
+function redacted(e: unknown, redact: string[]): string {
+    let msg = String((e as any)?.message ?? e).slice(0, 200);
+    for (const r of redact) if (r) msg = msg.split(r).join("<redacted>");
+    return msg;
+}
+
 /** `ip` is the caller's cf-connecting-ip, passed ONLY for taste/trial requests
  *  (and absent when the header is missing) — it enables the per-IP ceilings.
  *  `cost` is the per-bearer daily count (costFor); `budgetCost` is what the
- *  global guard and the per-IP cost cap are charged (budgetCostFor). It
- *  defaults to `cost`, which is right for a code, where the two are equal. */
+ *  global guard, the monthly allowance and the per-IP cost cap are charged
+ *  (budgetCostFor). It defaults to `cost`.
+ *
+ *  NEVER THROWS for an infrastructure fault: a Budget object or KV failure is
+ *  `unavailable` (503) with the cause logged, and a keyless request's counters
+ *  are rolled back first, so the account never loses a preview to an outage. */
 export async function reserve(
     env: Env, code: string, rec: CodeRecord, cost: number, now: number, ip?: string | null, budgetCost: number = cost
 ): Promise<ReserveOutcome> {
-    // 1) Per-minute rate limit (KV, soft): one shared paid key must not be
-    //    drained by a runaway/scraping client. Well above a real user's rate.
-    //    SKIPPED (no read, no write) when the daily cap makes it unreachable:
-    //    every successful reserve adds at least 1 to the day's count (the router
-    //    never sends a batch of 0 messages), so a bearer gets at most dailyCap
-    //    successes per UTC day, and a minute never straddles UTC midnight. With
-    //    dailyCap < rpmLimit (taste: 3 < 20) the rl: counter could never reach
-    //    its limit, so writing it changes no decision. Both counters share the
-    //    same KV read-modify-write race, so this holds exactly as softly as the
-    //    counters themselves already do.
     const rpmLimit = rpmLimitFor(rec);
+    // SKIPPED when the daily cap makes it unreachable: every successful
+    // reserve adds at least 1 to the day's count, so a bearer gets at most
+    // dailyCap successes per UTC day. With dailyCap < rpmLimit (taste: 3 < 20)
+    // the minute counter could never reach its limit.
     const rpmTracked = rec.dailyCap >= rpmLimit;
-    const rpmKey = `rl:${code}:${Math.floor(now / 60_000)}`;
-    const rpm = rpmTracked ? await readCount(env, rpmKey) : 0;
-    if (rpm >= rpmLimit) return { ok: false, reason: "rate_limited", retryAfterMs: 60_000 - (now % 60_000) };
+    const redact = [code, ip ?? ""];
 
-    // 2) Daily per-code cap (KV, soft fairness — bounded by the atomic global
-    //    guard below, so slight concurrent over-count costs pennies, not dollars).
-    const dayKey = `use:${code}:${today(now)}`;
-    const used = await readCount(env, dayKey);
-    if (used + cost > rec.dailyCap) {
-        return { ok: false, reason: "cap_exceeded", retryAfterMs: msUntilUtcMidnight(now), used, cap: rec.dailyCap };
+    if (!countsInKv(code, rec)) {
+        const monthCap = monthlyCapFor(env, rec.plan);
+        const body: ReserveReq = {
+            cost: budgetCost,
+            freezeAt: freezeAtFor(env, isFreeTraffic(rec)),
+            day: { key: dayRowKey(code, now), add: cost, cap: rec.dailyCap },
+            ...(monthCap !== null ? { month: { key: monthRowKey(code, now), add: budgetCost, cap: monthCap } } : {}),
+            ...(rpmTracked ? { rpm: { key: code, limit: rpmLimit } } : {}),
+            now
+        };
+        let d: ReserveRes;
+        try {
+            const res = await budgetStub(env).fetch("https://budget.internal/reserve", { method: "POST", body: JSON.stringify(body) });
+            d = await res.json() as ReserveRes;
+            if (typeof d?.allowed !== "boolean") throw new Error(`budget answered ${res.status} without a decision`);
+        } catch (e) {
+            console.warn("reserve: budget call failed, request refused", { error: redacted(e, redact) });
+            return { ok: false, reason: "unavailable", retryAfterMs: 60_000 };
+        }
+        if (d.allowed) return { ok: true, used: d.used ?? cost, cap: rec.dailyCap };
+        const used = d.used ?? 0;
+        if (d.reason === "rate_limited") return { ok: false, reason: "rate_limited", retryAfterMs: 60_000 - (now % 60_000) };
+        if (d.reason === "cap_exceeded") return { ok: false, reason: "cap_exceeded", retryAfterMs: msUntilUtcMidnight(now), used, cap: rec.dailyCap };
+        if (d.reason === "month_cap_exceeded") return { ok: false, reason: "month_cap_exceeded", retryAfterMs: msUntilNextUtcMonth(now), used, cap: rec.dailyCap };
+        return { ok: false, reason: "capacity", retryAfterMs: 3_600_000 };
     }
 
-    // 2b) KEYLESS ONLY: daily ceilings per ADDRESS (an IPv6 /64, see ipBucket),
-    //     shared by every free id behind it. The id is generated by the client,
-    //     so it can be rerolled for another 3; the address behind it cannot be,
-    //     cheaply. Checked BEFORE the budget guard so a farmed request never
-    //     spends. No header (not fronted by Cloudflare, or a unit test) ⇒ skip
-    //     the cap, never deny on its absence. A trial has its own counters
-    //     (use:ipt: messages, use:iptc: cost units), same logic.
+    // ---- LEGACY KEYLESS (0.1.x taste/trial): KV counters, as before --------
+    // 1) Per-minute rate limit (KV, soft).
+    const rpmKey = `rl:${code}:${Math.floor(now / 60_000)}`;
+    const dayKey = `use:${code}:${today(now)}`;
+    let rpm: number, used: number;
     const guards = ipGuards(rec.plan, ip, now);
     const ipUsed: number[] = [];
-    for (const g of guards) {
-        const n = await readCount(env, g.key);
-        ipUsed.push(n);
-        if (n + (g.unit === "cost" ? budgetCost : cost) > g.cap) {
-            // Same shape as the per-bearer cap (the client cannot act on the
-            // difference, and spelling out "your address is capped" would only
-            // teach a farmer what to evade). used/cap stay the BEARER's numbers
-            // so the plugin's "n of 3 left today" line never goes incoherent.
+    try {
+        rpm = rpmTracked ? await readCount(env, rpmKey) : 0;
+        if (rpm >= rpmLimit) return { ok: false, reason: "rate_limited", retryAfterMs: 60_000 - (now % 60_000) };
+
+        // 2) Daily per-bearer cap.
+        used = await readCount(env, dayKey);
+        if (used + cost > rec.dailyCap) {
             return { ok: false, reason: "cap_exceeded", retryAfterMs: msUntilUtcMidnight(now), used, cap: rec.dailyCap };
         }
-    }
 
-    // 2c) KEYLESS FAILS CLOSED. For a taste/trial/preview request the KV
-    //     counters ARE the limit: nothing else stops one random free_ id from
-    //     translating without end. So they are written BEFORE the budget is
-    //     committed, and if any write fails the request is refused with
-    //     "unavailable" (503) having spent nothing: no budget, no model call.
-    //     A partial write is rolled back best-effort. A paid code keeps the
-    //     fail-open order below (budget first, soft counters): it has paid,
-    //     and its fairness cap is not what protects the money.
-    const redact = [code, ip ?? ""];
-    const keyless = rec.plan === "taste" || rec.plan === "trial";
-    if (keyless) {
-        // A FROZEN budget refuses everything, so ask it first: writing four
-        // counters only to roll all four back is pure KV churn on exactly the
-        // day the relay is already out of money. The rollback below stays for
-        // the race where the budget freezes between this read and the reserve.
-        const budgetStub = env.BUDGET.get(env.BUDGET.idFromName("global"));
-        const freezeAtK = Number(env.GLOBAL_BUDGET_MESSAGES) || DEFAULT_GLOBAL_FREEZE;
-        try {
-            const st = await (await budgetStub.fetch("https://budget.internal/status")).json() as { total?: number; frozen?: boolean };
-            if (st.frozen === true || (typeof st.total === "number" && st.total >= freezeAtK)) {
-                return { ok: false, reason: "capacity", retryAfterMs: 3_600_000 };
-            }
-        } catch { /* unknown: fall through; the reserve below still decides */ }
-        const writes: { key: string; before: number; after: number; ttl: number }[] = [
-            { key: dayKey, before: used, after: used + cost, ttl: 172_800 },
-            ...(rpmTracked ? [{ key: rpmKey, before: rpm, after: rpm + 1, ttl: 120 }] : []),
-            ...guards.map((g, i) => ({
-                key: g.key, before: ipUsed[i]!, after: ipUsed[i]! + (g.unit === "cost" ? budgetCost : cost), ttl: 172_800
-            }))
-        ];
-        const done: typeof writes = [];
-        const rollback = async () => {
-            for (const w of done) {
-                try { await env.CODES.put(w.key, String(w.before), { expirationTtl: w.ttl }); } catch { /* best effort */ }
-            }
-        };
-        for (const w of writes) {
-            try {
-                await env.CODES.put(w.key, String(w.after), { expirationTtl: w.ttl });
-                done.push(w);
-            } catch (e) {
-                let msg = String((e as any)?.message ?? e).slice(0, 200);
-                for (const r of redact) if (r) msg = msg.split(r).join("<redacted>");
-                console.warn("reserve: keyless counter write failed, request refused", { error: msg });
-                await rollback();
-                return { ok: false, reason: "unavailable", retryAfterMs: 60_000 };
+        // 2b) Daily ceilings per ADDRESS (an IPv6 /64, see ipBucket), shared by
+        //     every free id behind it. The id is generated by the client, so it
+        //     can be rerolled for another 3; the address behind it cannot be,
+        //     cheaply. No header (not fronted by Cloudflare, or a unit test) ⇒
+        //     skip the cap, never deny on its absence.
+        for (const g of guards) {
+            const n = await readCount(env, g.key);
+            ipUsed.push(n);
+            if (n + (g.unit === "cost" ? budgetCost : cost) > g.cap) {
+                // Same shape as the per-bearer cap (spelling out "your address
+                // is capped" would only teach a farmer what to evade).
+                return { ok: false, reason: "cap_exceeded", retryAfterMs: msUntilUtcMidnight(now), used, cap: rec.dailyCap };
             }
         }
-        const bresK = await budgetStub.fetch("https://budget.internal/reserve", {
-            method: "POST",
-            body: JSON.stringify({ cost: budgetCost, freezeAt: freezeAtK })
-        });
-        const decisionK = await bresK.json() as { allowed: boolean };
-        if (!decisionK.allowed) {
-            await rollback();
+    } catch (e) {
+        console.warn("reserve: keyless counter read failed, request refused", { error: redacted(e, redact) });
+        return { ok: false, reason: "unavailable", retryAfterMs: 60_000 };
+    }
+
+    // 2c) KEYLESS FAILS CLOSED. The KV counters ARE the limit: nothing else
+    //     stops one random free_ id from translating without end. So they are
+    //     written BEFORE the budget is committed, and if any write fails the
+    //     request is refused with "unavailable" (503) having spent nothing. A
+    //     partial write is rolled back best-effort.
+    const stub = budgetStub(env);
+    const freezeAtK = freezeAtFor(env, true);
+    // Ask the budget first: writing counters only to roll them back is pure KV
+    // churn on exactly the day the relay is already out of money. Decided from
+    // the total only (a stale "frozen" flag never refuses, see budget.ts).
+    try {
+        const st = await (await stub.fetch("https://budget.internal/status")).json() as { total?: number };
+        if (typeof st.total === "number" && st.total >= freezeAtK) {
             return { ok: false, reason: "capacity", retryAfterMs: 3_600_000 };
         }
-        return { ok: true, used: used + cost, cap: rec.dailyCap };
+    } catch { /* unknown: fall through; the reserve below still decides */ }
+    const writes: { key: string; before: number; after: number; ttl: number }[] = [
+        { key: dayKey, before: used, after: used + cost, ttl: 172_800 },
+        ...(rpmTracked ? [{ key: rpmKey, before: rpm, after: rpm + 1, ttl: 120 }] : []),
+        ...guards.map((g, i) => ({
+            key: g.key, before: ipUsed[i]!, after: ipUsed[i]! + (g.unit === "cost" ? budgetCost : cost), ttl: 172_800
+        }))
+    ];
+    const done: typeof writes = [];
+    const rollback = async () => {
+        for (const w of done) {
+            try { await env.CODES.put(w.key, String(w.before), { expirationTtl: w.ttl }); } catch { /* best effort */ }
+        }
+    };
+    for (const w of writes) {
+        try {
+            await env.CODES.put(w.key, String(w.after), { expirationTtl: w.ttl });
+            done.push(w);
+        } catch (e) {
+            console.warn("reserve: keyless counter write failed, request refused", { error: redacted(e, redact) });
+            await rollback();
+            return { ok: false, reason: "unavailable", retryAfterMs: 60_000 };
+        }
     }
-
-    // 3) Global spend guard (ATOMIC — Durable Object). This is the real money
-    //    ceiling; committed FIRST so a race can never push total dollars past
-    //    the cap. If it freezes, nothing per-code is written. Charged the SPEND
-    //    units (budgetCost), so a keyless install's messages-only count cannot
-    //    hide the prompt size from the ceiling.
-    const freezeAt = Number(env.GLOBAL_BUDGET_MESSAGES) || DEFAULT_GLOBAL_FREEZE;
-    const budget = env.BUDGET.get(env.BUDGET.idFromName("global"));
-    const bres = await budget.fetch("https://budget.internal/reserve", {
-        method: "POST",
-        body: JSON.stringify({ cost: budgetCost, freezeAt })
-    });
-    const decision = await bres.json() as { allowed: boolean };
-    if (!decision.allowed) return { ok: false, reason: "capacity", retryAfterMs: 3_600_000 };
-
-    // 4) Commit the per-code counters (soft; paid codes only, keyless returned
-    //    above). Self-purge (daily 2d, rpm 2min). A failed write is logged and
-    //    ignored (see softPut): the budget is already committed, so the paid
-    //    request goes ahead.
-    await softPut(env, dayKey, String(used + cost), 172_800, "reserve", "day", redact);
-    if (rpmTracked) await softPut(env, rpmKey, String(rpm + 1), 120, "reserve", "rpm", redact);
-    for (let i = 0; i < guards.length; i++) {
-        const g = guards[i]!;
-        await softPut(env, g.key, String(ipUsed[i]! + (g.unit === "cost" ? budgetCost : cost)), 172_800, "reserve", g.unit === "cost" ? "ip_cost" : "ip", redact);
+    let allowed: boolean;
+    try {
+        const bres = await stub.fetch("https://budget.internal/reserve", {
+            method: "POST",
+            body: JSON.stringify({ cost: budgetCost, freezeAt: freezeAtK, now } satisfies ReserveReq)
+        });
+        const decision = await bres.json() as { allowed?: unknown };
+        if (typeof decision?.allowed !== "boolean") throw new Error(`budget answered ${bres.status} without a decision`);
+        allowed = decision.allowed;
+    } catch (e) {
+        // The counters were written for a request that will not be served:
+        // give them back. If the object did commit before its answer was lost,
+        // the budget only ends up a little conservative.
+        console.warn("reserve: budget call failed, request refused", { error: redacted(e, redact) });
+        await rollback();
+        return { ok: false, reason: "unavailable", retryAfterMs: 60_000 };
     }
-
+    if (!allowed) {
+        await rollback();
+        return { ok: false, reason: "capacity", retryAfterMs: 3_600_000 };
+    }
     return { ok: true, used: used + cost, cap: rec.dailyCap };
 }
 
-/** Return a reservation when the upstream call failed, so a Groq outage never
- *  costs a user their quota. Best-effort; the global counter is left as-is
- *  (slack-tolerant) so the budget guard stays conservative. */
-/** `plan` picks which address counters to give back (taste → use:ip:, trial →
+/** Return a reservation when the upstream call failed, so an outage never
+ *  costs a user their quota. Best-effort; the global counter is left as-is so
+ *  the budget guard stays conservative.
+ *
+ *  `plan` picks where the counters live (see countsInKv) and which address
+ *  counters a legacy keyless request gives back (taste → use:ip:, trial →
  *  use:ipt: and use:iptc:). It defaults to taste so the pre-trial call
- *  signature keeps its exact meaning; `budgetCost` (default `cost`) is what
- *  the cost-unit counter gives back. Never throws: it runs in waitUntil after
- *  the response, and a failed refund only leaves a counter slightly high. */
+ *  signature keeps its exact meaning; `budgetCost` (default `cost`) is what the
+ *  cost-unit counters give back. Never throws: it runs in waitUntil after the
+ *  response, and a failed refund only leaves a counter slightly high. */
 export async function refund(
     env: Env, code: string, cost: number, now: number, ip?: string | null,
     plan: CodeRecord["plan"] = "taste", budgetCost: number = cost
 ): Promise<void> {
     const redact = [code, ip ?? ""];
+    if (!countsInKv(code, { plan })) {
+        const rows = [{ key: dayRowKey(code, now), sub: cost }];
+        if (monthlyCapFor(env, plan) !== null) rows.push({ key: monthRowKey(code, now), sub: budgetCost });
+        try {
+            await budgetStub(env).fetch("https://budget.internal/refund", { method: "POST", body: JSON.stringify({ rows }) });
+        } catch (e) {
+            console.warn("refund: budget call failed, counter stays charged", { error: redacted(e, redact) });
+        }
+        return;
+    }
     const giveBack = async (key: string, by: number, counter: string) => {
         let n: number;
         try { n = await readCount(env, key); } catch { return; }
@@ -623,9 +723,27 @@ export async function refund(
     }
 }
 
-/** Current usage for GET /v1/status. */
+/** A DO-counted bearer's count for today (see countsInKv). Throws on failure. */
+export async function readDayCount(env: Env, code: string, now: number): Promise<number> {
+    const key = dayRowKey(code, now);
+    const res = await budgetStub(env).fetch("https://budget.internal/peek", { method: "POST", body: JSON.stringify({ keys: [key] }) });
+    const v = Number((await res.json() as { values?: Record<string, unknown> })?.values?.[key]);
+    return Number.isFinite(v) ? v : 0;
+}
+
+/** Current usage for GET /v1/status. A counter that cannot be read shows 0,
+ *  with the cause logged: status must not fail over a display number. */
 export async function usage(env: Env, code: string, rec: CodeRecord, now: number): Promise<{ used: number; cap: number; resetsInMs: number }> {
-    const used = await readCount(env, `use:${code}:${today(now)}`);
+    let used: number;
+    if (countsInKv(code, rec)) {
+        used = await readCount(env, `use:${code}:${today(now)}`);
+    } else {
+        try { used = await readDayCount(env, code, now); }
+        catch (e) {
+            console.warn("usage: budget read failed, showing 0", { error: redacted(e, [code]) });
+            used = 0;
+        }
+    }
     return { used, cap: rec.dailyCap, resetsInMs: msUntilUtcMidnight(now) };
 }
 
@@ -1003,7 +1121,9 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
         await env.CODES.put(`code:${key}`, JSON.stringify(rec));
         for (const id of joinIds) await env.CODES.put(`order:${id}`, key); // reverse index (both join ids)
         // Hand the key to the install that bought it, if a payment/subscription
-        // event already said which one (see checkout.ts). Never throws.
+        // event already said which one (see checkout.ts). A KV failure there
+        // throws, so this webhook answers 500 and Dodo retries; everything
+        // above is an idempotent upsert, so the retry is safe.
         await linkFromKey(env, key, joinIds);
         // POST-WRITE RE-CHECK: a lifecycle event running concurrently may have
         // missed our order: index and staged AFTER the drain above. Look once
@@ -1021,7 +1141,8 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
     }
 
     // ---- Which install bought this (checkout.ts). Runs before the state
-    // machine, never throws, and never changes the code record itself.
+    // machine and never changes the code record itself. A KV failure throws
+    // (500, Dodo retries): this is the only event that names the install.
     if (name.startsWith("payment.") || name.startsWith("subscription.")) {
         await linkFromLifecycle(env, name, data);
     }
@@ -1064,6 +1185,8 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
     // terminal:true closes the refund bypass — a replayed active subscription
     // event can never flip a refunded code back to active.
     if (name === "refund.succeeded" || DISPUTE_LOST.has(name)) {
+        // The purchase is over: a new one may be bought from that install now.
+        await clearBuying(env, asStr(data.payment_id));
         return { action: await applyLifecycle(env, asStr(data.payment_id), { revoked: true, terminal: true, expiresAt: now, revokedAt: now }) };
     }
 

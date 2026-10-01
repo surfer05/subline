@@ -4,11 +4,12 @@
  * model. Legacy clients never reach this file (index.ts routes on
  * `x-subline-api: 2`).
  */
-import { ipBucket, isNewClient, mintCode, type CodeRecord, type Env } from "./codes";
+import { ipBucket, ipBucketWide, isNewClient, mintCode, readDayCount, type CodeRecord, type Env } from "./codes";
 import {
-    checkCode, grantCode, installOf, previewKey, PREVIEW_DAILY_CAP, PROMO_RE, promoIndex, resolveEntitlement,
+    checkCode, grantCode, installOf, PREVIEW_DAILY_CAP, PROMO_RE, promoIndex, resolveEntitlement,
     reissueCode, resetInstalls, signToken, TOKEN_TTL_MS
 } from "./entitle";
+import { readCappedText, SMALL_BODY_BYTES } from "./body";
 import { REDEEM_IP_DAILY_FAILURES, REDEEM_IP_DAILY_SUCCESSES } from "./promo";
 
 export { REDEEM_IP_DAILY_FAILURES, REDEEM_IP_DAILY_SUCCESSES };
@@ -34,12 +35,6 @@ function identify(req: Request): { install: string; credential: string } | null 
     // A bearer that is an install id must be THIS install's id.
     if (credential.startsWith("free_") && credential !== install) return null;
     return { install, credential };
-}
-
-async function readCount(env: Env, key: string): Promise<number> {
-    const v = await env.CODES.get(key);
-    const n = v === null ? 0 : Number(v);
-    return Number.isFinite(n) ? n : 0;
 }
 
 /**
@@ -71,7 +66,13 @@ export async function handleStatusV2(req: Request, env: Env, now: number): Promi
     if (!r.ok) return fail(r.error, r.status);
     let used = 0;
     if (r.automatic && !r.ai && r.acctId) {
-        try { used = await readCount(env, previewKey(r.acctId, now)); } catch { used = 0; }
+        // Counted in the Budget object with the account's other ✦ use (see
+        // codes.ts reserve). A read failure shows 0, logged: a display number.
+        try { used = await readDayCount(env, "pv:" + r.acctId, now); }
+        catch (e) {
+            console.warn("status: preview count read failed", { error: String((e as any)?.message ?? e).slice(0, 200) });
+            used = 0;
+        }
     }
     const tokenExpiresAt = now + TOKEN_TTL_MS;
     const token = await signToken(env, { v: 1, i: r.hash, a: r.automatic, ai: r.ai, exp: tokenExpiresAt });
@@ -148,7 +149,9 @@ export async function handleRedeem(req: Request, env: Env, now: number): Promise
 
 async function redeemOnce(req: Request, env: Env, id: { install: string; credential: string }, now: number): Promise<Response> {
     let body: any;
-    try { body = JSON.parse(await req.text()); } catch { return fail("bad request", 400); }
+    const text = await readCappedText(req, SMALL_BODY_BYTES);
+    if (text === null) return fail("payload too large", 413);
+    try { body = JSON.parse(text); } catch { return fail("bad request", 400); }
     const promo = typeof body?.code === "string" ? body.code.trim().toUpperCase() : "";
     if (!PROMO_RE.test(promo)) return fail("not_found", 404);
 
@@ -167,17 +170,25 @@ async function redeemOnce(req: Request, env: Env, id: { install: string; credent
     if (r.automatic) return fail("already", 409);
 
     const stub = env.PROMO!.get(env.PROMO!.idFromName(promo));
+    // The caller's WIDE network (IPv4 /24, IPv6 /48): a promo allows only a
+    // few claims from one, so one person cannot drain it (see promo.ts).
+    const ip = req.headers.get("cf-connecting-ip");
+    const net = ip ? ipBucketWide(ip) : undefined;
     let claim: { result?: string };
     try {
         const res = await stub.fetch("https://promo.internal/claim", {
-            method: "POST", body: JSON.stringify({ install: r.hash, cap })
+            method: "POST", body: JSON.stringify({ install: r.hash, cap, net, promo })
         });
         claim = await res.json() as { result?: string };
-    } catch {
+    } catch (e) {
+        console.warn("redeem: claim failed", { error: String((e as any)?.message ?? e).slice(0, 200) });
         return fail("unavailable", 503);
     }
     if (claim.result === "claimed") return fail("claimed", 410);
     if (claim.result === "already") return fail("already", 409);
+    // Too many claims of this promo from one network. "rate_limited" keeps an
+    // older client's sentence sensible; `reason` lets a newer one be exact.
+    if (claim.result === "net_limited") return json({ ok: false, error: "rate_limited", reason: "net_limited" }, 429);
     if (claim.result !== "ok") return fail("unavailable", 503);
 
     // The slot is taken: mint and attach, or give the slot back.
@@ -186,20 +197,20 @@ async function redeemOnce(req: Request, env: Env, id: { install: string; credent
         const rec: CodeRecord = { status: "active", plan: "automatic", dailyCap: PREVIEW_DAILY_CAP, note: `promo:${promo}`, createdAt: now };
         await env.CODES.put(`code:${code}`, JSON.stringify(rec));
         if (!(await grantCode(env, id.install, code, promo, now))) {
-            await release(stub, r.hash);
+            await release(stub, r.hash, net);
             return fail("device_limit", 403);
         }
     } catch (e) {
         console.warn("redeem: grant failed, slot released", { error: String((e as any)?.message ?? e).slice(0, 200) });
-        await release(stub, r.hash);
+        await release(stub, r.hash, net);
         return fail("unavailable", 503);
     }
     return json({ ok: true, code });
 }
 
-async function release(stub: DurableObjectStub, hash: string): Promise<void> {
+async function release(stub: DurableObjectStub, hash: string, net?: string): Promise<void> {
     try {
-        await stub.fetch("https://promo.internal/release", { method: "POST", body: JSON.stringify({ install: hash }) });
+        await stub.fetch("https://promo.internal/release", { method: "POST", body: JSON.stringify({ install: hash, net }) });
     } catch { /* the slot stays taken; an approximate loss of one */ }
 }
 
