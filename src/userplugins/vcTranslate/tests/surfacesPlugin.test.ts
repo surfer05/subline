@@ -196,7 +196,7 @@ describe("an install that owns nothing sees no change", () => {
         expect(P.bioWithLine(ORIGINAL, "Ich liebe Pizza")).toBe(ORIGINAL);
         expect(P.statusTextChildren(ORIGINAL, "Bin gleich zurück")).toBe(ORIGINAL);
         expect(P.forumTagChildren("Hilfe gesucht")).toBe("Hilfe gesucht");
-        expect(P.statusBubbleChildren("Bin gleich zurück")).toBe("Bin gleich zurück");
+        expect(deep(P.statusLine({ text: "Bin gleich zurück" }))).toBeNull();
         expect(P.replyQuoteChildren(ORIGINAL, { referencedMessage: { message: { id: "q1", channel_id: "c1", content: "Kommst du?" } } })).toBe(ORIGINAL);
     }
 
@@ -606,17 +606,36 @@ describe("channel-level text follows the message rules of its channel", () => {
 describe("size limits", () => {
     beforeEach(() => paid());
 
-    it("a text over 2,000 characters is not sent and gets no line; the others in its batch still translate", async () => {
-        const long = "Das ist ein sehr langer Absatz über Pizza. ".repeat(100).slice(0, 4096);
+    it("an embed description over 4,000 characters sends its first part and says so; the others in its batch still translate", async () => {
+        // WAS: "a text over 2,000 characters is not sent and gets no line".
+        // Discord allows 4,096 in a description, and the longest text in a
+        // rules or announcement embed is the one that matters most, so it
+        // got silence. Now: up to 4,000 is sent whole, and past that the
+        // first part, with a plain note that the rest is missing.
+        const long = "Das ist ein sehr langer Absatz über Pizza. ".repeat(100).slice(0, 4090);
         const message = { ...embedMessage("big"), embeds: [{ rawTitle: "Neue Pizzeria in der Stadt", rawDescription: long }] };
         accessory(message);
         await settle();
         const sent = surfaceCalls().flatMap(c => JSON.parse(c[2]).messages.map((m: any) => m.text));
         expect(sent).toContain("Neue Pizzeria in der Stadt");
-        expect(sent.some((t: string) => t.length > 2000)).toBe(false);
+        expect(sent.some((t: string) => t.length > 4000)).toBe(false);
+        expect(sent.some((t: string) => t.startsWith("Das ist ein sehr langer"))).toBe(true);
         const out = text(accessory(message));
         expect(out).toContain("✦ de · sharp: Neue Pizzeria in der Stadt");
-        expect(out).not.toContain("sharp: Das ist ein sehr langer");
+        expect(out).toContain("sharp: Das ist ein sehr langer");
+        expect(out).toContain("Translated the first part. The rest is too long.");
+    });
+
+    it("an embed description of 3,000 characters is translated whole", async () => {
+        const long = "Hola a todos, bienvenidos al servidor.\n\n".repeat(80).slice(0, 3000);
+        const message = { ...embedMessage("mid"), embeds: [{ rawDescription: long }] };
+        accessory(message);
+        await settle();
+        const sent = surfaceCalls().flatMap(c => JSON.parse(c[2]).messages.map((m: any) => m.text));
+        expect(sent.some((t: string) => t.length > 2000 && t.length <= 3000)).toBe(true);
+        const out = text(accessory(message));
+        expect(out).toContain("sharp: Hola a todos");
+        expect(out).not.toContain("The rest is too long");
     });
 
     it("a batch of long fields splits so no request carries more than 20 KB", async () => {
@@ -663,8 +682,16 @@ describe("budget and priority: messages always come first", () => {
         const relay = times.filter(t => t.surface && t.engine === "relay").map(t => t.at);
         expect(relay.length).toBeGreaterThan(0);
         for (const at of relay) expect(relay.filter(x => x >= at && x < at + 60_000).length).toBeLessThanOrEqual(4);
-        // Tight marks are ✦ only: no ≈ fan-out to Google.
-        expect(times.filter(t => t.surface && t.engine === "google")).toEqual([]);
+        // Tight marks are ✦ only while the day's surface ✦ lasts. This scroll
+        // spends it (4 requests of 25 statuses at 2 units, a minute), and from
+        // then on rows get ≈ in place like an Automatic owner's, which Google
+        // meters at 60 texts a minute. WAS: no ≈ at all, so an AI reader saw
+        // untranslated rows for the rest of the day.
+        const google = times.filter(t => t.surface && t.engine === "google");
+        const firstGoogle = google[0]?.at ?? Number.POSITIVE_INFINITY;
+        expect(firstGoogle).toBeGreaterThan(relay[0]!);
+        const googleTexts = google.flatMap(t => t.ids.map(() => t.at));
+        for (const at of googleTexts) expect(googleTexts.filter(x => x >= at && x < at + 60_000).length).toBeLessThanOrEqual(60);
     });
 
     it("a message batch that arrives mid-scroll goes out on time, without waiting behind surfaces", async () => {
@@ -695,9 +722,12 @@ describe("budget and priority: messages always come first", () => {
         accessory(embedMessage());
         await settle();
         expect(times.filter(t => t.surface && t.engine === "relay")).toEqual([]);
-        // Roomy lines fall back to ≈; tight places keep Discord's original.
+        // Roomy lines fall back to ≈, and tight places do too. WAS: tight
+        // places kept Discord's original, so for the rest of the day an AI
+        // reader saw less than an Automatic owner. Paying more must never
+        // show less.
         expect(text(accessory(embedMessage()))).toContain("≈ de · google: Neue Pizzeria in der Stadt");
-        expect(decorator("u1")).toBe("Bin gleich zurück, muss kochen");
+        expect(text(decorator("u1"))).toContain("≈ google: Bin gleich zurück, muss kochen");
 
         __stubSetSelectedChannel("c1");
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: { id: "live2", channel_id: "c1", content: "hola, ¿qué tal estáis todos?", author: { id: "u2", username: "ana" } } });
@@ -800,6 +830,15 @@ describe("the reply bar", () => {
         expect(surfaceCalls()).toEqual([]);
     });
 
+    it("keeps Discord's quoted line when the stored translation is Google's guess at romanized text", async () => {
+        // The message's own line says "≈ rough" for this. In place there is
+        // no room for that mark, so the guess (Google is 100% sure, and
+        // inverts the negation) must not be shown as the meaning.
+        paid();
+        setTranslation(makeKey("q3", "en"), { lang: "ar", text: "I want to go home", via: "google", conf: 1 });
+        expect(bar(quoted("q3", "c1", "ana ma bghitsh nmchi l dar"))).toEqual(ORIGINAL);
+    });
+
     it("with no cached translation, shows Discord's line and asks (✦ only) when the quoted channel translates messages", async () => {
         paid();
         expect(bar(quoted("q2"))).toEqual(ORIGINAL);
@@ -848,33 +887,82 @@ describe("the reply bar", () => {
     });
 });
 
-describe("the custom status bubble", () => {
+describe("the custom status line under the profile bubble", () => {
     const status = "Só sei que nada sei, mas gosto de aprender";
 
-    it("a non-paid install gets Discord's own text back, the same string", () => {
-        expect(P.statusBubbleChildren(status)).toBe(status);
-        expect(P.statusBubbleChildren(undefined)).toBeUndefined();
+    /** Every style object on the way down to the text. */
+    function styles(node: any, out: any[] = []): any[] {
+        if (node === null || typeof node !== "object") return out;
+        if (Array.isArray(node)) { for (const n of node) styles(n, out); return out; }
+        if (node.props?.style) out.push(node.props.style);
+        styles(node.children, out);
+        return out;
+    }
+
+    it("a non-paid install gets nothing", async () => {
+        await restart(() => DataStore.clearEntitlementForTest());
+        expect(deep(P.statusLine({ text: status }))).toBeNull();
+        expect(deep(P.statusLine(undefined))).toBeNull();
     });
 
-    it("paid: the original text, then a second smaller line \"✦ translation\" inside the bubble, bio or not", async () => {
+    it("paid: its own \"Status · ✦\" line, ≈ first", async () => {
         paid();
-        stubProfiles.set("u1", { bio: "Ich liebe Pizza" });
-        expect(P.statusBubbleChildren(status)).toBe(status);
+        const first = deep(P.statusLine({ text: status }));
+        expect(first === null || text(first) === "").toBe(true);
         await settle();
-        const out = P.statusBubbleChildren(status);
-        expect(out[0]).toBe(status);
-        const line = out[1];
-        expect(line.type).toBe("div");
-        expect(line.props.style).toMatchObject({ whiteSpace: "normal", overflowWrap: "anywhere" });
-        expect(text(line)).toBe("✦ sharp: " + status);
-        // ✦ only: no ≈ request for the bubble.
-        expect(surfaceCalls("google")).toEqual([]);
+        const line = deep(P.statusLine({ text: status }));
+        expect(line.props["data-subline-status"]).toBe("");
+        expect(text(line)).toBe("Status · ✦ de · sharp: " + status);
     });
 
-    it("the bubble's re-measure hook returns a version number and never throws", () => {
-        expect(typeof P.useSurfaceVersion()).toBe("number");
-        plugin.stop!();
-        expect(typeof P.useSurfaceVersion()).toBe("number");
+    // THE FIELD BUG, 2026-10-01: the ✦ line sat INSIDE Discord's status text,
+    // which its CSS clamps to 2 lines (8 on hover, at most 144px). A 128-char
+    // status filled them, so its translation ended in "…" or never showed.
+    for (const [name, source] of [
+        ["Latin", "Hoje estou muito cansado depois do trabalho, mas amanhã vou jogar com vocês a noite toda, prometo que não vou faltar!!".padEnd(128, "!")],
+        ["CJK", "今日は仕事でとても疲れたけど、明日は一晩中みんなと一緒にゲームをする約束だよ。絶対に休まないからね。".repeat(4).slice(0, 128)]
+    ] as const) {
+        it(`a 128-char ${name} status shows all of a 300-char translation, with no clamp anywhere`, async () => {
+            paid();
+            const long = "This is a very long translation that keeps going. ".repeat(6).slice(0, 300);
+            native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => ({
+                ok: true,
+                results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "pt", text: long, skip: false, conf: 0.99 }))
+            }));
+            expect(source.length).toBe(128);
+            deep(P.statusLine({ text: source }));
+            await settle();
+            const line = deep(P.statusLine({ text: source }));
+            expect(text(line)).toContain(long.trim());
+            expect(long.trim().length).toBeGreaterThan(290);
+            for (const st of styles(line)) {
+                expect(st.WebkitLineClamp).toBeUndefined();
+                expect(st.maxHeight).toBeUndefined();
+                expect(st.overflow).toBeUndefined();
+            }
+        });
+    }
+
+    // Typing your own status renders a live preview of it on every key, and
+    // each prefix was a ✦ request: a 58-char status spent 62 of the day's 200.
+    it("the reader's own status, and the live preview while typing it, is never sent", async () => {
+        paid();
+        const target = "Estoy cocinando, vuelvo en un rato, no me esperen";
+        for (let i = 1; i <= target.length; i++) {
+            deep(P.statusLine({ text: target.slice(0, i), sublineSelf: true }));
+            await vi.advanceTimersByTimeAsync(180);
+        }
+        await settle(60_000);
+        expect(surfaceCalls()).toEqual([]);
+    });
+
+    it("the reader's own bio is never sent, on any profile surface", async () => {
+        paid();
+        expect(deep(P.renderBioLine({ userId: "me", userBio: "Me encanta cocinar y jugar" }))).toBeNull();
+        const own = { type: "bio", props: { userId: "me", userBio: "Me encanta cocinar y jugar" }, children: [] };
+        expect(P.bioWithLine(own, "Me encanta cocinar y jugar")).toBe(own);
+        await settle(60_000);
+        expect(surfaceCalls()).toEqual([]);
     });
 });
 

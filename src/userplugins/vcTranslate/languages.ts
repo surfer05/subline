@@ -87,3 +87,17 @@ export function targetLanguageOptions(current?: unknown): LanguageSelectOption[]
     }
     return rows;
 }
+
+/** Languages written right to left. */
+const RTL_LANGS = new Set(["ar", "fa", "he", "iw", "ur", "ps", "sd", "yi", "ug", "ckb", "dv"]);
+
+/**
+ * True when `code` (a target language, "ar" or "ar-EG") is written right to
+ * left. A translation into it often keeps a Latin name or game term, and
+ * without an explicit direction the line was laid out left to right, so an
+ * Arabic reader read the segments in reverse order.
+ */
+export function isRtlLang(code: unknown): boolean {
+    if (typeof code !== "string") return false;
+    return RTL_LANGS.has(code.trim().toLowerCase().split(/[-_]/)[0]!);
+}

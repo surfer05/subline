@@ -13,13 +13,16 @@ import {
 import type { Message } from "@vencord/discord-types";
 
 import { createBatcher, type Batcher } from "./batcher";
+import { forgetNotices, putNotice, takeNotice } from "./sublineNotice";
+import { fitLlmRequest, LLM_TEXT_MAX, shrinkAfterRefusal } from "./fitRequest";
 import { renderDiscordMarkup, type MarkupResolvers } from "./discordMarkup";
 import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel, toggleChannelOptOut } from "./channels";
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
 import { DECODED_TITLE, decodedPrefix, decodeMessage, translatableText } from "./decode";
 import { isConfidentlyTargetLanguage } from "./detectLang";
 import {
-    entitlementLevel, ENTITLEMENT_REFRESH_MS, holderFor, loadEntitlement, setCurrentHolder, setEntitlement
+    entitlementLevel, ENTITLEMENT_REFRESH_MS, getEntitlement, holderFor, type Level, loadEntitlement, setCurrentHolder,
+    setEntitlement
 } from "./entitlement";
 import { previewDiffers, previewText, PRICING_URL } from "./freePlan";
 import {
@@ -32,7 +35,7 @@ import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { shouldSkip } from "./skip";
 import {
-    connectInstallIdSetting, EARLY_CHECK_MS, earlyCheckSince, endEarlyCheck, installIdOnce, knownInstallId, loadLocalTasteCount, markPriorHintDone, markTasteExhausted, noteTasteSpent,
+    connectInstallIdSetting, EARLY_CHECK_MS, earlyCheckSince, endEarlyCheck, installIdOnce, knownInstallId, loadLocalTasteCount, markPriorHintDone, markTasteExhausted, noteRelayClock, noteTasteSpent,
     priorUseHint, recordTasteQuota, rolloverTasteIfNewUtcDay, TASTE_CAP, tasteBearer, tasteCap, tasteExhausted, tasteLabel, tasteRemaining
 } from "./taste";
 import {
@@ -50,7 +53,7 @@ import {
 } from "./types";
 import { ENGINE_RANK, isRealTranslation, mayReplace } from "./upgrade";
 import { createCheckoutFlow, type CheckoutFlow, type Plan } from "./checkout";
-import { normalizeTargetLang } from "./languages";
+import { isRtlLang, normalizeTargetLang } from "./languages";
 import { openUpgrade, registerUpgradeOpener } from "./upgradeBridge";
 import { RESET_HELP_URL, UPGRADE_COPY } from "./upgradeCopy";
 import { type CodeSubmitResult, openActivatePanel, openCodeEntry, openUpgradePanel } from "./upgradePanel";
@@ -64,7 +67,7 @@ import {
 import { SURFACE_PATCHES } from "./surfaces/patches";
 import { SurfaceService, type SurfaceOutcome, type SurfaceTier } from "./surfaces/service";
 import {
-    safe, setSurfaceService, SurfaceLines, tightTranslation, TightSwap, useSurfaceVersion
+    safe, setSurfaceRtl, setSurfaceService, SurfaceLines, tightTranslation, TightSwap
 } from "./surfaces/ui";
 import { __resetWeeklyStats, closeWeekIfDue, countShown, loadWeeklyStats } from "./weeklyNote";
 
@@ -193,6 +196,45 @@ const forcedInFlightListeners = new Set<() => void>();
  */
 const deferredChannels = new Set<string>();
 
+/**
+ * A timed retry for each channel holding ⏳ lines. The recovery sweep above
+ * needs a LATER success in the same channel, so in a quiet DM one failed call
+ * left "waiting for the translator" up until someone else posted (measured:
+ * still deferred after 10 minutes, one request ever sent). The timer asks
+ * again after 15s (or when Google's cooldown ends, if later), doubling up to
+ * 2 minutes while it keeps failing. A successful sweep resets it.
+ */
+const deferredRetries = new Map<string, { timer: ReturnType<typeof setTimeout> | null; nextDelayMs: number; }>();
+const DEFERRED_RETRY_FIRST_MS = 15_000;
+const DEFERRED_RETRY_MAX_MS = 120_000;
+
+function armDeferredRetry(channelId: string): void {
+    const state = deferredRetries.get(channelId) ?? { timer: null, nextDelayMs: DEFERRED_RETRY_FIRST_MS };
+    deferredRetries.set(channelId, state);
+    if (state.timer !== null) return;
+    const cooling = cooldownUntil("google") - Date.now();
+    // Just after the cooldown when there is one: asking inside it is refused
+    // untried. A little jitter keeps several channels from asking at once.
+    const delay = Math.max(cooling > 0 ? cooling + 500 + Math.floor(Math.random() * 1_000) : 0, state.nextDelayMs);
+    state.timer = setTimeout(() => {
+        state.timer = null;
+        state.nextDelayMs = Math.min(state.nextDelayMs * 2, DEFERRED_RETRY_MAX_MS);
+        if (!deferredChannels.has(channelId)) {
+            deferredRetries.delete(channelId);
+            return;
+        }
+        // catchUp itself ignores a channel that is not on screen; opening it
+        // runs catch-up anyway.
+        catchUp(channelId);
+    }, delay);
+}
+
+function clearDeferredRetry(channelId: string): void {
+    const state = deferredRetries.get(channelId);
+    if (state?.timer) clearTimeout(state.timer);
+    deferredRetries.delete(channelId);
+}
+
 function notifyForcedInFlight(): void {
     for (const fn of forcedInFlightListeners) fn();
 }
@@ -229,7 +271,10 @@ function isForcedInFlight(messageId: string): boolean {
 type ForcedHint =
     | { kind: "cooldown" }
     | { kind: "gate" }
-    | { kind: "failed"; code: BeaconErrorCode };
+    | { kind: "failed"; code: BeaconErrorCode }
+    // A ✦ preview that did not come back. Nothing was charged; the button
+    // is offered again.
+    | { kind: "preview" };
 
 // How long a failure hint stays on screen before it clears itself. Long
 // enough to read, short enough that it cannot be mistaken for a permanent
@@ -238,6 +283,9 @@ type ForcedHint =
 // Exported so tests can advance exactly this long rather than hardcoding a
 // duplicate of the constant.
 export const FORCED_HINT_TTL_MS = 5_000;
+
+/** Shown for a few seconds when a ✦ preview did not load. */
+export const PREVIEW_FAILED_HINT = "Preview didn't load. Try again.";
 
 const forcedHints = new Map<string, ForcedHint>();
 const forcedHintTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -547,13 +595,6 @@ async function relayCredentials(): Promise<{ credential: string; install: string
     return { credential: code !== "" ? code : install, install };
 }
 
-/** The notice text the activation notice is showing, "" for none. */
-let activationNoticeShown = "";
-/**
- * Which "checking" notice is up, "" for none: "code" for "Can't reach Subline
- * to check your code. Retrying.", "early" for the early-user check.
- */
-let checkingNoticeShown: "" | "code" | "early" = "";
 /**
  * The relay's last answer was the 3-computer limit. Every Activate link then
  * shows that sentence and its GitHub link, never the buy panel: buying again
@@ -569,11 +610,9 @@ let deviceLimited = false;
  * retrying (scheduleStatusRetry).
  */
 function showCheckingNotice(kind: "code" | "early" = "code"): void {
-    if (activated() || checkingNoticeShown === kind) return;
-    if (checkingNoticeShown !== "") popNotice();
-    checkingNoticeShown = kind;
-    if (kind === "early") showNotice(UPGRADE_COPY.earlyCheckingNotice, UPGRADE_COPY.earlyCheckingNoticeButton, popNotice);
-    else showNotice(UPGRADE_COPY.checkingNotice, UPGRADE_COPY.checkingNoticeButton, popNotice);
+    if (activated()) return;
+    if (kind === "early") putNotice("checking", UPGRADE_COPY.earlyCheckingNotice, UPGRADE_COPY.earlyCheckingNoticeButton, () => takeNotice("checking"));
+    else putNotice("checking", UPGRADE_COPY.checkingNotice, UPGRADE_COPY.checkingNoticeButton, () => takeNotice("checking"));
 }
 
 /**
@@ -598,9 +637,7 @@ async function showUnreachableNotice(prior: boolean): Promise<void> {
 
 /** The relay answered: the checking notice has said what it had to. */
 function takeDownCheckingNotice(): void {
-    if (checkingNoticeShown === "") return;
-    checkingNoticeShown = "";
-    popNotice();
+    takeNotice("checking");
 }
 
 /**
@@ -609,9 +646,8 @@ function takeDownCheckingNotice(): void {
  * a toast: it stays until dismissed.
  */
 function showActivationNotice(message: string = UPGRADE_COPY.activateNotice): void {
-    if (activated() || activationNoticeShown === message) return;
-    activationNoticeShown = message;
-    showNotice(message, UPGRADE_COPY.activateButton, openUpgradeForLevel);
+    if (activated()) return;
+    putNotice("activation", message, UPGRADE_COPY.activateButton, openUpgradeForLevel);
 }
 
 /** Open the page where a reader asks for a computer reset. */
@@ -623,11 +659,10 @@ function openResetHelp(): void {
  * The 3-computer limit, with a "GitHub" button that opens the issues page
  * (a toast cannot carry a link; a notice can). Never the buy panel.
  */
-function showDeviceLimitNotice(): void {
+function showDeviceLimitNotice(force = false): void {
     deviceLimited = true;
-    if (activationNoticeShown === UPGRADE_COPY.deviceLimit) return;
-    activationNoticeShown = UPGRADE_COPY.deviceLimit;
-    showNotice(UPGRADE_COPY.deviceLimit, UPGRADE_COPY.deviceLimitButton, openResetHelp);
+    // Idempotent: a notice already up (or queued) is never queued twice.
+    putNotice("activation", UPGRADE_COPY.deviceLimit, UPGRADE_COPY.deviceLimitButton, openResetHelp, force);
 }
 
 /**
@@ -637,10 +672,7 @@ function showDeviceLimitNotice(): void {
  * can now read it.
  */
 function onEntitlementChanged(): void {
-    if (activated() && activationNoticeShown !== "") {
-        activationNoticeShown = "";
-        popNotice();
-    }
+    if (activated()) takeNotice("activation");
     if (activated()) takeDownCheckingNotice();
     if (fastBatcher === null) return;   // stopped
     // Not while a relay answer is being taken in (a dead code is dropped
@@ -851,7 +883,13 @@ function applyStatus(res: Extract<Awaited<ReturnType<typeof Native.relayStatus>>
     try {
         if (res.deadCode !== undefined && res.deadCode === savedCode()) {
             if (deadCodeConfirmed(res.deadCode)) {
-                settings.store.clearedPurchaseCode = res.deadCode;
+                // NOT marked as cleared by the reader. The relay never offers
+                // a dead code back, so if it offers this one again it is live
+                // again (a renewal paid after a declined card), and must be
+                // taken back. Marking it cleared kept a paying subscriber on
+                // ≈ for good. Only a code the reader removes by hand is
+                // remembered as cleared (the settings handler).
+                autoDroppedCode = res.deadCode;
                 settings.store.sublineCode = "";
                 dropped = true;
             } else {
@@ -889,6 +927,7 @@ function applyStatus(res: Extract<Awaited<ReturnType<typeof Native.relayStatus>>
             checkedAt: now,
             ...(holder !== null ? { holder } : {})
         });
+        noteRelayClock(res.serverNow, now);
         if (res.previews !== undefined) recordTasteQuota(res.previews.used, res.previews.cap);
     }
     if (res.grant === "early") earlyGrantPending = true;
@@ -897,6 +936,11 @@ function applyStatus(res: Extract<Awaited<ReturnType<typeof Native.relayStatus>>
 
 /** The relay just granted the early-user Automatic: the next announcement says so. */
 let earlyGrantPending = false;
+/**
+ * The code applyStatus last dropped as dead, until the settings handler has
+ * seen the change: that change was not the reader clearing the code.
+ */
+let autoDroppedCode = "";
 /** True while applyStatus changes the saved code (see onEntitlementChanged). */
 let applyingStatus = false;
 
@@ -911,6 +955,9 @@ function currentHolderNow(): string | null {
     setCurrentHolder(h);
     return h;
 }
+
+const LEVEL_RANK: Record<Level, number> = { none: 0, automatic: 1, ai: 2 };
+const levelRank = (level: Level) => LEVEL_RANK[level];
 
 /** The plan and code the "You're on." notice was last shown for. */
 let announcedPurchase = "";
@@ -941,8 +988,8 @@ function openUpgradeForLevel(): void {
     if (level === "none" && deviceLimited) {
         // Buying again would not free a computer: the sentence and its link.
         Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message: UPGRADE_COPY.deviceLimit });
-        activationNoticeShown = "";
-        showDeviceLimitNotice();
+        // Back on screen if the reader closed it; never a second copy.
+        showDeviceLimitNotice(true);
         return;
     }
     if (level === "none") {
@@ -1100,6 +1147,117 @@ let statusAttempts = 0;
 let statusSession = 0;
 let entitlementTimer: ReturnType<typeof setInterval> | null = null;
 
+/**
+ * THE ENTITLEMENT CLOCK. A 24-hour setInterval used to be the only re-check,
+ * and two things slipped past it:
+ *   - the stored answer running out while Discord runs (the AI renewal
+ *     moment: aiUntil is the billing date, and the relay only moves it when
+ *     the renewal lands), which turned a paying subscriber's ✦ off for up to
+ *     a day, every month;
+ *   - a laptop asleep for a week: timers do not count sleep, the wall clock
+ *     does, so the answer expired and nothing noticed for a day of awake time.
+ * Now a one-minute tick reads the WALL CLOCK: it asks the relay when 24 hours
+ * have passed since the last ask, just before the stored answer runs out,
+ * and at once after a sleep. A level that changed on its own (time passed)
+ * redraws the screen without waiting for any answer.
+ */
+const ENTITLEMENT_TICK_MS = 60_000;
+/** A tick this late means the machine was asleep. */
+const ENTITLEMENT_WAKE_GAP_MS = 5 * 60_000;
+/** Asked this long before the stored answer runs out. */
+const ENTITLEMENT_EXPIRY_LEAD_MS = 60_000;
+/** Back online or back in focus asks again, at most this often. */
+const ENTITLEMENT_NUDGE_MS = 10 * 60_000;
+/** After AI lapses: ask again on this ladder, so a late renewal is picked up in minutes. */
+const RENEWAL_FOLLOW_UPS_MS = [2 * 60_000, 10 * 60_000, 30 * 60_000, 2 * 60 * 60_000];
+
+let lastStatusAskAt = 0;
+let lastEntitlementTickAt = 0;
+let lastTickLevel: Level | null = null;
+let renewalFollowUp: { step: number; at: number; } | null = null;
+/** The expiry point the tick already asked about (see entitlementTick). */
+let askedForExpiry: number | null = null;
+let entitlementNudge: (() => void) | null = null;
+
+/** When the stored answer (or its AI part) runs out, or null. */
+function entitlementExpiry(): number | null {
+    const e = getEntitlement();
+    if (e === null) return null;
+    const ai = e.ai && typeof e.aiUntil === "number" ? e.aiUntil : Number.POSITIVE_INFINITY;
+    const at = Math.min(e.tokenExpiresAt, ai);
+    return Number.isFinite(at) ? at : null;
+}
+
+/** AI just went away: start (or keep) the follow-up ladder. AI back: stop it. */
+function noteLevelForRenewal(before: Level, after: Level, now: number): void {
+    if (after === "ai") renewalFollowUp = null;
+    else if (before === "ai" && renewalFollowUp === null) renewalFollowUp = { step: 0, at: now + RENEWAL_FOLLOW_UPS_MS[0]! };
+}
+
+function entitlementTick(now: number = Date.now()): void {
+    const woke = lastEntitlementTickAt !== 0 && now - lastEntitlementTickAt > ENTITLEMENT_WAKE_GAP_MS;
+    lastEntitlementTickAt = now;
+    const level = entitlementLevel(now);
+    if (lastTickLevel !== null && level !== lastTickLevel) {
+        noteLevelForRenewal(lastTickLevel, level, now);
+        onEntitlementChanged();
+    }
+    lastTickLevel = level;
+
+    const checkedAt = getEntitlement()?.checkedAt ?? 0;
+    const expiry = entitlementExpiry();
+    let due = woke || now >= Math.max(checkedAt, lastStatusAskAt) + ENTITLEMENT_REFRESH_MS;
+    // Once per expiry point: an answer that moved it (a renewal) arms it again.
+    if (expiry !== null && now >= expiry - ENTITLEMENT_EXPIRY_LEAD_MS && askedForExpiry !== expiry) {
+        askedForExpiry = expiry;
+        due = true;
+    }
+    if (renewalFollowUp !== null && now >= renewalFollowUp.at) {
+        const step = renewalFollowUp.step + 1;
+        renewalFollowUp = step < RENEWAL_FOLLOW_UPS_MS.length ? { step, at: now + RENEWAL_FOLLOW_UPS_MS[step]! } : null;
+        due = true;
+    }
+    if (due) void refreshEntitlement();
+}
+
+/** Back online, or Discord back in focus: ask again, at most every 10 minutes. */
+function nudgeEntitlement(): void {
+    const now = Date.now();
+    if (now - lastStatusAskAt < ENTITLEMENT_NUDGE_MS) return;
+    entitlementTick(now);
+    if (now - lastStatusAskAt >= ENTITLEMENT_NUDGE_MS) void refreshEntitlement();
+}
+
+function startEntitlementClock(): void {
+    lastEntitlementTickAt = Date.now();
+    lastTickLevel = entitlementLevel();
+    entitlementTimer = setInterval(() => entitlementTick(), ENTITLEMENT_TICK_MS);
+    try {
+        if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+            entitlementNudge = () => nudgeEntitlement();
+            window.addEventListener("online", entitlementNudge);
+            window.addEventListener("focus", entitlementNudge);
+        }
+    } catch { /* the tick alone still covers it */ }
+}
+
+function stopEntitlementClock(): void {
+    if (entitlementTimer !== null) clearInterval(entitlementTimer);
+    entitlementTimer = null;
+    try {
+        if (entitlementNudge !== null && typeof window !== "undefined") {
+            window.removeEventListener("online", entitlementNudge);
+            window.removeEventListener("focus", entitlementNudge);
+        }
+    } catch { /* nothing to undo */ }
+    entitlementNudge = null;
+    lastStatusAskAt = 0;
+    lastEntitlementTickAt = 0;
+    lastTickLevel = null;
+    renewalFollowUp = null;
+    askedForExpiry = null;
+}
+
 function scheduleStatusRetry(): void {
     if (statusRetryTimer !== null) return;
     const delay = STATUS_RETRY_MS[statusAttempts] ?? STATUS_RETRY_EVERY_MS;
@@ -1126,6 +1284,7 @@ function clearStatusRetry(): void {
 async function refreshEntitlement(): Promise<void> {
     const session = statusSession;
     let answered = false;
+    lastStatusAskAt = Date.now();
     try {
         const { credential, install } = await relayCredentials();
         // While this install does not own Automatic, say whether it was used
@@ -1146,9 +1305,15 @@ async function refreshEntitlement(): Promise<void> {
             takeDownCheckingNotice();
             const before = entitlementLevel();
             const saved = applyStatus(res);
+            noteLevelForRenewal(before, entitlementLevel(), Date.now());
+            lastTickLevel = entitlementLevel();
             if (saved || before !== entitlementLevel()) onEntitlementChanged();
             else if (!activated()) showActivationNotice();
-            if (saved || res.grant === "early") announcePurchase();
+            // "You're on." only when this answer RAISED what the install
+            // owns (or granted the early Automatic). Losing AI also adopts a
+            // code (the account's Automatic one), and that reader must not be
+            // told they are on.
+            if ((saved && levelRank(entitlementLevel()) > levelRank(before)) || res.grant === "early") announcePurchase();
             tasteLog(`the relay says: ${entitlementLevel()}`);
             // A dead code was dropped and nothing replaced it: ask again for
             // this install alone (its bearer is then the install id).
@@ -1863,9 +2028,14 @@ function beaconErrorCode(res: { error: string } | null): BeaconErrorCode {
  * Fast tier only, and `deferred` always: nothing here is a statement about any
  * individual message. See the block comment on the marker write in runTier.
  */
-function deferBatch(isQuality: boolean, req: BatchRequest): void {
+function deferBatch(isQuality: boolean, req: BatchRequest, channelId?: string): void {
     if (isQuality) return;
     for (const m of req.messages) writeResult(makeKey(m.id, req.targetLang), { deferred: true });
+    // Marked, so the sweep and the timer ask again once the cooldown ends.
+    if (channelId !== undefined && req.messages.length > 0) {
+        deferredChannels.add(channelId);
+        armDeferredRetry(channelId);
+    }
 }
 
 async function runTier(
@@ -1876,13 +2046,32 @@ async function runTier(
     // ForcedHint's own doc). Both onFlush closures in rebuildBatcher leave
     // this undefined, so every `report?.(...)` below is a no-op for the
     // automatic pipeline — its invisible-failure behaviour is unchanged.
-    report?: (outcome: ForcedHint) => void
+    report?: (outcome: ForcedHint) => void,
+    // The edit counter of each message when its text was fixed (at flush).
+    // Only a split passes it down, so a part sent later still compares
+    // against the text it actually carries.
+    epochs?: ReadonlyMap<string, number>
 ): Promise<void> {
     const isQuality = engine !== "google";
     // The in-flight set belonging to THIS tier. The other tier's request for
     // the same id (if any) is a separate round trip and settles on its own.
     const inFlightSet = isQuality ? inFlightQuality : inFlightFast;
     const debug = settings.store.debugLogging;
+    // Every id this call was handed, released in the finally below whatever
+    // the request ends up carrying (fitting may drop or split messages).
+    const handedIds = req.messages.map(m => m.id);
+    // Ids handed on to a smaller request, which releases them itself.
+    const delegated = new Set<string>();
+    // Edited after their text was fixed: their answer describes words that no
+    // longer exist, so nothing is written for them and they are asked again.
+    const sentEpoch = epochs ?? new Map(req.messages.map(m => [m.id, editEpoch.get(m.id) ?? 0]));
+    const stale = new Set<string>();
+    let sweepChannel: string | undefined;
+    const isStale = (id: string) => {
+        if ((editEpoch.get(id) ?? 0) === (sentEpoch.get(id) ?? 0)) return false;
+        stale.add(id);
+        return true;
+    };
 
     if (debug) {
         const ids = req.messages.map(m => m.id);
@@ -1942,8 +2131,25 @@ async function runTier(
             // has an answer. Leave them readable as "delayed" rather than
             // blank — and resolved, so catch-up sees work already accounted
             // for instead of re-requesting into the same closed door.
-            deferBatch(isQuality, req);
+            deferBatch(isQuality, req, channelId);
             return;
+        }
+
+        // Fit the ✦ request inside what the relay accepts BEFORE it costs a
+        // gate slot: a 413 or 400 is refused every time it is sent, and a long
+        // message kept in the context ring poisoned every later batch in the
+        // channel. Each part of a split goes through the gate on its own.
+        if (isQuality) {
+            req = withinTextLimit(req, channelId);
+            if (req.messages.length === 0) return;
+            const parts = fitLlmRequest(req);
+            if (parts.length > 1) {
+                if (debug) logger.debug(`[flush] ${engine}: request too large, split into ${parts.length}`);
+                for (const part of parts) for (const m of part.messages) delegated.add(m.id);
+                for (const part of parts) await runTier(engine, part, myGeneration, channelId, report, sentEpoch);
+                return;
+            }
+            req = parts[0]!;
         }
 
         // Only the LLM engines are rate-gated — Google is per-message with its
@@ -2032,6 +2238,20 @@ async function runTier(
             const errorCode = beaconErrorCode(res);
             recordError(errorCode, beaconErrorStatus(res));
 
+            // Refused for its SIZE (413, or the relay's 400 for an overlong
+            // text): the same request is refused every time, so re-send it
+            // smaller, now. Halves first, then a lone message without its
+            // context. Each part meets the rate gate on its own.
+            if (isQuality && res !== null && isOversizeRefusal(engine, res.error)) {
+                const smaller = shrinkAfterRefusal(req);
+                if (smaller.length > 0) {
+                    logger.info(`[flush] ${engine}: request refused for its size; re-sending in ${smaller.length} smaller part(s)`);
+                    for (const part of smaller) for (const m of part.messages) delegated.add(m.id);
+                    for (const part of smaller) await runTier(engine, part, myGeneration, channelId, report, sentEpoch);
+                    return;
+                }
+            }
+
             // REFUND THE LEDGER. It was charged above, at send time, and the
             // provider has now refused the whole batch — nothing was judged,
             // so nothing was bought. The ledger's own trade-off ("a message
@@ -2117,9 +2337,13 @@ async function runTier(
             // forever.
             if (!isQuality) {
                 for (const m of req.messages) {
+                    if (isStale(m.id)) continue;
                     writeResult(makeKey(m.id, req.targetLang), { deferred: true });
                 }
-                if (channelId !== undefined) deferredChannels.add(channelId);
+                if (channelId !== undefined) {
+                    deferredChannels.add(channelId);
+                    armDeferredRetry(channelId);
+                }
                 // THE 19-SECOND RACE. These messages were enqueued to BOTH
                 // tiers in one tick, so the quality timer was armed BEFORE this
                 // failure existed — it asked "is Google cooling down?" and was
@@ -2185,6 +2409,10 @@ async function runTier(
 
         for (const r of res.results) {
             const key = makeKey(r.id, req.targetLang);
+            if (isStale(r.id)) {
+                if (debug) logger.debug(`[response] ${engine} ${r.id}: dropped, the message was edited meanwhile`);
+                continue;
+            }
             if (debug) {
                 const outcome = "failed" in r ? "failed" : r.skip ? "skip" : `translation (${r.lang})`;
                 logger.debug(`[response] ${engine} ${r.id}: ${outcome}`);
@@ -2199,7 +2427,10 @@ async function runTier(
                 if (!isQuality) {
                     const transport = "transport" in r && r.transport === true;
                     writeResult(key, transport ? { deferred: true } : { failed: true });
-                    if (transport && channelId !== undefined) deferredChannels.add(channelId);
+                    if (transport && channelId !== undefined) {
+                        deferredChannels.add(channelId);
+                        armDeferredRetry(channelId);
+                    }
                 }
                 continue;
             }
@@ -2239,18 +2470,68 @@ async function runTier(
         // so Google is talking to us again and the channel's ⏳ backlog is
         // worth re-asking about. catchUp re-enqueues whatever is still
         // deferred; a channel that is not focused is catch-up's own concern.
+        //
+        // Run AFTER the finally below has released this batch's ids, so a
+        // message that failed in this same batch is asked again too.
         if (!isQuality && channelId !== undefined && deferredChannels.has(channelId)
             && res.results.some(r => !("failed" in r))) {
             deferredChannels.delete(channelId);
-            catchUp(channelId);
+            clearDeferredRetry(channelId);
+            sweepChannel = channelId;
         }
     } finally {
         // Fires once this flush has fully settled, whichever way it went
         // (sent, skipped for cooldown, stranded by a rebuild, rejected). That
         // is the earliest point these ids are safe to retry — not when they
         // were queued, and not only on the happy path.
-        for (const m of req.messages) inFlightSet.delete(m.id);
+        for (const id of handedIds) if (!delegated.has(id)) inFlightSet.delete(id);
+        // Ask again for every message edited while this request was out, now
+        // that its id is free. enqueue() applies the focus and skip rules.
+        for (const id of stale) {
+            const edited = lastEdit.get(id);
+            if (edited !== undefined && myGeneration === batcherGeneration) enqueue(edited.pending, edited.isOwn);
+        }
+        if (sweepChannel !== undefined && myGeneration === batcherGeneration) catchUp(sweepChannel);
     }
+}
+
+/** A refusal that says "too big", which the same request will get every time. */
+function isOversizeRefusal(engine: EngineId, error: string): boolean {
+    if (/\bHTTP 413\b/.test(error)) return true;
+    return engine === "relay" && /\bHTTP 400\b/.test(error);
+}
+
+/**
+ * Keep every ✦ text inside the relay's per-text limit. Mention expansion can
+ * push a near-4,000-character message past it (`<#id>` becomes a channel name
+ * of up to 100 characters), and one such text made the relay refuse the whole
+ * batch. Such a message is sent as Discord stored it instead; if even that is
+ * too long it is left to ≈, because no ✦ request could carry it.
+ */
+function withinTextLimit(req: BatchRequest, channelId: string | undefined): BatchRequest {
+    if (!req.messages.some(m => m.text.length > LLM_TEXT_MAX)) return req;
+    const messages: BatchRequest["messages"] = [];
+    for (const m of req.messages) {
+        if (m.text.length <= LLM_TEXT_MAX) {
+            messages.push(m);
+            continue;
+        }
+        let raw: unknown;
+        try {
+            raw = channelId ? (MessageStore.getMessage(channelId, m.id) as any)?.content : undefined;
+        } catch {
+            raw = undefined;
+        }
+        if (typeof raw === "string" && raw.trim() !== "" && raw.length <= LLM_TEXT_MAX) {
+            messages.push({ ...m, text: raw });
+        } else {
+            // Charged so catch-up does not pick it again on every open: no ✦
+            // request can ever carry it.
+            markQualityAttempted(makeKey(m.id, req.targetLang));
+            logger.info(`[flush] ${m.id}: ${m.text.length} characters, too long for a ✦ request; left to ≈`);
+        }
+    }
+    return { ...req, messages };
 }
 
 /**
@@ -2419,6 +2700,23 @@ async function requestPreview(message: Message, text: string, googleText: string
         return;
     }
     previewAsked.add(message.id);
+    // Charged once the relay served the preview. Anything short of that (the
+    // relay down, a 503, a network blip, the credentials not read) leaves the
+    // message free to be asked again: the button used to vanish for good
+    // after one failed press, with nothing said.
+    let served = false;
+    try {
+        served = await sendPreview(message, text, googleText);
+    } finally {
+        if (!served) {
+            previewAsked.delete(message.id);
+            if (!tasteExhausted()) setForcedHint(message.id, { kind: "preview" });
+        }
+    }
+}
+
+/** requestPreview's request. True once the relay served (and charged) it. */
+async function sendPreview(message: Message, text: string, googleText: string | null): Promise<boolean> {
     const { credential, install } = await relayCredentials();
     const req: BatchRequest = {
         messages: [{ id: message.id, author: message.author?.username ?? "unknown", text, replyToId: replyParentId(message) }],
@@ -2432,16 +2730,19 @@ async function requestPreview(message: Message, text: string, googleText: string
     } catch {
         res = null;
     }
+    if (res !== null) noteRelayClock(res.serverNow);
     if (res === null || !res.ok) {
         if (res !== null && isDailyLimit(res.error)) markTasteExhausted();
         if (res !== null && isEntitlementRefusal(res.errorCode)) refreshAfterRefusal();
         tasteLog(`${message.id}: no preview (${res === null ? "IPC call rejected" : "the relay refused"})`);
-        return;
+        return false;
     }
     noteTasteSpent();
     if (!(typeof res.quotaCap === "number" && res.quotaCap > TASTE_CAP)) recordTasteQuota(res.quotaUsed, res.quotaCap);
     const r = res.results.find(x => x.id === message.id);
-    if (r === undefined || "failed" in r || r.skip) return;
+    // Served and charged even when the row says skip or failed: asking again
+    // would spend another preview on the same answer.
+    if (r === undefined || "failed" in r || r.skip) return true;
     // CUT HERE TOO. The relay cuts a preview itself, but the same 5-word /
     // 32-character rule is applied again, so a full ✦ line can never appear
     // in a preview whatever the relay did.
@@ -2458,6 +2759,7 @@ async function requestPreview(message: Message, text: string, googleText: string
     }
     previews.set(message.id, shown);
     notifyForcedInFlight();
+    return true;
 }
 
 function rebuildBatcher() {
@@ -2893,7 +3195,27 @@ function onMessageUpdate({ message }: { message: Message; }) {
     // means embed-only updates are invalidated (harmless, the text is
     // unchanged so it re-resolves identically) but never re-requested.
     const text = message.content;
-    if (typeof text !== "string" || text === "") return;
+    if (typeof text !== "string") return;
+    // A real edit: any request already carrying the old text is now stale
+    // (see runTier), and a copy still waiting in a debounce window is taken
+    // out so the new text is what gets sent.
+    editEpoch.set(message.id, (editEpoch.get(message.id) ?? 0) + 1);
+    if (fastBatcher?.remove(message.id)) inFlightFast.delete(message.id);
+    if (qualityBatcher?.remove(message.id)) inFlightQuality.delete(message.id);
+    if (text === "") {
+        lastEdit.delete(message.id);
+        return;
+    }
+
+    const pending: PendingMessage = {
+        id: message.id,
+        author: message.author?.username ?? "unknown",
+        text,
+        channelId: message.channel_id,
+        replyToId: replyParentId(message)
+    };
+    const isOwn = message.author?.id === UserStore.getCurrentUser()?.id;
+    rememberEdit(pending, isOwn);
 
     if (!message.channel_id || !channelActive(message.channel_id)) return;
     // Same focus rule as a new message: an edit in a channel nobody is looking
@@ -2904,21 +3226,26 @@ function onMessageUpdate({ message }: { message: Message; }) {
     // Invalidating without re-queuing was the bug this replaces: the subtitle
     // vanished on edit and only came back on the next channel open. Goes
     // through enqueue() so the skip rule and the in-flight guard apply exactly
-    // as they do for a new message. (An edit landing inside the ~1s window
-    // while the original is still in flight is dropped by that guard, and the
-    // in-flight response then writes the pre-edit translation; the next
-    // channel-open catch-up does not correct it, since that entry looks
-    // resolved. Rare enough to accept rather than add a second cache layer.)
-    enqueue(
-        {
-            id: message.id,
-            author: message.author?.username ?? "unknown",
-            text,
-            channelId: message.channel_id,
-            replyToId: replyParentId(message)
-        },
-        message.author?.id === UserStore.getCurrentUser()?.id
-    );
+    // as they do for a new message. An edit landing while the original is
+    // still in flight is skipped by that guard here; runTier then drops the
+    // stale answer and asks again with this text (see editEpoch).
+    enqueue(pending, isOwn);
+}
+
+/**
+ * How many times each message has been edited this session. runTier compares
+ * the value at flush with the value when the answer lands: a fix-a-typo edit
+ * 0.3s after sending used to keep a ✦ line for the old words for good.
+ */
+const editEpoch = new Map<string, number>();
+/** The latest edit of each message, so runTier can ask again with it. */
+const lastEdit = new Map<string, { pending: PendingMessage; isOwn: boolean; }>();
+const MAX_EDITS_KEPT = 500;
+
+function rememberEdit(pending: PendingMessage, isOwn: boolean): void {
+    lastEdit.delete(pending.id);
+    lastEdit.set(pending.id, { pending, isOwn });
+    if (lastEdit.size > MAX_EDITS_KEPT) lastEdit.delete(lastEdit.keys().next().value!);
 }
 
 interface CatchUpOptions {
@@ -3142,6 +3469,11 @@ const TEXT_COLOUR = "var(--text-default, var(--text-normal, #dbdee1))";
 /** The translation itself: keeps the message's own line breaks (see the accessory). */
 const TRANSLATION_TEXT_STYLE = { whiteSpace: "pre-wrap" } as const;
 
+/** The direction of a line written in the reader's language. */
+function translationDir(): "rtl" | "auto" {
+    return isRtlLang(settings.store.targetLang) ? "rtl" : "auto";
+}
+
 /**
  * How each engine's output is announced on the subtitle itself.
  *
@@ -3210,6 +3542,8 @@ function forcedHintDisplay(hint: ForcedHint): { text: string; title: string } {
                 text: "⚡ translation failed",
                 title: `VcTranslate: the request went out and failed (${describeFailureReason(hint.code)}).`
             };
+        case "preview":
+            return { text: PREVIEW_FAILED_HINT, title: PREVIEW_FAILED_HINT };
     }
 }
 
@@ -3229,7 +3563,7 @@ function previewLine(messageId: string) {
     }
     return (
         <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-            ✦ reads this as: {preview.text}{preview.truncated ? "…" : ""}{" "}
+            ✦ reads this as: <span dir={translationDir()}>{preview.text}{preview.truncated ? "…" : ""}</span>{" "}
             <a
                 href={PRICING_URL}
                 target="_blank"
@@ -3278,7 +3612,7 @@ function decodedLine(message: Message) {
             <span style={{ color: "var(--text-muted)" }} title={DECODED_TITLE}>
                 {decodedPrefix(decoded.kind)}
             </span>
-            <span style={TRANSLATION_TEXT_STYLE}>{decoded.text}</span>
+            <span dir="auto" style={TRANSLATION_TEXT_STYLE}>{decoded.text}</span>
         </div>
     );
 }
@@ -3494,7 +3828,13 @@ function translationLines(message: Message) {
               * was painted as one: HTML collapses "\n" to a space unless the
               * text says otherwise. pre-wrap keeps the breaks and still wraps.
               */}
-            <span style={TRANSLATION_TEXT_STYLE}>{entry.text.trim()}</span>
+            {/*
+              * dir: the reader's language decides the direction, and [dir]
+              * isolates the text from the ≈/✦ prefix and the hints after it.
+              * "auto" for left-to-right targets, so a line that is still in
+              * the source script takes its own direction.
+              */}
+            <span dir={translationDir()} style={TRANSLATION_TEXT_STYLE}>{entry.text.trim()}</span>
             {offerPreview && (
                 <span style={{ color: "var(--text-muted)" }}>
                     {" · "}
@@ -3858,16 +4198,19 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
     const engine: EngineId = tier === "fast" ? "google" : "relay";
     // Surfaces pause entirely while EITHER engine is cooling down: whatever
     // capacity is left then belongs to the conversation.
-    if (!isPaidSurfaceUser() || isCoolingDown("google") || isCoolingDown("relay")) return null;
+    // "busy" for every refusal BEFORE anything is sent: it costs the
+    // surfaces no per-minute slot and is asked again in seconds (see
+    // SurfaceOutcome). `null` is kept for a request that went out.
+    if (!isPaidSurfaceUser() || isCoolingDown("google") || isCoolingDown("relay")) return "busy";
     // Surfaces' OWN Google cooldown: a 429 on a burst of statuses must never
     // park the ≈ line under messages (see the 429 branch below).
-    if (engine === "google" && Date.now() < surfaceGoogleCooldownUntil) return null;
+    if (engine === "google" && Date.now() < surfaceGoogleCooldownUntil) return "busy";
     if (engine === "relay") {
         // MESSAGES FIRST. A surface request takes a rate-gate slot only when
         // no message batch is queued or waiting, never queues for one, and
         // leaves two slots free, so even a second message batch right after
         // does not wait.
-        if (inFlightQuality.size > 0 || !tryAcquireIdleSlot(2)) return null;
+        if (inFlightQuality.size > 0 || !tryAcquireIdleSlot(2)) return "busy";
     }
     const req: BatchRequest = {
         messages: texts.map((text, i) => ({ id: `s${i}`, author: "", text })),
@@ -3875,7 +4218,7 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
         targetLang: settings.store.targetLang,
         ...(engine === "google" ? { maxConcurrency: 1 } : {})
     };
-    if (engine === "relay" && !surfaceQualityAllowed()) return null;
+    if (engine === "relay" && !surfaceQualityAllowed()) return "busy";
     let res: Awaited<ReturnType<typeof Native.translateBatch>>;
     try {
         const install = engine === "relay" ? tasteBearer(await installIdOnce()) : undefined;
@@ -3951,6 +4294,7 @@ function startSurfaces(): SurfaceService {
         debug: surfaceDebug
     });
     setSurfaceService(surfaceService);
+    setSurfaceRtl(() => isRtlLang(settings.store.targetLang));
     return surfaceService;
 }
 
@@ -3984,12 +4328,75 @@ const SurfaceAccessory = safe("message accessory", SurfaceAccessoryImpl, surface
  * status has its own line inside its bubble, see statusBubbleChildren.)
  */
 function BioLineImpl(props: any) {
-    if (!isPaidSurfaceUser()) return null;
+    // The reader's own bio is never translated, so editing it does not send
+    // every half-typed version.
+    if (!isPaidSurfaceUser() || isCurrentUser(props?.userId)) return null;
     const bio = props?.userBio;
     if (typeof bio !== "string" || bio.trim() === "") return null;
     return <SurfaceLines texts={[{ kind: "bio", label: "About me", text: bio }]} />;
 }
 const BioLine = safe("bio line", BioLineImpl, surfaceDebug);
+
+/** Is `userId` the reader themselves? Their own text is never translated. */
+function isCurrentUser(userId: unknown): boolean {
+    try {
+        return typeof userId === "string" && userId !== "" && userId === UserStore.getCurrentUser()?.id;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * The custom status's translation, as its own line under the profile's
+ * status bubble. WAS a second line INSIDE the bubble text, which Discord
+ * clamps to 2 lines (8 on hover, at most 144px): a 128-character status
+ * filled them and its translation ended in "…" or never showed. This line
+ * sits in flow below the bubble, with no clamp and no max height.
+ */
+function StatusLineImpl(props: any) {
+    if (!isPaidSurfaceUser() || props?.sublineSelf === true) return null;
+    const text = props?.text;
+    if (typeof text !== "string" || text.trim() === "") return null;
+    return (
+        <div data-subline-status="" style={STATUS_LINE_STYLE}>
+            <SurfaceLines texts={[{ kind: "status", label: "Status", text }]} />
+        </div>
+    );
+}
+const StatusLine = safe("status line", StatusLineImpl, surfaceDebug);
+
+const STATUS_LINE_STYLE = { marginTop: 4, overflowWrap: "anywhere" } as const;
+
+/**
+ * The status line's side margins, mirrored from Discord's own rules for the
+ * bubble's reference container (853855.css), keyed by the same profile
+ * classes, so the line lines up with the bubble in every profile layout and
+ * custom theme. Without the sheet the line still shows, just unindented.
+ */
+const STATUS_LINE_CSS = [
+    ".user-profile-popout [data-subline-status]{margin-inline:109px 12px}",
+    ".custom-user-profile-theme .user-profile-popout [data-subline-status]{margin-inline:105px 8px}",
+    ".user-profile-sidebar [data-subline-status]{margin-inline:109px 8px}",
+    ".user-profile-modal [data-subline-status]{margin-inline:161px 16px}",
+    ".user-profile-modal-v2 [data-subline-status]{margin-inline:calc(var(--custom-modal-v2-profile-card-padding) + var(--custom-user-profile-avatar-size) - var(--space-8)) 12px}"
+].join("\n");
+const STATUS_LINE_STYLE_ID = "subline-status-line-style";
+
+function addStatusLineStyle(): void {
+    try {
+        if (typeof document === "undefined" || document.getElementById(STATUS_LINE_STYLE_ID)) return;
+        const el = document.createElement("style");
+        el.id = STATUS_LINE_STYLE_ID;
+        el.textContent = STATUS_LINE_CSS;
+        document.head.appendChild(el);
+    } catch { /* the line still shows without it */ }
+}
+
+function removeStatusLineStyle(): void {
+    try {
+        if (typeof document !== "undefined") document.getElementById(STATUS_LINE_STYLE_ID)?.remove();
+    } catch { /* nothing to undo */ }
+}
 
 /**
  * Is this a server (guild) channel? Channel-level surfaces (topics, voice
@@ -4187,12 +4594,20 @@ function ReplyQuoteImpl({ original, referenced }: { original: unknown; reference
     const existing = getTranslation(makeKey(quoted.id, settings.store.targetLang));
     if (existing !== undefined && "skipped" in existing) return decoded ?? fallback;
     if (isRealTranslation(existing)) {
+        // The message's own line says "≈ rough" for a Google guess it cannot
+        // trust (romanized text, a low-confidence detection). In place there
+        // is no room for that mark, so the guess is not shown at all: the
+        // original stays. Returned here, not passed to TightSwap, which would
+        // show the same cached guess.
+        if (existing.via === "google" && googleUnsure(existing, translatableText(content)).unsure) {
+            return decoded ?? fallback;
+        }
         const shown = render(existing.text.trim());
         if (shown === null || shown === undefined) return fallback;
         const glyph = ENGINE_PROVENANCE[existing.via].glyph;
         return (
             <span title={markup.readable} data-subline-surface="in-place">
-                <span style={{ opacity: 0.75 }}>{glyph} </span>{shown as any}
+                <span style={{ opacity: 0.75 }}>{glyph} </span><span dir={translationDir()}>{shown as any}</span>
             </span>
         );
     }
@@ -4256,11 +4671,6 @@ function isLoadedInChannel(channelId: string, messageId: string): boolean {
     }
 }
 
-const BUBBLE_LINE_STYLE = {
-    fontSize: "0.85em", color: "var(--text-muted)", marginTop: 2,
-    whiteSpace: "normal", overflowWrap: "anywhere"
-} as const;
-
 /** Lines under an onboarding question: the question and its options. */
 function OnboardingLinesImpl({ prompt }: { prompt: unknown; }) {
     if (!isPaidSurfaceUser()) return null;
@@ -4301,6 +4711,7 @@ export default definePlugin({
     bioWithLine: (original: unknown, userBio: unknown) => {
         try {
             if (!isPaidSurfaceUser() || typeof userBio !== "string" || userBio.trim() === "") return original;
+            if (isCurrentUser((original as any)?.props?.userId)) return original;
             return <>{original}<BioLine userBio={userBio} /></>;
         } catch {
             return original;
@@ -4336,20 +4747,10 @@ export default definePlugin({
             return heading;
         }
     },
-    // The profile's custom status bubble: the original text, then its ✦
-    // translation as a second, smaller line inside the same bubble. The
-    // bubble re-measures its height when it lands (useSurfaceVersion).
-    statusBubbleChildren: (text: unknown) => {
-        try {
-            if (!isPaidSurfaceUser() || typeof text !== "string" || text.trim() === "") return text;
-            const t = tightTranslation(text);
-            if (t === null) return text;
-            return [text, <div key="subline-surface" style={BUBBLE_LINE_STYLE} data-subline-surface="status-bubble">{t.glyph} {t.text}</div>];
-        } catch {
-            return text;
-        }
-    },
-    useSurfaceVersion,
+    // The profile custom status: its own "Status · ✦" line under the bubble,
+    // in flow and unclamped (see the patch). Nothing for the reader's own
+    // status, which includes the live preview while they type one.
+    statusLine: (props: unknown) => <StatusLine {...((props ?? {}) as object)} />,
     // The reply bar's quoted line. Nothing for a blocked, ignored or
     // suspended author: Discord's own line, and nothing is sent.
     replyQuoteChildren: (original: unknown, props: any) => {
@@ -4438,6 +4839,7 @@ export default definePlugin({
         // Text outside messages (paid only). Registered first so a slow read
         // below delays nothing; the service sends nothing for a free install.
         startSurfaces();
+        addStatusLineStyle();
         addMessageAccessory(SURFACE_ACCESSORY_ID, props => <SurfaceAccessory message={props.message} />);
         void surfaceCache?.load();
         void surfaceBudget?.load();
@@ -4492,7 +4894,7 @@ export default definePlugin({
         setCurrentHolder(holderFor(savedCode(), await installIdOnce()));
         await loadEntitlement();
         void refreshEntitlement();
-        entitlementTimer = setInterval(() => { void refreshEntitlement(); }, ENTITLEMENT_REFRESH_MS);
+        startEntitlementClock();
 
         // The weekly note's running count. Awaited, like the channel lists
         // below, so the first translation of the session is counted into the
@@ -4538,7 +4940,9 @@ export default definePlugin({
             // links to this install does not bring it straight back.
             const code = savedCode();
             const changed = code !== lastCode;
-            if (changed && code === "" && lastCode !== "") settings.store.clearedPurchaseCode = lastCode;
+            const dropped = lastCode !== "" && lastCode === autoDroppedCode;
+            if (changed && code === "" && lastCode !== "" && !dropped) settings.store.clearedPurchaseCode = lastCode;
+            if (dropped) autoDroppedCode = "";
             lastCode = code;
             // What the relay said about the old code is not about the new one:
             // until it answers again, the stored answer counts for nothing.
@@ -4586,6 +4990,7 @@ export default definePlugin({
 
     stop() {
         removeMessageAccessory(SURFACE_ACCESSORY_ID);
+        removeStatusLineStyle();
         // Nothing queued is sent after this, and the cache is saved as it is.
         surfaceService?.stop();
         void surfaceCache?.persistNow();
@@ -4605,15 +5010,24 @@ export default definePlugin({
         connectInstallIdSetting(null);
         checkoutFlow?.stop();
         checkoutFlow = null;
+        // The entitlement clock (see startEntitlementClock), and everything
+        // it keeps.
         if (entitlementTimer !== null) clearInterval(entitlementTimer);
         entitlementTimer = null;
-        activationNoticeShown = "";
-        checkingNoticeShown = "";
+        if (entitlementNudge !== null) stopEntitlementClock();
+        entitlementNudge = null;
+        lastStatusAskAt = 0;
+        lastEntitlementTickAt = 0;
+        lastTickLevel = null;
+        renewalFollowUp = null;
+        askedForExpiry = null;
+        forgetNotices();
         deviceLimited = false;
         if (deadRecheckTimer !== null) clearTimeout(deadRecheckTimer);
         deadRecheckTimer = null;
         applyingStatus = false;
         earlyGrantPending = false;
+        autoDroppedCode = "";
         announcedPurchase = "";
         checkoutTarget = "automatic";
         activeTargetLang = null;
@@ -4683,6 +5097,12 @@ export default definePlugin({
         // looks exactly like one applied twenty-one times.
         forcedInFlightListeners.clear();
         deferredChannels.clear();
+        // Edits belong to the session that saw them; the generation bump below
+        // already stops any answer that was waiting on them.
+        editEpoch.clear();
+        lastEdit.clear();
+        for (const state of deferredRetries.values()) if (state.timer) clearTimeout(state.timer);
+        deferredRetries.clear();
         // The plan's session state. The relay is asked again on the next
         // start(); its last answer and the weekly count are persisted and read
         // back then.

@@ -27,9 +27,9 @@ import { React } from "@webpack/common";
 import { languageLabel } from "../langLabel";
 import { isRomanizedGuess } from "../romanized";
 import { MIN_DETECT_CONFIDENCE } from "../types";
-import type { SurfaceEntry } from "./cache";
+import { normalizeSurfaceText, type SurfaceEntry } from "./cache";
 import type { SurfaceText } from "./extract";
-import type { SurfaceService } from "./service";
+import { fitLongText, type SurfaceService } from "./service";
 
 let service: SurfaceService | null = null;
 
@@ -48,15 +48,40 @@ export interface SurfaceDisplay {
     text: string;
 }
 
+/**
+ * Google's ≈ for `source` is a guess not worth showing: detected below the
+ * confidence gate, or romanized text (Arabizi, Hinglish, Darija in Latin
+ * letters), which Google translates confidently and wrongly, sometimes with
+ * the negation inverted. ONE rule for every surface, roomy or in place.
+ */
+export function fastUnsure(fast: { lang: string; conf?: number; }, source: string): boolean {
+    return (fast.conf !== undefined && fast.conf < MIN_DETECT_CONFIDENCE) || isRomanizedGuess(fast.lang, source);
+}
+
 /** What to show for an entry, or null. The ≈ line is held back when it is unsure. */
 export function displayFor(entry: SurfaceEntry | null | undefined, source: string): SurfaceDisplay | null {
     if (!entry) return null;
     if (entry.quality) return { glyph: "✦", lang: entry.quality.lang, text: entry.quality.text.trim() };
     const fast = entry.fast;
     if (!fast) return null;
-    const unsure = (fast.conf !== undefined && fast.conf < MIN_DETECT_CONFIDENCE) || isRomanizedGuess(fast.lang, source);
-    if (unsure) return null;
+    if (fastUnsure(fast, source)) return null;
     return { glyph: "≈", lang: fast.lang, text: fast.text.trim() };
+}
+
+let rtlTarget: () => boolean = () => false;
+
+/** Set by the plugin: whether the reader's language is written right to left. */
+export function setSurfaceRtl(isRtl: () => boolean): void {
+    rtlTarget = isRtl;
+}
+
+/** The direction of a translated line: the reader's language decides it. */
+export function translationDir(): "rtl" | "auto" {
+    try {
+        return rtlTarget() ? "rtl" : "auto";
+    } catch {
+        return "auto";
+    }
 }
 
 /** " es" after the glyph, or nothing when the engine named no language ("und"). */
@@ -93,6 +118,12 @@ const LINE_STYLE = { fontSize: "0.85rem", color: "var(--text-muted)", fontStyle:
 /** Lines that sit away from what they translate say what they are. */
 const LABELLED_KINDS = new Set(["reply", "forward", "status", "onboarding"]);
 
+/** Kinds Discord lets run past 2,000 characters (an embed description allows 4,096). */
+const LONG_KINDS = new Set(["embed-description", "forward", "rule", "guidelines"]);
+
+/** Shown after a line that covers only the first 4,000 characters of its text. */
+export const PARTIAL_NOTE = "Translated the first part. The rest is too long.";
+
 /**
  * Roomy: one small line per foreign text, under the original. A reply or
  * forward preview's line is prefixed with its label, since it does not sit
@@ -107,12 +138,15 @@ export function SurfaceLines({ texts }: { texts: SurfaceText[]; }) {
         for (const t of texts) {
             if (seen.has(t.text)) continue;
             seen.add(t.text);
-            const shown = displayFor(service.want(t.text), t.text);
+            const long = LONG_KINDS.has(t.kind);
+            const shown = displayFor(service.want(t.text, { long }), t.text);
             if (shown === null) continue;
+            const partial = long && fitLongText(normalizeSurfaceText(t.text)).partial;
             lines.push(
                 <div key={`${t.kind}:${t.text}`} style={LINE_STYLE} data-subline-surface={t.kind}>
                     <span>{LABELLED_KINDS.has(t.kind) ? `${t.label} · ` : ""}{shown.glyph}{langSuffix(shown.lang)} · </span>
-                    <span>{shown.text}</span>
+                    <span dir={translationDir()}>{shown.text}</span>
+                    {partial && <span data-subline-partial="">{" · "}{PARTIAL_NOTE}</span>}
                 </div>
             );
         }
@@ -124,17 +158,19 @@ export function SurfaceLines({ texts }: { texts: SurfaceText[]; }) {
 
 /**
  * The translation of a tight text, or null while pending, skipped or failed.
- * ✦ when there is one. Without AI (an Automatic owner) Google's ≈ is shown in
- * place instead, since the relay is never asked.
+ * ✦ when there is one. Without ✦ (an Automatic owner, or an AI reader whose
+ * surface ✦ for today is spent) Google's ≈ is shown in place instead, held
+ * back by the same unsure rules as a roomy line.
  */
 export function tightTranslation(text: string): { lang: string; text: string; glyph: "✦" | "≈"; } | null {
     if (service === null) return null;
     const entry = service.want(text, { tight: true });
     const q = entry?.quality;
     if (q && q.text.trim() !== "") return { lang: q.lang, text: q.text.trim(), glyph: "✦" };
-    if (service.qualityAllowed()) return null;
+    if (service.tightQualityOnly()) return null;
     const f = entry?.fast;
     if (!f || f.text.trim() === "") return null;
+    if (fastUnsure(f, text)) return null;
     return { lang: f.lang, text: f.text.trim(), glyph: "≈" };
 }
 
@@ -144,7 +180,7 @@ const PREFIX_STYLE = { opacity: 0.75 } as const;
 export function TranslatedInPlace({ original, translation, glyph = "✦" }: { original: string; translation: unknown; glyph?: string; }) {
     return (
         <span title={original} data-subline-surface="in-place">
-            <span style={PREFIX_STYLE}>{glyph} </span>{translation as any}
+            <span style={PREFIX_STYLE}>{glyph} </span><span dir={translationDir()}>{translation as any}</span>
         </span>
     );
 }
@@ -175,21 +211,4 @@ export function TightSwap({ original, text, tooltip, render }: {
     } catch {
         return (original ?? null) as any;
     }
-}
-
-/**
- * A hook Discord's own component can call (see the status bubble patch): it
- * re-renders that component when any surface translation lands, so layout
- * that Discord measures once (the bubble's height) is measured again.
- */
-export function useSurfaceVersion(): number {
-    const [version, bump] = React.useReducer((n: number) => n + 1, 0);
-    React.useEffect(() => {
-        try {
-            return service?.subscribe(bump);
-        } catch {
-            return undefined;
-        }
-    }, []);
-    return version;
 }

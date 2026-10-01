@@ -416,3 +416,132 @@ describe("source language and detection confidence", () => {
         });
     });
 
+
+// WORST CASES, 2026-10-01. Each of these left a message stuck or blank.
+describe("translateWithGoogle — worst cases", () => {
+    // The live endpoint answered 400 (an HTML page) above ~16,300 URL
+    // characters. A CJK character is 9 URL characters, so a 1,830-char
+    // Japanese message never translated and sat on "waiting" for good.
+    const wallFetch = (seen: string[]) => vi.fn().mockImplementation(async (url: string) => {
+        seen.push(url);
+        if (url.length > 16_300) return { ok: false, status: 400, json: async () => ({}) };
+        return okResponse("ok", "ja");
+    });
+
+    it("splits a message too long for one URL and joins the pieces", async () => {
+        const ja = "これはとても長い日本語の文章です。".repeat(112).slice(0, 1_900);
+        expect(ja.length).toBe(1_900);
+        const seen: string[] = [];
+        const results = await translateWithGoogle(req([ja]), wallFetch(seen) as any);
+        expect(results[0]).toMatchObject({ id: "0", skip: false, lang: "ja" });
+        expect(seen.length).toBeGreaterThan(1);
+        for (const url of seen) expect(url.length).toBeLessThanOrEqual(16_300);
+    });
+
+    it("never cuts a mention, an emoji or a link in half", async () => {
+        const { splitForUrl } = await import("../engines/google");
+        const tokens = ["<@123456789012345678>", "<:blob:987654321098765432>", "https://example.com/a.b?c=d"];
+        // No spaces, newlines or sentence ends: only code-point cuts are left.
+        const text = "あいうえお" + tokens[0] + "かきくけこ" + tokens[1] + "さしすせそ" + tokens[2] + "たちつてと";
+        for (let budget = 60; budget <= 260; budget += 7) {
+            const pieces = splitForUrl(text, budget);
+            expect(pieces.map(p => p.text + p.sep).join("")).toBe(text);
+            for (const t of tokens) expect(pieces.some(p => p.text.includes(t))).toBe(true);
+        }
+    });
+
+    it("fails the whole message when one piece fails, and never shows part of it", async () => {
+        const ja = "これはとても長い日本語の文章です。".repeat(112).slice(0, 1_900);
+        let n = 0;
+        const fetchImpl = vi.fn().mockImplementation(async () => {
+            n++;
+            return n === 2 ? { ok: true, json: async () => ({ nope: 1 }) } : okResponse("ok", "ja");
+        });
+        const results = await translateWithGoogle(req([ja]), fetchImpl as any);
+        expect(results).toEqual([{ id: "0", failed: true }]);
+    });
+
+    it("makes the whole message unsure when one piece is unsure", async () => {
+        const ja = "これはとても長い日本語の文章です。".repeat(112).slice(0, 1_900);
+        let n = 0;
+        const fetchImpl = vi.fn().mockImplementation(async () => {
+            n++;
+            return n === 2 ? okResponse("ok", "ja", 0.3) : okResponse("ok", "ja", 1);
+        });
+        const results = await translateWithGoogle(req([ja]), fetchImpl as any);
+        expect(results).toEqual([{ id: "0", skip: true, reason: "unsure" }]);
+    });
+
+    it("treats a 400 as a verdict about the message, not a busy endpoint", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 400, json: async () => ({}) });
+        const results = await translateWithGoogle(req(["hola"]), fetchImpl as any);
+        expect(results).toEqual([{ id: "0", failed: true }]);
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
+    it("never runs more than 4 requests at once across parallel batches", async () => {
+        const { __resetGoogleGate } = await import("../engines/google");
+        __resetGoogleGate();
+        let liveNow = 0;
+        let peak = 0;
+        const fetchImpl = vi.fn().mockImplementation(async () => {
+            liveNow++;
+            peak = Math.max(peak, liveNow);
+            await new Promise(r => setTimeout(r, 1));
+            liveNow--;
+            return okResponse("hi", "es");
+        });
+        const batch = (k: number) => req(Array.from({ length: 10 }, (_, i) => `m${k}-${i}`));
+        await Promise.all([0, 1, 2, 3, 4].map(k => translateWithGoogle(batch(k), fetchImpl as any)));
+        expect(fetchImpl).toHaveBeenCalledTimes(50);
+        expect(peak).toBeLessThanOrEqual(4);
+        expect(peak).toBe(4);
+    });
+
+    it("never runs more than 2 at once when Google is the only translator", async () => {
+        let liveNow = 0;
+        let peak = 0;
+        const fetchImpl = vi.fn().mockImplementation(async () => {
+            liveNow++;
+            peak = Math.max(peak, liveNow);
+            await new Promise(r => setTimeout(r, 1));
+            liveNow--;
+            return okResponse("hi", "es");
+        });
+        const batch = (k: number) => ({ ...req(Array.from({ length: 10 }, (_, i) => `p${k}-${i}`)), patientRetries: true });
+        await Promise.all([0, 1, 2, 3, 4].map(k => translateWithGoogle(batch(k), fetchImpl as any)));
+        expect(peak).toBeLessThanOrEqual(2);
+        // A one-at-a-time batch alongside a normal one never lifts the peak past 4.
+        peak = 0;
+        await Promise.all([
+            translateWithGoogle({ ...req(["s1", "s2", "s3"]), maxConcurrency: 1 }, fetchImpl as any),
+            ...[0, 1, 2].map(k => translateWithGoogle(batch(k + 10), fetchImpl as any)),
+            translateWithGoogle(req(Array.from({ length: 10 }, (_, i) => `q${i}`)), fetchImpl as any)
+        ]);
+        expect(peak).toBeLessThanOrEqual(4);
+    });
+
+    // A stalled socket (wake from sleep, a Wi-Fi switch) used to hold the
+    // message blank and in flight for Node's 300s headers timeout.
+    const hangingFetch = (hangOn: (url: string) => boolean) => vi.fn().mockImplementation((url: string, init?: any) => {
+        if (!hangOn(url)) return Promise.resolve(okResponse("hi", "es"));
+        return new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+    });
+
+    it("gives up on a request that never answers", async () => {
+        const fetchImpl = hangingFetch(() => true);
+        await expect(translateWithGoogle(req(["hola"]), fetchImpl as any, { requestTimeoutMs: 50 }))
+            .rejects.toThrow("aborted");
+    });
+
+    it("marks only the hung message as waiting and keeps the rest", async () => {
+        const fetchImpl = hangingFetch(url => url.includes("query.text=b"));
+        const results = await translateWithGoogle(req(["a", "b"]), fetchImpl as any, { requestTimeoutMs: 50 });
+        expect(results).toEqual([
+            { id: "0", lang: "es", text: "hi", skip: false },
+            { id: "1", failed: true, transport: true }
+        ]);
+    });
+});

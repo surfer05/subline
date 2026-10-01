@@ -500,11 +500,19 @@ describe("markers — who writes them, and which ones catch-up picks back up", (
             ({ ok: false, error: "google: HTTP 429" }));
         stubMessages.set(CHANNEL, [discordMessage("1", "viel glück!")]);
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "viel glück!") });
-        await settle();
+        await vi.advanceTimersByTimeAsync(1_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
         const calls = native.translateBatch.mock.calls.length;
-        await settle();
+        await vi.advanceTimersByTimeAsync(5_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
         expect(native.translateBatch.mock.calls.length).toBe(calls);
         expect(getTranslation(makeKey("1", "en"))).toEqual({ deferred: true });
+        // The timed retry (a quiet channel has no later success to sweep on)
+        // backs off: 15s, 30s, 60s, then every 2 minutes. Ten minutes of a
+        // wall costs a handful of requests, not a treadmill.
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        expect(native.translateBatch.mock.calls.length - calls).toBeLessThanOrEqual(7);
     });
 
     // THE WALL OF WARNINGS, 2026-09-02. A channel of English small talk —

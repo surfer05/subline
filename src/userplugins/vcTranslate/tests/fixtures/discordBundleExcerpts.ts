@@ -1,6 +1,6 @@
 /**
  * The smallest pieces of Discord's public web client (discord.com/assets,
- * fetched with no login on 2026-09-27) each surface patch match needs: for
+ * fetched with no login on 2026-09-27; the status bubble sites on 2026-10-01) each surface patch match needs: for
  * each replacement, per site, just the matched text plus any context its
  * lookbehind or lookahead reads. Regression fixtures for
  * tests/surfacePatches.test.ts; the full-bundle check (every find in exactly
@@ -115,17 +115,18 @@ export const BUNDLE_SITES: Array<{ patch: number; replacement: number; module: s
     {
         "patch": 8,
         "replacement": 0,
-        "module": "983495",
+        "module": "394816",
         "sites": [
-            "es=null!=a?(0,l.jsx)(f.E,{variant:\"text-sm/normal\",className:eu.qS,children:a}):null,eo=void 0!=="
+            "(0,l.jsxs)(l.Fragment,{children:[eT,(0,l.jsxs)(\"div\",{ref:M,className:r()(ex.kL,E)",
+            "(0,l.jsxs)(l.Fragment,{children:[eT,(0,l.jsxs)(\"div\",{ref:M,className:r()(ex.kL,E)"
         ]
     },
     {
         "patch": 8,
         "replacement": 1,
-        "module": "983495",
+        "module": "394816",
         "sites": [
-            "maxHeight:`${B?Math.min(V.current,_):n}px`})},[X,a,n,er,B,_,Z]"
+            "I=!y&&!n.bot&&!A;if(g){let e=null!=p&&\"\"!==p?p:null;return(0,l.jsx)(E.f5,{value:T,children:(0,l.jsx)(eR,{emoji:c??null,text:e,statusLabel:b,placeholderText:d,ref:t,...S})"
         ]
     },
     {

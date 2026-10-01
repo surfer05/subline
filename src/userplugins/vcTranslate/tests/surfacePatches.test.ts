@@ -70,3 +70,37 @@ describe("surface patches against Discord's current public bundle", () => {
         expect(out).toEqual(["parsed"]);
     });
 });
+
+describe("the profile status line patch", () => {
+    // Pieces of the bubble module (394816, 2026-10-01) in their real order:
+    // the clamped status text, both return branches, and the outer component.
+    const MODULE = [
+        "er=null!=a?(0,l.jsx)(f.E,{variant:\"text-sm/normal\",className:ex.qS,children:a}):null,",
+        "return null==C?(0,l.jsxs)(l.Fragment,{children:[eT,(0,l.jsxs)(\"div\",{ref:M,className:r()(ex.kL,E),onMouseEnter:()=>{}})]}):",
+        "(0,l.jsxs)(l.Fragment,{children:[eT,(0,l.jsxs)(\"div\",{ref:M,className:r()(ex.kL,E),onFocus:()=>{C(!0)}})]})}),",
+        "ev=i.forwardRef(function(e,t){let{user:n,disableToolbar:A=!1,...S}=e,y=(0,o.bG)([v.default],()=>v.default.getId()===n.id),",
+        "I=!y&&!n.bot&&!A;if(g){let e=null!=p&&\"\"!==p?p:null;return(0,l.jsx)(E.f5,{value:T,children:(0,l.jsx)(eR,{emoji:c??null,text:e,statusLabel:b,placeholderText:d,ref:t,...S})})}"
+    ].join("");
+
+    function patched(): string {
+        const patch = SURFACE_PATCHES.find(p => p.find === "action:\"HOVER_CUSTOM_STATUS\"")!;
+        let src = MODULE;
+        for (const r of patch.replacement) src = src.replace(canon(r.match), r.replace);
+        return src;
+    }
+
+    it("leaves the clamped status text exactly as Discord wrote it", () => {
+        expect(patched()).toContain("className:ex.qS,children:a}):null,");
+        expect(patched()).not.toContain("statusBubbleChildren");
+    });
+
+    it("puts the line in flow, between the reference container and the bubble, in both branches", () => {
+        const src = patched();
+        expect(src.match(/\$self\.statusLine\(arguments\[0\]\)/g)).toHaveLength(2);
+        expect(src).toContain("children:[eT,$self.statusLine(arguments[0]),(0,l.jsxs)(\"div\",{ref:M");
+    });
+
+    it("marks the reader's own status on the props every branch passes on", () => {
+        expect(patched()).toContain("if(S.sublineSelf=y,g){");
+    });
+});

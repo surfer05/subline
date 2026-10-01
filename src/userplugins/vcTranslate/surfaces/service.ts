@@ -29,10 +29,12 @@ export type SurfaceVerdict = { lang: string; text: string; conf?: number } | "sk
 
 /**
  * What `translate` returns: a verdict per text, in order, or `null` for "not
- * now" (cooling down, refused, unreachable). "Not now" is retried later;
- * a "fail" verdict is not retried for `failRetryMs`.
+ * now" (sent, but refused or unreachable). "Not now" is retried later; a
+ * "fail" verdict is not retried for `failRetryMs`. `"busy"` means nothing was
+ * sent at all (a message batch was out, a cooldown, no gate slot): it costs
+ * no per-minute slot and no budget, and is retried after `busyRetryMs`.
  */
-export type SurfaceOutcome = SurfaceVerdict[] | null;
+export type SurfaceOutcome = SurfaceVerdict[] | null | "busy";
 
 export interface SurfaceDeps {
     isPaid(): boolean;
@@ -70,6 +72,7 @@ export interface SurfaceDeps {
     maxFastBatch?: number;
     failRetryMs?: number;
     notNowRetryMs?: number;
+    busyRetryMs?: number;
 }
 
 export const SURFACE_FAST_DEBOUNCE_MS = 400;
@@ -85,6 +88,37 @@ export const SURFACE_MAX_FAST_BATCH = 5;
 export const SURFACE_MAX_BATCH_BYTES = 20 * 1024;
 /** Longer texts are not surface-translated at all: no request, no line. */
 export const SURFACE_MAX_TEXT_CHARS = 2_000;
+/**
+ * The cap for long-text kinds (an embed description allows 4,096). The same
+ * number as the relay's per-text limit (relay/src/index.ts MAX_TEXT_CHARS):
+ * one text over it makes the relay refuse the whole batch.
+ */
+export const SURFACE_MAX_LONG_TEXT_CHARS = 4_000;
+
+/**
+ * A long text cut to fit SURFACE_MAX_LONG_TEXT_CHARS: at the last paragraph
+ * break, else the last sentence end, else the last space, at or under the
+ * limit. `partial` says the line covers only the first part.
+ */
+export function fitLongText(text: string): { text: string; partial: boolean; } {
+    const max = SURFACE_MAX_LONG_TEXT_CHARS;
+    if (text.length <= max) return { text, partial: false };
+    const head = text.slice(0, max);
+    const breaks = [head.lastIndexOf("\n\n"), head.lastIndexOf("\n")];
+    const sentence = Math.max(...[". ", "! ", "? ", "。", "！", "？"].map(m => {
+        const at = head.lastIndexOf(m);
+        return at < 0 ? -1 : at + m.trimEnd().length;
+    }));
+    const floor = max / 2;
+    let cut = breaks.find(at => at >= floor) ?? -1;
+    if (cut < 0 && sentence >= floor) cut = sentence;
+    if (cut < 0) cut = head.lastIndexOf(" ");
+    if (cut < floor) cut = max;
+    // Never end on half of a surrogate pair.
+    const code = text.charCodeAt(cut - 1);
+    if (code >= 0xd800 && code <= 0xdbff) cut--;
+    return { text: text.slice(0, cut).trimEnd(), partial: true };
+}
 
 /** What one text costs against the daily budget: 1 + one per started 1,000 characters. */
 export function surfaceCost(text: string): number {
@@ -96,6 +130,19 @@ function byteLength(text: string): number {
 }
 export const SURFACE_FAIL_RETRY_MS = 10 * 60_000;
 export const SURFACE_NOT_NOW_RETRY_MS = 60_000;
+/** Nothing was sent (a message batch was out): ask again soon. */
+export const SURFACE_BUSY_RETRY_MS = 8_000;
+/**
+ * At most this many tight texts wait per tier. Rows scrolled past fall off
+ * the old end without ever being sent; what is on screen now is the newest.
+ */
+export const SURFACE_MAX_PENDING = 60;
+/**
+ * Before a batch carrying tight texts leaves, mounted views are asked to
+ * render again, and a tight text only goes if it is wanted again within this
+ * long. A row scrolled past is no longer mounted, so it never spends.
+ */
+export const SURFACE_PROBE_MS = 300;
 export const SURFACE_MAX_QUALITY_PER_MINUTE = 4;
 /**
  * Google is free to us, but a member list or a busy server can want hundreds
@@ -112,12 +159,20 @@ export interface WantOptions {
      * ✦ only: Google is never asked, so a long list costs no ≈ fan-out.
      */
     tight?: boolean;
+    /** A kind that may be long (an embed description): the 4,000 cap applies, see fitLongText. */
+    long?: boolean;
 }
 
 const TIERS: SurfaceTier[] = ["fast", "quality"];
 
+interface PendingText { text: string; tight: boolean; wantedAt: number; }
+
 export class SurfaceService {
-    private readonly pending: Record<SurfaceTier, Map<string, string>> = { fast: new Map(), quality: new Map() };
+    private readonly pending: Record<SurfaceTier, Map<string, PendingText>> = { fast: new Map(), quality: new Map() };
+    /** When the probe for the next flush went out (see SURFACE_PROBE_MS), or null. */
+    private readonly probeAt: Record<SurfaceTier, number | null> = { fast: null, quality: null };
+    /** One timer per tier that wakes mounted views when parked texts may be asked again. */
+    private readonly wake: Record<SurfaceTier, { handle: unknown; at: number; } | null> = { fast: null, quality: null };
     private readonly inFlight: Record<SurfaceTier, Set<string>> = { fast: new Set(), quality: new Set() };
     private readonly retryAt: Record<SurfaceTier, Map<string, number>> = { fast: new Map(), quality: new Map() };
     private readonly timers: Record<SurfaceTier, unknown> = { fast: null, quality: null };
@@ -142,22 +197,30 @@ export class SurfaceService {
      */
     want(text: string | null | undefined, options: WantOptions = {}): SurfaceEntry | null {
         if (typeof text !== "string" || !this.deps.isPaid()) return null;
-        const norm = normalizeSurfaceText(text);
-        if (norm === "" || norm.length > SURFACE_MAX_TEXT_CHARS || this.deps.locallySkipped(norm)) return null;
+        let norm = normalizeSurfaceText(text);
+        if (options.long) norm = fitLongText(norm).text;
+        if (norm === "" || (norm.length > SURFACE_MAX_TEXT_CHARS && !options.long) || this.deps.locallySkipped(norm)) return null;
         const key = surfaceKey(norm, this.deps.targetLang());
         const entry = this.deps.cache.get(key);
         if (entry?.skip) return null;
         if (entry?.quality) return entry;
-        const quality = this.qualityAllowed();
-        // Without ✦, a tight mark is Google's too: ≈ in place.
-        if ((!options.tight || !quality) && !entry?.fast) this.queue("fast", key, norm);
-        if (quality && this.budgetLeft() > 0) this.queue("quality", key, norm);
+        const tight = options.tight === true;
+        // A tight mark is ✦ only while ✦ can be had. Without AI, or once
+        // today's surface ✦ is spent, it is Google's too: ≈ in place, exactly
+        // as an Automatic owner gets. Paying more must never show less.
+        if ((!tight || !this.tightQualityOnly()) && !entry?.fast) this.queue("fast", key, norm, tight);
+        if (this.qualityAllowed() && this.budgetLeft() > 0) this.queue("quality", key, norm, tight);
         return entry ?? null;
     }
 
     /** Whether ✦ may be asked right now (see SurfaceDeps.qualityAllowed). */
     qualityAllowed(): boolean {
         return this.deps.qualityAllowed ? this.deps.qualityAllowed() : true;
+    }
+
+    /** True while a tight mark waits for ✦ alone: ✦ is allowed and today's budget is not spent. */
+    tightQualityOnly(): boolean {
+        return this.qualityAllowed() && this.budgetLeft() > 0;
     }
 
     private budgetLeft(): number {
@@ -180,16 +243,56 @@ export class SurfaceService {
             this.retryAt[tier].clear();
             this.sends[tier] = [];
             this.busy[tier] = false;
+            this.probeAt[tier] = null;
+            if (this.wake[tier] !== null) this.deps.cancel(this.wake[tier]!.handle);
+            this.wake[tier] = null;
         }
         this.listeners.clear();
     }
 
-    private queue(tier: SurfaceTier, key: string, text: string): void {
-        if (this.inFlight[tier].has(key) || this.pending[tier].has(key)) return;
+    private queue(tier: SurfaceTier, key: string, text: string, tight = false): void {
+        if (this.inFlight[tier].has(key)) return;
         const retry = this.retryAt[tier].get(key);
         if (retry !== undefined && this.deps.now() < retry) return;
-        this.pending[tier].set(key, text);
+        const queue = this.pending[tier];
+        // Re-inserted on every want, so the newest end of the map is what is
+        // on screen now; flush sends from that end first.
+        const was = queue.get(key);
+        queue.delete(key);
+        queue.set(key, { text, tight: tight && (was?.tight ?? true), wantedAt: this.deps.now() });
+        // Tight texts only: a list row is wanted again whenever it is on
+        // screen, while a roomy line under a message may render just once.
+        if (queue.size > SURFACE_MAX_PENDING) {
+            for (const [k, p] of queue) {
+                if (queue.size <= SURFACE_MAX_PENDING) break;
+                if (p.tight) queue.delete(k);
+            }
+        }
         this.arm(tier);
+    }
+
+    private notify(): void {
+        for (const listener of [...this.listeners]) {
+            try { listener(); } catch { /* one broken listener must not starve the rest */ }
+        }
+    }
+
+    /**
+     * Wake mounted views at `at`, when a parked text may be asked again. Only
+     * views still on screen call want() again, so nothing that has scrolled
+     * away or closed is sent. One timer per tier, moved earlier when needed.
+     */
+    private scheduleWake(tier: SurfaceTier, at: number): void {
+        const current = this.wake[tier];
+        if (current !== null && current.at <= at) return;
+        if (current !== null) this.deps.cancel(current.handle);
+        const generation = this.generation;
+        const handle = this.deps.schedule(() => {
+            if (generation !== this.generation) return;
+            this.wake[tier] = null;
+            this.notify();
+        }, Math.max(0, at - this.deps.now()) + 1);
+        this.wake[tier] = { handle, at };
     }
 
     private arm(tier: SurfaceTier, atLeastMs = 0): void {
@@ -239,13 +342,34 @@ export class SurfaceService {
             }
             if (tier === "fast") max = Math.min(max, cap - this.sends[tier].length);
         }
+        // STILL ON SCREEN? A tight text (a list row, a title) is wanted on
+        // render, so rows scrolled past sit in the queue too. Ask mounted
+        // views to render again and send only the tight texts wanted again;
+        // the rest never spend a request or the day's budget.
+        if (this.probeAt[tier] === null && this.listeners.size > 0 && [...queue.values()].some(p => p.tight)) {
+            const generation = this.generation;
+            this.probeAt[tier] = this.deps.now();
+            this.timers[tier] = this.deps.schedule(() => {
+                this.timers[tier] = null;
+                if (generation === this.generation) void this.flush(tier);
+            }, SURFACE_PROBE_MS);
+            this.notify();
+            return;
+        }
+        if (this.probeAt[tier] !== null) {
+            const probedAt = this.probeAt[tier]!;
+            this.probeAt[tier] = null;
+            for (const [key, p] of [...queue.entries()]) if (p.tight && p.wantedAt < probedAt) queue.delete(key);
+            if (queue.size === 0) return;
+        }
         // Pack by count, by size, and (for ✦) by what today's budget still
-        // allows. A text the budget can no longer afford is dropped from the
-        // ✦ queue; a roomy line keeps its ≈.
+        // allows, NEWEST FIRST: what was wanted last is what is on screen. A
+        // text the budget can no longer afford is dropped from the ✦ queue; a
+        // roomy line keeps its ≈.
         const batch: Array<[string, string]> = [];
         let bytes = 0;
         let units = 0;
-        for (const [key, text] of [...queue.entries()]) {
+        for (const [key, { text }] of [...queue.entries()].reverse()) {
             if (batch.length >= max) break;
             const size = byteLength(text);
             if (batch.length > 0 && bytes + size > maxBytes) break;
@@ -259,11 +383,13 @@ export class SurfaceService {
             units += cost;
         }
         if (batch.length === 0) return;
+        // Chosen newest first, sent in the order they were wanted.
+        batch.reverse();
         // One entry per relay request, one per Google text.
+        const sendEntries = tier === "fast" ? batch.length : 1;
         {
             const sentAt = this.deps.now();
-            const entries = tier === "fast" ? batch.length : 1;
-            for (let i = 0; i < entries; i++) this.sends[tier].push(sentAt);
+            for (let i = 0; i < sendEntries; i++) this.sends[tier].push(sentAt);
         }
         for (const [key] of batch) {
             queue.delete(key);
@@ -283,12 +409,26 @@ export class SurfaceService {
         }
         if (generation !== this.generation) return;
         this.busy[tier] = false;
+        const now = this.deps.now();
+        if (outcome === "busy") {
+            // Nothing left this computer: give back the per-minute slot it
+            // took, spend no budget, and ask again soon.
+            this.sends[tier].splice(this.sends[tier].length - sendEntries, sendEntries);
+            const at = now + (this.deps.busyRetryMs ?? SURFACE_BUSY_RETRY_MS);
+            for (const [key] of batch) {
+                this.inFlight[tier].delete(key);
+                this.retryAt[tier].set(key, at);
+            }
+            this.scheduleWake(tier, at);
+            if (this.pending[tier].size > 0) this.arm(tier);
+            return;
+        }
         // Whatever did not fit, or was asked for meanwhile, leaves in the next
         // request, armed only now that this one is back.
         if (this.pending[tier].size > 0) this.arm(tier);
         if (tier === "quality" && outcome !== null) this.deps.budget?.spend(units);
 
-        const now = this.deps.now();
+        let earliestRetry = Number.POSITIVE_INFINITY;
         batch.forEach(([key], i) => {
             this.inFlight[tier].delete(key);
             const verdict = outcome === null ? null : outcome[i];
@@ -318,9 +458,14 @@ export class SurfaceService {
                 this.deps.cache.put(key, tier === "quality" ? { quality: verdict } : { fast: verdict });
                 if (tier === "quality") this.pending.fast.delete(key);
             }
+            const retry = this.retryAt[tier].get(key);
+            if (retry !== undefined && retry > now && verdict !== "skip") earliestRetry = Math.min(earliestRetry, retry);
         });
-        for (const listener of [...this.listeners]) {
-            try { listener(); } catch { /* one broken listener must not starve the rest */ }
-        }
+        // A text parked for "not now" or a failure is asked for again by the
+        // views still showing it, once its wait is over. Without this wake,
+        // a popout opened during a message batch stayed untranslated until
+        // something unrelated re-rendered it.
+        if (Number.isFinite(earliestRetry)) this.scheduleWake(tier, earliestRetry);
+        this.notify();
     }
 }

@@ -822,7 +822,7 @@ describe("the audit round", () => {
     const DAY = 24 * HOUR;
     const lastStatusCall = () => native.relayStatus.mock.calls[native.relayStatus.mock.calls.length - 1]!;
 
-    it("a dead code is dropped and marked cleared, and the Automatic code the relay hands back is saved", async () => {
+    it("a dead code is dropped (not marked as cleared by the reader), and the Automatic code the relay hands back is saved", async () => {
         DataStore.setEntitlementForTest({ automatic: true, ai: true, tokenExpiresAt: Date.now() + 7 * DAY, checkedAt: Date.now() });
         settings.store.sublineCode = "LK-AI-GONE";
         settings.store.engine = "relay";
@@ -834,7 +834,8 @@ describe("the audit round", () => {
         await vi.advanceTimersByTimeAsync(DEAD_CODE_CONFIRM_MS + 1_000);
         await flush();
         expect(settings.store.sublineCode).toBe("slp_auto9");
-        expect(settings.store.clearedPurchaseCode).toBe("LK-AI-GONE");
+        // The relay dropped it, not the reader: a renewal can bring it back.
+        expect(settings.store.clearedPurchaseCode).toBe("");
         // Automatic survives the AI lapse: ≈ on every message, no ✦.
         native.relayStatus.mockResolvedValue(v2({ automatic: true }));
         answer();
@@ -874,15 +875,17 @@ describe("the audit round", () => {
         await vi.advanceTimersByTimeAsync(DEAD_CODE_CONFIRM_MS + 1_000);
         await flush();
         expect(settings.store.sublineCode).toBe("");
-        expect(settings.store.clearedPurchaseCode).toBe("LK-AI-GONE");
+        expect(settings.store.clearedPurchaseCode).toBe("");
         const [credential, install] = lastStatusCall();
         expect(credential).toMatch(/^free_[0-9a-f]{32}$/);
         expect(credential).toBe(install);
-        // The dead code never comes back, even if a later answer names it.
+        // WAS: "the dead code never comes back". The relay never offers a
+        // dead code, so one it offers again is live again (the renewal went
+        // through after a declined card), and it is taken back.
         native.relayStatus.mockResolvedValue(v2({ automatic: true, code: "LK-AI-GONE" }));
         await vi.advanceTimersByTimeAsync(ENTITLEMENT_REFRESH_MS);
         await flush();
-        expect(settings.store.sublineCode).toBe("");
+        expect(settings.store.sublineCode).toBe("LK-AI-GONE");
     });
 
     it("a ✦ refusal does not ask the relay again while a dead answer is unconfirmed: the hourly re-check owns it", async () => {
@@ -907,7 +910,8 @@ describe("the audit round", () => {
         await vi.advanceTimersByTimeAsync(DEAD_CODE_CONFIRM_MS + 1_000);
         await flush();
         expect(native.relayStatus.mock.calls.length).toBeGreaterThan(n);
-        expect(settings.store.clearedPurchaseCode).toBe("LK-LAG");
+        expect(settings.store.sublineCode).toBe("");
+        expect(settings.store.clearedPurchaseCode).toBe("");
     });
 
     it("a saved code the relay no longer knows keeps its plan on the first strike, then is dropped and the install id alone is asked (Automatic stays)", async () => {
@@ -927,7 +931,7 @@ describe("the audit round", () => {
         await vi.advanceTimersByTimeAsync(DEAD_CODE_CONFIRM_MS + 1_000);
         await flush();
         expect(settings.store.sublineCode).toBe("");
-        expect(settings.store.clearedPurchaseCode).toBe("LK-REFUNDED");
+        expect(settings.store.clearedPurchaseCode).toBe("");
         expect(lastStatusCall()[0]).toMatch(/^free_[0-9a-f]{32}$/);
         expect(activationNotices()).toHaveLength(0);
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal amigo") });

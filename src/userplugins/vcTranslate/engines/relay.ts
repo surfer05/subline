@@ -340,6 +340,9 @@ function v2StatusFrom(body: any): RelayStatus {
     };
 }
 
+/** How long one ✦ batch may take. An LLM answer can take seconds; a stall is not that. */
+export const TRANSLATE_TIMEOUT_MS = 30_000;
+
 export async function translateWithRelay(
     req: BatchRequest,
     code: string,
@@ -352,12 +355,19 @@ export async function translateWithRelayDetailed(
     req: BatchRequest,
     code: string,
     fetchImpl: typeof fetch = fetch,
-    install?: string
+    install?: string,
+    // A stalled socket (wake from sleep, a Wi-Fi switch) otherwise waits out
+    // Node's 300s headers timeout while the batch sits in flight. An abort is
+    // a transport failure, so the usual cooldown and retry paths take it.
+    timeoutMs: number = TRANSLATE_TIMEOUT_MS
 ): Promise<RelayOutcome> {
     const res = await fetchImpl(RELAY_URL, {
         method: "POST",
         headers: relayHeaders(code, install, true),
-        body: JSON.stringify(req)
+        body: JSON.stringify(req),
+        ...(typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+            ? { signal: AbortSignal.timeout(timeoutMs) }
+            : {})
     });
 
     // The relay speaks NativeResponse: { ok:true, results } | { ok:false, error, retryAfterMs }.

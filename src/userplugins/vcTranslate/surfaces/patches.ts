@@ -130,20 +130,28 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
         }]
     },
     {
-        surface: "custom status bubble in the profile header (a second, smaller ✦ line inside the bubble)",
-        source: "written against the current bundle (the profile custom status bubble)",
+        surface: "custom status in the profile header: an unclamped \"Status · ✦\" line under the bubble",
+        source: "written against the current bundle (the profile custom status bubble). WAS a line INSIDE the bubble's text, which Discord clamps (2 lines, 8 on hover, max 144px): a long status hid its translation completely",
         find: "action:\"HOVER_CUSTOM_STATUS\"",
         replacement: [
             {
-                match: /(\i=null!=(\i)\?\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-sm\/normal",className:\i\.\i,children:)\2\}\):null,(?=\i=void 0!==)/,
-                replace: "$1$self.statusBubbleChildren($2)}):null,"
+                // Both return branches start the same Fragment: the hidden,
+                // in-flow reference container first, then the absolutely
+                // positioned bubble. The line goes between them, in flow, so
+                // it takes its own height below the bubble and is never
+                // clamped. `arguments[0]` is the bubble's props: the returns
+                // sit in its forwardRef function body.
+                match: /(\(0,\i\.jsxs\)\(\i\.Fragment,\{children:\[\i,)(?=\(0,\i\.jsxs\)\("div",\{ref:\i,className:\i\(\)\(\i\.\i,\i\))/g,
+                replace: "$1$self.statusLine(arguments[0]),"
             },
             {
-                // The bubble measures its height once per change of its own
-                // inputs. This adds "a surface translation landed" to those
-                // inputs, so the new line is measured and never clipped.
-                match: /(maxHeight:`\$\{\i\?Math\.min\(\i\.current,\i\):\i\}px`\}\)\},\[\i,\i,\i,\i,\i,\i,\i)\]/,
-                replace: "$1,$self.useSurfaceVersion()]"
+                // The outer component knows whether this is the reader's own
+                // status (the live preview while typing one is always theirs).
+                // Its rest props reach the bubble in every branch, so the flag
+                // rides along on them: own status and own typing are never
+                // translated.
+                match: /(?<=(\i)=!(\i)&&!\i\.bot&&!\i;)if\((\i)\)\{(?=let \i=null!=\i&&""!==\i\?\i:null;return\(0,\i\.jsx\)\(\i\.\i,\{value:\i,children:\(0,\i\.jsx\)\(\i,\{emoji:\i\?\?null,text:\i,statusLabel:\i,placeholderText:\i,ref:\i,\.\.\.(\i)\}\))/,
+                replace: "if($4.sublineSelf=$2,$3){"
             }
         ]
     },

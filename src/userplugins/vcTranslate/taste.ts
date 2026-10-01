@@ -248,12 +248,30 @@ function utcDay(now: number): string {
     return new Date(now).toISOString().slice(0, 10);
 }
 
+/**
+ * How far the relay's clock is ahead of this one (ms), from its last stated
+ * `now`. The previews' day is the RELAY's UTC day: a local clock an hour fast
+ * rolled over an hour early, stored the relay's yesterday count as today's,
+ * and showed "Add AI ✦" until the next local midnight.
+ */
+let relaySkew = 0;
+
+/** Record the relay's clock from an answer that stated it. */
+export function noteRelayClock(serverNow: unknown, now: number = Date.now()): void {
+    if (typeof serverNow === "number" && Number.isFinite(serverNow) && serverNow > 0) relaySkew = serverNow - now;
+}
+
+/** The relay's UTC day at local time `now`. */
+function relayDay(now: number): string {
+    return utcDay(now + relaySkew);
+}
+
 /** Record what the relay said. Ignores anything malformed rather than showing it. */
 export function recordTasteQuota(u: unknown, c: unknown, now: number = Date.now()): void {
     if (typeof u !== "number" || !Number.isFinite(u) || u < 0) return;
     used = Math.floor(u);
     if (typeof c === "number" && Number.isFinite(c) && c > 0) cap = Math.floor(c);
-    readDay = utcDay(now);
+    readDay = relayDay(now);
 }
 
 /**
@@ -263,7 +281,7 @@ export function recordTasteQuota(u: unknown, c: unknown, now: number = Date.now(
  */
 export function markTasteExhausted(now: number = Date.now()): void {
     used = cap;
-    readDay = utcDay(now);
+    readDay = relayDay(now);
 }
 
 /**
@@ -273,7 +291,7 @@ export function markTasteExhausted(now: number = Date.now()): void {
  */
 export function rolloverTasteIfNewUtcDay(now: number = Date.now()): boolean {
     if (readDay === null) return false;
-    if (readDay === utcDay(now)) return false;
+    if (readDay === relayDay(now)) return false;
     used = null;
     readDay = null;
     return true;
@@ -298,7 +316,7 @@ let localDay: string | null = null;
 let localUsed = 0;
 
 function localUsedToday(now: number): number {
-    return localDay === utcDay(now) ? localUsed : 0;
+    return localDay === relayDay(now) ? localUsed : 0;
 }
 
 /** Read the persisted local count. A bad or missing value is a zero. */
@@ -314,7 +332,7 @@ export async function loadLocalTasteCount(): Promise<void> {
 
 /** One ✦ served under the taste allowance (a preview or a ⚡ press). */
 export function noteTasteSpent(now: number = Date.now()): void {
-    const day = utcDay(now);
+    const day = relayDay(now);
     if (localDay !== day) { localDay = day; localUsed = 0; }
     localUsed++;
     void DataStore.set(LOCAL_TASTE_KEY, { day: localDay, used: localUsed }).catch(() => { });
@@ -354,4 +372,5 @@ export function __resetTaste(): void {
     readDay = null;
     localDay = null;
     localUsed = 0;
+    relaySkew = 0;
 }

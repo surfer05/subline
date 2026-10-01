@@ -258,3 +258,13 @@ describe("the paid-only model (v2) on the wire", () => {
         await expect(fetchRelayRedeem(INSTALL, "SERVER5", ok({ ok: true }) as any)).rejects.toThrow(/relay redeem: HTTP 200/);
     });
 });
+
+describe("translateWithRelayDetailed — a stalled connection", () => {
+    it("gives up instead of waiting for Node's 300s timeout", async () => {
+        const fetchImpl = vi.fn().mockImplementation((_url: string, init?: any) => new Promise((_res, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        }));
+        await expect(translateWithRelayDetailed(req(["hola"]), "slp_abc", fetchImpl as any, undefined, 50))
+            .rejects.toThrow("aborted");
+    });
+});

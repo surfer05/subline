@@ -228,8 +228,11 @@ describe("a purchase linked while Discord was closed", () => {
     });
 
     it("says it once, however many paths deliver the same purchase", async () => {
+        // The install owned nothing when Discord closed; the relay now links
+        // a purchase. (An answer that hands back a code with nothing new is
+        // no purchase, and says nothing: see planIndex's "losing AI".)
         native.relayStatus.mockResolvedValue(v2({ automatic: true, code: "LK-ONCE" }));
-        await restart();
+        await restart(() => DataStore.clearEntitlementForTest());
         openUpgrade();
         pressPlan(0);
         await flush();

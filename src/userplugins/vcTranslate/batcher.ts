@@ -20,6 +20,11 @@ export interface BatcherOptions {
 export interface Batcher {
     add(msg: PendingMessage): void;
     recordContext(msg: PendingMessage): void;
+    /**
+     * Take a message out of its queue before it is sent, e.g. because it was
+     * edited inside the debounce window. True when it was queued.
+     */
+    remove(id: string): boolean;
     flushNow(): void;
     /** Remove and return every queued message across all channels, without flushing. */
     drainPending(): PendingMessage[];
@@ -118,6 +123,18 @@ export function createBatcher(opts: BatcherOptions): Batcher {
 
         recordContext(msg) {
             pushContext(stateFor(msg.channelId), msg);
+        },
+
+        remove(id) {
+            let removed = false;
+            for (const s of channels.values()) {
+                const i = s.queue.findIndex(m => m.id === id);
+                if (i >= 0) {
+                    s.queue.splice(i, 1);
+                    removed = true;
+                }
+            }
+            return removed;
         },
 
         flushNow() {
