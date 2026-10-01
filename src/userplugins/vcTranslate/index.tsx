@@ -2922,6 +2922,9 @@ function readableContent(text: string, channelId: string): string {
  * paths that decide per call whether the quality tier is in play at all.
  */
 function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true, recordContext = true) {
+    // The raw text, before the readable rewrite below, because that is what a
+    // later MESSAGE_UPDATE carries and is compared with.
+    rememberSeenText(pending.id, pending.text);
     // Two flavours of local skip, handled identically: the structural one
     // (own message, nothing translatable left after stripping emotes/links)
     // and the linguistic one (we can tell locally that this is already in the
@@ -3172,6 +3175,7 @@ function contextBefore(message: any, size: number): { author: string; text: stri
 
 function onMessageCreate({ message, optimistic }: { message: Message; optimistic?: boolean; }) {
     if (optimistic || !message?.id) return;
+    if (typeof message.content === "string") rememberSeenText(message.id, message.content);
     if (!channelActive(message.channel_id)) return;
     // Not the channel on screen: don't spend a request on it now. It is not
     // lost — opening that channel runs catch-up over its recent backlog.
@@ -3192,23 +3196,25 @@ function onMessageCreate({ message, optimistic }: { message: Message; optimistic
 function onMessageUpdate({ message }: { message: Message; }) {
     if (!message?.id) return;
 
-    // Whatever we had cached describes the pre-edit text, so it is wrong now
-    // regardless of what kind of update this is. The quality tier's spent
-    // attempt is discarded with it, for the same reason: it was spent on text
-    // that no longer exists, so the edited message is entitled to its own.
+    // MESSAGE_UPDATE is not only fired for user edits. It also fires when a
+    // link preview loads, an attachment finishes or a pin changes. Discord now
+    // sends the whole message for those, with the text unchanged; older
+    // payloads carried no `content` at all. Neither is an edit: the
+    // translation we have (or are waiting for) still fits these words, and
+    // dropping it would pay for every link message twice on both tiers.
+    const text = message.content;
+    if (typeof text !== "string") return;
+    if (seenText.get(message.id) === text) return;
+    rememberSeenText(message.id, text);
+
+    // A real edit. Whatever we had cached describes the pre-edit text, so it
+    // is wrong now. The quality tier's spent attempt is discarded with it, for
+    // the same reason: it was spent on text that no longer exists, so the
+    // edited message is entitled to its own.
     invalidateMessage(message.id);
     forgetQualityAttempts(message.id);
 
-    // MESSAGE_UPDATE is not only fired for user edits: it also fires for embed
-    // hydration (a link preview resolving, an attachment finishing processing)
-    // and for pin/flag changes. Those payloads are PARTIAL — they carry no
-    // `content` field at all — so re-queuing unconditionally would spend a
-    // translation call on every link anyone posts. Requiring non-empty content
-    // means embed-only updates are invalidated (harmless, the text is
-    // unchanged so it re-resolves identically) but never re-requested.
-    const text = message.content;
-    if (typeof text !== "string") return;
-    // A real edit: any request already carrying the old text is now stale
+    // Any request already carrying the old text is now stale
     // (see runTier), and a copy still waiting in a debounce window is taken
     // out so the new text is what gets sent.
     editEpoch.set(message.id, (editEpoch.get(message.id) ?? 0) + 1);
@@ -3253,6 +3259,20 @@ const editEpoch = new Map<string, number>();
 /** The latest edit of each message, so runTier can ask again with it. */
 const lastEdit = new Map<string, { pending: PendingMessage; isOwn: boolean; }>();
 const MAX_EDITS_KEPT = 500;
+/**
+ * The last raw text seen for each message (created, queued or edited), so a
+ * MESSAGE_UPDATE that only adds a link preview is told apart from an edit.
+ * Bounded: an id that fell out is treated as edited, which costs one request
+ * at worst and never shows a translation of words that are gone.
+ */
+const seenText = new Map<string, string>();
+const MAX_SEEN_TEXTS = 2_000;
+
+function rememberSeenText(id: string, text: string): void {
+    seenText.delete(id);
+    seenText.set(id, text);
+    if (seenText.size > MAX_SEEN_TEXTS) seenText.delete(seenText.keys().next().value!);
+}
 
 function rememberEdit(pending: PendingMessage, isOwn: boolean): void {
     lastEdit.delete(pending.id);
@@ -5113,6 +5133,7 @@ export default definePlugin({
         // already stops any answer that was waiting on them.
         editEpoch.clear();
         lastEdit.clear();
+        seenText.clear();
         for (const state of deferredRetries.values()) if (state.timer) clearTimeout(state.timer);
         deferredRetries.clear();
         // The plan's session state. The relay is asked again on the next

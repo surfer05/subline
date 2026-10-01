@@ -199,6 +199,88 @@ describe("an edit made while a translation is on its way", () => {
         expect(qualityTexts).toEqual(["hola amigo como estas", "adios amigo hasta luego"]);
     });
 
+    // Discord sends MESSAGE_UPDATE with the full message when a link preview
+    // loads, so the text arrives again unchanged. That is not an edit.
+    const withPreview = (id: string, content: string) =>
+        FluxDispatcher.dispatch("MESSAGE_UPDATE", {
+            message: { ...discordMessage(id, content), embeds: [{ type: "link", url: "https://example.com" }] }
+        });
+
+    const countRequests = () => {
+        const calls = { quality: [] as string[], google: [] as string[] };
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) => {
+            const list = engine === "google" ? calls.google : calls.quality;
+            for (const m of JSON.parse(payload).messages) list.push(m.text);
+            if (engine !== "google") await new Promise(r => setTimeout(r, 5_000));
+            return answerAll(payload, engine === "google" ? "G:" : "Q:");
+        });
+        return calls;
+    };
+    const linkText = "mira esto https://example.com amigo";
+
+    it("a link preview loading while ✦ is out does not ask again", async () => {
+        settings.store.engine = "groq";
+        settings.store.groqApiKey = "gsk-test";
+        const calls = countRequests();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", linkText) });
+        await advance(2_000);
+        withPreview("1", linkText);
+        await advance(60_000);
+
+        expect(calls.quality).toHaveLength(1);
+        expect(calls.google).toHaveLength(1);
+        expect(getTranslation(key("1"))).toMatchObject({ via: "groq" });
+    });
+
+    it("a link preview loading after the answer does not ask again", async () => {
+        settings.store.engine = "groq";
+        settings.store.groqApiKey = "gsk-test";
+        const calls = countRequests();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", linkText) });
+        await advance(60_000);
+        withPreview("1", linkText);
+        await advance(60_000);
+
+        expect(calls.quality).toHaveLength(1);
+        expect(calls.google).toHaveLength(1);
+        expect(getTranslation(key("1"))).toMatchObject({ via: "groq" });
+    });
+
+    it("an update with no text, then reopening the channel, does not ask again", async () => {
+        settings.store.engine = "groq";
+        settings.store.groqApiKey = "gsk-test";
+        const calls = countRequests();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", linkText) });
+        await advance(60_000);
+        // An older-style partial payload: no content field at all.
+        FluxDispatcher.dispatch("MESSAGE_UPDATE", {
+            message: { id: "1", channel_id: CHANNEL, embeds: [{ type: "link", url: "https://example.com" }] }
+        });
+        stubMessages.set(CHANNEL, [discordMessage("1", linkText)]);
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await advance(60_000);
+
+        expect(calls.quality).toHaveLength(1);
+        expect(calls.google).toHaveLength(1);
+        expect(getTranslation(key("1"))).toMatchObject({ via: "groq" });
+    });
+
+    it("a real edit after a preview loaded is still sent", async () => {
+        settings.store.engine = "groq";
+        settings.store.groqApiKey = "gsk-test";
+        const calls = countRequests();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", linkText) });
+        await advance(60_000);
+        withPreview("1", linkText);
+        await advance(1_000);
+        edit("1", "mira esto amigo, es buenisimo");
+        await advance(60_000);
+
+        expect(calls.quality).toHaveLength(2);
+        expect(calls.quality[1]).toBe("mira esto amigo, es buenisimo");
+        expect(getTranslation(key("1"))).toMatchObject({ text: "Q:mira esto amigo, es buenisimo", via: "groq" });
+    });
+
     it("drops a ≈ answer for the old text when Google is the only translator", async () => {
         native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => {
             await new Promise(r => setTimeout(r, 3_000));
