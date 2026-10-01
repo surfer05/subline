@@ -4,7 +4,7 @@ import { applyMorEvent, costFor, reserve, type CodeRecord, type Env } from "../s
 import { installHash } from "../src/checkout";
 import { resolveEntitlement } from "../src/entitle";
 import { applyBudget } from "../src/budget";
-import { translate, translateWithFallback, type BatchRequest, type Provider } from "../src/translate";
+import { chunkBatch, MAX_PARALLEL_CHUNKS, translate, translateBatch, translateWithFallback, type BatchRequest, type Provider } from "../src/translate";
 import { Promo } from "../src/promo";
 import { codeRec, fakeBudget, fakeDOStorage, fakeKV } from "./kv-mock";
 
@@ -387,7 +387,7 @@ describe("7. a slow primary does not use up the time the fallback needs", () => 
         const kv = fakeKV({ "code:slp_ai": codeRec({ plan: "monthly", dailyCap: 2000 }) });
         let res: Response | null = null;
         void paidPress(paidEnv(kv)).then(r => { res = r; });
-        await vi.advanceTimersByTimeAsync(23_000);
+        await vi.advanceTimersByTimeAsync(27_000);
         expect(res).not.toBeNull();
         expect(res!.status).toBe(429);
         expect(await res!.json()).toMatchObject({ ok: false, error: "translation service busy", retryAfterMs: 60_000 });
@@ -595,5 +595,123 @@ describe("15. /admin/codes mint never overwrites a customer's code", () => {
         expect((await mint(env(kv), { action: "mint", orderRef: "sub_real" })).status).toBe(409);
         expect(kv._dump()["order:sub_real"]).toBe("LK-REAL");
         expect((await mint(env(kv), { action: "mint", dailyCap: 100 })).status).toBe(200);
+    });
+});
+
+// ---------------------------------------------------------------------------
+describe("16. a long ✦ batch is not cut off while the primary is healthy", () => {
+    /** A model that answers every id in 0..n-1 after `ms(bodyChars)`. */
+    const slowModel = (ms: (chars: number) => number, n: number) => (url: string, init: any) => new Promise((resolve, reject) => {
+        const body = String(init?.body ?? "");
+        const rows = Array.from({ length: n }, (_, i) => ({ id: String(i), lang: "ja", text: "t" + i, skip: false }));
+        const t = setTimeout(() => resolve(okModel(rows)), ms(body.length));
+        init?.signal?.addEventListener("abort", () => { clearTimeout(t); reject(new DOMException("aborted", "AbortError")); });
+    });
+
+    it("a 3,900-character batch whose primary needs 15 s: the primary answers, the fallback is never called", async () => {
+        vi.useFakeTimers();
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const urls: string[] = [];
+        const model = slowModel(() => 15_000, 2);
+        vi.stubGlobal("fetch", vi.fn((url: string, init: any) => { urls.push(url); return model(url, init); }));
+        let result: any = null;
+        void translateWithFallback(breq(["あ".repeat(1_950), "い".repeat(1_950)]), orProvider, groqProvider, new AbortController().signal)
+            .then(r => { result = r; }, e => { result = e; });
+        await vi.advanceTimersByTimeAsync(16_000);
+        expect(urls.every(u => u === OR)).toBe(true);
+        expect(result).toEqual([{ id: "0", lang: "ja", text: "t0", skip: false }, { id: "1", lang: "ja", text: "t1", skip: false }]);
+    });
+
+    it("a 120 KB batch from a 0.2.0 client (20 x 2,000 CJK characters) is answered in time, in order, in at most 6 parallel calls", async () => {
+        vi.useFakeTimers();
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        // Latency grows with the text: 2 s plus 1 ms per character sent. The
+        // whole batch as ONE call would need about 42 s on each provider.
+        const model = slowModel(chars => 2_000 + chars, 20);
+        const calls: string[] = [];
+        vi.stubGlobal("fetch", vi.fn((url: string, init: any) => { calls.push(url); return model(url, init); }));
+        const kv = fakeKV({ "code:slp_ai": codeRec({ plan: "monthly", dailyCap: 2000 }) });
+        const messages = Array.from({ length: 20 }, (_, i) => ({ id: String(i), author: "a", text: String.fromCharCode(0x3042 + i).repeat(2_000) }));
+        const body = JSON.stringify({ messages, context: [], targetLang: "en" });
+        expect(new TextEncoder().encode(body).length).toBeGreaterThan(120_000);
+        let res: Response | null = null;
+        void worker.fetch(new Request("https://relay/v1/translate", {
+            method: "POST", headers: { authorization: "Bearer slp_ai", "content-type": "application/json" }, body
+        }), paidEnv(kv), ctx).then(r => { res = r; });
+        await vi.advanceTimersByTimeAsync(26_000);
+        expect(res).not.toBeNull();
+        expect(res!.status).toBe(200);
+        const out = await res!.json() as any;
+        expect(out.results.map((r: any) => r.id)).toEqual(messages.map(m => m.id));
+        expect(out.results.every((r: any) => r.skip === false && r.text === "t" + r.id)).toBe(true);
+        expect(calls.filter(u => u === OR).length).toBeLessThanOrEqual(MAX_PARALLEL_CHUNKS);
+        expect(calls.some(u => u.includes("groq.com"))).toBe(false);
+    });
+
+    it("an ordinary batch (25 short messages) is still one upstream call", async () => {
+        const req = breq(Array.from({ length: 25 }, (_, i) => "message number " + i));
+        expect(chunkBatch(req)).toEqual([req]);
+    });
+
+    it("chunks keep the order, the context, and never cut a message", () => {
+        const req: BatchRequest = { ...breq(Array.from({ length: 40 }, (_, i) => "x".repeat(1_000 + i))), context: [{ author: "c", text: "ctx" }] };
+        const chunks = chunkBatch(req);
+        expect(chunks.length).toBeGreaterThan(1);
+        expect(chunks.length).toBeLessThanOrEqual(MAX_PARALLEL_CHUNKS);
+        expect(chunks.flatMap(c => c.messages)).toEqual(req.messages);
+        expect(chunks.every(c => c.context === req.context && c.targetLang === "en")).toBe(true);
+    });
+
+    it("one chunk failing on both providers fails the request (no half batch), and the rest are stopped", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        let hung = 0, stopped = 0;
+        vi.stubGlobal("fetch", vi.fn((url: string, init: any) => {
+            if (!String(init?.body ?? "").includes("zzzz")) { hung++; init?.signal?.addEventListener("abort", () => { stopped++; }); }
+            // The first chunk's calls fail fast; every other call hangs.
+            return String(init?.body ?? "").includes("zzzz") ? Promise.resolve(errModel(429, { "retry-after": "5" })) : hang(url, init);
+        }));
+        const req = breq(Array.from({ length: 4 }, (_, i) => (i === 0 ? "z" : "y").repeat(3_000)));
+        await expect(translateBatch(req, orProvider, groqProvider, new AbortController().signal)).rejects.toMatchObject({ status: 429, timedOut: false });
+        expect(hung).toBeGreaterThan(0);
+        expect(stopped).toBe(hung);
+    });
+});
+
+// ---------------------------------------------------------------------------
+describe("17. a promo is not blocked for real people sharing an IPv4 network", () => {
+    const redeem = (e: Env, install: string, ip: string) => worker.fetch(new Request("https://relay/v1/redeem", {
+        method: "POST", headers: v2Headers(install, install, { "cf-connecting-ip": ip }), body: JSON.stringify({ code: "KPOPCLUB" })
+    }), e, ctx);
+    const fresh = (n: number) => "free_" + (5000 + n).toString(16).padStart(32, "0");
+
+    it("eight members behind one CGNAT /24 all redeem a 100-slot promo", async () => {
+        const e = env(fakeKV({ "promo:KPOPCLUB": JSON.stringify({ cap: 100, created: 0 }) }), { PROMO: fakePromo() });
+        const out: number[] = [];
+        for (let n = 1; n <= 8; n++) out.push((await redeem(e, fresh(n), `100.64.7.${n}`)).status);
+        expect(out).toEqual([200, 200, 200, 200, 200, 200, 200, 200]);
+    });
+});
+
+// ---------------------------------------------------------------------------
+describe("18. a lapsed subscriber is not told their payment is still being confirmed", () => {
+    it("AI renewal fails (on_hold) and AI ends: buying AI again opens a checkout, not 409 purchase_pending", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        const t0 = Date.now();
+        vi.setSystemTime(t0);
+        const kv = fakeKV();
+        const e = env(kv);
+        await buy(e, A, "KEY-AUTO", "pdt_auto", "pay_a", undefined, t0);
+        await buy(e, A, "KEY-AI", "pdt_month", "pay_m", "sub_m", t0);
+        expect((await status(e, A, "KEY-AUTO")).body).toMatchObject({ automatic: true, ai: true });
+        const later = t0 + 40 * DAY;
+        vi.setSystemTime(later);
+        const hash = await installHash(A);
+        await applyMorEvent(e, { type: "subscription.on_hold", data: { subscription_id: "sub_m", product_id: "pdt_month", metadata: { install: hash } } }, later);
+        expect((await status(e, A, "KEY-AUTO")).body).toMatchObject({ automatic: true, ai: false });
+        vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ session_id: "cks_9", checkout_url: "https://checkout.dodopayments.com/session/cks_9" }), { status: 200 })));
+        const res = await worker.fetch(new Request("https://relay/v1/checkout", {
+            method: "POST", headers: v2Headers(A, "KEY-AUTO"), body: JSON.stringify({ plan: "monthly" })
+        }), e, ctx);
+        expect(res.status).toBe(200);
     });
 });

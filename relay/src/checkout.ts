@@ -286,6 +286,13 @@ const PURCHASE_ENDED = new Set([
     "payment.failed", "payment.cancelled", "subscription.failed", "subscription.cancelled", "subscription.expired"
 ]);
 
+/** Dunning: a renewal could not be charged. On a subscription that was already
+ *  live (it has a key) this is a lapse, not a purchase on its way: nothing will
+ *  switch on by itself until the card is fixed, so the buyer must not be told
+ *  "still being confirmed" (409 purchase_pending). On a subscription that never
+ *  went live (no key yet: a mandate still being set up) it stays pending. */
+const SUB_DUNNING_EVENTS = new Set(["subscription.on_hold", "subscription.past_due", "subscription.paused"]);
+
 function purchaseKind(env: Env, name: string, data: any): { kind: PurchaseKind; plan: string | null } {
     const pid = typeof data?.product_id === "string" ? data.product_id
         : Array.isArray(data?.product_cart) && typeof data.product_cart[0]?.product_id === "string" ? data.product_cart[0].product_id
@@ -317,7 +324,9 @@ export async function linkFromLifecycle(env: Env, name: string, data: any): Prom
         }
         if (!hash) return;
         const { kind, plan } = purchaseKind(env, name, data);
-        if (PURCHASE_ENDED.has(name)) await env.CODES.delete(buyingKey(hash, kind));
+        const subId = typeof data?.subscription_id === "string" ? data.subscription_id : "";
+        const lapsed = SUB_DUNNING_EVENTS.has(name) && subId !== "" && (await env.CODES.get(`order:${subId}`)) !== null;
+        if (PURCHASE_ENDED.has(name) || lapsed) await env.CODES.delete(buyingKey(hash, kind));
         else await env.CODES.put(buyingKey(hash, kind), JSON.stringify({ plan, at: Date.now() }), { expirationTtl: INST_TTL_S });
         const ids = [data?.payment_id, data?.subscription_id]
             .filter((x: unknown): x is string => typeof x === "string" && x !== "");

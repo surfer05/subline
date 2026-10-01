@@ -23,7 +23,7 @@ import {
     isTasteBearer, isNewClient, resolveFreePlan, startTrial, tasteRecord, freezeAtFor,
     type Env, type CodeRecord, type FreePlan
 } from "./codes";
-import { translateWithFallback, toPreview, type BatchRequest, type FallbackError, type Provider, type Result } from "./translate";
+import { translateBatch, toPreview, type BatchRequest, type FallbackError, type Provider, type Result } from "./translate";
 import { record, type Outcome } from "./metrics";
 import { installOf, isApiV2, legacyFreeAllowed, PREVIEW_DAILY_CAP, resolveEntitlement } from "./entitle";
 import { adminReissue, adminResetInstalls, createPromo, handleRedeem, handleStatusV2, promoStats } from "./v2";
@@ -39,7 +39,9 @@ const MAX_CONTEXT = 12;      // client's context ring is 8; a big context is a c
  *  budget of its own: 25 long CJK messages ran to ~34 KB and every message in
  *  it was refused). Newer clients split at ~30 KB (fitRequest.ts). Kept
  *  moderate on purpose: a preview is counted per message, so a much bigger body
- *  would let one counted preview carry far more upstream spend. */
+ *  would let one counted preview carry far more upstream spend. A body this
+ *  big is split into parallel upstream calls (translateBatch), so it fits the
+ *  request's time budget instead of timing out on both providers. */
 const MAX_BODY_BYTES = 131_072;
 const MAX_TEXT_CHARS = 4_000;
 /** A context line only steers the model; its first part does that. */
@@ -48,10 +50,12 @@ const MAX_AUTHOR_CHARS = 100;
 /** Context characters in all; the oldest lines go first past this. */
 const MAX_CONTEXT_CHARS = 6_000;
 const MAX_TARGET_CHARS = 40; // a language name; anything longer is an injection payload
-/** The whole upstream budget of one request: the primary gets at most
- *  PRIMARY_TIMEOUT_MS (translate.ts) of it, the fallback the rest (13 s or
- *  more). The plugin waits 30 s for the relay. */
-const REQUEST_TIMEOUT_MS = 22_000;
+/** The whole upstream budget of one request. A long batch is split into
+ *  chunks that run at once (translate.ts translateBatch); each chunk's primary
+ *  gets primaryTimeoutFor(chunk) of this (9 to 20 s), its fallback the rest (6
+ *  s or more). The plugin waits 30 s for the relay (0.2.1+), so this leaves it
+ *  about 4 s for the relay's own KV work and the network. */
+const REQUEST_TIMEOUT_MS = 26_000;
 const GROQ_FALLBACK_MODEL = "openai/gpt-oss-120b";
 
 /** Resolve which upstream answers this request, as an explicit Provider.kind —
@@ -333,7 +337,7 @@ async function serveBatch(
     let primaryFail: number | "throw" | null = null;
     try {
         const { primary, fallback } = providers(env);
-        const full = await translateWithFallback(batch, primary, fallback, controller.signal, {
+        const full = await translateBatch(batch, primary, fallback, controller.signal, {
             onPrimaryFail: s => { primaryFail = s ?? "throw"; }
         });
         clearTimeout(timer);

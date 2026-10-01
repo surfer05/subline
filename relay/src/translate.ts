@@ -446,10 +446,36 @@ export async function translate(req: BatchRequest, provider: Provider, signal?: 
     return parseRows(content, req);
 }
 
-/** The primary provider's own deadline when a fallback exists. A degraded
- *  primary (answers slower than this, or hanging) gives up here, so the
- *  fallback still has the rest of the request's time budget. */
+/** The primary provider's own deadline for the SMALLEST request when a
+ *  fallback exists. A degraded primary (answers slower than this, or hanging)
+ *  gives up here, so the fallback still has the rest of the request's time
+ *  budget. A bigger request gets more (primaryTimeoutFor). */
 export const PRIMARY_TIMEOUT_MS = 9_000;
+/** Extra primary time per character of message text. */
+export const PRIMARY_MS_PER_CHAR = 3;
+/** The most the primary ever gets: what it had before the fallback had its own
+ *  share (the old single-provider deadline), so a healthy but slow primary on a
+ *  long batch is never cut off sooner than it used to be. */
+export const PRIMARY_TIMEOUT_MAX_MS = 20_000;
+
+/**
+ * The primary's own deadline for `req`. Output time grows with the text to
+ * translate, so a fixed cutoff that suits a short batch cuts off a HEALTHY
+ * primary on a long one, and the fallback then starts from zero with less time
+ * than the primary had (both fail, the user is charged). Short batches keep the
+ * quick hand-over to the fallback; long ones keep most of the budget on the
+ * primary and fall back on a fast failure. Characters, not bytes: a CJK
+ * character is about one token, three UTF-8 bytes.
+ *
+ * NOT MEASURED. No latency figures exist in the repo; these numbers are set so
+ * no request is cut off sooner than before this deadline existed once it is
+ * long (3,667+ characters get the old 20 s), and a short one still falls back
+ * in about 9 to 12 s. Measure p95 latency per size and retune.
+ */
+export function primaryTimeoutFor(req: BatchRequest): number {
+    const chars = req.messages.reduce((n, m) => n + m.text.length, 0);
+    return Math.min(PRIMARY_TIMEOUT_MAX_MS, PRIMARY_TIMEOUT_MS + chars * PRIMARY_MS_PER_CHAR);
+}
 
 /** What translateWithFallback throws. `status` and `retryAfterMs` are the LAST
  *  attempt's (what the user's retry should follow); `primaryStatus` is the
@@ -459,7 +485,7 @@ export const PRIMARY_TIMEOUT_MS = 9_000;
 export interface FallbackError { status?: number; retryAfterMs?: number; primaryStatus?: number; timedOut?: boolean }
 
 export interface FallbackOptions {
-    /** Override PRIMARY_TIMEOUT_MS (tests). */
+    /** Override primaryTimeoutFor(req) (tests). */
     primaryTimeoutMs?: number;
     /** Called once when the primary fails, before the fallback runs. */
     onPrimaryFail?: (status: number | undefined) => void;
@@ -481,11 +507,11 @@ function failure(e: unknown, extra: Partial<FallbackError>): FallbackError {
 
 /** Try the primary provider (OpenRouter by default); on ANY upstream failure —
  *  rate limit, overload, out of credits (402), a bad primary key, or the
- *  primary's own deadline (PRIMARY_TIMEOUT_MS) — fall back to a second provider
+ *  primary's own deadline (primaryTimeoutFor) — fall back to a second provider
  *  (the direct Groq key) so a paying user still gets a translation.
  *
  *  TIME. `signal` is the whole request's budget. The primary gets
- *  min(PRIMARY_TIMEOUT_MS, that budget); the fallback gets whatever is left. A
+ *  min(primaryTimeoutFor(req), that budget); the fallback gets whatever is left. A
  *  primary that hangs no longer eats the whole budget and leaves the healthy
  *  fallback unused (each such batch was charged and then retried by the
  *  client). Only when the request's own budget is spent is the fallback not
@@ -506,7 +532,7 @@ export async function translateWithFallback(
         }
     }
     const own = new AbortController();
-    const timer = setTimeout(() => own.abort(), opts.primaryTimeoutMs ?? PRIMARY_TIMEOUT_MS);
+    const timer = setTimeout(() => own.abort(), opts.primaryTimeoutMs ?? primaryTimeoutFor(req));
     const onOuter = () => own.abort();
     if (signal?.aborted) own.abort();
     else signal?.addEventListener("abort", onOuter, { once: true });
@@ -531,5 +557,74 @@ export async function translateWithFallback(
         return await translate(req, fallback, signal);
     } catch (f) {
         throw failure(f, { primaryStatus, timedOut: !!signal?.aborted });
+    }
+}
+
+/** Message text characters in one upstream call before the relay splits a
+ *  batch. An ordinary chat batch is far below this and goes out as ONE call,
+ *  exactly as before. */
+export const CHUNK_TEXT_CHARS = 4_000;
+/** Upstream calls one request runs at once. A Worker opens at most 6
+ *  connections at a time per request; more would queue and wait. */
+export const MAX_PARALLEL_CHUNKS = 6;
+
+/** Split `req` into at most MAX_PARALLEL_CHUNKS requests of contiguous
+ *  messages, each about CHUNK_TEXT_CHARS of text (bigger when the batch is so
+ *  long that 6 chunks must carry it). Every chunk keeps the full context. A
+ *  message is never cut. Order is kept: concatenating the chunks' messages
+ *  gives back req.messages. */
+export function chunkBatch(req: BatchRequest): BatchRequest[] {
+    const total = req.messages.reduce((n, m) => n + m.text.length, 0);
+    if (total <= CHUNK_TEXT_CHARS || req.messages.length <= 1) return [req];
+    const target = Math.max(CHUNK_TEXT_CHARS, Math.ceil(total / MAX_PARALLEL_CHUNKS));
+    const groups: Message[][] = [];
+    let cur: Message[] = [], chars = 0;
+    for (const m of req.messages) {
+        if (cur.length > 0 && chars + m.text.length > target && groups.length < MAX_PARALLEL_CHUNKS - 1) {
+            groups.push(cur);
+            cur = [];
+            chars = 0;
+        }
+        cur.push(m);
+        chars += m.text.length;
+    }
+    groups.push(cur);
+    return groups.map(messages => ({ ...req, messages }));
+}
+
+/**
+ * Translate a whole batch: a long one is split into chunks that run AT THE
+ * SAME TIME, each with its own primary deadline and fallback
+ * (translateWithFallback). A long batch's wait is then about one chunk's, not
+ * the sum, so a 30 KB batch from a new client, or a 128 KB one from a 0.2.0
+ * client that cannot split, fits the request's time budget instead of timing
+ * out on both providers and staying charged.
+ *
+ * All or nothing, like a single call: the first chunk that fails stops the
+ * others and its error is thrown (the caller refunds or charges exactly as for
+ * one call). The results come back in the batch's own message order.
+ */
+export async function translateBatch(
+    req: BatchRequest, primary: Provider, fallback: Provider | null, signal?: AbortSignal, opts: FallbackOptions = {}
+): Promise<Result[]> {
+    const chunks = chunkBatch(req);
+    if (chunks.length === 1) return translateWithFallback(req, primary, fallback, signal, opts);
+    const stop = new AbortController();
+    const onOuter = () => stop.abort();
+    if (signal?.aborted) stop.abort();
+    else signal?.addEventListener("abort", onOuter, { once: true });
+    try {
+        const parts = await Promise.all(chunks.map(c =>
+            translateWithFallback(c, primary, fallback, stop.signal, opts).catch(e => {
+                // The first failure is the one Promise.all throws. Its
+                // timedOut already says whether the request's own budget ran
+                // out (stop only aborts with the outer signal until now).
+                stop.abort();
+                throw e;
+            })
+        ));
+        return parts.flat();
+    } finally {
+        signal?.removeEventListener("abort", onOuter);
     }
 }

@@ -449,6 +449,20 @@ export function ipBucketWide(ip: string): string {
     return b;
 }
 
+/**
+ * The network key a promo counts its claims under, or undefined for none.
+ * IPv6 only, cut to its /48: that is where one person holds 65,536 /64s and
+ * can drain a promo. An IPv4 /24 is NOT limited: behind carrier-grade NAT (much
+ * mobile and home internet in India and Southeast Asia) and on campus or dorm
+ * networks, many real people share one /24, and a limit there would refuse the
+ * sixth real member of a server. One person cannot hold many IPv4 addresses
+ * cheaply, and the per-address redeem limits (promo.ts) still apply.
+ */
+export function promoNetKey(ip: string): string | undefined {
+    const wide = ipBucketWide(ip);
+    return wide.endsWith("::/48") ? wide : undefined;
+}
+
 /** One per-address ceiling: its counter key, its limit, and which unit it
  *  counts (messages, or budget cost units). */
 interface IpGuard { key: string; cap: number; unit: "messages" | "cost" }

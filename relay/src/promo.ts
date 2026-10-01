@@ -24,8 +24,9 @@
  * is a new claimant, and the per-address limit above is per IPv6 /64. One
  * person with a /48 (a free tunnel, many VPS hosts) holds 65,536 of those and
  * could drain "the first 100" in seconds. So a promo also counts its claims per
- * WIDE network (IPv4 /24, IPv6 /48, see ipBucketWide) and allows at most
- * netLimitFor(cap) from one. A genuine burst spread over many networks is not
+ * IPv6 /48 (see promoNetKey) and allows at most netLimitFor(cap) from one.
+ * IPv4 is not counted per network: carrier-grade NAT and campus networks put
+ * many real people behind one /24. A genuine burst spread over many networks is not
  * slowed. Residential proxy pools cannot be fully stopped without proof of
  * server membership: the owner's remedy for a drain is a new promo code, and
  * the drain alerts below make one visible while it happens.

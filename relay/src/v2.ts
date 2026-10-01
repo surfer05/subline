@@ -4,7 +4,7 @@
  * model. Legacy clients never reach this file (index.ts routes on
  * `x-subline-api: 2`).
  */
-import { ipBucket, ipBucketWide, isNewClient, mintCode, readDayCount, type CodeRecord, type Env } from "./codes";
+import { ipBucket, promoNetKey, isNewClient, mintCode, readDayCount, type CodeRecord, type Env } from "./codes";
 import {
     checkCode, grantCode, installOf, PREVIEW_DAILY_CAP, PROMO_RE, promoIndex, resolveEntitlement,
     reissueCode, resetInstalls, signToken, TOKEN_TTL_MS
@@ -170,10 +170,11 @@ async function redeemOnce(req: Request, env: Env, id: { install: string; credent
     if (r.automatic) return fail("already", 409);
 
     const stub = env.PROMO!.get(env.PROMO!.idFromName(promo));
-    // The caller's WIDE network (IPv4 /24, IPv6 /48): a promo allows only a
-    // few claims from one, so one person cannot drain it (see promo.ts).
+    // The caller's IPv6 /48: a promo allows only a few claims from one, so one
+    // person cannot drain it (see promo.ts). IPv4 has no network limit here:
+    // CGNAT and campuses share one /24 among many real people (promoNetKey).
     const ip = req.headers.get("cf-connecting-ip");
-    const net = ip ? ipBucketWide(ip) : undefined;
+    const net = ip ? promoNetKey(ip) : undefined;
     let claim: { result?: string };
     try {
         const res = await stub.fetch("https://promo.internal/claim", {
