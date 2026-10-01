@@ -41,15 +41,17 @@ table.pv td b{color:var(--fg);font-weight:600}
 .plain h3{margin:0 0 6px;font-family:var(--font-serif);font-size:17px;font-weight:400}
 .plain p{margin:0;font-size:13.5px;color:var(--muted)}
 ul.off{list-style:none;padding:0;margin:26px 0 0;max-width:64ch}
-ul.off li{display:grid;grid-template-columns:20px minmax(0,1fr);gap:12px;padding:11px 0;border-top:1px solid var(--line);font-size:14px}
+ul.off li{display:grid;grid-template-columns:minmax(20px,max-content) minmax(0,1fr);gap:12px;padding:11px 0;border-top:1px solid var(--line);font-size:14px}
 ul.off li:first-child{border-top:0}
-ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);padding-top:3px}
+ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);padding-top:3px;white-space:nowrap}
 @media (max-width:600px){
   table.pv,table.pv tbody,table.pv tr,table.pv td{display:block;width:auto}
   table.pv thead{display:none}
   table.pv tr{border-bottom:1px solid var(--line);padding:12px 0}
   table.pv td{border:0;padding:2px 0;white-space:normal}
   table.pv td:first-child{font-size:15px;margin-bottom:4px}
+  table.pv td[data-k]::before{content:attr(data-k);display:block;font-family:var(--font-mono);font-size:10.5px;
+    letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-top:6px}
 }
 </style>
 </head>
@@ -60,15 +62,15 @@ ul.off .t{font-family:var(--font-mono);font-size:11px;color:var(--accent);paddin
 <table class="pv">
 <thead><tr><th>What</th><th>Goes to</th><th>Kept</th></tr></thead>
 <tbody>
-<tr><td>Messages</td><td><b>Google</b> for <span class="gl-inline">≈</span>. Our <b>relay</b> for <span class="gl-inline">✦</span>, with a few earlier messages for context. The relay asks an AI through OpenRouter or Groq.</td><td>Nothing.</td></tr>
-<tr><td>Usernames</td><td>Sent with <span class="gl-inline">✦</span> so the AI knows who said what.</td><td>Nothing.</td></tr>
-<tr><td>Profiles and embeds</td><td>Bios and statuses of people you see, wherever you see them. Embeds, polls, topics and titles you see, from channels Subline translates.</td><td>Cached on your device for 30 days.</td></tr>
-<tr><td>Your code</td><td>Unlocks Subline. The relay never sees your name or email.</td><td>Daily counts, deleted after 2 days.</td></tr>
-<tr><td>Install id</td><td>A random id made when you install. It ties your purchase or code to this computer. If you buy from Subline, a scrambled form of it goes to Dodo with the purchase, so Subline can switch on by itself. The relay reads its record of this id's first use to give early users Automatic at no charge. Your IP is counted to stop abuse.</td><td>Daily counts for 2 days. First use for 90 days. The link to your purchase for 30 days.</td></tr>
-<tr><td>Your account</td><td>Your codes and computers are linked into one account. AI works on the computers where you bought it or entered its code.</td><td>Until you ask us to delete it.</td></tr>
-<tr><td>Computers</td><td>A code works on up to 3 computers. The relay keeps a scrambled id for each one, and when it was last used, to count them. One unused for 30 days can be replaced. If you got early-user Automatic, the relay remembers that for this computer.</td><td>Until you ask us to delete it.</td></tr>
-<tr><td>Server codes</td><td>When you use a server code, the relay records that your install claimed it, to count its claims. Tries from your network are counted each day to stop guessing.</td><td>Claims: until you ask us to delete them. Tries: 2 days.</td></tr>
-<tr><td>Stats</td><td>Totals only. No text, no names.</td><td>35 days.</td></tr>
+<tr><td>Messages</td><td data-k="Goes to"><b>Google</b> for <span class="gl-inline">≈</span>. Our <b>relay</b> for <span class="gl-inline">✦</span>, with a few earlier messages for context. The relay asks an AI through OpenRouter or Groq.</td><td data-k="Kept">Nothing.</td></tr>
+<tr><td>Usernames</td><td data-k="Goes to">Sent with <span class="gl-inline">✦</span> so the AI knows who said what.</td><td data-k="Kept">Nothing.</td></tr>
+<tr><td>Profiles and embeds</td><td data-k="Goes to">Bios and statuses of people you see, wherever you see them. Embeds, polls, topics and titles you see, from channels Subline translates.</td><td data-k="Kept">Cached on your device for 30 days.</td></tr>
+<tr><td>Your code</td><td data-k="Goes to">Unlocks Subline. The relay never sees your name or email.</td><td data-k="Kept">Daily counts, deleted after 2 days.</td></tr>
+<tr><td>Install id</td><td data-k="Goes to">A random id made when you install. It ties your purchase or code to this computer. If you buy from Subline, a scrambled form of it goes to Dodo with the purchase, so Subline can switch on by itself. The relay reads its record of this id's first use to give early users Automatic at no charge. Your IP is counted to stop abuse.</td><td data-k="Kept">Daily counts for 2 days. First use for 90 days. The link to your purchase for 30 days.</td></tr>
+<tr><td>Your account</td><td data-k="Goes to">Your codes and computers are linked into one account. AI works on the computers where you bought it or entered its code.</td><td data-k="Kept">Until you ask us to delete it.</td></tr>
+<tr><td>Computers</td><td data-k="Goes to">A code works on up to 3 computers. The relay keeps a scrambled id for each one, and when it was last used, to count them. One unused for 30 days can be replaced. If you got early-user Automatic, the relay remembers that for this computer.</td><td data-k="Kept">Until you ask us to delete it.</td></tr>
+<tr><td>Server codes</td><td data-k="Goes to">When you use a server code, the relay records that your install claimed it, to count its claims. Tries from your network are counted each day to stop guessing.</td><td data-k="Kept">Claims: until you ask us to delete them. Tries: 2 days.</td></tr>
+<tr><td>Stats</td><td data-k="Goes to">Totals only. No text, no names.</td><td data-k="Kept">35 days.</td></tr>
 </tbody></table>
 <ul class="off">
   <li><span class="t">off</span><div><b>DMs are off.</b> Turn one on per chat, or press ⚡ on a single message.</div></li>

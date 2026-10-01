@@ -4,6 +4,20 @@
  * entry, their toasts, and the ⚡ popover labels. One place, so the copy can be
  * rewritten without reading any code. Short plain sentences, no em dashes.
  */
+/** AI prices in cents, as on the Dodo products. The yearly saving below is derived from them. */
+export const AI_MONTHLY_CENTS = 199;
+export const AI_ANNUAL_CENTS = 1999;
+
+/**
+ * What a year saves against 12 months, in whole percent, rounded DOWN so the
+ * claim is never bigger than the real saving ($23.88 vs $19.99 is 16.3%).
+ */
+export function annualSavingPercent(monthlyCents: number, annualCents: number): number {
+    return Math.floor((12 * monthlyCents - annualCents) * 100 / (12 * monthlyCents));
+}
+
+const ANNUAL_NOTE = `Save ${annualSavingPercent(AI_MONTHLY_CENTS, AI_ANNUAL_CENTS)}%`;
+
 export const UPGRADE_COPY = {
     /* ---- not activated ---- */
     /** A notice that stays until dismissed, shown once per session while not activated. */
@@ -55,7 +69,7 @@ export const UPGRADE_COPY = {
     monthlyPrice: "$1.99 a month",
     annualName: "Annual",
     annualPrice: "$19.99 a year",
-    annualNote: "2 months free",
+    annualNote: ANNUAL_NOTE,
     /**
      * Under the AI plans in the Add AI panel: a Dodo coupon goes on the checkout
      * page, not in Subline. Coupons are made for the Monthly plan only (relay
@@ -63,7 +77,7 @@ export const UPGRADE_COPY = {
      */
     couponHint: "Have a coupon? Pick Monthly and enter it on the payment page.",
     monthlyButton: "Monthly $1.99",
-    annualButton: "Yearly $19.99 · 2 months free",
+    annualButton: `Yearly $19.99 · ${ANNUAL_NOTE}`,
     aiNeedsAutomatic: "AI needs Automatic first.",
     alreadyAutomatic: "You already have Automatic.",
     /** Buy or Add AI while a payment from this install is still being confirmed. */

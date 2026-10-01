@@ -13,15 +13,19 @@
 // already saved the code by itself, so that view says to go back there, with
 // no downloads. The key Dodo appended is offered only as a collapsed fallback
 // (fallbackKeys), in case the purchase has not switched on after a few
-// minutes: a buyer must never be left with a payment and nothing to type. The page cleans the
-// address back to "?from=discord#thanks" once it has read it (the key and
-// Dodo's parameters go, the from= stays), so "?from=discord" alone, as after a
-// refresh, shows that same view in its ok state.
+// minutes: a buyer must never be left with a payment and nothing to type.
 //
 // A checkout started from the Subline installer returns to "?from=installer".
 // The installer is still open and carries on by itself once the purchase
 // lands, so that view says to go back to it, again with no code and no
-// downloads. "?from=installer" alone shows it too, like "?from=discord".
+// downloads.
+//
+// Once read, the page cleans the address with cleanedReturnSearch: the key and
+// Dodo's parameters go, the from= and the outcome stay ("?from=discord&result=failed#thanks",
+// "?result=ok#thanks"). A refresh, back/forward or a restored tab then shows
+// the same outcome, never "You're all set" after a declined card. An address
+// with no result= (hand typed, or cleaned by v0.2.0) never claims success: it
+// shows the pending view, which is true either way.
 //
 // Returns null when this is not a return from checkout. Otherwise
 // { state: "ok" | "pending" | "failed", keys: [...], fromDiscord: bool, fromInstaller: bool },
@@ -36,8 +40,11 @@ function parseCheckoutReturn(search, hash) {
   var fromInstaller = from === "installer";
   var isReturn = !!params && status !== "" && !!(params.get("payment_id") || params.get("subscription_id"));
   if (!isReturn) {
-    if (fromDiscord || fromInstaller) return { state: "ok", keys: [], fromDiscord: fromDiscord, fromInstaller: fromInstaller };
-    return hash === "#thanks" ? { state: "ok", keys: [], fromDiscord: false, fromInstaller: false } : null;
+    // A cleaned address: the outcome is in result=, never a key.
+    var result = params ? params.get("result") : null;
+    var kept = result === "ok" || result === "pending" || result === "failed" ? result : null;
+    if (!kept && !fromDiscord && !fromInstaller && hash !== "#thanks") return null;
+    return { state: kept || "pending", keys: [], fromDiscord: fromDiscord, fromInstaller: fromInstaller };
   }
 
   var OK = ["succeeded", "active"];
@@ -59,4 +66,15 @@ function parseCheckoutReturn(search, hash) {
     return out;
   }
   return { state: state, keys: keys, fromDiscord: false, fromInstaller: false };
+}
+
+// The address the page keeps after reading a return (before "#thanks"): the
+// from= and the outcome, never a key or Dodo's ids. parseCheckoutReturn reads
+// it back to the same state and view.
+function cleanedReturnSearch(ret) {
+  var parts = [];
+  if (ret.fromDiscord) parts.push("from=discord");
+  else if (ret.fromInstaller) parts.push("from=installer");
+  parts.push("result=" + ret.state);
+  return "?" + parts.join("&");
 }

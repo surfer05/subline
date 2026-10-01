@@ -136,16 +136,16 @@ describe("the Add AI panel", () => {
         expect(native.openExternal).not.toHaveBeenCalled();
     });
 
-    it("shows both plans, with the annual one's months free", () => {
+    it("shows both plans, with the annual one's saving", () => {
         openUpgrade();
         const el = openedModals[0]!({ transitionState: 1, onClose: () => { } });
         expect(el.props.title).toBe("Add AI");
-        expect(el.props.actions.map((a: any) => a.text)).toEqual(["Monthly $1.99", "Yearly $19.99 · 2 months free"]);
+        expect(el.props.actions.map((a: any) => a.text)).toEqual(["Monthly $1.99", "Yearly $19.99 · Save 16%"]);
         const body = el.children[0].type({});
         const flat = JSON.stringify(body);
         expect(flat).toContain("$1.99 a month");
         expect(flat).toContain("$19.99 a year");
-        expect(flat).toContain("2 months free");
+        expect(flat).toContain("Save 16%");
     });
 
     it("falls back to the pricing page once the plugin is stopped", () => {

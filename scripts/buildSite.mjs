@@ -198,7 +198,7 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}"${HIDDEN_SECTIONS.h
 
   // Back from checkout: show the thanks view first. The key is written with
   // textContent only and never sent anywhere (no fetch, no analytics).
-  // Then the address is cut back to "#thanks" (keeping any from=) with
+  // Then the address is cut back to "?result=<state>#thanks" (keeping any from=) with
   // history.replaceState, so the key does not sit in the address bar, the
   // history list, or a link someone copies to share the page. A refresh then
   // shows the same view without the key; it is also in the receipt email.
@@ -248,10 +248,10 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}"${HIDDEN_SECTIONS.h
       });
     }
     try {
-      // The key and Dodo's parameters leave the address; a from= stays, so a
-      // refresh still shows "go back to Discord" (or the installer).
-      var keep = d ? "?from=discord" : inst ? "?from=installer" : "";
-      if (location.search && history.replaceState) history.replaceState(null, "", location.pathname + keep + "#thanks");
+      // The key and Dodo's parameters leave the address; the from= and the
+      // outcome stay, so a refresh shows the same view and the same outcome.
+      var keep = cleanedReturnSearch(ret);
+      if (location.search !== keep && history.replaceState) history.replaceState(null, "", location.pathname + keep + "#thanks");
     } catch (e) { /* the view still shows */ }
   })();
 
@@ -321,6 +321,21 @@ ${parts.map(p => `<!-- ${p.name} -->\n<section id="${p.name}"${HIDDEN_SECTIONS.h
       if (macBtn) macBtn.classList.replace("btn-primary", "btn-secondary");
     }
   }
+
+  // The thanks view's downloads follow the same rule: Windows first and filled
+  // on Windows, and the Intel line only on a Mac (Safari can't tell Intel
+  // from Apple Silicon, so a buyer there needs the manual link right here).
+  (function thanksDownloads() {
+    var tWin = document.querySelector('#thanks [data-dl="win"]');
+    var tMac = document.querySelector('#thanks [data-dl="mac"]');
+    if (os === "windows" && tWin && tMac) {
+      tMac.parentNode.insertBefore(tWin, tMac);
+      tWin.classList.replace("btn-secondary", "btn-primary");
+      tMac.classList.replace("btn-primary", "btn-secondary");
+    }
+    var tIntel = document.querySelector("#thanks [data-thanks-intel]");
+    if (tIntel) tIntel.hidden = os !== "mac";
+  })();
 
   // Every download link starts pointed at the releases page (in the HTML, so
   // it works with JS off) and is only ever REPLACED with something more

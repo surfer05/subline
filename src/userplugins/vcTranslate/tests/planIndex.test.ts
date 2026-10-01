@@ -597,7 +597,7 @@ describe("an Automatic owner", () => {
         const { openUpgrade } = await import("../upgradeBridge");
         openUpgrade();
         const { el } = lastModal();
-        expect(el.props.actions.map((a: any) => a.text)).toEqual(["Monthly $1.99", "Yearly $19.99 · 2 months free"]);
+        expect(el.props.actions.map((a: any) => a.text)).toEqual(["Monthly $1.99", "Yearly $19.99 · Save 16%"]);
         el.props.actions[1].onClick();
         await flush();
         expect(native.relayCheckout.mock.calls[0]![1]).toBe("annual");

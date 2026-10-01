@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import settings from "../settings";
 import { SETTINGS_COPY } from "../settingsCopy";
 import { TASTE_CAP } from "../taste";
-import { RESET_HELP_URL, UPGRADE_COPY } from "../upgradeCopy";
+import { AI_ANNUAL_CENTS, AI_MONTHLY_CENTS, annualSavingPercent, RESET_HELP_URL, UPGRADE_COPY } from "../upgradeCopy";
 
 /** Every string in a (nested) copy object. */
 function strings(v: unknown): string[] {
@@ -63,7 +63,7 @@ describe("the Windows test round's wording", () => {
         expect(UPGRADE_COPY.codeSubtitle).toBe("A server code, or the code from your purchase email.");
         expect(UPGRADE_COPY.panelSubtitle).toBe("✦ reads the whole conversation, so slang and replies come out right.");
         expect(UPGRADE_COPY.monthlyButton).toBe("Monthly $1.99");
-        expect(UPGRADE_COPY.annualButton).toBe("Yearly $19.99 · 2 months free");
+        expect(UPGRADE_COPY.annualButton).toBe("Yearly $19.99 · Save 16%");
         expect(UPGRADE_COPY.popoverPreview.replace("{n}", "4")).toBe("Preview ✦ (4 left today)");
         expect(UPGRADE_COPY.popoverUpgrade).toBe("Add AI ✦");
         expect(UPGRADE_COPY.googleBusy).toBe("Google is busy. Subline retries by itself.");
@@ -74,7 +74,20 @@ describe("the Windows test round's wording", () => {
         expect(all).not.toContain("2.49");
         expect(all).not.toContain("4 months");
         expect(all).toContain("$1.99 a month");
-        expect(all).toContain("2 months free");
+        expect(all).toContain("Save 16%");
+        expect(all).not.toContain("months free");
+    });
+
+    it("never claims a bigger yearly saving than the prices give", () => {
+        const yearOfMonths = 12 * AI_MONTHLY_CENTS;
+        const saved = yearOfMonths - AI_ANNUAL_CENTS;
+        expect(UPGRADE_COPY.monthlyPrice).toBe(`$${(AI_MONTHLY_CENTS / 100).toFixed(2)} a month`);
+        expect(UPGRADE_COPY.annualPrice).toBe(`$${(AI_ANNUAL_CENTS / 100).toFixed(2)} a year`);
+        const pct = Number(/^Save (\d+)%$/.exec(UPGRADE_COPY.annualNote)?.[1]);
+        expect(pct).toBeGreaterThan(0);
+        expect(pct * yearOfMonths).toBeLessThanOrEqual(saved * 100);
+        expect(annualSavingPercent(199, 1999)).toBe(16);
+        expect(UPGRADE_COPY.annualButton).toBe(`Yearly $19.99 · ${UPGRADE_COPY.annualNote}`);
     });
 
     it("gives Automatic five ✦ previews a day", () => {
