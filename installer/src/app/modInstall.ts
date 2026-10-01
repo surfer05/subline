@@ -17,15 +17,26 @@
  * bundle at the runtime location is the worst possible artefact: `patchInstall`
  * would refuse it, but a bundle already referenced by an existing patch would
  * take Discord down with it until the next successful install.
+ *
+ * THE SWAP HAS A ROLLBACK. It used to delete the live bundle and THEN rename
+ * the new one into place. On Windows an antivirus scanning the fresh staging
+ * folder makes that rename fail with EPERM or EBUSY, and the user was left
+ * with no bundle at all: Discord's stub still require()s <dest>/patcher.js,
+ * so Discord would not start ("Cannot find module ...patcher.js"). Now the
+ * live bundle is renamed aside to `<dest>.subline-old`, the new one renamed
+ * in, and the old one put back if anything fails. The aside copy is deleted
+ * only once the new bundle inspects OK. If even the put-back fails, the next
+ * install (or the helper, which runs at login) restores it first.
  */
 
 import { cpSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { inspectModBundle, removeModBundle } from "../bundle/bundle.js";
+import { inspectModBundle } from "../bundle/bundle.js";
 import type { ModBundle } from "../bundle/bundle.js";
+import { manifestPathFor, MOD_MANIFEST_FILENAME } from "../bundle/spec.js";
 import type { Result } from "../patcher/result.js";
-import { rewrap, err, fsError, ok } from "../patcher/result.js";
+import { err, errnoOf, fsError, ok } from "../patcher/result.js";
 
 /**
  * Fault-injection seam, mirroring `PatchOptions.hooks.afterWrite`.
@@ -39,6 +50,8 @@ import { rewrap, err, fsError, ok } from "../patcher/result.js";
 export interface InstallModBundleHooks {
     /** Runs after the bundle is staged, immediately before it is inspected. */
     afterStage?: (stagingDir: string) => void;
+    /** Replaces the blocking sleep between rename retries, so tests do not wait. */
+    sleepSync?: (ms: number) => void;
 }
 
 export interface InstallModBundleOptions {
@@ -47,6 +60,8 @@ export interface InstallModBundleOptions {
     /** Where it must end up — `~/Library/Application Support/Subline/mod`. */
     destDir: string;
     hooks?: InstallModBundleHooks;
+    /** Decides whether a locked rename is retried (Windows only). Defaults to the running platform. */
+    platform?: NodeJS.Platform;
 }
 
 export interface InstalledModBundle extends ModBundle {
@@ -55,6 +70,60 @@ export interface InstalledModBundle extends ModBundle {
 }
 
 const STAGING_SUFFIX = ".subline-staging";
+/** Where the live bundle waits while a new one is swapped in. */
+export const OLD_SUFFIX = ".subline-old";
+
+/** Errnos a Windows antivirus or indexer lock produces for a moment. */
+const TRANSIENT_LOCK_ERRNOS = new Set(["EPERM", "EACCES", "EBUSY"]);
+/** 100, 200, 400, 800, 1600 ms: about 3 s in all, longer than a typical scan of a fresh folder. */
+const RENAME_RETRY_DELAYS_MS = [100, 200, 400, 800, 1600];
+
+function blockingSleep(ms: number): void {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * renameSync, retried on Windows while something holds the folder for a moment.
+ * Throws the last error when it never succeeds. Exported for the tests.
+ */
+export function renameWithRetry(
+    from: string,
+    to: string,
+    platform: NodeJS.Platform = process.platform,
+    sleep: (ms: number) => void = blockingSleep
+): void {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            renameSync(from, to);
+            return;
+        } catch (cause) {
+            const delay = RENAME_RETRY_DELAYS_MS[attempt];
+            if (platform !== "win32" || delay === undefined || !TRANSIENT_LOCK_ERRNOS.has(errnoOf(cause) ?? "")) throw cause;
+            sleep(delay);
+        }
+    }
+}
+
+/**
+ * Put back a bundle a failed swap left aside.
+ *
+ * Runs before every install and before the helper reads the bundle: the only
+ * state it acts on is "no bundle at `destDir`, a good one at
+ * `destDir.subline-old`", which only an interrupted swap produces. Discord's
+ * stub cannot heal itself, so this is what keeps it starting. Returns whether
+ * it restored anything.
+ */
+export function recoverModBundle(destDir: string, platform: NodeJS.Platform = process.platform): Result<boolean> {
+    const old = `${destDir}${OLD_SUFFIX}`;
+    if (existsSync(destDir) || !existsSync(old)) return ok(false);
+    if (!inspectModBundle(old).ok) return ok(false);
+    try {
+        renameWithRetry(old, destDir, platform);
+    } catch (cause) {
+        return fsError<boolean>(cause, destDir, "put the previous Subline mod back", platform);
+    }
+    return ok(true);
+}
 
 /**
  * Put the shipped bundle at its runtime location and return what is now there.
@@ -80,14 +149,25 @@ export function installModBundle(options: InstallModBundleOptions): Result<Insta
         );
     }
 
-    // A directory that is not one of ours is never replaced — but that guard
-    // lives in `removeModBundle` and is deliberately NOT duplicated here. An
-    // earlier version checked for the manifest first as a fail-fast; a mutation
-    // deleting that check left the whole suite green, because `removeModBundle`
-    // refuses the same directory a moment later with the same error code. A
-    // guard that cannot change an observable outcome is untested by definition
-    // and rots, so there is one reachable source of this refusal.
+    const platform = options.platform ?? process.platform;
+    const sleep = options.hooks?.sleepSync;
+    const rename = (from: string, to: string): void => renameWithRetry(from, to, platform, sleep);
+
+    // An earlier swap that could not put the old bundle back left it aside.
+    // Restore it before anything else, so "replaced" below sees the truth.
+    recoverModBundle(destDir, platform);
+
     const replaced = existsSync(destDir);
+    // A directory that is not one of ours is never replaced. This is the one
+    // place that refuses it now that the swap no longer goes through
+    // removeModBundle (its guard is the same check).
+    if (replaced && !existsSync(manifestPathFor(destDir))) {
+        return err<InstalledModBundle>(
+            "MOD_BUNDLE_INVALID",
+            `${destDir} has no ${MOD_MANIFEST_FILENAME}, so Subline will not delete it. It is not a mod bundle we installed.`,
+            { path: destDir }
+        );
+    }
 
     const staging = `${destDir}${STAGING_SUFFIX}`;
     try {
@@ -96,7 +176,7 @@ export function installModBundle(options: InstallModBundleOptions): Result<Insta
         cpSync(sourceDir, staging, { recursive: true });
     } catch (cause) {
         rmSync(staging, { recursive: true, force: true });
-        return fsError<InstalledModBundle>(cause, destDir, "copy the Subline mod into place");
+        return fsError<InstalledModBundle>(cause, destDir, "copy the Subline mod into place", platform);
     }
 
     options.hooks?.afterStage?.(staging);
@@ -122,24 +202,56 @@ export function installModBundle(options: InstallModBundleOptions): Result<Insta
         );
     }
 
+    const old = `${destDir}${OLD_SUFFIX}`;
+    const discardStaging = (): void => {
+        try { rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ }
+    };
+    /** Put the live bundle back. Returns the cause when that ALSO failed. */
+    const restoreOld = (): string | null => {
+        try {
+            if (existsSync(destDir)) rmSync(destDir, { recursive: true, force: true });
+            rename(old, destDir);
+            return null;
+        } catch (cause) {
+            return `${errnoOf(cause) ?? "no errno"}: ${cause instanceof Error ? cause.message : String(cause)}`;
+        }
+    };
+    const withRollbackCause = (failed: Result<InstalledModBundle>, rollback: string | null): Result<InstalledModBundle> => {
+        if (failed.ok || rollback === null) return failed;
+        // Both causes, so the log says what happened (the old bundle stays at
+        // `.subline-old` and the next install or helper run puts it back).
+        return { ok: false, error: { ...failed.error, cause: `${failed.error.cause ?? "no cause"}; putting the old mod back also failed (${rollback}), it is kept at ${old}` } };
+    };
+
+    // 1. The live bundle aside. If THIS fails nothing has changed yet.
     if (replaced) {
-        const removed = removeModBundle(destDir);
-        if (!removed.ok) {
-            rmSync(staging, { recursive: true, force: true });
-            return rewrap<InstalledModBundle>(removed.error, { code: removed.error.code, path: destDir });
+        try { rmSync(old, { recursive: true, force: true }); } catch { /* a stale aside copy; the rename reports it */ }
+        try {
+            rename(destDir, old);
+        } catch (cause) {
+            discardStaging();
+            return fsError<InstalledModBundle>(cause, destDir, "move the old Subline mod aside", platform);
         }
     }
 
+    // 2. The new one in. On failure the old one goes straight back.
     try {
-        renameSync(staging, destDir);
+        rename(staging, destDir);
     } catch (cause) {
-        rmSync(staging, { recursive: true, force: true });
-        return fsError<InstalledModBundle>(cause, destDir, "move the Subline mod into place");
+        discardStaging();
+        const failed = fsError<InstalledModBundle>(cause, destDir, "move the Subline mod into place", platform);
+        return withRollbackCause(failed, replaced ? restoreOld() : null);
     }
 
-    // Read it once more from its final path, so `loaderPath` is the real one.
+    // 3. Read it once more from its final path, so `loaderPath` is the real one.
     const installed = inspectModBundle(destDir);
-    if (!installed.ok) return installed;
+    if (!installed.ok) return withRollbackCause(installed, replaced ? restoreOld() : null);
+
+    // 4. Only now is the old one finished with. Failing to delete it is not a
+    //    failed install: the next install removes it first.
+    if (replaced) {
+        try { rmSync(old, { recursive: true, force: true, maxRetries: 5 }); } catch { /* left for the next install */ }
+    }
     return ok({ ...installed.value, replaced });
 }
 

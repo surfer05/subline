@@ -70,6 +70,7 @@ const STEP_TITLES: Record<FlowState["step"], string> = {
     "betterdiscord-blocked": "BetterDiscord is installed",
     "mod-conflict": "Another mod is installed",
     "already-installed": "Subline is already set up",
+    "other-account": "Set up by another account",
     "discord-running": "Discord is running",
     "quit-blocked": "Discord is still running",
     "choose-language": "Your reading language",
@@ -122,6 +123,9 @@ function headingFor(state: FlowState): string {
     ) {
         return "Subline couldn't read Discord";
     }
+    if (state.step === "permission-failed" && state.permissionStatus === "not-writable") {
+        return "This account can't change Discord";
+    }
     return STEP_TITLES[state.step];
 }
 
@@ -151,8 +155,15 @@ function setDetail(el: HTMLElement, text: string): void {
     }
 }
 
-function render(state: FlowState): void {
+function render(state: FlowState | null): void {
+    // null: the main process refused (Uninstall has started). Nothing to draw.
+    if (state === null || uninstalling) return;
     stepName.textContent = headingFor(state);
+    // The footer Uninstall stays live wherever the user may stop, and is off
+    // while Subline is writing to Discord (patching, the helper, the launch):
+    // nothing on those screens can be pressed, and neither can this.
+    const footerUninstall = document.getElementById("uninstall") as HTMLButtonElement | null;
+    if (footerUninstall !== null) footerUninstall.disabled = state.busy && state.actions.length === 0;
 
     setDetail(detail, state.detail);
     if (state.busy) {
@@ -220,6 +231,9 @@ function renderExtra(state: FlowState): void {
     }
 
     if (state.step === "choose-code") {
+        // Checking a code or opening checkout: the spinner line says so, and
+        // there is no field to type into twice.
+        if (state.busy) return;
         // A choice first: buy Automatic, or "I have a code". The field is drawn
         // only once revealed, or when a save came back refused (so the reason
         // and the field are on screen together). codeScreenView decides.
@@ -244,7 +258,7 @@ function renderExtra(state: FlowState): void {
         input.spellcheck = false;
         input.oninput = () => { typedCode = input.value; };
         input.onkeydown = event => {
-            if (event.key === "Enter" && typedCode.trim() !== "") void onAction("set-code");
+            if (event.key === "Enter" && typedCode.trim() !== "" && state.actions.includes("set-code")) pressOnce("set-code");
         };
 
         const hint = document.createElement("p");
@@ -440,9 +454,26 @@ function renderActions(state: FlowState): void {
         // the button rendered inert, and Cancel dead for a two-minute poll.
         // A state that should offer nothing offers an empty actions array;
         // one that offers an action means it.
-        button.onclick = () => void onAction(action);
+        button.onclick = () => pressOnce(action);
         actionBar.append(button);
     }
+}
+
+/**
+ * A press disables every button in the bar until it has been handled, so a
+ * double click sends one action. A backstop only: the flow itself refuses an
+ * action its state does not offer, and holds a busy state with nothing to
+ * press while it waits on the network. Tied to the PRESS, never to
+ * state.busy: a waiting screen that offers Cancel must keep it live.
+ */
+function pressOnce(action: FlowActionType): void {
+    const bar = Array.from(actionBar.querySelectorAll("button")) as HTMLButtonElement[];
+    for (const button of bar) button.disabled = true;
+    void onAction(action).finally(() => {
+        // Usually replaced by the next render already; re-enabled only when
+        // nothing new was drawn (a dialog closed with no choice, say).
+        for (const button of bar) if (button.isConnected) button.disabled = false;
+    });
 }
 
 /**
@@ -450,6 +481,7 @@ function renderActions(state: FlowState): void {
  * reveals the field and re-renders, and sends nothing to the flow.
  */
 function renderCodeActions(state: FlowState): void {
+    if (state.busy) return;
     const view = codeScreenView({ revealed: codeRevealed, hasError: state.error !== null });
     for (const spec of view.buttons) {
         // Still only what the flow offered: the view orders and labels them.
@@ -464,7 +496,7 @@ function renderCodeActions(state: FlowState): void {
             };
         } else {
             const action = spec.kind;
-            button.onclick = () => void onAction(action);
+            button.onclick = () => pressOnce(action);
         }
         actionBar.append(button);
     }
@@ -534,6 +566,9 @@ document.getElementById("copy-diagnostics")?.addEventListener("click", () => {
  */
 const CLOSING_DISCORD_WOULD_HELP = ["DISCORD_RUNNING", "FILE_IN_USE"];
 
+/** The renderer is sandboxed and has no process.platform; the user agent says Mac on macOS only. */
+const IS_MAC = /Macintosh|Mac OS X/.test(navigator.userAgent);
+
 /**
  * Show what an uninstall did, and — when the obstacle is a running Discord —
  * offer to remove it rather than describing it.
@@ -573,7 +608,9 @@ function showUninstall(report: UninstallReport, mayRetry: boolean): void {
 
     // Permission never arrived, or the check itself failed. Nothing was
     // changed, so the remedy is the same gate again, on a button that says so.
-    if (first !== undefined && (first.code === "PERMISSION_DENIED" || report.permissionCheckFailed === true)) {
+    // macOS only: App Management does not exist anywhere else. NOT_WRITABLE
+    // (another account owns Discord) is not a permission a toggle grants.
+    if (IS_MAC && first !== undefined && (first.code === "PERMISSION_DENIED" || report.permissionCheckFailed === true)) {
         const button = document.createElement("button");
         button.className = "btn btn-primary";
         button.textContent = "Grant permission and remove";

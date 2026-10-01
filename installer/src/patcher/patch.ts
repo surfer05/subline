@@ -37,7 +37,7 @@ import type { Result } from "./result.js";
 import { err, fsError, ok, rewrap } from "./result.js";
 import { hasUnpackedAppDir, inspectInstall } from "./state.js";
 import type { InstallState, InstallStateKind, KnownMod } from "./state.js";
-import { buildStubAsar, readIsOriginalAsar, readStub, STUB_PACKAGE_JSON, stubIndexSource } from "./stub.js";
+import { buildStubAsar, legacyStubIndexSource, readIsOriginalAsar, readStub, STUB_PACKAGE_JSON, stubIndexSource } from "./stub.js";
 import { readDiscordVersion } from "./version.js";
 
 const TEMP_FILENAME = ".subline-app.asar.tmp";
@@ -340,7 +340,12 @@ export function verifyPatch(install: DiscordInstall, expected: PatchIdentity, ex
             { path: install.asarPath }
         );
     }
-    if (stub.value.packageJson !== STUB_PACKAGE_JSON || stub.value.indexSource !== stubIndexSource(loaderPath)) {
+    // Either stub form is ours: an install patched before 0.2.1 carries the
+    // one-line form and is not "damaged" (re-patching it for that alone would
+    // write to Discord, and nag a running one to restart, for nothing).
+    const knownSource = stub.value.indexSource === stubIndexSource(loaderPath)
+        || stub.value.indexSource === legacyStubIndexSource(loaderPath);
+    if (stub.value.packageJson !== STUB_PACKAGE_JSON || !knownSource) {
         return err<true>("VERIFICATION_FAILED", "The patched app.asar contents are not what was written.", {
             path: install.asarPath
         });

@@ -171,26 +171,31 @@ describe("waiting for Discord's updater to settle", () => {
         expect(report.reason).toContain("started while we were watching");
     });
 
-    it("keeps waiting and settles once the update finishes", async () => {
-        // Running, running, then closed and quiet.
-        const ports = makePorts({ running: [true, true, false, false], ageMs: 600_000 });
-        const report = await awaitDiscordSettled(INSTALL, ports, OPTIONS);
-
-        expect(report.settled).toBe(true);
-        expect(ports.sleeps.filter(ms => ms === OPTIONS.pollMs).length).toBeGreaterThanOrEqual(2);
-        expect(report.waitedMs).toBeGreaterThan(0);
-    });
-
-    it("gives up within its budget and reports what was blocking, not a generic timeout", async () => {
+    it("does NOT wait out a running Discord: one look, then the next run retries", async () => {
+        // Worst case on Windows: Discord sits in the tray all day. Polling it
+        // for 5 minutes every run kept the helper (and a tasklist every 5 s)
+        // running permanently and repaired nothing sooner.
+        let checks = 0;
         const ports = makePorts({ running: true });
-        const report = await awaitDiscordSettled(INSTALL, ports, { ...OPTIONS, maxWaitMs: 40_000 });
+        const counted: SettlePorts = { ...ports, discordRunning: async install => { checks += 1; return ports.discordRunning(install); } };
+        const report = await awaitDiscordSettled(INSTALL, counted, { ...OPTIONS, maxWaitMs: 5 * 60_000 });
 
         expect(report.settled).toBe(false);
         expect(report.status).toBe("discord-running");
+        expect(report.attempts).toBe(1);
+        expect(checks).toBe(1);
+        expect(report.waitedMs).toBe(0);
+    });
+
+    it("gives up within its budget while files keep changing, and says so", async () => {
+        const ports = makePorts({ running: false, ageMs: 0 });
+        const report = await awaitDiscordSettled(INSTALL, ports, { ...OPTIONS, maxWaitMs: 40_000 });
+
+        expect(report.settled).toBe(false);
+        expect(report.status).toBe("files-changing");
         // The budget is spent as a NUMBER OF OBSERVATIONS derived from it, so
         // the time it took can never exceed it either.
         expect(report.attempts).toBe(3);
-        expect(report.waitedMs).toBe(30_000);
         expect(report.waitedMs).toBeLessThanOrEqual(40_000);
     });
 
@@ -204,14 +209,15 @@ describe("waiting for Discord's updater to settle", () => {
         const frozen: SettlePorts = {
             now: () => 1_000_000,
             sleep: async () => undefined,
-            discordRunning: async () => true,
-            mtimeOf: () => 0,
+            discordRunning: async () => false,
+            // Written "now", forever: an update that never stops landing.
+            mtimeOf: () => 1_000_000,
             readDiscordVersion: () => ok({ version: "0.0.406", releaseChannel: "stable", raw: {} })
         };
         const report = await awaitDiscordSettled(INSTALL, frozen, OPTIONS);
 
         expect(report.settled).toBe(false);
-        expect(report.status).toBe("discord-running");
+        expect(report.status).toBe("files-changing");
         expect(report.waitedMs).toBe(0);
         // Bounded by observations, derived from the budget: 120s / 15s + 1.
         expect(report.attempts).toBe(9);

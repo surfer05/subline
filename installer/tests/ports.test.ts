@@ -414,3 +414,39 @@ describe("opening a checkout on Windows", () => {
         expect(opened).toHaveLength(1);
     });
 });
+
+describe("worst cases in the real ports", () => {
+    it("never opens the macOS permission link on Windows (it was a 'get an app' prompt)", async () => {
+        const execCalls: string[] = [];
+        const p = createFlowPorts({
+            appResourcesPath: appResources,
+            productVersion: "0.1.0",
+            log: { info: () => {}, warn: () => {}, error: () => {} },
+            platform: "win32",
+            env: { APPDATA: join(home, "AppData", "Roaming"), LOCALAPPDATA: join(home, "AppData", "Local") },
+            home,
+            searchRoots: [discord.root],
+            helper: helperWiring(),
+            exec: async (file: string, args: string[]) => { execCalls.push(`${file} ${args.join(" ")}`); return { stdout: "" }; }
+        });
+        await p.openPermissionSettings();
+        expect(execCalls).toEqual([]);
+    });
+
+    it("remembers a patched Discord in the product folder, and only macOS asks whose loader it is", () => {
+        const p = ports();
+        p.rememberPatchedInstall?.(discord.install);
+        const file = join(home, "Library", "Application Support", "Subline", "patched-installs.json");
+        expect(existsSync(file)).toBe(true);
+        expect(readFileSync(file, "utf8")).toContain(discord.install.rootPath);
+        // A loader in a sibling home folder is another account's; this home's own is not.
+        expect(p.isOtherAccountLoader?.(join(home, "..", "someone-else", "Library", "Application Support", "Subline", "mod", "patcher.js"))).toBe(true);
+        expect(p.isOtherAccountLoader?.(join(home, "Library", "Application Support", "Subline", "mod", "patcher.js"))).toBe(false);
+    });
+
+    it("macOS process list for the helper is this user's only", async () => {
+        const seen: string[][] = [];
+        await listProcesses("darwin", async (_file, args) => { seen.push(args); return { stdout: "" }; }, undefined, 501);
+        expect(seen[0]).toEqual(["-x", "-U", "501", "-o", "pid=,comm="]);
+    });
+});

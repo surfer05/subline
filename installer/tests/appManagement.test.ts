@@ -9,7 +9,8 @@ import {
     probeAppManagement,
     isLoggedAttempt,
     MAX_CONSECUTIVE_UNKNOWN,
-    PROBE_FILENAME
+    PROBE_FILENAME,
+    worstAppManagementStatus
 } from "../src/app/appManagement.js";
 import type { AppManagementStatus } from "../src/app/appManagement.js";
 
@@ -49,15 +50,45 @@ describe("probeAppManagement", () => {
         expect(existsSync(join(dir, PROBE_FILENAME))).toBe(false);
     });
 
-    it("reports blocked for the errnos App Management produces", () => {
-        for (const code of ["EPERM", "EACCES"]) {
-            const status = probeAppManagement({
-                resourcesPath: dir,
-                platform: "darwin",
-                attemptWrite: () => { throw errnoError(code); }
-            });
-            expect(status).toBe("blocked");
-        }
+    it("reports blocked for the errno App Management produces (EPERM)", () => {
+        const status = probeAppManagement({
+            resourcesPath: dir,
+            platform: "darwin",
+            attemptWrite: () => { throw errnoError("EPERM"); }
+        });
+        expect(status).toBe("blocked");
+    });
+
+    it("reports not-writable, never blocked, for EACCES: file ownership that no toggle can fix", () => {
+        const refused: string[] = [];
+        const status = probeAppManagement({
+            resourcesPath: dir,
+            platform: "darwin",
+            attemptWrite: () => { throw errnoError("EACCES"); },
+            onRefused: cause => refused.push(cause)
+        });
+        expect(status).toBe("not-writable");
+        // The log names the errno and the path.
+        expect(refused[0]).toContain("EACCES");
+        expect(refused[0]).toContain(dir);
+    });
+
+    it("ends the wait at once on not-writable, as a failure, instead of polling forever", async () => {
+        let probes = 0;
+        const report = await awaitAppManagement({
+            probe: () => { probes += 1; return "not-writable"; },
+            sleep: async () => {},
+            pollIntervalMs: 1
+        });
+        expect(probes).toBe(1);
+        expect(report.failed).toBe(true);
+        expect(report.permitted).toBe(false);
+        expect(report.summary).toContain("account");
+    });
+
+    it("ranks not-writable above blocked when folding several installs", () => {
+        expect(worstAppManagementStatus(["blocked", "not-writable"])).toBe("not-writable");
+        expect(worstAppManagementStatus(["granted", "not-writable"])).toBe("not-writable");
     });
 
     it("reports unknown — not blocked — for an unrelated failure", () => {

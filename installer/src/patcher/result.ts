@@ -14,8 +14,13 @@ export type PatcherErrorCode =
     | "DISCORD_NOT_FOUND"
     /** A path was supplied explicitly but does not look like a Discord app. */
     | "NOT_A_DISCORD_INSTALL"
-    /** macOS App Management / plain filesystem permission refusal (EACCES/EPERM). */
+    /** macOS App Management (EPERM), or a Windows access refusal (EACCES). */
     | "PERMISSION_DENIED"
+    /**
+     * macOS EACCES: the files belong to another account (or root). Not App
+     * Management, so the permission screen cannot fix it.
+     */
+    | "NOT_WRITABLE"
     /** Target volume is mounted read-only (EROFS). */
     | "READ_ONLY_VOLUME"
     /**
@@ -178,8 +183,38 @@ export function errnoOf(cause: unknown): string | undefined {
  * them as distinct failures the GUI must explain differently: App Management
  * has a remedy (deep link + poll), a read-only volume does not.
  */
-export function fsError<T>(cause: unknown, path: string, what: string): Result<T> {
+export function fsError<T>(cause: unknown, path: string, what: string, platform: NodeJS.Platform = process.platform): Result<T> {
     const errno = errnoOf(cause);
+    // WINDOWS: EPERM is nearly always a file something holds open (antivirus
+    // scanning a fresh copy, Discord's updater, a tray Discord): libuv maps
+    // ERROR_ACCESS_DENIED to EPERM. Treating it as a macOS permission sent
+    // Windows users to "macOS needs your permission" and an x-apple: link.
+    // As FILE_IN_USE it gets the close-Discord remedy that actually helps.
+    if (platform === "win32" && (errno === "EPERM" || errno === "EBUSY")) {
+        return err<T>(
+            "FILE_IN_USE",
+            `Cannot ${what}: another program still has Discord's files open. Close Discord completely, `
+            + "including any Discord icon in the system tray near the clock, then try again.",
+            { path, cause }
+        );
+    }
+    if (platform === "win32" && errno === "EACCES") {
+        return err<T>(
+            "PERMISSION_DENIED",
+            `Not allowed to ${what}. Windows would not let Subline change Discord's files. Close Discord fully, `
+            + "including the tray icon near the clock, then try again.",
+            { path, cause }
+        );
+    }
+    // macOS EACCES is file ownership, not App Management (which is EPERM).
+    if (platform === "darwin" && errno === "EACCES") {
+        return err<T>(
+            "NOT_WRITABLE",
+            `Not allowed to ${what}: this Mac account does not have permission for these files. If another account `
+            + "or an admin installed Discord, reinstall Discord from this account, or run Subline from the account that installed it.",
+            { path, cause }
+        );
+    }
     switch (errno) {
         case "EACCES":
         case "EPERM":

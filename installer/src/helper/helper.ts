@@ -106,6 +106,24 @@ export interface HelperPorts {
     /** `verifyOnce` — the beacon reader, reused. */
     verifyBeacon(options: VerifyOptions): VerificationReport;
     notify(alert: Alert): Promise<void>;
+
+    /**
+     * Windows: whether the scheduled task that runs this helper still exists.
+     * Uninstall deletes it, but a run already in progress (waiting for Discord
+     * to close) used to carry on: patch Discord, write its memory, and even
+     * register the task again. Checked before every write. Absent on macOS,
+     * where removing the LaunchAgent stops the running job itself.
+     */
+    stillRegistered?(): Promise<boolean>;
+    /** Put back a bundle an interrupted swap left aside (modInstall recoverModBundle). */
+    recoverBundle?(dir: string): Result<boolean>;
+    /**
+     * True when a loader path lives in ANOTHER user's home folder: a Discord
+     * set up by another account on this computer, which this helper must
+     * never touch (re-patching it to this account's path breaks Discord for
+     * the other account, and the two helpers then fight over it).
+     */
+    isOtherAccountLoader?(loaderPath: string): boolean;
 }
 
 export interface HelperRunOptions {
@@ -119,6 +137,9 @@ export interface HelperRunOptions {
     /** Check for a new build regardless of the throttle. */
     forceUpdateCheck?: boolean;
 }
+
+/** How long a repair may wait on a running Discord before the user is told to quit it (Windows). */
+export const QUIT_REQUIRED_AFTER_MS = 30 * 60_000;
 
 /** Six hours. Trigger A runs hourly; only trigger B touches the network. */
 export const DEFAULT_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -134,7 +155,8 @@ const IMMEDIATE_PATCH_ALERTS: readonly PatcherErrorCode[] = [
     "PERMISSION_DENIED",
     "READ_ONLY_VOLUME",
     "MOD_BUNDLE_INVALID",
-    "BROKEN_INSTALL"
+    "BROKEN_INSTALL",
+    "NOT_WRITABLE"
 ];
 
 /**
@@ -190,6 +212,13 @@ export interface HelperRunReport {
     alerts: AlertRaised[];
     decisions: HelperDecision[];
     summary: string;
+    /**
+     * Every deferral this run made is the same as the previous run's (same
+     * install, same reason). The log keeps one line for such a run.
+     */
+    repeatDeferral?: boolean;
+    /** Windows: the helper's task was removed (Uninstall) while this run was going. Nothing was written. */
+    uninstalled?: boolean;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -206,6 +235,12 @@ class Run {
     updateChecked = false;
     updateInstalled: string | null = null;
     health: HealthObservation | null = null;
+    /** Set once the helper's registration is found gone: nothing more is written. */
+    uninstalled = false;
+    /** What this run deferred, as stable keys (see HelperState.lastDeferralKey). */
+    readonly deferralKeys: string[] = [];
+    /** The bundle installed right now (after any update this run made). */
+    bundle: ModBundle | null = null;
 
     constructor(
         readonly ports: HelperPorts,
@@ -225,8 +260,13 @@ class Run {
         this.ports.log.info(`helper.${kind}`, { outcome, reason, ...fields });
     }
 
-    async alert(code: AlertCode, message: string, detail: Record<string, string | number | boolean | null>): Promise<void> {
-        const alert: Alert = { code, message, detail, at: this.ports.now() };
+    async alert(
+        code: AlertCode,
+        message: string,
+        detail: Record<string, string | number | boolean | null>,
+        key?: string
+    ): Promise<void> {
+        const alert: Alert = { code, message, detail, at: this.ports.now(), ...(key === undefined ? {} : { key }) };
         const raised = await raiseAlert(
             this.state,
             alert,
@@ -245,6 +285,27 @@ class Run {
         });
         if (cleared) this.decide("alert", `${code}:resolved`, "the condition no longer holds");
     }
+
+    /**
+     * False once the helper's registration is gone (Windows uninstall during
+     * this run). Every write checks this first; the answer is remembered.
+     */
+    async stillRegistered(before: string): Promise<boolean> {
+        if (this.uninstalled) return false;
+        if (this.ports.stillRegistered === undefined) return true;
+        let registered = true;
+        try {
+            registered = await this.ports.stillRegistered();
+        } catch {
+            // Cannot tell: carry on as before rather than stop repairing.
+            registered = true;
+        }
+        if (!registered) {
+            this.uninstalled = true;
+            this.decide("scan", "uninstalled", "the helper's scheduled task is gone, so Subline was removed while this run was going; nothing more is written", { before });
+        }
+        return registered;
+    }
 }
 
 /**
@@ -257,21 +318,34 @@ export async function runHelperOnce(ports: HelperPorts, options: HelperRunOption
     run.state = ports.readState();
 
     const bundle = readInstalledBundle(run);
+    run.bundle = bundle;
     const managed = collectManaged(run);
 
     if (managed.length > 0 && bundle !== null) {
-        for (const entry of managed) await reconcile(run, entry, bundle, "scheduled check");
+        for (const entry of managed) {
+            if (run.uninstalled) break;
+            await reconcile(run, entry, bundle, "scheduled check");
+        }
     }
 
-    await maybeUpdate(run, managed, bundle);
-    await checkHealth(run, managed);
+    if (!run.uninstalled) await maybeUpdate(run, managed, bundle);
+    if (!run.uninstalled) await checkHealth(run, managed);
 
-    run.state.lastRunAt = at;
-    const written = ports.writeState(run.state);
-    if (!written.ok) {
-        // Not fatal, but it makes the NEXT run amnesiac — and an amnesiac run
-        // cannot escalate a sustained health problem, so it is worth a line.
-        run.decide("scan", "state-not-saved", written.error.message, { code: written.error.code });
+    const deferralKey = run.deferralKeys.length === 0 ? null : [...run.deferralKeys].sort().join(";");
+    const repeatDeferral = deferralKey !== null && deferralKey === run.state.lastDeferralKey;
+    run.state.lastDeferralKey = deferralKey;
+
+    // An uninstalled helper writes NOTHING: helper-state.json would recreate
+    // Subline's folder and remember the install as ours, which is what let a
+    // removed Subline come back.
+    if (await run.stillRegistered("state")) {
+        run.state.lastRunAt = at;
+        const written = ports.writeState(run.state);
+        if (!written.ok) {
+            // Not fatal, but it makes the NEXT run amnesiac — and an amnesiac run
+            // cannot escalate a sustained health problem, so it is worth a line.
+            run.decide("scan", "state-not-saved", written.error.message, { code: written.error.code });
+        }
     }
 
     return {
@@ -286,7 +360,9 @@ export async function runHelperOnce(ports: HelperPorts, options: HelperRunOption
         health: run.health,
         alerts: run.alerts,
         decisions: run.decisions,
-        summary: summarize(run, managed.length)
+        summary: summarize(run, managed.length),
+        repeatDeferral,
+        uninstalled: run.uninstalled
     };
 }
 
@@ -309,6 +385,16 @@ function readInstalledBundle(run: Run): ModBundle | null {
     if (dir === null) {
         run.decide("scan", "no-bundle-location", "this platform has no known location for the mod bundle");
         return null;
+    }
+    // An interrupted swap can leave the live bundle aside. Put it back first:
+    // Discord's stub requires it, and this helper runs at login.
+    const recovered = run.ports.recoverBundle?.(dir);
+    if (recovered !== undefined) {
+        if (!recovered.ok) {
+            run.decide("scan", "bundle-recover-failed", recovered.error.message, { code: recovered.error.code, cause: recovered.error.cause ?? null, path: dir });
+        } else if (recovered.value) {
+            run.decide("scan", "bundle-recovered", "an interrupted update had left the mod bundle aside; it is back in place", { path: dir });
+        }
     }
     const inspected = run.ports.inspectBundle(dir);
     if (!inspected.ok) {
@@ -367,6 +453,17 @@ function collectManaged(run: Run): ManagedInstall[] {
             run.decide("scan", "not-ours", "Subline has never patched this install", {
                 path: install.rootPath,
                 kind: state.kind
+            });
+            continue;
+        }
+
+        const loader = state.marker?.loaderPath ?? state.loaderPath;
+        if (state.kind !== "patched-by-other" && loader !== null && loader !== undefined && run.ports.isOtherAccountLoader?.(loader) === true) {
+            // Another account on this computer set this Discord up. Its loader
+            // is in that account's home; patching it to ours breaks Discord for
+            // them, and their helper patches it back. Never touched, never alerted.
+            run.decide("scan", "other-account", "another account on this computer set up Subline for this Discord, so this account leaves it alone", {
+                path: install.rootPath
             });
             continue;
         }
@@ -471,6 +568,8 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
         // reader who restarts Discord and then reads nothing for an hour would
         // keep being told to restart a Discord they already restarted.
         if (!await run.ports.discordRunning(install)) run.clear("restart-required");
+        // Nothing waits on a running Discord any more: the patch is in place.
+        run.clear("quit-required");
         return;
     }
 
@@ -493,6 +592,7 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
 
     if (!settled.settled) {
         run.deferred.push(install.rootPath);
+        run.deferralKeys.push(`${install.stableId}|${settled.status}|${reason}`);
         run.decide("repatch", "deferred", settled.reason, {
             path: install.rootPath,
             trigger,
@@ -500,8 +600,15 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
             settle: settled.status,
             waitedMs: settled.waitedMs
         });
+        await noteBlockedByRunningDiscord(run, entry, settled.status === "discord-running");
         return;
     }
+    setBlockedSince(run, entry, null);
+
+    // Uninstall may have removed the helper while this run waited for the
+    // install to settle. Patching now would put Subline back into a Discord
+    // the user just removed it from.
+    if (!await run.stillRegistered("repatch")) return;
 
     const patched = run.ports.patch(install, { modBundleDir: bundle.dir });
     if (patched.ok) {
@@ -517,6 +624,10 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
         run.clear("repatch-failed");
         run.clear("rollback-failed");
         run.clear("backup-missing");
+        // The user quit Discord as asked: the repair is in, and it starts with
+        // the Discord they open next. No second notice for the same event.
+        const quitAnswered = run.state.alerts["quit-required"] !== undefined;
+        run.clear("quit-required");
 
         // A repair a running Discord cannot see is not finished from the
         // reader's side. Only when we actually WROTE something (an
@@ -524,14 +635,24 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
         // stale process is still up: if Discord is closed, its next launch
         // reads the new app.asar on its own and there is nothing to say.
         // Saying it anyway is how an alert channel gets trained into noise.
-        if (!patched.value.alreadyPatched && await run.ports.discordRunning(install)) {
+        //
+        // EVERY REAL REPAIR IS NEWS ONCE. The key is what was written (Discord
+        // version and mod build): a second Discord update the same day, or a
+        // new Subline build, notifies even inside the 24h window, while the
+        // same pair written again (a write loop) stays quiet.
+        if (!patched.value.alreadyPatched && !quitAnswered && await run.ports.discordRunning(install)) {
+            const discordVersion = patched.value.discordVersion ?? entry.version ?? null;
+            const onlySublineChanged = reason === "build-changed" && !versionChanged;
             await run.alert(
                 "restart-required",
-                "Discord updated and Subline has been restored. Quit and reopen Discord to start translating again.",
+                onlySublineChanged
+                    ? "Subline updated. Quit and reopen Discord to use the new version."
+                    : "Discord updated and Subline has been restored. Quit and reopen Discord to start translating again.",
                 {
-                    discord: patched.value.discordVersion ?? null,
+                    discord: discordVersion,
                     buildId: patched.value.pluginBuildId ?? null
-                }
+                },
+                `${discordVersion ?? "unknown"}|${patched.value.pluginBuildId ?? bundle.buildId}`
             );
         }
         return;
@@ -546,8 +667,45 @@ function rememberInstall(run: Run, entry: ManagedInstall, buildId: string, patch
         discordVersion: entry.version ?? previous?.discordVersion ?? null,
         buildId: patchedNow ? buildId : (entry.marker?.pluginBuildId ?? previous?.buildId ?? null),
         patchedAt: patchedNow ? run.ports.now() : (previous?.patchedAt ?? null),
-        failures: patchedNow ? 0 : (previous?.failures ?? 0)
+        failures: patchedNow ? 0 : (previous?.failures ?? 0),
+        // Patched, or nothing to patch: nothing is waiting on Discord.
+        blockedByRunningSince: null
     };
+}
+
+/** Record (or clear) since when this install's repair has waited only on a running Discord. */
+function setBlockedSince(run: Run, entry: ManagedInstall, since: number | null): void {
+    const previous = run.state.installs[entry.install.stableId];
+    if (previous === undefined && since === null) return;
+    run.state.installs[entry.install.stableId] = {
+        discordVersion: previous?.discordVersion ?? entry.knownVersion,
+        buildId: previous?.buildId ?? entry.marker?.pluginBuildId ?? null,
+        patchedAt: previous?.patchedAt ?? null,
+        failures: previous?.failures ?? 0,
+        blockedByRunningSince: since
+    };
+}
+
+/**
+ * A repair deferred. When the ONLY thing in the way is a running Discord
+ * (Windows), and it has been for 30 minutes, tell the user what to do: a
+ * Discord closed to the tray is never quit, and the repair would otherwise
+ * wait silently until the next reboot, or forever.
+ */
+async function noteBlockedByRunningDiscord(run: Run, entry: ManagedInstall, blockedByRunning: boolean): Promise<void> {
+    if (!blockedByRunning) {
+        setBlockedSince(run, entry, null);
+        return;
+    }
+    const now = run.ports.now();
+    const since = run.state.installs[entry.install.stableId]?.blockedByRunningSince ?? now;
+    setBlockedSince(run, entry, since);
+    if (now - since < QUIT_REQUIRED_AFTER_MS) return;
+    await run.alert(
+        "quit-required",
+        "Discord updated. To turn Subline back on, right-click the Discord icon near the clock, choose Quit Discord, then open Discord again.",
+        { blockedForMs: now - since, path: entry.install.rootPath }
+    );
 }
 
 /**
@@ -575,7 +733,8 @@ async function handlePatchFailure(
         discordVersion: entry.version ?? previous?.discordVersion ?? null,
         buildId: previous?.buildId ?? null,
         patchedAt: previous?.patchedAt ?? null,
-        failures
+        failures,
+        blockedByRunningSince: null
     };
 
     // OBSERVED, not assumed. `patchInstall` rolls back on every failure path, but
@@ -661,6 +820,7 @@ async function maybeUpdate(run: Run, managed: ManagedInstall[], bundle: ModBundl
     if (manifest === null) return;
 
     run.state.lastReleaseBuildId = manifest.buildId;
+    run.state.lastReleasePluginVersion = manifest.pluginVersion;
     const installedBuildId = bundle?.buildId ?? null;
     const installed = bundle === null ? null : { buildId: bundle.buildId, pluginVersion: bundle.pluginVersion };
     if (installed !== null && installed.buildId === manifest.buildId) {
@@ -695,6 +855,7 @@ async function maybeUpdate(run: Run, managed: ManagedInstall[], bundle: ModBundl
     if (installedNew === null) return;
 
     run.updateInstalled = installedNew.buildId;
+    run.bundle = installedNew;
     run.state.updateFailures = 0;
     run.clear("update-failed");
     // The suspicion was evidence about the OLD build, and it is discarded — but
@@ -787,6 +948,8 @@ async function downloadAndInstall(run: Run, manifest: ReleaseManifest): Promise<
             return null;
         }
 
+        // Uninstall may have removed the helper while this run downloaded.
+        if (!await run.stillRegistered("update")) return null;
         const installed = run.ports.installBundle(unpacked.value);
         if (!installed.ok) {
             await failUpdate(run, installed.error);
@@ -888,7 +1051,22 @@ async function checkHealth(run: Run, managed: ManagedInstall[]): Promise<void> {
     // `update-failed` already says so, and two notifications for one problem is
     // how notifications get ignored.
     const installedBuildId = run.state.installs[newest.install.stableId]?.buildId ?? expectedBuildId;
-    const feedHasNewer = run.state.lastReleaseBuildId !== null && run.state.lastReleaseBuildId !== installedBuildId;
+    // NEWER, not merely different, and against the bundle installed RIGHT NOW.
+    // An inequality held the "needs an update" alert back forever whenever the
+    // installed build was newer than the feed's (a dogfood Mac, or an
+    // installer newer than the last release), although maybeUpdate would
+    // never install the feed's older build: no fix was ever coming.
+    const releasedVersion = run.state.lastReleasePluginVersion;
+    const feedHasNewer = run.state.lastReleaseBuildId !== null && (releasedVersion === null
+        // A memory from before the version was kept: the old judgement, until
+        // the next feed check records it.
+        ? run.state.lastReleaseBuildId !== installedBuildId
+        : isNewerBuild(
+        { buildId: run.state.lastReleaseBuildId, pluginVersion: releasedVersion } as ReleaseManifest,
+        run.bundle === null
+            ? { buildId: installedBuildId, pluginVersion: null }
+            : { buildId: run.bundle.buildId, pluginVersion: run.bundle.pluginVersion }
+    ));
     if (feedHasNewer) {
         run.decide("health", "broken-update-pending", "a newer build exists and is what the update path is for", {
             installed: installedBuildId,

@@ -434,6 +434,9 @@ export function makeFakeSchtasks(overrides: Partial<FakeSchtasks> = {}): FakeSch
             fake.calls.push(`query-interval ${name}`);
             return fake.registered.has(name) ? fake.intervals.get(name) ?? null : null;
         },
+        async end(name: string) {
+            fake.calls.push(`end ${name}`);
+        },
         ...overrides
     };
     return fake;

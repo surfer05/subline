@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildAsar, readAsarDirectory, readAsarFiles } from "../src/patcher/asar.js";
-import { buildStubAsar, parseRequirePath, readStub, STUB_PACKAGE_JSON } from "../src/patcher/stub.js";
+import { buildStubAsar, legacyStubIndexSource, parseRequirePath, readStub, STUB_PACKAGE_JSON } from "../src/patcher/stub.js";
 import {
     badEntryTypesAsarBytes,
     buildOriginalDiscordAsar,
@@ -276,7 +276,8 @@ describe("asar format", () => {
     it("reproduces the real Vencord-written app.asar byte for byte", () => {
         const expected = Buffer.from(REAL_VENCORD_STUB_BASE64, "base64");
         expect(expected).toHaveLength(199);
-        expect(buildStubAsar(REAL_VENCORD_LOADER_PATH).equals(expected)).toBe(true);
+        // Vencord writes the one-line form; Subline's own stub is the fail-open one.
+        expect(buildStubAsar(REAL_VENCORD_LOADER_PATH, legacyStubIndexSource).equals(expected)).toBe(true);
     });
 
     it("reads back entry names, sizes and offsets", () => {

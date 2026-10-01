@@ -50,8 +50,15 @@ export type AppManagementStatus =
     | "not-required"
     /** We can write inside the app bundle. */
     | "granted"
-    /** The write was refused — App Management, or a plain permission problem. */
+    /** The write was refused with EPERM: App Management (TCC). The user can grant it. */
     | "blocked"
+    /**
+     * The write was refused with EACCES: plain file ownership. Discord.app
+     * belongs to another account (dragged in by them, or installed by an admin
+     * or MDM). No toggle in System Settings changes that, so this is never
+     * waited on.
+     */
+    | "not-writable"
     /** Something else went wrong; we cannot say either way. */
     | "unknown";
 
@@ -64,6 +71,8 @@ export const PROBE_FILENAME = ".subline-permission-probe";
  * and only all-clear is clear. An empty list needs no permission at all.
  */
 export function worstAppManagementStatus(statuses: readonly AppManagementStatus[]): AppManagementStatus {
+    // Above "blocked": a grant would not fix it, so waiting for one is pointless.
+    if (statuses.includes("not-writable")) return "not-writable";
     if (statuses.includes("blocked")) return "blocked";
     if (statuses.includes("unknown")) return "unknown";
     if (statuses.includes("granted")) return "granted";
@@ -82,6 +91,8 @@ export interface ProbeOptions {
      * what DID happen turns debugging into guessing.
      */
     onUnknown?: (cause: string) => void;
+    /** Told the errno and path of a write that was refused, so the log says which refusal it was. */
+    onRefused?: (cause: string) => void;
 }
 
 /**
@@ -105,7 +116,14 @@ export function probeAppManagement(options: ProbeOptions): AppManagementStatus {
         attempt(probePath);
     } catch (cause) {
         const errno = errnoOf(cause);
-        if (errno === "EPERM" || errno === "EACCES") return "blocked";
+        if (errno === "EPERM" || errno === "EACCES") {
+            options.onRefused?.(`${errno} at ${probePath}: ${cause instanceof Error ? cause.message : String(cause)}`);
+            // EPERM ("Operation not permitted") is what TCC App Management
+            // returns. EACCES ("Permission denied") is POSIX ownership, which
+            // no System Settings toggle can change. Treating both as "blocked"
+            // left a two-account Mac on "Turn on Subline" forever.
+            return errno === "EPERM" ? "blocked" : "not-writable";
+        }
         options.onUnknown?.(`${errno ?? "no errno"}: ${cause instanceof Error ? cause.message : String(cause)}`);
         return "unknown";
     } finally {
@@ -185,7 +203,16 @@ export interface AwaitAppManagementOptions {
     onAttempt?: (status: AppManagementStatus, attempt: number) => void;
 }
 
+/** The sentence for a status, shown verbatim on the permission screens. */
+export function appManagementSummary(status: AppManagementStatus): string {
+    return describe(status);
+}
+
 function describe(status: AppManagementStatus): string {
+    if (status === "not-writable") {
+        return "Your Mac account can't change Discord's files. This happens when another account or an admin "
+            + "installed Discord. Reinstall Discord from this account, or run Subline from the account that installed it.";
+    }
     if (status === "granted") return "macOS is allowing Subline to update Discord.";
     if (status === "not-required") return "This platform does not require permission to update Discord.";
     if (status === "unknown") {
@@ -244,6 +271,8 @@ export async function awaitAppManagement(options: AwaitAppManagementOptions): Pr
         options.onAttempt?.(status, attempts);
 
         if (status === "granted" || status === "not-required") return toReport(status, attempts);
+        // Ownership, not a toggle: no amount of waiting fixes it.
+        if (status === "not-writable") return toReport(status, attempts, { failed: true });
 
         // `unknown` is polled too, for a while: the commonest cause is a
         // transient filesystem state. A long unbroken run of it is not.

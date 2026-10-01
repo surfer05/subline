@@ -40,6 +40,7 @@ import { join } from "node:path";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "../patcher/realFs.js";
 
 import { removeModBundle } from "../bundle/bundle.js";
+import { MARKER_FILENAME } from "../patcher/marker.js";
 import type { DiscordInstall } from "../patcher/locate.js";
 import type { UnpatchReport } from "../patcher/patch.js";
 import type { PatcherError, Result } from "../patcher/result.js";
@@ -104,6 +105,13 @@ export interface UninstallOptions {
      * existing caller behaved and stays valid.
      */
     discordRunning?: readonly { pid: number }[];
+    /**
+     * Resources folders of every Discord Subline remembers patching
+     * (patched-installs.json), checked again before the shared bundle is
+     * deleted. A Discord still carrying our marker there still require()s the
+     * bundle, whatever happened to the others.
+     */
+    rememberedResources?: readonly string[];
 }
 
 export interface RestoreOutcome {
@@ -285,12 +293,24 @@ export function uninstall(ports: UninstallPorts, options: UninstallOptions): Uni
         restores.push({ install, ok: true, restored: result.value.restored, error: null });
     }
 
-    const discordRestored = restores.length > 0 && restores.every(entry => entry.ok);
-
     // 2. The shared bundle — ONLY once no Discord still requires it. Deleting it
     //    under a still-patched Discord stops that Discord from starting at all.
     let modBundleRemoved = false;
     let modBundleKeptForSafety = false;
+    // "Every target restored" is not "no Discord needs the bundle": an
+    // unrelated clean Stable restores fine while a hand-picked PTB elsewhere
+    // still loads Subline. Every Discord we remember patching that was NOT
+    // just restored is checked by its marker.
+    const restoredHere = new Set(restores.filter(entry => entry.ok).map(entry => entry.install.resourcesPath));
+    const stillMarked = [...new Set(options.rememberedResources ?? [])]
+        .filter(resources => !restoredHere.has(resources) && existsSync(join(resources, MARKER_FILENAME)));
+    if (stillMarked.length > 0) {
+        ports.log.warn("uninstall.still-patched", {
+            reason: "a Discord Subline patched still carries its marker",
+            paths: stillMarked.join(", ")
+        });
+    }
+    const discordRestored = restores.length > 0 && restores.every(entry => entry.ok) && stillMarked.length === 0;
     if (!discordRestored) {
         modBundleKeptForSafety = true;
         ports.log.warn("uninstall.bundle-kept", { reason: "a Discord is still patched and needs it to start" });
@@ -375,6 +395,7 @@ export function uninstall(ports: UninstallPorts, options: UninstallOptions): Uni
         clean,
         summary: summarize({
             restores,
+            stillMarked: stillMarked.length,
             discordRestored,
             problems,
             // Either counts: a machine with no settings file still had its
@@ -388,13 +409,15 @@ export function uninstall(ports: UninstallPorts, options: UninstallOptions): Uni
 
 function summarize(input: {
     restores: RestoreOutcome[];
+    /** Discords that still carry Subline's marker after the restores. */
+    stillMarked: number;
     discordRestored: boolean;
     problems: PatcherError[];
     /** What ACTUALLY happened, not what was asked for. */
     settingsRemoved: boolean;
     modBundleKeptForSafety: boolean;
 }): string {
-    if (input.restores.length === 0) {
+    if (input.restores.length === 0 && input.stillMarked === 0) {
         return "There was nothing to remove. Subline is not installed in any Discord we can find.";
     }
 

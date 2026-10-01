@@ -73,7 +73,14 @@ export type AlertCode =
      * Observed 2026-08-28: repaired correctly at 07:30, one attempt, logged —
      * and the user spent the morning believing it was broken.
      */
-    | "restart-required";
+    | "restart-required"
+    /**
+     * Windows: Discord updated while open and has stayed open (closed to the
+     * tray, never quit) for 30 minutes, so the repair cannot be written. The
+     * helper cannot close Discord, and saying nothing is how a user ends up
+     * believing Subline is broken.
+     */
+    | "quit-required";
 
 export interface Alert {
     code: AlertCode;
@@ -82,6 +89,12 @@ export interface Alert {
     /** Scalars for the log and the app: versions, counts, codes. Never text. */
     detail: Record<string, string | number | boolean | null>;
     at: number;
+    /**
+     * What this occurrence is about. When it differs from the key last
+     * notified, it is a NEW event and notifies even inside the repeat window
+     * (a second Discord update the same day). The same key stays throttled.
+     */
+    key?: string;
 }
 
 /** How long before the same unresolved condition is worth notifying about again. */
@@ -137,12 +150,15 @@ export async function raiseAlert(
     repeatMs: number = repeatMsFor(alert.code)
 ): Promise<AlertRaised> {
     const previous: AlertMemory | undefined = state.alerts[alert.code];
-    const dueAgain = previous === undefined || alert.at - previous.lastNotifiedAt >= repeatMs;
+    const newEvent = previous !== undefined && alert.key !== undefined && previous.key !== alert.key;
+    const dueAgain = previous === undefined || newEvent || alert.at - previous.lastNotifiedAt >= repeatMs;
 
+    const key = dueAgain ? alert.key : previous.key;
     state.alerts[alert.code] = {
         firstAt: previous?.firstAt ?? alert.at,
         lastNotifiedAt: dueAgain ? alert.at : previous.lastNotifiedAt,
-        count: (previous?.count ?? 0) + 1
+        count: (previous?.count ?? 0) + 1,
+        ...(key === undefined ? {} : { key })
     };
 
     // The durable surface is written EVERY time, even when the notification is

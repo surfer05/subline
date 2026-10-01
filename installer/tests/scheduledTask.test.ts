@@ -264,3 +264,16 @@ describe("taskCommandFromXml", () => {
         expect(taskCommandFromXml("ERROR: The system cannot find the file specified.")).toBeNull();
     });
 });
+
+describe("removing the task while a helper run is going", () => {
+    it("ends the running helper BEFORE deleting the task", async () => {
+        await install();
+        schtasks.calls.length = 0;
+        const removed = await removeScheduledTask({ schtasks, platform: "win32" });
+        expect(removed.ok && removed.value).toBe(true);
+        const end = schtasks.calls.indexOf(`end ${HELPER_TASK_NAME}`);
+        const del = schtasks.calls.indexOf(`delete ${HELPER_TASK_NAME}`);
+        expect(end).toBeGreaterThanOrEqual(0);
+        expect(end).toBeLessThan(del);
+    });
+});

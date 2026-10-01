@@ -17,9 +17,7 @@
 
 import { existsSync } from "node:fs";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron";
-import { execFile } from "node:child_process";
 import { userInfo } from "node:os";
-import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -27,7 +25,7 @@ import { DiagnosticsLog } from "../app/log.js";
 import { InstallFlow } from "../app/flow.js";
 import type { FlowAction, FlowState } from "../app/flow.js";
 import {
-    APP_MANAGEMENT_SETTINGS_URL, awaitAppManagement, isLoggedAttempt, probeAppManagement, worstAppManagementStatus
+    APP_MANAGEMENT_SETTINGS_URL, appManagementSummary, awaitAppManagement, isLoggedAttempt, probeAppManagement, worstAppManagementStatus
 } from "../app/appManagement.js";
 import { uninstall } from "../app/uninstall.js";
 import type { UninstallReport } from "../app/uninstall.js";
@@ -41,7 +39,9 @@ import { inspectModBundle } from "../bundle/bundle.js";
 import { shippedModDirFor } from "../app/modInstall.js";
 import { shouldRelaunchForNewerBundle } from "../app/relaunch.js";
 import { findDiscordProcesses, quitDiscord } from "../app/discordProcess.js";
-import { uninstallTargets } from "../patcher/locate.js";
+import { rememberedResourcesPath, uninstallTargets } from "../patcher/locate.js";
+import { hiddenExec } from "../patcher/exec.js";
+import { readPatchedInstalls } from "../app/patchedInstalls.js";
 import { unpatchInstall } from "../patcher/patch.js";
 import { usingOriginalFs } from "../patcher/realFs.js";
 import {
@@ -52,9 +52,16 @@ import type { HelperWiring } from "./ports.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-const execFileAsync = promisify(execFile);
+/** Never a console window on Windows (see patcher/exec.ts). */
+const execFileAsync = hiddenExec();
 let window: BrowserWindow | null = null;
 let flow: InstallFlow | null = null;
+/**
+ * Set when Uninstall starts. From then on the install flow is over for this
+ * window: no flow:start, flow:send or flow:restart may start (or restart) an
+ * install while files are being put back.
+ */
+let uninstallStarted = false;
 
 const log = new DiagnosticsLog({ dir: logDirFor() });
 
@@ -349,15 +356,18 @@ ipcMain.handle("flow:start", () => {
     // new bundle landed asks for its first state through this handler, and
     // starting the flow would run the old build's install.
     if (relaunchIfBundleChanged()) return null;
+    if (uninstallStarted) return null;
     return (flow ??= createFlow()).start();
 });
 
 ipcMain.handle("flow:send", async (_event, action: FlowAction) => {
+    if (uninstallStarted) return null;
     flow ??= createFlow();
     return flow.send(action);
 });
 
 ipcMain.handle("flow:restart", () => {
+    if (uninstallStarted) return null;
     // The old flow may still have a background confirmation running (see
     // InstallFlow.verify); detach it so a late result cannot repaint the new
     // run's screen with the previous run's verdict.
@@ -425,7 +435,7 @@ function helperWiring(): HelperWiring {
         managedResources: () => {
             const ports = createHelperPorts({ productVersion: app.getVersion(), log, releaseManifestUrl: null });
             const remembered = new Set(Object.keys(ports.readState().installs));
-            return managedResourcesPaths(ports.locate, ports.inspect, remembered);
+            return managedResourcesPaths(ports.locate, ports.inspect, remembered, ports.isOtherAccountLoader);
         }
     };
 }
@@ -474,7 +484,26 @@ ipcMain.handle("uninstall:run", async (
     // observed bricking a real machine on 2026-09-02. Uninstall's question is
     // "where did we ever leave a mark?", and this is the function that
     // answers it.
-    const installs = uninstallTargets({ platform: process.platform });
+    // THE INSTALL FLOW STOPS FIRST. Uninstall can be pressed on any screen,
+    // including "Turn on Subline" and "Finish paying in your browser", whose
+    // polls kept running: the grant given FOR this uninstall, or a payment
+    // landing, then started a patch and a helper registration interleaved
+    // with the restore below. abort() ends the polls and waits for anything
+    // already writing, so what it wrote is restored too.
+    uninstallStarted = true;
+    if (flow !== null) {
+        const running = flow;
+        flow = null;
+        await running.abort();
+    }
+
+    // Every Discord Subline remembers patching, read BEFORE anything deletes
+    // the product folder that holds the list. A hand-picked PTB, Canary or
+    // unusual folder is found only through it.
+    const remembered = readPatchedInstalls(productDirFor());
+    const installs = uninstallTargets({ platform: process.platform }, remembered, detail => {
+        log.warn("uninstall.remembered-skipped", detail);
+    });
 
     // §4 applies to removal too. Putting Discord's original archive back is a
     // write inside the app bundle — the very write the INSTALL flow probes for
@@ -491,6 +520,24 @@ ipcMain.handle("uninstall:run", async (
         probeAppManagement({ resourcesPath: install.resourcesPath, platform: process.platform })));
     const status = probe();
     log.info("uninstall.permission.probe", { status, installs: installs.length });
+    if (status === "not-writable") {
+        // File ownership, not App Management: no toggle fixes it, so nothing
+        // is opened and nothing waits. Nothing has been changed.
+        const message = appManagementSummary("not-writable");
+        return {
+            restores: [],
+            helperStopped: false,
+            discordRestored: false,
+            modBundleRemoved: false,
+            modBundleKeptForSafety: false,
+            settingsRemoved: false,
+            productDataRemoved: false,
+            translationCache: "left-in-discord-storage",
+            problems: [{ code: "NOT_WRITABLE", message, path: installs[0]?.resourcesPath }],
+            clean: false,
+            summary: `${message} Nothing has been changed.`
+        };
+    }
     if (status !== "granted" && status !== "not-required") {
         phase("permission");
         uninstallPermissionCancelled = false;
@@ -509,6 +556,22 @@ ipcMain.handle("uninstall:run", async (
             cancelled: report.cancelled,
             failed: report.failed
         });
+        if (!report.permitted && report.status === "not-writable") {
+            const message = appManagementSummary("not-writable");
+            return {
+                restores: [],
+                helperStopped: false,
+                discordRestored: false,
+                modBundleRemoved: false,
+                modBundleKeptForSafety: false,
+                settingsRemoved: false,
+                productDataRemoved: false,
+                translationCache: "left-in-discord-storage",
+                problems: [{ code: "NOT_WRITABLE", message, path: installs[0]?.resourcesPath }],
+                clean: false,
+                summary: `${message} Nothing has been changed.`
+            };
+        }
         if (!report.permitted) {
             // Nothing has been touched: no helper removed, no file moved.
             // Cancelled: the renderer says so and nothing more. Failed: the
@@ -594,7 +657,13 @@ ipcMain.handle("uninstall:run", async (
     });
     return uninstall(
         { unpatch: (install, opts) => unpatchInstall(install, opts), ...uninstallPaths(), log },
-        { installs, keepSettings: options.keepSettings, helper, discordRunning }
+        {
+            installs,
+            keepSettings: options.keepSettings,
+            helper,
+            discordRunning,
+            rememberedResources: remembered.map(entry => rememberedResourcesPath(entry, process.platform))
+        }
     );
 });
 

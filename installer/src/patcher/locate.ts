@@ -317,13 +317,14 @@ function canonicalKey(path: string): string {
  * …patcher.js", and the repair was hand-written PowerShell. Uninstall must
  * sweep them all.
  */
+function carriesOurMark(install: DiscordInstall): boolean {
+    return existsSync(install.backupPath) || existsSync(join(install.resourcesPath, "subline-patch.json"));
+}
+
 export function locatePatchedResidue(options: LocateOptions = {}): DiscordInstall[] {
     const platform = options.platform ?? process.platform;
     const roots = options.searchRoots ?? defaultSearchRoots(platform);
     const branches = options.branches ?? DEFAULT_BRANCHES;
-
-    const carriesOurMark = (install: DiscordInstall): boolean =>
-        existsSync(install.backupPath) || existsSync(join(install.resourcesPath, "subline-patch.json"));
 
     const found: DiscordInstall[] = [];
     const seen = new Set<string>();
@@ -363,12 +364,81 @@ export function locatePatchedResidue(options: LocateOptions = {}): DiscordInstal
  * leftover, deduplicated. This exists as a function so the wiring in main.ts
  * is a call, not logic — logic in main.ts is logic no test executes.
  */
-export function uninstallTargets(options: LocateOptions = {}): DiscordInstall[] {
+export function uninstallTargets(
+    options: LocateOptions = {},
+    remembered: readonly RememberedLocation[] = [],
+    onSkipped?: (detail: { path: string; code: string }) => void
+): DiscordInstall[] {
+    const platform = options.platform ?? process.platform;
     const live = locateDiscordInstalls(options);
     const targets = [...(live.ok ? live.value : [])];
     const seen = new Set(targets.map(i => i.rootPath));
-    for (const residue of locatePatchedResidue(options)) {
-        if (!seen.has(residue.rootPath)) targets.push(residue);
+    const add = (install: DiscordInstall): void => {
+        if (seen.has(install.rootPath)) return;
+        seen.add(install.rootPath);
+        targets.push(install);
+    };
+    // EVERY BRANCH for residue, not only Stable: a PTB or Canary Subline
+    // patched carries the same marks, and costs nothing to look for.
+    for (const residue of locatePatchedResidue({ ...options, branches: BRANCHES.map(definition => definition.branch) })) add(residue);
+    // And every Discord Subline remembers patching, wherever it is. A path
+    // that no longer exists is skipped and reported, never an error that hides
+    // the others.
+    for (const install of locateRemembered(remembered, { platform, ...(onSkipped === undefined ? {} : { onSkipped }) })) add(install);
+    if (platform === "win32") {
+        // A hand-picked Windows install moves to a new app-1.0.x folder on every
+        // update: sweep every folder under its branch folder that carries our mark.
+        for (const entry of remembered) {
+            if (entry.stableId === entry.rootPath || !isDirectory(entry.stableId)) continue;
+            for (const appDir of findWindowsAppDirs(entry.stableId)) {
+                const install = makeInstall(branchFromPath(entry.stableId, platform) ?? entry.branch, appDir, platform, true);
+                if (carriesOurMark(install)) add(install);
+            }
+        }
     }
     return targets;
+}
+
+/** A Discord Subline remembers patching (app/patchedInstalls.ts). */
+export interface RememberedLocation {
+    rootPath: string;
+    stableId: string;
+    branch: DiscordBranch;
+}
+
+/**
+ * The Discords at remembered locations that are still there. Tolerant: a
+ * remembered path that is gone or no longer Discord is skipped and reported
+ * through `onSkipped`, never returned as an error for the whole list
+ * (locateDiscordInstalls fails the whole call for one bad explicit path, which
+ * would hide every other target). On Windows the newest app folder under the
+ * remembered branch folder is used, because the remembered one is replaced on
+ * every Discord update.
+ */
+export function locateRemembered(
+    remembered: readonly RememberedLocation[],
+    options: { platform?: NodeJS.Platform; onSkipped?: (detail: { path: string; code: string }) => void } = {}
+): DiscordInstall[] {
+    const platform = options.platform ?? process.platform;
+    const found: DiscordInstall[] = [];
+    for (const entry of remembered) {
+        if (platform === "win32" && entry.stableId !== entry.rootPath && isDirectory(entry.stableId)) {
+            const newest = findWindowsAppDirs(entry.stableId)
+                .map(appDir => makeInstall(branchFromPath(entry.stableId, platform) ?? entry.branch, appDir, platform, true))
+                .find(looksLikeDiscord);
+            if (newest !== undefined) {
+                found.push(newest);
+                continue;
+            }
+        }
+        const install = describeExplicitPath(entry.rootPath, platform, [entry.branch]);
+        if (install.ok) found.push(install.value);
+        else options.onSkipped?.({ path: entry.rootPath, code: install.error.code });
+    }
+    return found;
+}
+
+/** The Resources folder of a remembered install, whether or not it still looks like Discord. */
+export function rememberedResourcesPath(entry: RememberedLocation, platform: NodeJS.Platform = process.platform): string {
+    return resourcesDirFor(entry.rootPath, platform);
 }

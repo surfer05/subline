@@ -101,6 +101,16 @@ export interface SettleOptions {
     requireDiscordClosed?: boolean;
 }
 
+/*
+ * A RUNNING DISCORD IS NOT WAITED OUT INSIDE A RUN. It used to be: 61 checks
+ * over 5 minutes, then "deferred". On Windows, where the task already runs
+ * every 5 minutes, that kept a helper (and a tasklist every 5 s) running all
+ * day for anyone whose Discord sits in the tray, and repaired nothing sooner.
+ * Discord is a user's app, open for hours; the NEXT run is the retry. So a
+ * running Discord ends this run at once. Files still moving are polled as
+ * before: an update lands in seconds.
+ */
+
 /**
  * 8s of quiet, then a second observation 5s later that must agree.
  *
@@ -187,12 +197,20 @@ export async function awaitDiscordSettled(
     let lastStatus: SettleStatus;
     let lastQuietFor: number | null = null;
 
+    const notSettled = (status: SettleStatus, reason: string, quietForMs: number | null): SettleReport => ({
+        status,
+        settled: false,
+        version: null,
+        quietForMs,
+        waitedMs: waited(),
+        attempts,
+        reason
+    });
+
     do {
         attempts += 1;
         if (requireClosed && await ports.discordRunning(install)) {
-            lastStatus = "discord-running";
-            lastReason = "Discord is running, so it may be updating itself and its app.asar is in use";
-            lastQuietFor = null;
+            return notSettled("discord-running", "Discord is running, so it may be updating itself and its app.asar is in use", null);
         } else {
             const first = sample(install, ports);
             const quietFor = first.newestMtime === null ? null : ports.now() - first.newestMtime;
@@ -221,9 +239,7 @@ export async function awaitDiscordSettled(
                     // Discord can start during the confirmation delay — for
                     // instance because the user opened it, or because the
                     // updater relaunched it.
-                    lastStatus = "discord-running";
-                    lastReason = "Discord started while we were watching it";
-                    lastQuietFor = null;
+                    return notSettled("discord-running", "Discord started while we were watching it", null);
                 } else {
                     return {
                         status: "settled",
@@ -244,13 +260,5 @@ export async function awaitDiscordSettled(
         await ports.sleep(pollMs);
     } while (true);
 
-    return {
-        status: lastStatus,
-        settled: false,
-        version: null,
-        quietForMs: lastQuietFor,
-        waitedMs: waited(),
-        attempts,
-        reason: lastReason
-    };
+    return notSettled(lastStatus, lastReason, lastQuietFor);
 }

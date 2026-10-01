@@ -386,7 +386,7 @@ describe("patchInstall", () => {
         expect(sha256(fixture.install.backupPath)).toBe(genuineHash);
     });
 
-    it("returns PERMISSION_DENIED, not a stack trace, when the directory is not writable", () => {
+    it("returns a named refusal, not a stack trace, when the directory is not writable", () => {
         fixture = makeDiscordFixture();
         const asarHash = sha256(fixture.install.asarPath);
         chmodSync(fixture.install.resourcesPath, 0o555);
@@ -394,7 +394,9 @@ describe("patchInstall", () => {
         const result = patchInstall(fixture.install, options());
         expect(result.ok).toBe(false);
         if (result.ok) return;
-        expect(result.error.code).toBe("PERMISSION_DENIED");
+        // EACCES is file ownership: on macOS that is NOT_WRITABLE, never the
+        // App Management screen, which cannot fix it.
+        expect(result.error.code).toBe(process.platform === "darwin" ? "NOT_WRITABLE" : "PERMISSION_DENIED");
 
         chmodSync(fixture.install.resourcesPath, 0o755);
         expect(sha256(fixture.install.asarPath)).toBe(asarHash);
@@ -715,12 +717,34 @@ describe("fsError", () => {
     });
 
     it("still maps the cases that already had remedies", () => {
-        expect((fsError(thrown("EACCES"), "/a", "x") as { error: { code: string } }).error.code)
+        expect((fsError(thrown("EACCES"), "/a", "x", "linux") as { error: { code: string } }).error.code)
             .toBe("PERMISSION_DENIED");
-        expect((fsError(thrown("EPERM"), "/a", "x") as { error: { code: string } }).error.code)
+        expect((fsError(thrown("EPERM"), "/a", "x", "darwin") as { error: { code: string } }).error.code)
             .toBe("PERMISSION_DENIED");
         expect((fsError(thrown("EROFS"), "/a", "x") as { error: { code: string } }).error.code)
             .toBe("READ_ONLY_VOLUME");
+    });
+
+    it("Windows EPERM is a file something holds open, never macOS App Management", () => {
+        const failed = fsError(thrown("EPERM"), "/a", "rename app.asar", "win32") as { error: { code: string; message: string } };
+        expect(failed.error.code).toBe("FILE_IN_USE");
+        expect(failed.error.message).not.toMatch(/macOS|App Management|System Settings/);
+        expect((fsError(thrown("EPERM"), "/a", "x", "darwin") as { error: { code: string } }).error.code).toBe("PERMISSION_DENIED");
+    });
+
+    it("Windows EACCES says what Windows needs, not App Management", () => {
+        const failed = fsError(thrown("EACCES"), "/a", "rename app.asar", "win32") as { error: { code: string; message: string } };
+        expect(failed.error.code).toBe("PERMISSION_DENIED");
+        expect(failed.error.message).toContain("Windows would not let Subline change Discord's files.");
+        expect(failed.error.message).not.toMatch(/macOS|App Management/);
+    });
+
+    it("macOS EACCES is file ownership (NOT_WRITABLE), and does not send anyone to App Management", () => {
+        const failed = fsError(thrown("EACCES"), "/a", "write app.asar", "darwin") as { error: { code: string; message: string } };
+        expect(failed.error.code).toBe("NOT_WRITABLE");
+        expect(failed.error.message).not.toMatch(/App Management/);
+        expect(failed.error.message).toContain("Mac account");
+        expect(failed.error.message).toContain("If another account or an admin installed Discord");
     });
 });
 

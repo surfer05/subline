@@ -54,8 +54,12 @@ export const UPGRADE_COPY = {
     annualName: "Annual",
     annualPrice: "$19.99 a year",
     annualNote: "2 months free",
-    /** Under the AI plans in the Add AI panel: a Dodo coupon goes on the checkout page, not in Subline. */
-    couponHint: "Have a coupon? Enter it on the payment page.",
+    /**
+     * Under the AI plans in the Add AI panel: a Dodo coupon goes on the checkout
+     * page, not in Subline. Coupons are made for the Monthly plan only (relay
+     * createCoupon: restricted_to [monthly]), so Yearly's page refuses them.
+     */
+    couponHint: "Have a coupon? Pick Monthly and enter it on the payment page.",
     monthlyButton: "Monthly $1.99",
     annualButton: "Yearly $19.99 · 2 months free",
     aiNeedsAutomatic: "AI needs Automatic first.",

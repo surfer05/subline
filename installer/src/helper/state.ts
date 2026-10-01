@@ -43,6 +43,13 @@ export interface InstallMemory {
     patchedAt: number | null;
     /** Consecutive failed re-patch attempts, so one bad night is not an alert. */
     failures: number;
+    /**
+     * Windows: since when a repair has been waiting only for Discord to close
+     * (it cannot rename a file a running Discord holds). Null when not blocked.
+     * Thirty minutes of it raises "quit-required": a Discord closed to the tray
+     * and never quit otherwise stays untranslated with no word to the user.
+     */
+    blockedByRunningSince?: number | null;
 }
 
 /**
@@ -67,6 +74,12 @@ export interface AlertMemory {
     firstAt: number;
     lastNotifiedAt: number;
     count: number;
+    /**
+     * What the last notification was about (for restart-required: the Discord
+     * version and mod build that were written). A different key is news even
+     * inside the repeat window; the same key is not.
+     */
+    key?: string;
 }
 
 export interface HelperState {
@@ -77,6 +90,13 @@ export interface HelperState {
     lastUpdateCheckAt: number | null;
     /** The newest build id the release feed has offered us. */
     lastReleaseBuildId: string | null;
+    /** Its plugin version, so "the feed has something newer" means NEWER, not just different. */
+    lastReleasePluginVersion: string | null;
+    /**
+     * What the last run deferred and why, so an identical deferral every 5
+     * minutes costs one log line instead of a full entry. Null when it deferred nothing.
+     */
+    lastDeferralKey: string | null;
     /** Consecutive failed update checks. A flaky network is not news. */
     updateFailures: number;
     health: HealthMemory;
@@ -90,6 +110,8 @@ export function emptyHelperState(): HelperState {
         installs: {},
         lastUpdateCheckAt: null,
         lastReleaseBuildId: null,
+        lastReleasePluginVersion: null,
+        lastDeferralKey: null,
         updateFailures: 0,
         health: { lastStatus: "unknown", lastObservedAt: null, suspectSince: null, observations: 0 },
         alerts: {}
@@ -136,6 +158,8 @@ export function parseHelperState(raw: string): HelperState {
     state.lastRunAt = num(parsed.lastRunAt);
     state.lastUpdateCheckAt = num(parsed.lastUpdateCheckAt);
     state.lastReleaseBuildId = str(parsed.lastReleaseBuildId);
+    state.lastReleasePluginVersion = str(parsed.lastReleasePluginVersion);
+    state.lastDeferralKey = str(parsed.lastDeferralKey);
     state.updateFailures = count(parsed.updateFailures);
 
     if (isRecord(parsed.installs)) {
@@ -147,6 +171,8 @@ export function parseHelperState(raw: string): HelperState {
                 patchedAt: num(value.patchedAt),
                 failures: count(value.failures)
             };
+            const blocked = num(value.blockedByRunningSince);
+            if (blocked !== null) state.installs[rootPath]!.blockedByRunningSince = blocked;
         }
     }
 
@@ -165,7 +191,8 @@ export function parseHelperState(raw: string): HelperState {
             const firstAt = num(value.firstAt);
             const lastNotifiedAt = num(value.lastNotifiedAt);
             if (firstAt === null || lastNotifiedAt === null) continue;
-            state.alerts[code] = { firstAt, lastNotifiedAt, count: count(value.count) };
+            const key = str(value.key);
+            state.alerts[code] = { firstAt, lastNotifiedAt, count: count(value.count), ...(key === null ? {} : { key }) };
         }
     }
 

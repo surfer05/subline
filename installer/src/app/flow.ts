@@ -37,11 +37,11 @@
 
 import type { InstalledModBundle } from "./modInstall.js";
 import type { AppManagementReport, AppManagementStatus } from "./appManagement.js";
-import { awaitAppManagement, isLoggedAttempt } from "./appManagement.js";
+import { appManagementSummary, awaitAppManagement, isLoggedAttempt } from "./appManagement.js";
 import type { QuitReport, RunningProcess } from "./discordProcess.js";
 import { findDiscordProcesses, quitDiscord } from "./discordProcess.js";
 import {
-    type ActivationRelay, ACTIVATION_POLL_MS, AUTOMATIC_PRODUCT_ID, installBearer, isDodoCheckoutUrl, looksLikeCoupon, promoCode, type RedeemAnswer,
+    type ActivationRelay, ACTIVATION_POLL_MS, activationPollDelay, AUTOMATIC_PRODUCT_ID, installBearer, isDodoCheckoutUrl, looksLikeCoupon, promoCode, type RedeemAnswer,
     staticAutomaticCheckoutUrl, staticCheckoutAllowed, type StatusAnswer, WAITING_HINT_AFTER_MS
 } from "./activation.js";
 import { CODE_SCREEN_COPY, RESET_HELP_URL } from "./codeScreen.js";
@@ -117,6 +117,13 @@ export type FlowStep =
      * all of it asking the user to redo work that was already done.
      */
     | "already-installed"
+    /**
+     * Discord carries Subline, but pointing at ANOTHER Mac account's copy of
+     * it. Patching it again from this account would point it here and break
+     * Discord for the other account (it cannot read this home folder). So this
+     * is a refusal with a recheck, like BetterDiscord.
+     */
+    | "other-account"
     /* §3 step 5. */
     | "discord-running"
     | "quit-blocked"
@@ -340,6 +347,17 @@ export interface FlowPorts {
 
     patch(install: DiscordInstall, options: { modBundleDir: string; overwriteForeignMod: boolean }): Result<PatchReport>;
     /**
+     * Remember a Discord this run patched (patched-installs.json), so Uninstall
+     * and the helper find it again even when it is not where detection looks
+     * (a hand-picked PTB, Canary or unusual folder). Never fails the install.
+     */
+    rememberPatchedInstall?(install: DiscordInstall): void;
+    /**
+     * True when a loader path lives in ANOTHER user's home folder: the Discord
+     * was set up by another account on this computer.
+     */
+    isOtherAccountLoader?(loaderPath: string): boolean;
+    /**
      * §3 step 8b. REQUIRED, and that is the entire point of this port existing.
      *
      * Before this, `helper:install` was an IPC handler no flow state ever called,
@@ -417,7 +435,53 @@ export class InstallFlow {
         return this.current;
     }
 
+    /**
+     * Set by abort(): the flow is finished, whatever it was waiting for. Every
+     * write below (bundle, patch, helper, launch, saved code) checks it first,
+     * so a poll or a probe answer already in flight cannot act on Discord after
+     * the user pressed Uninstall.
+     */
+    private aborted = false;
+    /** Every dispatch still running, so abort() can wait for the ones that write. */
+    private readonly inflight = new Set<Promise<FlowState>>();
+
+    /**
+     * Stop this flow for good, and resolve once nothing it started is still
+     * running.
+     *
+     * Field worst case: the user is on "Turn on Subline" or "Finish paying in
+     * your browser" and presses the footer Uninstall. Without this, the
+     * flow's poll kept going, and the grant they gave FOR the uninstall (or
+     * the payment landing) started a patch and a helper registration
+     * interleaved with the uninstall's own restore. Moving to a terminal state
+     * ends both polls (they watch for the screen to change); the flag stops any
+     * answer already in flight from writing.
+     */
+    async abort(): Promise<void> {
+        if (!this.aborted) {
+            this.aborted = true;
+            this.onChange = null;
+            this.current = state({ step: "cancelled", detail: "Stopped.", actions: [] });
+            this.ports.log.info("flow.aborted", {});
+        }
+        await Promise.allSettled([...this.inflight]);
+    }
+
+    /**
+     * Busy, with nothing to press, while a relay call or a process check that
+     * a user action started is in flight. Keeps the step (and its heading).
+     *
+     * THIS IS THE SERIALIZER. send() refuses any action the current state does
+     * not offer, so a double click, an Enter plus a click, or a second press
+     * after a slow answer is refused instead of running the whole chain twice
+     * (two redeems, two patches, two helper registrations, two Discord launches).
+     */
+    private hold(detail?: string): void {
+        this.set({ ...this.current, detail: detail ?? this.current.detail, busy: true, actions: [], error: null });
+    }
+
     private set(next: FlowState): FlowState {
+        if (this.aborted) return this.current;
         this.current = next;
         this.ports.log.info("flow.state", {
             step: next.step,
@@ -449,12 +513,19 @@ export class InstallFlow {
      * have taken them anyway.
      */
     async start(): Promise<FlowState> {
+        const running = this.resume();
+        this.inflight.add(running);
+        void running.finally(() => this.inflight.delete(running)).catch(() => {});
+        return running;
+    }
+
+    private async resume(): Promise<FlowState> {
         try {
             const installs = this.ports.locate(this.explicitPaths);
             if (installs.ok) {
                 for (const install of installs.value) {
                     const inspected = this.ports.inspect(install);
-                    if (inspected.ok && inspected.value.kind === "patched-by-us") {
+                    if (inspected.ok && inspected.value.kind === "patched-by-us" && !this.otherAccount(inspected.value)) {
                         this.chosenInstall = install;
                         return this.alreadyInstalled(install, inspected.value);
                     }
@@ -476,7 +547,10 @@ export class InstallFlow {
             return this.current;
         }
         this.ports.log.info("flow.action", { step: this.current.step, action: action.type });
-        return this.dispatch(action);
+        const running = this.dispatch(action);
+        this.inflight.add(running);
+        void running.finally(() => this.inflight.delete(running)).catch(() => {});
+        return running;
     }
 
     private async dispatch(action: FlowAction): Promise<FlowState> {
@@ -515,8 +589,14 @@ export class InstallFlow {
                 if (action.type !== "choose-install") return this.current;
                 const picked = (this.current.installs ?? []).find(install => install.rootPath === action.rootPath);
                 if (picked === undefined) return this.current;
+                // inspectChosen can await (the helper check, the process list)
+                // before it shows anything: nothing to press twice meanwhile.
+                this.hold();
                 return this.inspectChosen(picked);
             }
+
+            case "other-account":
+                return this.chosenInstall === null ? this.detect() : this.inspectChosen(this.chosenInstall);
 
             // Nothing to do but close. Deliberately offers no "install again":
             // re-patching a working install is a write to somebody else's
@@ -548,10 +628,12 @@ export class InstallFlow {
 
             case "discord-running":
                 if (action.type === "quit-discord") return this.quit();
+                this.hold();
                 return this.checkRunning();
 
             case "quit-blocked":
                 if (action.type === "force-quit-discord") return this.quit(true);
+                this.hold();
                 return this.checkRunning();
 
             case "choose-language":
@@ -588,6 +670,9 @@ export class InstallFlow {
                 return this.waitForPermission();
 
             case "permission-failed":
+                // A Discord this account cannot write is not waiting for a
+                // toggle: Try again checks again, it does not reopen Settings.
+                if (this.current.permissionStatus === "not-writable") return this.permissionStep();
                 return this.waitForPermission();
 
             case "permission-waiting":
@@ -600,7 +685,14 @@ export class InstallFlow {
             case "patch-failed":
                 // A permission failure that survived the probe goes back to the
                 // permission screen rather than retrying the same blocked write.
-                if (this.current.error?.code === "PERMISSION_DENIED") return this.explainPermission("blocked");
+                // macOS ONLY: App Management does not exist anywhere else, and
+                // on Windows that screen opened an x-apple: link into a "get an
+                // app to open this" prompt. Elsewhere, patch again: applyPatch
+                // checks for a running Discord first and sends the user to the
+                // close-Discord screen when one is back.
+                if (this.current.error?.code === "PERMISSION_DENIED" && this.ports.platform === "darwin") {
+                    return this.explainPermission("blocked");
+                }
                 return this.patchStep();
 
             // Discord is ALREADY PATCHED by the time this screen can appear, so
@@ -794,7 +886,27 @@ export class InstallFlow {
      * a write to somebody else's application in exchange for nothing, and the
      * helper already repairs the one case that needs it.
      */
+    /** Patched by Subline, but for another account on this computer (see "other-account"). */
+    private otherAccount(installState: InstallState): boolean {
+        const loader = installState.marker?.loaderPath ?? installState.loaderPath;
+        return loader !== null && loader !== undefined && this.ports.isOtherAccountLoader?.(loader) === true;
+    }
+
     private alreadyInstalled(install: DiscordInstall, installState: InstallState): FlowState | Promise<FlowState> {
+        // NEVER "already set up" for a Discord another account set up. Its
+        // loader lives in that account's home folder, which this account
+        // cannot read; patching it again from here would point it at THIS
+        // home folder and stop Discord starting for the other account.
+        if (this.otherAccount(installState)) {
+            this.ports.log.warn("flow.other-account", { path: install.rootPath });
+            return this.set(state({
+                step: "other-account",
+                detail: "Another account on this Mac set up Subline for this Discord. Only that account can change it.",
+                install,
+                installState,
+                actions: ["recheck", "cancel"]
+            }));
+        }
         // AN OLDER BUILD IS NOT "ALREADY SET UP". Observed 2026-09-03: a new
         // installer run over an existing install landed on "nothing left to
         // do" while Discord kept running the previous plugin build - with the
@@ -1116,6 +1228,7 @@ export class InstallFlow {
      * A code the settings refuse to take stays on the activation screen.
      */
     private async saveConfirmedCode(code: string | null, ai: boolean): Promise<FlowState> {
+        if (this.aborted) return this.current;
         this.aiEntitled = ai;
         if (code !== null) {
             const saved = this.ports.setSublineCode(code);
@@ -1165,10 +1278,20 @@ export class InstallFlow {
             this.ports.log.error("activation.install-id-failed", errorFields(id.error));
             return this.codeStep(id.error);
         }
+        // Nothing on this screen can be pressed again until the relay answers
+        // (see hold). A second press used to redeem the promo a second time.
+        this.hold(CODE_SCREEN_COPY.checking);
         const promo = promoCode(typed);
         if (promo !== null) {
             const redeemed = await this.ports.relay.redeem(id.value, promo);
             this.ports.log.info("activation.redeem", { result: redeemed.kind });
+            if (this.aborted) return this.current;
+            // "already": this install already has Automatic. Usually it is OUR
+            // OWN earlier redeem whose answer was lost (a slow network past the
+            // 10 s timeout, then Save again). Ask the relay what this install
+            // has, exactly as Buy does on already_owned, instead of leaving
+            // the user on "Already yours." with no way forward.
+            if (redeemed.kind === "already") return this.alreadyActivated(id.value);
             if (redeemed.kind !== "ok") return this.codeStep(this.redeemError(redeemed, promo));
             return this.saveConfirmedCode(redeemed.code, false);
         }
@@ -1176,6 +1299,7 @@ export class InstallFlow {
         // tying this computer to it, so a mistyped or borrowed code never uses
         // up one of its 3 computers. Only "Use it" links it (useConfirmedCode).
         const answer = await this.ports.relay.status(typed, id.value, { check: true });
+        if (this.aborted) return this.current;
         const works = answer.kind === "ok" && (answer.check ? answer.check.valid && answer.check.automatic : answer.automatic);
         this.ports.log.info("activation.code-check", { result: answer.kind, works });
         if (works) {
@@ -1199,6 +1323,7 @@ export class InstallFlow {
             this.ports.log.error("activation.install-id-failed", errorFields(id.error));
             return this.codeStep(id.error);
         }
+        this.hold(CODE_SCREEN_COPY.checking);
         const answer = await this.ports.relay.status(code, id.value);
         this.ports.log.info("activation.code-linked", { result: answer.kind, automatic: answer.kind === "ok" ? answer.automatic : null });
         if (answer.kind === "ok" && answer.automatic) {
@@ -1220,7 +1345,9 @@ export class InstallFlow {
             this.ports.log.error("activation.install-id-failed", errorFields(id.error));
             return this.codeStep(id.error);
         }
+        this.set(state({ step: "choose-code", detail: CODE_SCREEN_COPY.openingCheckout, busy: true, actions: [] }));
         const checkout = await this.ports.relay.checkout(id.value);
+        if (this.aborted) return this.current;
         let url: string;
         if (checkout.kind === "ok" && isDodoCheckoutUrl(checkout.url)) {
             url = checkout.url;
@@ -1228,10 +1355,7 @@ export class InstallFlow {
             // This install already has Automatic: ask the relay again rather
             // than sell it twice.
             this.ports.log.info("activation.already-owned", {});
-            const answer = await this.ports.relay.status(installBearer(id.value), id.value);
-            if (answer.kind === "ok" && answer.automatic) return this.saveConfirmedCode(answer.code, answer.ai);
-            if (answer.kind === "unreachable") return this.codeStep(this.activationError(CODE_SCREEN_COPY.errUnreachable, answer.cause));
-            return this.codeStep(this.activationError(CODE_SCREEN_COPY.errAlready));
+            return this.alreadyActivated(id.value);
         } else if (checkout.kind === "network" && staticCheckoutAllowed(this.productId())) {
             // The relay could not be reached at all: the static link still
             // links the purchase to this install (metadata_install).
@@ -1265,9 +1389,26 @@ export class InstallFlow {
         const every = this.ports.activationPollIntervalMs ?? ACTIVATION_POLL_MS;
         let attempts = 0;
         while (this.current === waiting) {
-            // Asked at once, then every few seconds: a purchase already made
-            // (the browser was quicker than this screen) lands without a wait.
-            if (attempts > 0) await this.ports.sleep(every);
+            // Asked at once, then every few seconds for half an hour, then
+            // every 5 minutes, and never after 48 hours (activationPollDelay).
+            // A purchase already made (the browser was quicker than this
+            // screen) lands without a wait.
+            if (attempts > 0) {
+                const delay = activationPollDelay(this.ports.now() - startedAt, every);
+                if (delay === null) {
+                    // An installer left open on this screen must not ask the
+                    // relay forever (see ACTIVATION_POLL_FOR_MS). Back to the
+                    // choice, saying what is true: reopening finds the purchase.
+                    this.ports.log.info("activation.poll-stopped", { attempts, waitedMs: this.ports.now() - startedAt });
+                    return this.codeStep(this.activationError(CODE_SCREEN_COPY.errWaitingStopped, "stopped polling after 48h"));
+                }
+                // In slices of at most ACTIVATION_POLL_MS, so Back or an abort
+                // during the 5 minute phase stops the loop within seconds.
+                const until = this.ports.now() + delay;
+                while (this.current === waiting && this.ports.now() < until) {
+                    await this.ports.sleep(Math.min(ACTIVATION_POLL_MS, until - this.ports.now()));
+                }
+            }
             if (this.current !== waiting) break;
             // After 10 minutes: say that a finished payment still lands later.
             if (!hinted && this.ports.now() - startedAt >= WAITING_HINT_AFTER_MS) {
@@ -1304,7 +1445,9 @@ export class InstallFlow {
             this.ports.log.error("activation.install-id-failed", errorFields(id.error));
             return this.codeStep(id.error);
         }
+        this.hold(CODE_SCREEN_COPY.checking);
         const answer = await this.ports.relay.status(code, id.value);
+        if (this.aborted) return this.current;
         this.ports.log.info("activation.saved-code-check", { result: answer.kind, automatic: answer.kind === "ok" ? answer.automatic : null });
         if (answer.kind === "unreachable") return this.checkFailed(answer.cause);
         if (answer.kind === "ok" && answer.automatic) {
@@ -1319,7 +1462,9 @@ export class InstallFlow {
     private async checkSavedInstall(): Promise<FlowState> {
         const id = this.ports.savedInstallId();
         if (id === null) return this.codeStep();
+        this.hold(CODE_SCREEN_COPY.checkingPurchase);
         const answer = await this.ports.relay.status(installBearer(id), id);
+        if (this.aborted) return this.current;
         this.ports.log.info("activation.install-check", { result: answer.kind, automatic: answer.kind === "ok" ? answer.automatic : null });
         if (answer.kind === "unreachable") return this.checkFailed(answer.cause);
         // The relay can hand back a code the reader cleared in Subline's
@@ -1332,6 +1477,30 @@ export class InstallFlow {
         }
         if (answer.kind === "ok" && answer.automatic) return this.saveConfirmedCode(answer.code, answer.ai);
         return this.codeStep();
+    }
+
+    /**
+     * The relay said this install already has Automatic (checkout 409
+     * already_owned, or redeem "already"). Ask it what this install has and
+     * carry on with that. "Already yours." only when the relay does not
+     * confirm Automatic after all.
+     */
+    private async alreadyActivated(installId: string): Promise<FlowState> {
+        this.hold(CODE_SCREEN_COPY.checkingPurchase);
+        const answer = await this.ports.relay.status(installBearer(installId), installId);
+        this.ports.log.info("activation.already-check", { result: answer.kind, automatic: answer.kind === "ok" ? answer.automatic : null });
+        if (this.aborted) return this.current;
+        if (answer.kind === "unreachable") return this.codeStep(this.activationError(CODE_SCREEN_COPY.errUnreachable, answer.cause));
+        if (answer.kind === "ok" && answer.automatic) {
+            // Never bring back a code the reader cleared (see checkSavedInstall):
+            // carry on, but do not save it again.
+            if (answer.code !== null && answer.code === this.ports.clearedCode()) {
+                this.ports.log.info("activation.cleared-code-ignored", {});
+                return this.saveConfirmedCode(null, answer.ai);
+            }
+            return this.saveConfirmedCode(answer.code, answer.ai);
+        }
+        return this.codeStep(this.activationError(CODE_SCREEN_COPY.errAlready));
     }
 
     private productId(): string {
@@ -1359,10 +1528,35 @@ export class InstallFlow {
         const status = this.ports.probePermission(install);
         this.ports.log.info("permission.probe", { status });
         if (status === "granted" || status === "not-required") return this.patchStep();
+        if (status === "not-writable") return this.notWritable(install);
 
         // EXPLAIN BEFORE ATTEMPTING (§4). We already know the write would be
         // refused, so the user meets this as a step rather than as a failure.
         return this.explainPermission(status);
+    }
+
+    /**
+     * The write was refused with EACCES: file ownership, not App Management.
+     * Turning Subline on in System Settings cannot fix that, so there is no
+     * wait (it used to poll forever on "Turn on Subline"). Try again checks again.
+     */
+    private notWritable(install: DiscordInstall): FlowState {
+        const message = appManagementSummary("not-writable");
+        const cause = this.ports.lastPermissionProbeError?.() ?? undefined;
+        this.ports.log.error("permission.not-writable", { path: install.resourcesPath, cause: cause ?? null });
+        return this.set(state({
+            step: "permission-failed",
+            detail: message,
+            permissionStatus: "not-writable",
+            error: {
+                code: "NOT_WRITABLE",
+                message,
+                path: install.resourcesPath,
+                ...(cause === undefined ? {} : { cause })
+            },
+            install,
+            actions: ["retry", "cancel"]
+        }));
     }
 
     private explainPermission(status: AppManagementStatus): FlowState {
@@ -1452,8 +1646,9 @@ export class InstallFlow {
 
         // Also when the screen changed under a probe that said granted: a
         // Cancel pressed during the last probe must still mean no patch.
-        if (report.cancelled || this.current !== waiting) return this.current;
+        if (report.cancelled || this.current !== waiting || this.aborted) return this.current;
         if (report.permitted) return this.patchStep();
+        if (report.status === "not-writable") return this.notWritable(install);
 
         // The only way here: the CHECK kept failing for a reason that is not
         // a permission refusal. That is a real failure with a real cause, so
@@ -1489,6 +1684,7 @@ export class InstallFlow {
      * there; everything else patches as it always did.
      */
     private async patchStep(): Promise<FlowState> {
+        if (this.aborted) return this.current;
         if (this.updatingWithDiscordOpen && this.ports.platform === "win32") return this.stageUpdate();
         return this.applyPatch();
     }
@@ -1540,6 +1736,9 @@ export class InstallFlow {
         // gets an unexplained write failure instead of the screen that tells
         // them to close Discord. Checking here is cheap; the failure is not.
         const stillRunning = await this.ports.listProcesses();
+        // The one await before the writes: an abort (Uninstall) that landed
+        // meanwhile means nothing below may run.
+        if (this.aborted) return this.current;
         if (findDiscordProcesses(stillRunning, install.branch, this.ports.platform).length > 0) {
             // An UPDATE must not bounce back to the quit screen, whether Discord
             // was open all along or came back while the user was reading. On
@@ -1584,6 +1783,11 @@ export class InstallFlow {
 
         this.patchReport = patched.value;
         this.patchedAt = this.ports.now();
+        try {
+            this.ports.rememberPatchedInstall?.(install);
+        } catch (cause) {
+            this.ports.log.warn("patch.remember-failed", { cause: String(cause) });
+        }
         this.ports.log.info("patch.ok", {
             build: patched.value.pluginBuildId,
             discord: patched.value.discordVersion ?? null,
@@ -1613,6 +1817,7 @@ export class InstallFlow {
      * an install that is working would be a worse answer than a named warning.
      */
     private async installHelper(): Promise<FlowState> {
+        if (this.aborted) return this.current;
         this.set(state({
             step: "installing-helper",
             detail: "Setting Subline up to repair itself after Discord updates…",
@@ -1621,6 +1826,7 @@ export class InstallFlow {
         }));
 
         const result = await this.ports.installHelper();
+        if (this.aborted) return this.current;
         if (!result.ok) {
             this.ports.log.error("helper.install-failed", errorFields(result.error));
             return this.set(state({
@@ -1722,6 +1928,7 @@ export class InstallFlow {
             await this.ports.sleep(SETTLE_BEFORE_LAUNCH_MS);
         }
 
+        if (this.aborted) return this.current;
         this.set(state({ step: "launching", detail: "Starting Discord…", busy: true, actions: [] }));
         const launched = await this.ports.launchDiscord(install);
         this.launchedAt = this.ports.now();

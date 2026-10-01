@@ -187,6 +187,13 @@ export interface SchtasksPort {
      * outdated command.
      */
     queryInterval?(name: string): Promise<string | null>;
+    /**
+     * Both of the above from ONE `schtasks /Query /XML`, or null when there is
+     * no such task. Optional; ensureHelperFor prefers it (one spawn per run).
+     */
+    queryDefinition?(name: string): Promise<{ command: string | null; interval: string | null } | null>;
+    /** `schtasks /End /TN <name>`: stop a run in progress. Failure is ignored. Optional. */
+    end?(name: string): Promise<void>;
 }
 
 /** The first repetition `<Interval>` of a task definition from `schtasks /Query /XML`. */
@@ -339,6 +346,12 @@ export async function removeScheduledTask(options: {
 
     const name = options.name ?? HELPER_TASK_NAME;
     if (!await options.schtasks.exists(name)) return ok(false);
+
+    // End a run in progress FIRST. Deleting the task leaves a running helper
+    // running, and it used to finish its wait and patch Discord again after
+    // the uninstall. (Not synchronous, so the helper also re-checks that its
+    // task exists before every write: helper.ts stillRegistered.)
+    await options.schtasks.end?.(name);
 
     const removed = await options.schtasks.remove(name);
     if (!removed.ok) return removed as Result<boolean>;

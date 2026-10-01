@@ -12,7 +12,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -1190,5 +1190,201 @@ describe("the health check", () => {
         expect(report.health?.status).toBe("unknown");
         expect(report.health?.from).toBe("foreign-beacon");
         expect(harness.notifications).toEqual([]);
+    });
+});
+
+/* ------------------------------------------------------------------------ *
+ * Worst cases (the 0.2.1 pass): each fails on the code before its fix.
+ * ------------------------------------------------------------------------ */
+
+describe("worst cases", () => {
+    function countRunningChecks(): { count: () => number } {
+        let checks = 0;
+        const real = harness.ports.discordRunning;
+        harness.ports.discordRunning = async install => { checks += 1; return real(install); };
+        return { count: () => checks };
+    }
+
+    it("Windows, Discord open after an update: one look per run, and ONE quit-required notice after 30 minutes", async () => {
+        harness.platform = "win32";
+        patchForReal(harness);
+        await harness.run({ settle: {} });
+        simulateDiscordUpdate(harness.fixture.install, "0.0.407");
+        harness.discordOpen = true;
+        const checks = countRunningChecks();
+
+        const first = await harness.run({ settle: {} });
+        expect(first.deferred).toEqual([harness.fixture.install.rootPath]);
+        // It was 61 (every 5 s for 5 minutes, every run).
+        expect(checks.count()).toBeLessThanOrEqual(2);
+
+        for (let i = 0; i < 7; i++) {
+            harness.advance(5 * 60_000);
+            await harness.run({ settle: {} });
+        }
+        const quit = harness.notifications.filter(n => n.code === "quit-required");
+        expect(quit).toHaveLength(1);
+        expect(quit[0]?.message).toBe(
+            "Discord updated. To turn Subline back on, right-click the Discord icon near the clock, choose Quit Discord, then open Discord again."
+        );
+
+        for (let i = 0; i < 10; i++) {
+            harness.advance(30 * 60_000);
+            await harness.run({ settle: {} });
+        }
+        expect(harness.notifications.filter(n => n.code === "quit-required")).toHaveLength(1);
+
+        // The user quits Discord: the repair lands, the notice is resolved, and
+        // no second "restart" notice follows it.
+        harness.discordOpen = false;
+        harness.advance(5 * 60_000);
+        const repaired = await harness.run({ settle: {} });
+        expect(repaired.repatched).toEqual([harness.fixture.install.rootPath]);
+        expect(repaired.decisions.some(d => d.outcome === "quit-required:resolved")).toBe(true);
+        expect(harness.notifications.map(n => n.code)).not.toContain("restart-required");
+    });
+
+    it("an identical deferral run after run is marked as a repeat, so the log keeps one line for it", async () => {
+        harness.platform = "win32";
+        patchForReal(harness);
+        await harness.run();
+        simulateDiscordUpdate(harness.fixture.install, "0.0.407");
+        harness.discordOpen = true;
+        const first = await harness.run();
+        expect(first.repeatDeferral).toBe(false);
+        harness.advance(5 * 60_000);
+        const second = await harness.run();
+        expect(second.repeatDeferral).toBe(true);
+
+        const { bufferedLogger, concludeHelperLog } = await import("../src/helper/quiet.js");
+        const lines: string[] = [];
+        const target = { info: (e: string) => lines.push(e), warn: (e: string) => lines.push(e), error: (e: string) => lines.push(e) };
+        const held = bufferedLogger(target);
+        held.logger.info("helper.scan", {});
+        let headers = 0;
+        concludeHelperLog(second, held, target, () => { headers += 1; });
+        expect(lines).toEqual(["helper.deferred"]);
+        expect(headers).toBe(0);
+    });
+
+    it("a second Discord update the same day gets its own restart notice", async () => {
+        patchForReal(harness);
+        await harness.run();
+        simulateDiscordUpdate(harness.fixture.install, "0.0.409");
+        harness.discordOpen = true;
+        await harness.run();
+        harness.advance(3 * 60 * 60_000);
+        await harness.run();
+        simulateDiscordUpdate(harness.fixture.install, "0.0.410");
+        harness.advance(60 * 60_000);
+        await harness.run();
+
+        const restarts = harness.notifications.filter(n => n.code === "restart-required");
+        expect(restarts).toHaveLength(2);
+        expect(restarts[1]?.detail).toMatchObject({ discord: "0.0.410" });
+    });
+
+    it("a new Subline build under a running Discord says Subline updated, not Discord", async () => {
+        patchForReal(harness);
+        await harness.run();
+        simulateDiscordUpdate(harness.fixture.install, "0.0.409");
+        harness.discordOpen = true;
+        await harness.run();
+        harness.advance(60 * 60_000);
+        harness.shipped.rebuild({ buildId: "5566778899aabbcc", pluginVersion: "0.2.1" });
+        const installed = installModBundle({ sourceDir: harness.shipped.dir, destDir: harness.runtimeDir });
+        expect(installed.ok).toBe(true);
+        await harness.run();
+
+        const restarts = harness.notifications.filter(n => n.code === "restart-required");
+        expect(restarts).toHaveLength(2);
+        expect(restarts[1]?.message).toBe("Subline updated. Quit and reopen Discord to use the new version.");
+    });
+
+    it("the same version and build written again within a day stays quiet", async () => {
+        patchForReal(harness);
+        await harness.run();
+        simulateDiscordUpdate(harness.fixture.install, "0.0.409");
+        harness.discordOpen = true;
+        await harness.run();
+        harness.advance(60 * 60_000);
+        // Wiped again, same version: the same pair is written a second time.
+        simulateDiscordUpdate(harness.fixture.install, "0.0.409");
+        const again = await harness.run();
+        expect(again.repatched).toEqual([harness.fixture.install.rootPath]);
+        expect(harness.notifications.filter(n => n.code === "restart-required")).toHaveLength(1);
+    });
+
+    it("Windows: a run whose task was removed (Uninstall) mid-run patches nothing and writes no state", async () => {
+        harness.platform = "win32";
+        patchForReal(harness);
+        await harness.run();
+        simulateDiscordUpdate(harness.fixture.install, "0.0.407");
+        harness.discordOpen = false;
+        const statePath = helperStatePathFor(harness.productDir);
+        harness.advance(5 * 60_000);
+        const stateBefore = readFileSync(statePath, "utf8");
+        let registered = true;
+        harness.ports.stillRegistered = async () => registered;
+        // The uninstall removes the task while this run waits for Discord to settle.
+        const realSleep = harness.ports.sleep;
+        harness.ports.sleep = async ms => { registered = false; await realSleep(ms); };
+        let patches = 0;
+        const realPatch = harness.ports.patch;
+        harness.ports.patch = (install, options) => { patches += 1; return realPatch(install, options); };
+
+        const report = await harness.run();
+        expect(patches).toBe(0);
+        expect(report.repatched).toEqual([]);
+        expect(report.uninstalled, JSON.stringify(report.decisions.map(d => d.outcome + ":" + d.reason))).toBe(true);
+        // Not rewritten: no lastRunAt, nothing remembered.
+        expect(readFileSync(statePath, "utf8")).toBe(stateBefore);
+        expect(harness.notifications).toEqual([]);
+    });
+
+    it("never touches a Discord another account on this computer set up", async () => {
+        patchForReal(harness);
+        await harness.run();
+        // This account's view: the loader is in another user's home.
+        harness.ports.isOtherAccountLoader = path => path.startsWith(harness.runtimeDir);
+        harness.shipped.rebuild({ buildId: "5566778899aabbcc", pluginVersion: "0.2.1" });
+        installModBundle({ sourceDir: harness.shipped.dir, destDir: harness.runtimeDir });
+        const report = await harness.run();
+        expect(report.repatched).toEqual([]);
+        expect(report.decisions.some(d => d.outcome === "other-account")).toBe(true);
+        expect(harness.notifications).toEqual([]);
+    });
+
+    it("warns that the mod is stale when the feed only has an OLDER build than the installed one", async () => {
+        harness.shipped.rebuild({ buildId: "0a1b2c3d4e5f6a7b", pluginVersion: "0.2.1" });
+        expect(installModBundle({ sourceDir: harness.shipped.dir, destDir: harness.runtimeDir }).ok).toBe(true);
+        patchForReal(harness);
+        harness.feed = ok(releaseDocument("9988776655443322", new TextEncoder().encode("x"), "0.2.0"));
+
+        for (let index = 0; index < 4; index += 1) {
+            harness.advance(3 * 60 * 60_000);
+            writeBeacon(harness.beaconPath, harness.shipped.buildId, {
+                pluginVersion: "0.2.1",
+                loadedAt: new Date(harness.clock - 60_000).toISOString(),
+                lastTranslationAt: new Date(harness.clock).toISOString(),
+                lastRenderedAt: null,
+                counts: { approx: 9, upgraded: 0 }
+            });
+            await harness.run({ forceUpdateCheck: true });
+        }
+
+        expect(harness.notifications.map(alert => alert.code)).toContain("mod-stale");
+        expect(harness.logged).not.toContain("helper.health broken-update-pending");
+    });
+
+    it("puts back a bundle an interrupted swap left aside, before reading it", async () => {
+        const { renameSync } = await import("node:fs");
+        const { recoverModBundle } = await import("../src/app/modInstall.js");
+        patchForReal(harness);
+        renameSync(harness.runtimeDir, `${harness.runtimeDir}.subline-old`);
+        harness.ports.recoverBundle = dir => recoverModBundle(dir);
+        const report = await harness.run();
+        expect(report.decisions.some(d => d.outcome === "bundle-recovered")).toBe(true);
+        expect(existsSync(join(harness.runtimeDir, "patcher.js"))).toBe(true);
     });
 });

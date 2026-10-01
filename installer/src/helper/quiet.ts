@@ -65,6 +65,22 @@ export function isIdleRun(report: HelperRunReport): boolean {
 }
 
 /**
+ * A run that only deferred, exactly as the previous run did, and changed or
+ * told nobody anything else. A notification actually shown, a failure, an
+ * update or a repair is always logged in full.
+ */
+export function isRepeatDeferralRun(report: HelperRunReport): boolean {
+    if (report.repeatDeferral !== true || report.deferred.length === 0) return false;
+    if (report.repatched.length > 0 || report.failed.length > 0) return false;
+    if (report.updateChecked || report.updateInstalled !== null) return false;
+    if (report.alerts.some(alert => alert.notified)) return false;
+    if (report.decisions.some(d => d.outcome === "state-not-saved" || d.outcome === "failed" || d.outcome.endsWith(":resolved"))) return false;
+    const health = report.health?.status ?? null;
+    if (health !== null && health !== "healthy" && health !== "quiet" && health !== "unknown") return false;
+    return true;
+}
+
+/**
  * The Resources directory of every Discord install the helper looks after:
  * one that carries Subline's patch now, or that Subline has patched before
  * (its stable id is in the helper's memory: after an update wipes the patch,
@@ -75,7 +91,9 @@ export function isIdleRun(report: HelperRunReport): boolean {
 export function managedResourcesPaths(
     locate: () => Result<DiscordInstall[]>,
     inspect: (install: DiscordInstall) => Result<InstallState>,
-    rememberedStableIds: ReadonlySet<string>
+    rememberedStableIds: ReadonlySet<string>,
+    /** Leaves out a Discord another account set up: this account's agent must not watch (and fight over) it. */
+    isOtherAccountLoader?: (loaderPath: string) => boolean
 ): string[] {
     let located: Result<DiscordInstall[]>;
     try {
@@ -93,6 +111,8 @@ export function managedResourcesPaths(
             continue;
         }
         if (!state.ok || state.value.kind === "patched-by-other") continue;
+        const loader = state.value.marker?.loaderPath ?? state.value.loaderPath;
+        if (loader !== null && loader !== undefined && isOtherAccountLoader?.(loader) === true) continue;
         if (state.value.kind === "patched-by-us" || rememberedStableIds.has(install.stableId)) out.add(install.resourcesPath);
     }
     return [...out].sort();
@@ -113,6 +133,13 @@ export function concludeHelperLog(
 ): boolean {
     if (!force && isIdleRun(report)) {
         target.info("helper.idle", { summary: report.summary, managed: report.managed });
+        return true;
+    }
+    // The same deferral as last run (Windows: Discord still open after an
+    // update, every 5 minutes for hours). One line, so the rotated log keeps
+    // the install and uninstall records that "Copy diagnostics" needs.
+    if (!force && isRepeatDeferralRun(report)) {
+        target.info("helper.deferred", { summary: report.summary, managed: report.managed, deferred: report.deferred.length });
         return true;
     }
     writeHeader();

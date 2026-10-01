@@ -1374,7 +1374,6 @@ describe("the activation screen (paid only)", () => {
     const redeemErrors: Array<[RedeemAnswer, string]> = [
         [{ kind: "not_found" }, CODE_SCREEN_COPY.errNotFound],
         [{ kind: "claimed" }, CODE_SCREEN_COPY.errClaimed],
-        [{ kind: "already" }, CODE_SCREEN_COPY.errAlready],
         [{ kind: "rate_limited" }, CODE_SCREEN_COPY.errRateLimited],
         [{ kind: "unreachable", cause: "fetch failed" }, CODE_SCREEN_COPY.errUnreachable]
     ];
@@ -1418,7 +1417,7 @@ describe("the activation screen (paid only)", () => {
         expect(CODE_SCREEN_COPY.confirm).toBe("It works on up to 3 computers.");
         expect(CODE_SCREEN_COPY.useIt).toBe("Use it");
         expect(CODE_SCREEN_COPY.errBuyUnavailable).toBe("Buying isn't available yet. Use a code, or try again later.");
-        expect(CODE_SCREEN_COPY.errCoupon).toBe("Coupons go on the payment page.");
+        expect(CODE_SCREEN_COPY.errCoupon).toBe("If it's a coupon, it's for AI Monthly. Get Automatic first, then add AI in Discord and enter the coupon on the payment page.");
         expect(CODE_SCREEN_COPY.waitingLate).toBe("Paid already? It can take a few minutes. Close this and reopen Subline later.");
     });
 
@@ -1463,11 +1462,16 @@ describe("the activation screen (paid only)", () => {
         expect(state.detail).toBe(CODE_SCREEN_COPY.errNotActive);
     });
 
-    it("a Dodo coupon typed here is pointed at the payment page", async () => {
+    it("a Dodo coupon typed here is pointed at AI in Discord, not at a payment page that would refuse it", async () => {
+        // Coupons are restricted to the AI Monthly product (relay createCoupon),
+        // and the only payment page here is Automatic's.
         const h = harness({ relayRedeem: { kind: "not_found" } });
         await toCodeStep(h);
-        const state = await h.flow.send({ type: "set-code", code: "surferk7q2m" });
-        expect(state.detail).toBe("That code doesn't exist. Coupons go on the payment page.");
+        const state = await h.flow.send({ type: "set-code", code: "ALEXK7Q2M" });
+        expect(state.detail).toContain("That code doesn't exist.");
+        expect(state.detail).toContain("AI");
+        expect(state.detail).toContain("Discord");
+        expect(state.detail).not.toBe("That code doesn't exist. Coupons go on the payment page.");
     });
 
     const statusErrors: Array<[StatusAnswer, string]> = [
@@ -2155,5 +2159,247 @@ describe("every screen the flow can reach", () => {
         for (const state of await statesReached()) {
             expect(state.actions.length, state.step).toBeGreaterThan(0);
         }
+    });
+});
+
+/* ------------------------------------------------------------------------ *
+ * Worst cases (the 0.2.1 pass): each test fails on the code before its fix.
+ * ------------------------------------------------------------------------ */
+
+describe("worst cases", () => {
+    async function toCode(h: Harness) {
+        await toDetection(h);
+        return h.flow.send({ type: "set-language", code: "tr" });
+    }
+    const NOT_YET: StatusAnswer = { kind: "ok", automatic: false, ai: false, code: null };
+    const tick = () => new Promise(resolve => setImmediate(resolve));
+
+    it("an installer left on the finish-paying screen backs off after 30 minutes and stops after 48 hours", async () => {
+        const h = harness({ relayStatus: NOT_YET });
+        // The real schedule: 5 s, not the harness's 5 ms.
+        delete (h.ports as { activationPollIntervalMs?: number }).activationPollIntervalMs;
+        const times: number[] = [];
+        const status = h.ports.relay.status;
+        h.ports.relay.status = async (...args) => { times.push(h.ports.now()); return status(...args); };
+        await toCode(h);
+        const startedAt = h.ports.now();
+        const pending = h.flow.send({ type: "buy-automatic" });
+        for (let i = 0; i < 400_000; i++) {
+            if (h.flow.state.step !== "activation-waiting" && i > 0) break;
+            if (h.ports.now() - startedAt > 50 * 60 * 60_000) break;
+            await tick();
+        }
+        const inFirstTwoHours = times.filter(at => at - startedAt <= 2 * 60 * 60_000).length;
+        // One at once, 360 in the fast half hour, then one every 5 minutes:
+        // 1 + 360 + 18. It was ~1,441 (every 5 s, forever).
+        expect(inFirstTwoHours).toBeLessThanOrEqual(379);
+        expect(h.flow.state.step).not.toBe("activation-waiting");
+        if (h.flow.state.step === "activation-waiting") await h.flow.send({ type: "back" });
+        const ended = await pending;
+        expect(ended.step).toBe("choose-code");
+        expect(ended.detail).toBe(CODE_SCREEN_COPY.errWaitingStopped);
+        expect(ended.actions).toContain("buy-automatic");
+        const asked = times.length;
+        await tick();
+        expect(times.length).toBe(asked);
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("a promo answered \"already\" asks the relay what this install has, and carries on when it is Automatic", async () => {
+        const h = harness({ relayRedeem: { kind: "already" }, relayStatus: ACTIVE });
+        await toCode(h);
+        const state = await h.flow.send({ type: "set-code", code: "SERVER1" });
+        expect(h.relayCalls.filter(c => c.kind === "status")).toEqual([
+            { kind: "status", credential: `free_${TEST_INSTALL_ID}`, installId: TEST_INSTALL_ID }
+        ]);
+        expect(state.step).not.toBe("choose-code");
+        expect(state.step).toBe("done");
+    });
+
+    it("a promo answered \"already\" for an install the relay does not confirm still says Already yours.", async () => {
+        const h = harness({ relayRedeem: { kind: "already" }, relayStatus: NOT_YET });
+        await toCode(h);
+        const state = await h.flow.send({ type: "set-code", code: "SERVER1" });
+        expect(state.step).toBe("choose-code");
+        expect(state.detail).toBe(CODE_SCREEN_COPY.errAlready);
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("a double press on Save code sends ONE redeem, and the good path is not painted over", async () => {
+        const h = harness({ processes: [[DISCORD_PROCESS]] });
+        let release!: (answer: RedeemAnswer) => void;
+        let redeems = 0;
+        h.ports.relay.redeem = () => { redeems += 1; return new Promise<RedeemAnswer>(resolve => { release = resolve; }); };
+        await toCode(h);
+        const first = h.flow.send({ type: "set-code", code: "SERVER1" });
+        const second = h.flow.send({ type: "set-code", code: "SERVER1" });
+        expect(h.flow.state.busy).toBe(true);
+        expect(h.flow.state.actions).toEqual([]);
+        release({ kind: "ok", code: "slp_promominted" });
+        await Promise.all([first, second]);
+        expect(redeems).toBe(1);
+        expect(h.flow.state.step).toBe("discord-running");
+        expect(h.flow.state.detail).not.toBe(CODE_SCREEN_COPY.errAlready);
+    });
+
+    it("a double click on Use it runs ONE install: one patch, one helper, one Discord launch", async () => {
+        const h = harness({
+            relayStatus: [
+                { kind: "ok", automatic: false, ai: false, code: null, check: { valid: true, automatic: true, ai: false } },
+                { kind: "ok", automatic: true, ai: false, code: null }
+            ]
+        });
+        const status = h.ports.relay.status;
+        h.ports.relay.status = async (...args) => {
+            await new Promise(resolve => setTimeout(resolve, 5));
+            return status(...args);
+        };
+        await toCode(h);
+        await h.flow.send({ type: "set-code", code: "slp_abcdefghijklmnop" });
+        await Promise.all([h.flow.send({ type: "use-code" }), h.flow.send({ type: "use-code" })]);
+        await h.flow.settled();
+        expect(h.patchCalls).toHaveLength(1);
+        expect(h.helperInstalls).toBe(1);
+        expect(h.launched).toBe(1);
+        expect(h.logged.some(l => l.event === "flow.action.rejected" && l.fields.action === "use-code")).toBe(true);
+    });
+
+    it("a double click on Buy opens ONE checkout", async () => {
+        const h = harness({ relayStatus: NOT_YET });
+        const checkout = h.ports.relay.checkout;
+        h.ports.relay.checkout = async installId => {
+            await new Promise(resolve => setTimeout(resolve, 5));
+            return checkout(installId);
+        };
+        await toCode(h);
+        const first = h.flow.send({ type: "buy-automatic" });
+        const second = h.flow.send({ type: "buy-automatic" });
+        for (let i = 0; i < 200 && h.flow.state.step !== "activation-waiting"; i++) await new Promise(r => setTimeout(r, 1));
+        await h.flow.send({ type: "back" });
+        await Promise.all([first, second]);
+        expect(h.opened).toHaveLength(1);
+        expect(h.relayCalls.filter(c => c.kind === "checkout")).toHaveLength(1);
+    });
+
+    it("Windows: a PERMISSION_DENIED patch failure never leads to the macOS permission screen", async () => {
+        let attempt = 0;
+        const h = harness({
+            platform: "win32",
+            permission: ["not-required"],
+            patch: () => (++attempt === 1
+                ? { ok: false, error: fail("PERMISSION_DENIED", "Not allowed") }
+                : { ok: true, value: patchReport() })
+        });
+        await toDetection(h);
+        const failed = await setLanguage(h.flow, "tr");
+        expect(failed.step).toBe("patch-failed");
+        const next = await h.flow.send({ type: "retry" });
+        expect(next.step).not.toBe("permission-explain");
+        expect(h.steps).not.toContain("permission-explain");
+        expect(h.settingsOpened).toBe(0);
+        expect(attempt).toBe(2);
+    });
+
+    it("macOS: a Discord this account cannot write ends on an error with Try again at once, never a wait", async () => {
+        let probes = 0;
+        const h = harness({ permission: ["not-writable"] });
+        const probe = h.ports.probePermission;
+        h.ports.probePermission = install => { probes += 1; return probe(install); };
+        await toDetection(h);
+        const state = await setLanguage(h.flow, "tr");
+        expect(state.step).toBe("permission-failed");
+        expect(state.actions).toEqual(["retry", "cancel"]);
+        expect(state.detail).toContain("Mac account");
+        expect(probes).toBe(1);
+        expect(h.steps).not.toContain("permission-waiting");
+        expect(h.settingsOpened).toBe(0);
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("abort() during the permission wait: the grant that arrives next starts no patch and no helper", async () => {
+        const h = harness();
+        let probes = 0;
+        h.ports.probePermission = () => {
+            probes += 1;
+            if (probes === 3) void h.flow.abort();
+            return probes >= 4 ? "granted" : "blocked";
+        };
+        await toDetection(h);
+        await setLanguage(h.flow, "tr");
+        expect(h.flow.state.step).toBe("permission-explain");
+        const pending = h.flow.send({ type: "next" });
+        await pending;
+        await h.flow.abort();
+        expect(h.patchCalls).toHaveLength(0);
+        expect(h.helperInstalls).toBe(0);
+        expect(h.flow.state.step).toBe("cancelled");
+    });
+
+    it("abort() during the purchase poll: a purchase landing next patches nothing", async () => {
+        const h = harness({ relayStatus: [NOT_YET, ACTIVE] });
+        let polls = 0;
+        const status = h.ports.relay.status;
+        h.ports.relay.status = async (...args) => {
+            polls += 1;
+            if (polls === 1) void h.flow.abort();
+            return status(...args);
+        };
+        await toCode(h);
+        await h.flow.send({ type: "buy-automatic" });
+        await h.flow.abort();
+        expect(h.patchCalls).toHaveLength(0);
+        expect(h.codeWrites).toEqual([]);
+    });
+
+    it("abort() while the helper is being registered waits for it, and Discord is not launched after", async () => {
+        const h = harness();
+        let release!: () => void;
+        h.ports.installHelper = () => {
+            h.helperInstalls += 1;
+            return new Promise(resolve => {
+                release = () => resolve({ ok: true, value: { applicable: true, installed: true, label: "x", path: "x" } });
+            });
+        };
+        await toDetection(h);
+        const pending = h.flow.send({ type: "set-language", code: "tr" }).then(() => h.flow.send({ type: "buy-automatic" }));
+        for (let i = 0; i < 200 && h.helperInstalls === 0; i++) await tick();
+        expect(h.helperInstalls).toBe(1);
+        let aborted = false;
+        const abort = h.flow.abort().then(() => { aborted = true; });
+        await tick();
+        expect(aborted).toBe(false);
+        release();
+        await abort;
+        await pending;
+        expect(aborted).toBe(true);
+        expect(h.launched).toBe(0);
+    });
+
+    it("a Discord another Mac account set up is never \"already set up\", and is not patched from here", async () => {
+        const otherLoader = "/Users/other/Library/Application Support/Subline/mod/patcher.js";
+        const patched: InstallState = {
+            ...installState("patched-by-us"),
+            mod: "subline",
+            loaderPath: otherLoader,
+            marker: { loaderPath: otherLoader, pluginBuildId: BUILD_ID } as InstallState["marker"]
+        };
+        const h = harness({ inspect: { ok: true, value: patched } });
+        h.ports.isOtherAccountLoader = path => path.startsWith("/Users/other/");
+        expect((await h.flow.start()).step).toBe("welcome");
+        const state = await toDetection(h);
+        expect(state.step).toBe("other-account");
+        expect(state.actions).toEqual(["recheck", "cancel"]);
+        expect(state.detail).toBe("Another account on this Mac set up Subline for this Discord. Only that account can change it.");
+        expect(h.patchCalls).toHaveLength(0);
+        expect(h.helperEnsures).toBe(0);
+    });
+
+    it("remembers every Discord it patches, so Uninstall and the helper can find a hand-picked one", async () => {
+        const h = harness();
+        const remembered: string[] = [];
+        h.ports.rememberPatchedInstall = install => { remembered.push(install.rootPath); };
+        await toDetection(h);
+        await setLanguage(h.flow, "tr");
+        expect(remembered).toEqual([INSTALL.rootPath]);
     });
 });

@@ -97,6 +97,8 @@ describe("the Windows test round's wording", () => {
         const installer = readFileSync(new URL("../../../../installer/src/app/codeScreen.ts", import.meta.url), "utf8");
         expect(UPGRADE_COPY.codeRateLimited).toBe("Too many codes tried from this network today. Try again after midnight UTC.");
         expect(installer).toContain(`errRateLimited: "${UPGRADE_COPY.codeRateLimited}"`);
-        expect(UPGRADE_COPY.couponHint).toBe("Have a coupon? Enter it on the payment page.");
+        // Coupons only work on Monthly (relay createCoupon restricted_to [monthly]).
+        expect(UPGRADE_COPY.couponHint).toBe("Have a coupon? Pick Monthly and enter it on the payment page.");
+        expect(UPGRADE_COPY.couponHint).toContain("Monthly");
     });
 });

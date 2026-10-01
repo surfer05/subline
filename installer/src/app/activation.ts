@@ -55,8 +55,35 @@ export const CHECKOUT_RETURN_URL = "https://surfer05.github.io/subline/?from=ins
 /** After this long on the finish-paying screen, a hint says a late purchase still lands. */
 export const WAITING_HINT_AFTER_MS = 10 * 60_000;
 
-/** How often the installer asks whether the purchase has landed. */
+/** How often the installer asks whether the purchase has landed, for the first half hour. */
 export const ACTIVATION_POLL_MS = 5_000;
+
+/*
+ * THE POLL HAS AN END. An installer left open on "Finish paying in your
+ * browser" (an abandoned checkout, a bank mandate pending for two days) used
+ * to ask the relay every 5 s forever: 17,280 status calls and about 52,000 KV
+ * reads a day each, against a relay on the Workers free plan (100,000 KV reads
+ * a day for EVERYONE). Two idle installers could use that up alone.
+ *
+ * Same schedule as the plugin (src/userplugins/vcTranslate/checkout.ts:
+ * POLL_EVERY_MS, POLL_FOR_MS, SLOW_POLL_EVERY_MS, SLOW_POLL_FOR_MS). KEEP THE
+ * TWO IN SYNC. Copied, not imported: the installer never imports the plugin.
+ */
+/** Fast polling lasts this long (checkout.ts POLL_FOR_MS). */
+export const ACTIVATION_FAST_POLL_FOR_MS = 30 * 60_000;
+/** Then the relay is asked this often (checkout.ts SLOW_POLL_EVERY_MS). */
+export const ACTIVATION_SLOW_POLL_MS = 5 * 60_000;
+/** And polling stops altogether after this long (checkout.ts SLOW_POLL_FOR_MS). */
+export const ACTIVATION_POLL_FOR_MS = 48 * 60 * 60_000;
+
+/**
+ * How long to wait before the next poll, or null to stop polling.
+ * `fastEveryMs` is injectable so tests can shrink the fast phase's step.
+ */
+export function activationPollDelay(elapsedMs: number, fastEveryMs: number = ACTIVATION_POLL_MS): number | null {
+    if (elapsedMs >= ACTIVATION_POLL_FOR_MS) return null;
+    return elapsedMs < ACTIVATION_FAST_POLL_FOR_MS ? fastEveryMs : ACTIVATION_SLOW_POLL_MS;
+}
 
 /** A request that takes longer than this is treated as "can't reach Subline". */
 export const RELAY_TIMEOUT_MS = 10_000;
@@ -94,9 +121,11 @@ export function promoCode(raw: string): string | null {
  * Whether a code the relay does not know as a promo code looks like one of
  * the owner's Dodo coupons (relay/scripts/coupon.mjs: a name of 3 or more
  * letters and digits plus a 5-character suffix from an alphabet with no 0, O,
- * 1 or I). A coupon is typed on Dodo's payment page, not here; the screen says
- * so as well as "doesn't exist", because a mistyped server code can look the
- * same.
+ * 1 or I). Coupons are made for the AI Monthly plan only (relay/src/checkout.ts
+ * createCoupon: restricted_to [monthly]), so one works on the AI Monthly
+ * payment page that Discord opens, never on the Automatic checkout this
+ * installer sells. The screen says so as well as "doesn't exist", because a
+ * mistyped server code can look the same.
  */
 export function looksLikeCoupon(code: string): boolean {
     return /^[A-Z0-9]{8,16}$/.test(code) && /[A-HJ-NP-Z2-9]{5}$/.test(code);

@@ -289,3 +289,38 @@ describe("which Discords are watched", () => {
     });
 });
 
+
+describe("Windows: a removed helper is never brought back by the helper itself", () => {
+    it("ensureHelperFromHelper skips a task the user removed, and does not register it again", async () => {
+        await installHelperFor(windowsWiring(), "win32", home);
+        await schtasks.remove(HELPER_TASK_NAME);
+        const result = await ensureHelperFromHelper(windowsWiring(), "win32", home);
+        expect(result).toEqual({ action: "skipped", reason: "not-registered" });
+        expect(await schtasks.exists(HELPER_TASK_NAME)).toBe(false);
+    });
+
+    it("the app itself still repairs a missing task (ensureHelperFor from the UI)", async () => {
+        const result = await ensureHelperFor(windowsWiring(), "win32", home);
+        expect(result.ok && result.value.action).toBe("repaired");
+        expect(await schtasks.exists(HELPER_TASK_NAME)).toBe(true);
+    });
+
+    it("reads the task definition ONCE per check when the port can", async () => {
+        await installHelperFor(windowsWiring(), "win32", home);
+        let reads = 0;
+        const port = {
+            ...schtasks,
+            queryDefinition: async (name: string) => {
+                reads += 1;
+                return schtasks.registered.has(name)
+                    ? { command: schtasks.commands.get(name) ?? null, interval: schtasks.intervals.get(name) ?? null }
+                    : null;
+            },
+            queryCommand: async () => { throw new Error("should use queryDefinition"); },
+            queryInterval: async () => { throw new Error("should use queryDefinition"); }
+        };
+        const result = await ensureHelperFor({ ...windowsWiring(), schtasks: port }, "win32", home);
+        expect(result.ok && result.value.action).toBe("unchanged");
+        expect(reads).toBe(1);
+    });
+});

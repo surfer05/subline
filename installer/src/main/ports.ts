@@ -13,11 +13,10 @@
  * runnable from a plain Node process, which is how the ports get tested at all.
  */
 
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 
 import { APP_MANAGEMENT_SETTINGS_URL, probeAppManagement } from "../app/appManagement.js";
 import type { FlowLogger, FlowPorts, HelperEnsureReport, HelperInstallOutcome } from "../app/flow.js";
@@ -39,6 +38,9 @@ import {
 import { parsePsOutput, processNameFor } from "../app/discordProcess.js";
 import type { RunningProcess } from "../app/discordProcess.js";
 import { installModBundle, shippedModDirFor } from "../app/modInstall.js";
+import { rememberPatchedInstall } from "../app/patchedInstalls.js";
+import { hiddenExec } from "../patcher/exec.js";
+import { isOtherAccountLoader } from "../patcher/ownership.js";
 import { inspectModBundle } from "../bundle/bundle.js";
 import {
     HELPER_LABEL, helperLaunchAgentSpec, installLaunchAgent, launchAgentPlistPath, readLaunchAgentPlist,
@@ -59,7 +61,8 @@ import type { Result } from "../patcher/result.js";
 import { inspectInstall } from "../patcher/state.js";
 import { awaitVerification } from "../verify/verify.js";
 
-const run = promisify(execFile);
+/** Every console program goes through hiddenExec: no window flashes on Windows (see patcher/exec.ts). */
+const run = hiddenExec();
 
 export interface RealPortsOptions {
     /** The packaged app's `Contents/Resources`, where the shipped mod bundle sits. */
@@ -242,24 +245,43 @@ async function installWindowsHelper(wiring: HelperWiring): Promise<Result<Helper
 export async function ensureHelperFor(
     wiring: HelperWiring,
     platform: NodeJS.Platform = process.platform,
-    home: string = homedir()
+    home: string = homedir(),
+    options: { registerIfMissing?: boolean } = {}
 ): Promise<Result<HelperEnsureReport>> {
     if (platform === "win32") {
         const expected = wiring.executablePath ?? null;
         if (wiring.schtasks === undefined || expected === null) {
             return ok({ action: "skipped", reason: "no-scheduler", registered: null, expected });
         }
-        const registered = await wiring.schtasks.queryCommand(HELPER_TASK_NAME);
+        // ONE schtasks read when the port can do it (queryDefinition), not two.
+        const definition = wiring.schtasks.queryDefinition !== undefined
+            ? await wiring.schtasks.queryDefinition(HELPER_TASK_NAME)
+            : undefined;
+        const registered = definition !== undefined
+            ? (definition === null ? null : definition.command)
+            : await wiring.schtasks.queryCommand(HELPER_TASK_NAME);
+        // NEVER RESURRECT A TASK THE USER TOOK AWAY. Called from the helper,
+        // a missing task means Subline was uninstalled while that helper run
+        // was going; registering it again brought a removed Subline back to
+        // re-patch Discord every 5 minutes. Only the app may register it.
+        if (definition === null && options.registerIfMissing === false) {
+            return ok({ action: "skipped", reason: "not-registered", registered: null, expected });
+        }
+        if (registered === null && options.registerIfMissing === false && definition === undefined) {
+            return ok({ action: "skipped", reason: "not-registered", registered: null, expected });
+        }
         // Windows paths are case-insensitive, and Task Scheduler may hand the
         // command back with the quotes `createSimple` put round it.
         const normalise = (path: string): string => path.trim().replace(/^"(.*)"$/, "$1").toLowerCase();
         let reason: string | null = null;
         if (registered === null) reason = "missing";
         else if (normalise(registered) !== normalise(expected)) reason = "points-elsewhere";
-        else if (wiring.schtasks.queryInterval !== undefined) {
+        else {
             // An older install registered an hourly task; 0.2.1 runs every 5
             // minutes. Same command, outdated definition: re-register it.
-            const interval = await wiring.schtasks.queryInterval(HELPER_TASK_NAME);
+            const interval = definition !== undefined && definition !== null
+                ? definition.interval
+                : wiring.schtasks.queryInterval !== undefined ? await wiring.schtasks.queryInterval(HELPER_TASK_NAME) : null;
             const want = isoDuration(wiring.intervalSeconds ?? WINDOWS_INTERVAL_SECONDS);
             if (interval !== null && interval !== want) reason = "definition-changed";
         }
@@ -311,7 +333,7 @@ export const reloadAgentDetached: ReloadAgent = (plistPath, label, uid) => {
     // Values go in as positional parameters, never spliced into the script, so
     // a path with quotes or spaces cannot change what the shell runs.
     const script = "sleep 3; /bin/launchctl bootout \"gui/$1/$2\" 2>/dev/null; /bin/launchctl bootstrap \"gui/$1\" \"$3\"";
-    const child = spawn("/bin/sh", ["-c", script, "sh", String(uid), label, plistPath], { detached: true, stdio: "ignore" });
+    const child = spawn("/bin/sh", ["-c", script, "sh", String(uid), label, plistPath], { detached: true, stdio: "ignore", windowsHide: true });
     child.unref();
 };
 
@@ -344,7 +366,9 @@ export async function ensureHelperFromHelper(
 ): Promise<HelperSelfUpdate> {
     try {
         if (platform === "win32") {
-            const ensured = await ensureHelperFor(wiring, platform, home);
+            // registerIfMissing: false. A missing task means the user removed
+            // Subline; the helper must never put it back (see ensureHelperFor).
+            const ensured = await ensureHelperFor(wiring, platform, home, { registerIfMissing: false });
             if (!ensured.ok) return { action: "failed", reason: ensured.error.code };
             return {
                 action: ensured.value.action === "repaired" ? "rewritten" : ensured.value.action === "unchanged" ? "unchanged" : "skipped",
@@ -427,14 +451,18 @@ export async function removeHelperFor(
 export async function listProcesses(
     platform: NodeJS.Platform,
     exec: (file: string, args: string[]) => Promise<{ stdout: string }>,
-    log?: FlowLogger
+    log?: FlowLogger,
+    /** macOS: only this user's processes. Omitted: every user's, as before. */
+    uid?: number
 ): Promise<RunningProcess[]> {
     try {
         if (platform === "win32") {
             const { stdout } = await exec("tasklist", ["/FO", "CSV", "/NH"]);
             return parseTasklistCsv(stdout);
         }
-        const { stdout } = await exec("/bin/ps", ["-axo", "pid=,comm="]);
+        const { stdout } = uid === undefined
+            ? await exec("/bin/ps", ["-axo", "pid=,comm="])
+            : await exec("/bin/ps", ["-x", "-U", String(uid), "-o", "pid=,comm="]);
         return parsePsOutput(stdout);
     } catch (cause) {
         // A process table we cannot read is not a reason to fail an install. The
@@ -547,7 +575,10 @@ async function launchDiscord(
             // us; `unref()` stops Node keeping the event loop alive for it.
             const child = spawn(join(install.rootPath, processNameFor(install.branch, "win32")), [], {
                 detached: true,
-                stdio: "ignore"
+                stdio: "ignore",
+                // Discord is a GUI app and opens its own window; this only
+                // stops a console being created for it.
+                windowsHide: true
             });
             child.unref();
         } else {
@@ -628,10 +659,18 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
                 // timeout, and the same errno once a second is noise.
                 if (cause !== lastProbeError) options.log.warn("permission.probe-unknown", { cause });
                 lastProbeError = cause;
+            },
+            onRefused: cause => {
+                // EPERM (App Management) or EACCES (ownership): which one, and where.
+                if (cause !== lastProbeError) options.log.info("permission.probe-refused", { cause });
+                lastProbeError = cause;
             }
         }),
         lastPermissionProbeError: () => lastProbeError,
-        openPermissionSettings: () => openUrl(APP_MANAGEMENT_SETTINGS_URL, platform, exec),
+        // macOS ONLY. On Windows this ran `cmd /c start "" x-apple...`, which
+        // shows a "get an app to open this link" prompt. No caller can reach
+        // it there any more, and this keeps it that way.
+        openPermissionSettings: () => platform === "darwin" ? openUrl(APP_MANAGEMENT_SETTINGS_URL, platform, exec) : Promise.resolve(),
         permissionSettingsUrl: APP_MANAGEMENT_SETTINGS_URL,
 
         discordLocale: () => readDiscordLocale(discordSettingsPathFor(platform, env, home)),
@@ -663,6 +702,19 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
                 productVersion: options.productVersion,
                 overwriteForeignMod: patchOptions.overwriteForeignMod
             }),
+        rememberPatchedInstall: install => {
+            const remembered = rememberPatchedInstall(productDirFor(platform, env, home), install);
+            if (!remembered.ok) {
+                options.log.warn("patch.remember-failed", {
+                    code: remembered.error.code,
+                    path: remembered.error.path ?? null,
+                    cause: remembered.error.cause ?? null
+                });
+            }
+        },
+        ...(platform === "darwin"
+            ? { isOtherAccountLoader: (loaderPath: string) => isOtherAccountLoader(loaderPath, home, platform) }
+            : {}),
         installHelper: () => installHelperFor(options.helper, platform, home),
         ensureHelper: () => options.repairHelper === false
             ? Promise.resolve(ok({ action: "skipped" as const, reason: "development-build", registered: null, expected: null }))

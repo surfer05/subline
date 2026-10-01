@@ -9,22 +9,25 @@
  * `/Applications`.
  */
 
-import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 
 import type { FlowLogger } from "../app/flow.js";
-import { installModBundle } from "../app/modInstall.js";
+import { installModBundle, recoverModBundle } from "../app/modInstall.js";
+import { readPatchedInstalls } from "../app/patchedInstalls.js";
 import { isDiscordRunning } from "../app/discordProcess.js";
 import { inspectModBundle } from "../bundle/bundle.js";
 import { modBundleDirFor, productDirFor } from "../bundle/layout.js";
 import { manifestPathFor } from "../bundle/spec.js";
 import { listProcesses } from "../main/ports.js";
-import { locateDiscordInstalls } from "../patcher/locate.js";
+import { locateDiscordInstalls, locateRemembered } from "../patcher/locate.js";
+import type { DiscordInstall } from "../patcher/locate.js";
+import { isOtherAccountLoader } from "../patcher/ownership.js";
 import { readMarker } from "../patcher/marker.js";
 import { patchInstall, verifyPatch } from "../patcher/patch.js";
+import type { Exec } from "../patcher/exec.js";
+import { hiddenExec } from "../patcher/exec.js";
 import { err, fsError, ok } from "../patcher/result.js";
 import type { Result } from "../patcher/result.js";
 import { inspectInstall } from "../patcher/state.js";
@@ -34,13 +37,14 @@ import type { Alert } from "./alerts.js";
 import type { HelperPorts } from "./helper.js";
 import type { LaunchctlPort } from "./launchAgent.js";
 import type { SchtasksPort } from "./scheduledTask.js";
-import { taskCommandFromXml, taskIntervalFromXml } from "./scheduledTask.js";
+import { HELPER_TASK_NAME, taskCommandFromXml, taskIntervalFromXml } from "./scheduledTask.js";
 import { helperStatePathFor, readHelperState, writeHelperState } from "./state.js";
 import type { HelperState } from "./state.js";
 
-const run = promisify(execFile);
+/** Every console program goes through hiddenExec: no window flashes on Windows (see patcher/exec.ts). */
+const run = hiddenExec();
 
-export type Exec = (file: string, args: string[]) => Promise<{ stdout: string }>;
+export type { Exec } from "../patcher/exec.js";
 
 /** How long a single network call may take before it is a failure, not a wait. */
 export const FETCH_TIMEOUT_MS = 30_000;
@@ -65,6 +69,8 @@ export interface RealHelperPortsOptions {
     releaseManifestUrl?: string | null;
     exec?: Exec;
     fetchImpl?: typeof fetch;
+    /** macOS: whose processes count as "Discord is running". Defaults to this process's user. */
+    uid?: number;
 }
 
 async function fetchBody(
@@ -176,7 +182,7 @@ export async function notifyMac(alert: Alert, exec: Exec): Promise<void> {
 }
 
 /** `launchctl`, wrapped so the tests never spawn it. */
-export function createLaunchctl(exec: Exec = (file, args) => run(file, args)): LaunchctlPort {
+export function createLaunchctl(exec: Exec = run): LaunchctlPort {
     return {
         async bootstrap(plistPath: string, uid: number): Promise<Result<true>> {
             try {
@@ -219,7 +225,15 @@ export function createLaunchctl(exec: Exec = (file, args) => run(file, args)): L
  * found" from other failures only in localised text, and guessing at translated
  * strings is how a check silently inverts on a non-English Windows.
  */
-export function createSchtasks(exec: Exec = (file, args) => run(file, args)): SchtasksPort {
+export function createSchtasks(exec: Exec = run): SchtasksPort {
+    /** One /Query /XML read: both the command and the interval come from it. */
+    const queryXml = async (name: string): Promise<string | null> => {
+        try {
+            return (await exec("schtasks", ["/Query", "/TN", name, "/XML"])).stdout;
+        } catch {
+            return null;
+        }
+    };
     return {
         async create(name: string, xmlPath: string): Promise<Result<true>> {
             try {
@@ -273,19 +287,28 @@ export function createSchtasks(exec: Exec = (file, args) => run(file, args)): Sc
             }
         },
         async queryCommand(name: string): Promise<string | null> {
-            try {
-                const { stdout } = await exec("schtasks", ["/Query", "/TN", name, "/XML"]);
-                return taskCommandFromXml(stdout);
-            } catch {
-                return null;
-            }
+            const xml = await queryXml(name);
+            return xml === null ? null : taskCommandFromXml(xml);
         },
         async queryInterval(name: string): Promise<string | null> {
+            const xml = await queryXml(name);
+            return xml === null ? null : taskIntervalFromXml(xml);
+        },
+        async queryDefinition(name: string): Promise<{ command: string | null; interval: string | null } | null> {
+            const xml = await queryXml(name);
+            return xml === null ? null : { command: taskCommandFromXml(xml), interval: taskIntervalFromXml(xml) };
+        },
+        /**
+         * Stop a run of the task that is going right now. Deleting the task
+         * does not end a helper already running (waiting for Discord to
+         * close), which then carried on. Failure is ignored: there is often
+         * nothing running.
+         */
+        async end(name: string): Promise<void> {
             try {
-                const { stdout } = await exec("schtasks", ["/Query", "/TN", name, "/XML"]);
-                return taskIntervalFromXml(stdout);
+                await exec("schtasks", ["/End", "/TN", name]);
             } catch {
-                return null;
+                // Not running, or already gone.
             }
         }
     };
@@ -295,11 +318,12 @@ export function createHelperPorts(options: RealHelperPortsOptions): HelperPorts 
     const platform = options.platform ?? process.platform;
     const env = options.env ?? process.env;
     const home = options.home ?? homedir();
-    const exec: Exec = options.exec ?? ((file, args) => run(file, args));
+    const exec: Exec = options.exec ?? run;
     const fetchImpl = options.fetchImpl ?? fetch;
 
     const productDir = productDirFor(platform, env, home);
     const modDir = modBundleDirFor(platform, env, home);
+    const uid = options.uid ?? process.getuid?.();
     const statePath = productDir === null ? null : helperStatePathFor(productDir);
 
     return {
@@ -312,11 +336,25 @@ export function createHelperPorts(options: RealHelperPortsOptions): HelperPorts 
         productDir,
         modBundleDir: modDir,
 
-        locate: () =>
-            locateDiscordInstalls({
+        locate: () => {
+            const live = locateDiscordInstalls({
                 platform,
                 ...(options.searchRoots === undefined ? {} : { searchRoots: options.searchRoots })
-            }),
+            });
+            // Plus every Discord this account patched by hand (PTB, Canary,
+            // an unusual folder), so it is repaired after a Discord update
+            // too. A remembered path that is gone is skipped and logged.
+            const remembered = locateRemembered(readPatchedInstalls(productDir), {
+                platform,
+                onSkipped: detail => options.log.warn("locate.remembered-skipped", detail)
+            });
+            if (remembered.length === 0) return live;
+            const merged: DiscordInstall[] = [...(live.ok ? live.value : [])];
+            for (const install of remembered) {
+                if (!merged.some(known => known.rootPath === install.rootPath)) merged.push(install);
+            }
+            return ok(merged);
+        },
         inspect: install => inspectInstall(install),
         readMarker: resourcesPath => readMarker(resourcesPath),
         readDiscordVersion: install => readDiscordVersion(install),
@@ -340,7 +378,9 @@ export function createHelperPorts(options: RealHelperPortsOptions): HelperPorts 
             (await isDiscordRunning({
                 branch: install.branch,
                 platform,
-                listProcesses: () => listProcesses(platform, exec)
+                // THIS user's processes only (macOS): another account's
+                // Discord is not a reason to tell this one to restart.
+                listProcesses: () => listProcesses(platform, exec, undefined, uid)
             })).length > 0,
         mtimeOf: path => {
             try {
@@ -378,7 +418,15 @@ export function createHelperPorts(options: RealHelperPortsOptions): HelperPorts 
         },
 
         verifyBeacon: verifyOptions => verifyOnce({ ...verifyOptions, platform, env, home }),
-        notify: alert => notify(alert, platform, exec, options.log)
+        notify: alert => notify(alert, platform, exec, options.log),
+
+        ...(platform === "win32"
+            ? { stillRegistered: () => createSchtasks(exec).exists(HELPER_TASK_NAME) }
+            : {}),
+        recoverBundle: dir => recoverModBundle(dir, platform),
+        ...(platform === "darwin"
+            ? { isOtherAccountLoader: (loaderPath: string) => isOtherAccountLoader(loaderPath, home, platform) }
+            : {})
     };
 }
 

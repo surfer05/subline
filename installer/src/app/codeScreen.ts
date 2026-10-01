@@ -52,8 +52,20 @@ export const CODE_SCREEN_COPY = {
     errEmpty: "Type or paste a code first.",
     /** The relay answered "checkout unavailable": nothing is opened. */
     errBuyUnavailable: "Buying isn't available yet. Use a code, or try again later.",
-    /** Added after "doesn't exist" when the typed code looks like a Dodo coupon. */
-    errCoupon: "Coupons go on the payment page.",
+    /**
+     * Added after "doesn't exist" when the typed code looks like a Dodo coupon.
+     * Coupons are for AI Monthly only (relay createCoupon), so the Automatic
+     * checkout this installer opens would refuse one.
+     */
+    errCoupon: "If it's a coupon, it's for AI Monthly. Get Automatic first, then add AI in Discord and enter the coupon on the payment page.",
+    /** Shown while a typed or saved code is being checked with the relay. Nothing can be pressed twice. */
+    checking: "Checking your code…",
+    /** Shown while the relay is asked whether this computer already has a purchase. */
+    checkingPurchase: "Checking for your purchase…",
+    /** Shown while the relay makes a checkout. */
+    openingCheckout: "Opening checkout…",
+    /** The finish-paying screen stopped asking after 48 hours. */
+    errWaitingStopped: "Stopped checking for your payment. Paid already? Close this and reopen Subline later. It picks up your purchase.",
     /* The confirm step after a typed code checks out. Nothing is linked until "Use it".
        Same words as the plugin's confirm window. */
     confirmTitle: "Use this code?",

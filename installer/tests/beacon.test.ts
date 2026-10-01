@@ -146,7 +146,7 @@ describe("a damaged beacon degrades safely", () => {
             const read = readBeaconAt(locked);
             // Root can read anything, so accept either the permission error or
             // a successful read — what must never happen is a throw.
-            expect(read.ok || read.error.code === "PERMISSION_DENIED").toBe(true);
+            expect(read.ok || read.error.code === "PERMISSION_DENIED" || read.error.code === "NOT_WRITABLE").toBe(true);
         } finally {
             chmodSync(locked, 0o600);
         }

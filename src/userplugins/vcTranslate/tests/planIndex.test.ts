@@ -605,13 +605,13 @@ describe("an Automatic owner", () => {
         expect(shownToasts.map(t => t.message)).toContain("AI needs Automatic first.");
     });
 
-    it("says under the AI plans that a coupon goes on the payment page", async () => {
+    it("says under the AI plans that a coupon goes on the Monthly payment page", async () => {
         const { UpgradePanelBody } = await import("../upgradePanel");
         const text = (n: any): string => typeof n === "string" ? n
             : Array.isArray(n) ? n.map(text).join(" ")
             : n && typeof n === "object" && "children" in n ? text(n.children) : "";
         const body = text(UpgradePanelBody());
-        expect(body).toContain("Have a coupon? Enter it on the payment page.");
+        expect(body).toContain("Have a coupon? Pick Monthly and enter it on the payment page.");
         // After the plans, not before them.
         expect(body.indexOf("Have a coupon?")).toBeGreaterThan(body.indexOf("$19.99 a year"));
     });
