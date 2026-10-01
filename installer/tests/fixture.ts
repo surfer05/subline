@@ -21,7 +21,7 @@ import {
 import { HELPER_LABEL } from "../src/helper/launchAgent.js";
 import type { LaunchctlPort } from "../src/helper/launchAgent.js";
 import type { SchtasksPort } from "../src/helper/scheduledTask.js";
-import { taskCommandFromXml } from "../src/helper/scheduledTask.js";
+import { taskCommandFromXml, taskIntervalFromXml } from "../src/helper/scheduledTask.js";
 import { buildAsar } from "../src/patcher/asar.js";
 import type { DiscordInstall } from "../src/patcher/locate.js";
 import { stableIdFor } from "../src/patcher/locate.js";
@@ -347,6 +347,8 @@ export interface FakeSchtasks extends SchtasksPort {
     lieAboutRegistered: boolean;
     /** What each registered task runs, as `queryCommand` reports it. Tests may seed it. */
     commands: Map<string, string>;
+    /** Each registered task's repetition interval, as `queryInterval` reports it. Tests may seed it. */
+    intervals: Map<string, string>;
 }
 
 /**
@@ -370,6 +372,7 @@ export function makeFakeSchtasks(overrides: Partial<FakeSchtasks> = {}): FakeSch
         failRemove: false,
         lieAboutRegistered: false,
         commands: new Map<string, string>(),
+        intervals: new Map<string, string>(),
         async create(name: string, xmlPath: string) {
             fake.calls.push(`create ${name}`);
             try {
@@ -390,6 +393,8 @@ export function makeFakeSchtasks(overrides: Partial<FakeSchtasks> = {}): FakeSch
                 fake.registered.add(name);
                 const command = fake.lastXml === null ? null : taskCommandFromXml(fake.lastXml);
                 if (command !== null) fake.commands.set(name, command);
+                const interval = fake.lastXml === null ? null : taskIntervalFromXml(fake.lastXml);
+                if (interval !== null) fake.intervals.set(name, interval);
             }
             return { ok: true as const, value: true as const };
         },
@@ -424,6 +429,10 @@ export function makeFakeSchtasks(overrides: Partial<FakeSchtasks> = {}): FakeSch
         async queryCommand(name: string) {
             fake.calls.push(`query-command ${name}`);
             return fake.registered.has(name) ? fake.commands.get(name) ?? null : null;
+        },
+        async queryInterval(name: string) {
+            fake.calls.push(`query-interval ${name}`);
+            return fake.registered.has(name) ? fake.intervals.get(name) ?? null : null;
         },
         ...overrides
     };

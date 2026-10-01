@@ -14,6 +14,7 @@
  */
 
 import { execFile, spawn } from "node:child_process";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -45,7 +46,8 @@ import {
 } from "../helper/launchAgent.js";
 import type { LaunchctlPort } from "../helper/launchAgent.js";
 import {
-    HELPER_TASK_NAME, helperScheduledTaskSpec, installScheduledTask, removeScheduledTask
+    HELPER_TASK_NAME, helperScheduledTaskSpec, installScheduledTask, isoDuration, removeScheduledTask,
+    WINDOWS_INTERVAL_SECONDS
 } from "../helper/scheduledTask.js";
 import type { SchtasksPort } from "../helper/scheduledTask.js";
 import { modBundleDirFor, productDirFor } from "../bundle/layout.js";
@@ -131,6 +133,25 @@ export interface HelperWiring {
     schtasks?: SchtasksPort;
     /** Windows only: a directory we own, for the task XML hand-off file. */
     workDir?: string;
+    /**
+     * macOS: the Resources directory of every Discord install Subline manages,
+     * read fresh each time a registration is rendered. The LaunchAgent watches
+     * each one (WatchPaths), so a Discord update starts the helper within
+     * seconds instead of at the next hourly run. Absent or empty means no
+     * WatchPaths, the hourly run still applies.
+     */
+    managedResources?: () => readonly string[];
+}
+
+/** The LaunchAgent definition for this wiring, with the current WatchPaths. */
+function launchAgentSpecFor(wiring: HelperWiring) {
+    let resources: readonly string[] = [];
+    try {
+        resources = wiring.managedResources?.() ?? [];
+    } catch {
+        resources = [];
+    }
+    return helperLaunchAgentSpec(wiring.appPath, wiring.intervalSeconds, wiring.executableName, resources);
 }
 
 /**
@@ -155,7 +176,7 @@ export async function installHelperFor(
     }
     const registered = await installLaunchAgent({
         plistPath: launchAgentPlistPath(home),
-        spec: helperLaunchAgentSpec(wiring.appPath, wiring.intervalSeconds, wiring.executableName),
+        spec: launchAgentSpecFor(wiring),
         uid: wiring.uid,
         launchctl: wiring.launchctl,
         platform
@@ -189,7 +210,7 @@ async function installWindowsHelper(wiring: HelperWiring): Promise<Result<Helper
         );
     }
     const registered = await installScheduledTask({
-        spec: helperScheduledTaskSpec(wiring.executablePath, wiring.intervalSeconds),
+        spec: helperScheduledTaskSpec(wiring.executablePath, wiring.intervalSeconds ?? WINDOWS_INTERVAL_SECONDS),
         workDir: wiring.workDir,
         schtasks: wiring.schtasks,
         platform: "win32"
@@ -232,17 +253,20 @@ export async function ensureHelperFor(
         // Windows paths are case-insensitive, and Task Scheduler may hand the
         // command back with the quotes `createSimple` put round it.
         const normalise = (path: string): string => path.trim().replace(/^"(.*)"$/, "$1").toLowerCase();
-        if (registered !== null && normalise(registered) === normalise(expected)) {
-            return ok({ action: "unchanged", reason: null, registered, expected });
+        let reason: string | null = null;
+        if (registered === null) reason = "missing";
+        else if (normalise(registered) !== normalise(expected)) reason = "points-elsewhere";
+        else if (wiring.schtasks.queryInterval !== undefined) {
+            // An older install registered an hourly task; 0.2.1 runs every 5
+            // minutes. Same command, outdated definition: re-register it.
+            const interval = await wiring.schtasks.queryInterval(HELPER_TASK_NAME);
+            const want = isoDuration(wiring.intervalSeconds ?? WINDOWS_INTERVAL_SECONDS);
+            if (interval !== null && interval !== want) reason = "definition-changed";
         }
+        if (reason === null) return ok({ action: "unchanged", reason: null, registered, expected });
         const repaired = await installHelperFor(wiring, platform, home);
         if (!repaired.ok) return repaired as Result<HelperEnsureReport>;
-        return ok({
-            action: "repaired",
-            reason: registered === null ? "missing" : "points-elsewhere",
-            registered,
-            expected
-        });
+        return ok({ action: "repaired", reason, registered, expected });
     }
     if (platform !== "darwin") return ok({ action: "skipped", reason: "no-helper-on-platform", registered: null, expected: null });
 
@@ -253,7 +277,7 @@ export async function ensureHelperFor(
     }
 
     const plistPath = launchAgentPlistPath(home);
-    const spec = helperLaunchAgentSpec(wiring.appPath, wiring.intervalSeconds, wiring.executableName);
+    const spec = launchAgentSpecFor(wiring);
     const expected = spec.programArguments[0] ?? null;
     const current = readLaunchAgentPlist(plistPath);
     const registered = current === null ? null : firstProgramArgument(current);
@@ -269,6 +293,85 @@ export async function ensureHelperFor(
     const repaired = await installHelperFor(wiring, platform, home);
     if (!repaired.ok) return repaired as Result<HelperEnsureReport>;
     return ok({ action: "repaired", reason, registered, expected });
+}
+
+/**
+ * Reload the LaunchAgent from a process launchd did not start for it.
+ *
+ * The helper cannot `launchctl bootout` its own label while it runs: bootout
+ * stops the job, which is the process asking, so the bootstrap after it would
+ * never happen and the agent would be gone until the next login. Instead a
+ * detached shell (its own session, so it is not in the job's process group)
+ * waits a few seconds for the helper to exit, then boots the old definition
+ * out and the rewritten plist in.
+ */
+export type ReloadAgent = (plistPath: string, label: string, uid: number) => void;
+
+export const reloadAgentDetached: ReloadAgent = (plistPath, label, uid) => {
+    // Values go in as positional parameters, never spliced into the script, so
+    // a path with quotes or spaces cannot change what the shell runs.
+    const script = "sleep 3; /bin/launchctl bootout \"gui/$1/$2\" 2>/dev/null; /bin/launchctl bootstrap \"gui/$1\" \"$3\"";
+    const child = spawn("/bin/sh", ["-c", script, "sh", String(uid), label, plistPath], { detached: true, stdio: "ignore" });
+    child.unref();
+};
+
+export interface HelperSelfUpdate {
+    action: "unchanged" | "rewritten" | "skipped" | "failed";
+    reason: string | null;
+}
+
+/**
+ * The helper's own check that its registration is current, run at the end of
+ * every helper run.
+ *
+ * Why the helper and not only the app: an existing user rarely opens the
+ * Subline app, but the helper runs every hour. When a new Subline build changes
+ * the registration (0.2.1 added WatchPaths on macOS and a 5 minute interval on
+ * Windows), the first helper run of that build brings the registration up to
+ * date, and the faster trigger is live from then on.
+ *
+ * macOS: if the plist on disk is not exactly what this build renders (with the
+ * WatchPaths of the installs managed right now), write it and hand the reload
+ * to a detached process (see ReloadAgent). Windows: ensureHelperFor, which
+ * re-registers the task with `schtasks /Create /F` (safe while it runs).
+ * Never throws: a failure here must not turn a good repair run into a crash.
+ */
+export async function ensureHelperFromHelper(
+    wiring: HelperWiring,
+    platform: NodeJS.Platform = process.platform,
+    home: string = homedir(),
+    reload: ReloadAgent = reloadAgentDetached
+): Promise<HelperSelfUpdate> {
+    try {
+        if (platform === "win32") {
+            const ensured = await ensureHelperFor(wiring, platform, home);
+            if (!ensured.ok) return { action: "failed", reason: ensured.error.code };
+            return {
+                action: ensured.value.action === "repaired" ? "rewritten" : ensured.value.action === "unchanged" ? "unchanged" : "skipped",
+                reason: ensured.value.reason
+            };
+        }
+        if (platform !== "darwin") return { action: "skipped", reason: "no-helper-on-platform" };
+        if (wiring.appPath.startsWith("/Volumes/") || wiring.appPath.includes("/AppTranslocation/")) {
+            return { action: "skipped", reason: "running-from-temporary-location" };
+        }
+        const plistPath = launchAgentPlistPath(home);
+        const wanted = renderLaunchAgentPlist(launchAgentSpecFor(wiring));
+        const current = readLaunchAgentPlist(plistPath);
+        // No plist at all means the app was uninstalled under a still-loaded
+        // job, or the user removed it: never resurrect a registration the user
+        // took away.
+        if (current === null) return { action: "skipped", reason: "not-registered" };
+        if (current === wanted) return { action: "unchanged", reason: null };
+        const temp = `${plistPath}.tmp`;
+        mkdirSync(join(plistPath, ".."), { recursive: true });
+        writeFileSync(temp, wanted, "utf8");
+        renameSync(temp, plistPath);
+        reload(plistPath, HELPER_LABEL, wiring.uid);
+        return { action: "rewritten", reason: "definition-changed" };
+    } catch (cause) {
+        return { action: "failed", reason: String((cause as Error)?.message ?? cause).slice(0, 200) };
+    }
 }
 
 /** The executable a LaunchAgent plist runs: the first ProgramArguments string, unescaped. */

@@ -29,7 +29,7 @@ export type { DecisionKind, HelperDecision, HelperPorts, HelperRunOptions, Helpe
 
 export {
     DEFAULT_INTERVAL_SECONDS, HELPER_FLAG, HELPER_LABEL, helperLaunchAgentSpec, helperProgramArguments,
-    installLaunchAgent, LAUNCH_AGENTS_DIR_NAME, launchAgentPlistPath, readLaunchAgentPlist,
+    installLaunchAgent, LAUNCH_AGENTS_DIR_NAME, launchAgentPlistPath, launchAgentWatchPaths, readLaunchAgentPlist,
     removeLaunchAgent, renderLaunchAgentPlist
 } from "./launchAgent.js";
 export type { InstallLaunchAgentOptions, LaunchAgentReport, LaunchAgentSpec, LaunchctlPort } from "./launchAgent.js";
@@ -38,7 +38,7 @@ export { createHelperPorts, createLaunchctl, createSchtasks, findBundleRoot, not
 export type { Exec, RealHelperPortsOptions } from "./ports.js";
 
 export {
-    HELPER_TASK_NAME, helperScheduledTaskSpec, installScheduledTask, isoDuration,
+    HELPER_TASK_NAME, helperScheduledTaskSpec, installScheduledTask, isoDuration, taskIntervalFromXml, WINDOWS_INTERVAL_SECONDS,
     removeScheduledTask, renderScheduledTaskXml
 } from "./scheduledTask.js";
 export type {

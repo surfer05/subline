@@ -53,6 +53,38 @@ export interface LaunchAgentSpec {
     programArguments: readonly string[];
     intervalSeconds: number;
     runAtLoad: boolean;
+    /**
+     * Paths launchd watches; any change to one starts the helper. Empty means no
+     * WatchPaths key at all (the hourly interval and RunAtLoad still apply).
+     */
+    watchPaths?: readonly string[];
+}
+
+/**
+ * What launchd watches for one managed Discord: its app.asar AND the Resources
+ * directory that holds it.
+ *
+ * Field evidence (Discord 0.0.413 to 0.0.414): an update replaced app.asar and
+ * wiped the patch, and the hourly run repaired it ~15 minutes later (up to 60).
+ * Watching the file alone is not enough, because an update REPLACES it (a
+ * rename over the old inode), and a watched path that vanishes and reappears is
+ * exactly the case to cover; the directory changes on every such swap. launchd
+ * rate-limits a job to one start per 10s (ThrottleInterval), so a burst of
+ * writes during an update is at most a few runs, and every run waits for the
+ * files to settle before writing anything (settle.ts).
+ *
+ * Sorted and de-duplicated so the same set of installs always renders the same
+ * plist: ensureHelperFor compares the rendered text to decide whether the
+ * registration is outdated.
+ */
+export function launchAgentWatchPaths(resourcesPaths: readonly string[]): string[] {
+    const out = new Set<string>();
+    for (const resources of resourcesPaths) {
+        if (typeof resources !== "string" || resources === "") continue;
+        out.add(join(resources, "app.asar"));
+        out.add(resources);
+    }
+    return [...out].sort();
 }
 
 export function helperProgramArguments(appPath: string, executableName = "Subline"): string[] {
@@ -70,12 +102,14 @@ export function launchAgentPlistPath(home: string, label: string = HELPER_LABEL)
 export function helperLaunchAgentSpec(
     appPath: string,
     intervalSeconds: number = DEFAULT_INTERVAL_SECONDS,
-    executableName = "Subline"
+    executableName = "Subline",
+    managedResourcesPaths: readonly string[] = []
 ): LaunchAgentSpec {
     return {
         label: HELPER_LABEL,
         programArguments: helperProgramArguments(appPath, executableName),
         intervalSeconds,
+        watchPaths: launchAgentWatchPaths(managedResourcesPaths),
         // Spec §6: at login AND periodically. `RunAtLoad` is the half that
         // repairs a Discord that updated while the machine was off.
         runAtLoad: true
@@ -110,6 +144,16 @@ function xml(value: string): string {
  */
 export function renderLaunchAgentPlist(spec: LaunchAgentSpec): string {
     const args = spec.programArguments.map(argument => `        <string>${xml(argument)}</string>`).join("\n");
+    const watch = spec.watchPaths ?? [];
+    const watchBlock = watch.length === 0
+        ? ""
+        : `    <key>WatchPaths</key>
+    <array>
+${watch.map(path => `        <string>${xml(path)}</string>`).join("\n")}
+    </array>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+`;
     return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -124,7 +168,7 @@ ${args}
     <${spec.runAtLoad ? "true" : "false"}/>
     <key>StartInterval</key>
     <integer>${Math.max(1, Math.trunc(spec.intervalSeconds))}</integer>
-    <key>ProcessType</key>
+${watchBlock}    <key>ProcessType</key>
     <string>Background</string>
     <key>LowPriorityIO</key>
     <true/>

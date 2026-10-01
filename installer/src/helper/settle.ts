@@ -102,13 +102,21 @@ export interface SettleOptions {
 }
 
 /**
- * 45s of quiet. Long enough that an updater swapping a 3.6 MB archive and its
- * sidecars has finished; short enough that a login-time helper run still repairs
- * the install before the user has finished opening Discord.
+ * 8s of quiet, then a second observation 5s later that must agree.
+ *
+ * This used to be 45s, chosen when the only trigger was an hourly run. Since
+ * 0.2.1 the macOS helper is also started by launchd the moment Discord's
+ * Resources change (WatchPaths), so it now usually wakes up IN THE MIDDLE of an
+ * update, and the quiet window is what holds it back until the swap is done.
+ * Discord's updater replaces a handful of files in well under a second; 8s of
+ * nothing plus a confirming sample 5s later is ample margin for that, and puts
+ * a repaired Discord ~15s after the update rather than a minute. A run that
+ * fires while files are still moving polls every 5s within the same 5 minute
+ * budget and otherwise defers silently to the next trigger.
  */
-export const DEFAULT_QUIET_MS = 45_000;
-export const DEFAULT_CONFIRM_MS = 10_000;
-export const DEFAULT_POLL_MS = 15_000;
+export const DEFAULT_QUIET_MS = 8_000;
+export const DEFAULT_CONFIRM_MS = 5_000;
+export const DEFAULT_POLL_MS = 5_000;
 export const DEFAULT_MAX_WAIT_MS = 5 * 60_000;
 
 /** The paths an updater touches while it replaces an install. */

@@ -27,7 +27,7 @@ import { join } from "node:path";
 
 import type { Result } from "../patcher/result.js";
 import { err, fsError, ok, rewrap } from "../patcher/result.js";
-import { DEFAULT_INTERVAL_SECONDS, HELPER_FLAG } from "./launchAgent.js";
+import { HELPER_FLAG } from "./launchAgent.js";
 
 /**
  * The registered task's name.
@@ -50,9 +50,21 @@ export interface ScheduledTaskSpec {
     author: string;
 }
 
+/**
+ * Every 5 minutes on Windows.
+ *
+ * Task Scheduler has no file-watch trigger, and Discord on Windows installs each
+ * update into a NEW app-1.0.xxxx folder, so polling is the only way to notice
+ * one quickly. Field evidence: an hourly run left Discord unpatched for up to an
+ * hour after an update. A run with nothing to do reads a handful of small files,
+ * touches no network (the release feed has its own 6 hour throttle, see
+ * helper.ts), and writes one log line, so every 5 minutes costs next to nothing.
+ */
+export const WINDOWS_INTERVAL_SECONDS = 300;
+
 export function helperScheduledTaskSpec(
     executablePath: string,
-    intervalSeconds: number = DEFAULT_INTERVAL_SECONDS,
+    intervalSeconds: number = WINDOWS_INTERVAL_SECONDS,
     name: string = HELPER_TASK_NAME
 ): ScheduledTaskSpec {
     return {
@@ -168,6 +180,19 @@ export interface SchtasksPort {
      * there is no such task or its definition cannot be read.
      */
     queryCommand(name: string): Promise<string | null>;
+    /**
+     * The registered task's repetition interval (its first `<Interval>`, e.g.
+     * "PT5M"), or null when there is no such task or it cannot be read.
+     * Optional: a port without it cannot detect an outdated interval, only an
+     * outdated command.
+     */
+    queryInterval?(name: string): Promise<string | null>;
+}
+
+/** The first repetition `<Interval>` of a task definition from `schtasks /Query /XML`. */
+export function taskIntervalFromXml(document: string): string | null {
+    const match = /<Interval>([^<]*)<\/Interval>/.exec(document.replace(/\u0000/g, ""));
+    return match === null ? null : (match[1] ?? "").trim();
 }
 
 /** The `<Command>` of a task definition from `schtasks /Query /XML`, unescaped. */

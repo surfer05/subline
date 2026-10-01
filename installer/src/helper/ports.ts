@@ -34,7 +34,7 @@ import type { Alert } from "./alerts.js";
 import type { HelperPorts } from "./helper.js";
 import type { LaunchctlPort } from "./launchAgent.js";
 import type { SchtasksPort } from "./scheduledTask.js";
-import { taskCommandFromXml } from "./scheduledTask.js";
+import { taskCommandFromXml, taskIntervalFromXml } from "./scheduledTask.js";
 import { helperStatePathFor, readHelperState, writeHelperState } from "./state.js";
 import type { HelperState } from "./state.js";
 
@@ -243,7 +243,8 @@ export function createSchtasks(exec: Exec = (file, args) => run(file, args)): Sc
          */
         async createSimple(name: string, command: string): Promise<Result<true>> {
             try {
-                await exec("schtasks", ["/Create", "/TN", name, "/TR", command, "/SC", "HOURLY", "/F"]);
+                // Every 5 minutes, like the XML definition (WINDOWS_INTERVAL_SECONDS).
+                await exec("schtasks", ["/Create", "/TN", name, "/TR", command, "/SC", "MINUTE", "/MO", "5", "/F"]);
                 return ok(true);
             } catch (cause) {
                 return err<true>("HELPER_REGISTRATION_FAILED", "Windows refused the simplified helper task too.", {
@@ -275,6 +276,14 @@ export function createSchtasks(exec: Exec = (file, args) => run(file, args)): Sc
             try {
                 const { stdout } = await exec("schtasks", ["/Query", "/TN", name, "/XML"]);
                 return taskCommandFromXml(stdout);
+            } catch {
+                return null;
+            }
+        },
+        async queryInterval(name: string): Promise<string | null> {
+            try {
+                const { stdout } = await exec("schtasks", ["/Query", "/TN", name, "/XML"]);
+                return taskIntervalFromXml(stdout);
             } catch {
                 return null;
             }

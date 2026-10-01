@@ -14,14 +14,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { DEFAULT_INTERVAL_SECONDS, HELPER_FLAG } from "../src/helper/launchAgent.js";
+import { HELPER_FLAG } from "../src/helper/launchAgent.js";
 import {
     HELPER_TASK_NAME,
     helperScheduledTaskSpec,
     installScheduledTask,
     isoDuration,
     removeScheduledTask,
-    renderScheduledTaskXml
+    renderScheduledTaskXml,
+    taskIntervalFromXml,
+    WINDOWS_INTERVAL_SECONDS
 } from "../src/helper/scheduledTask.js";
 import { makeFakeSchtasks } from "./fixture.js";
 import type { FakeSchtasks } from "./fixture.js";
@@ -65,13 +67,24 @@ describe("isoDuration", () => {
 });
 
 describe("the task definition", () => {
-    it("runs this executable with the helper flag, hourly and at logon", () => {
+    it("runs this executable with the helper flag, every 5 minutes and at logon", () => {
         const xml = renderScheduledTaskXml(helperScheduledTaskSpec(EXE));
         expect(xml).toContain(`<Command>${EXE}</Command>`);
         expect(xml).toContain(`<Arguments>${HELPER_FLAG}</Arguments>`);
-        expect(xml).toContain(`<Interval>${isoDuration(DEFAULT_INTERVAL_SECONDS)}</Interval>`);
+        // Task Scheduler has no file-watch trigger: polling every 5 minutes is
+        // how a Windows Discord update is noticed quickly (0.2.1).
+        expect(WINDOWS_INTERVAL_SECONDS).toBe(300);
+        expect(xml).toContain("<Interval>PT5M</Interval>");
         expect(xml).toContain("<LogonTrigger>");
         expect(xml).toContain("<TimeTrigger>");
+    });
+
+    it("reads the repetition interval back from a queried definition", () => {
+        const xml = renderScheduledTaskXml(helperScheduledTaskSpec(EXE));
+        expect(taskIntervalFromXml(xml)).toBe("PT5M");
+        // schtasks /Query /XML output decoded as UTF-8 carries a NUL after every character.
+        expect(taskIntervalFromXml(xml.split("").join("\u0000"))).toBe("PT5M");
+        expect(taskIntervalFromXml("<Task/>")).toBeNull();
     });
 
     it("repeats indefinitely rather than stopping after a day", () => {

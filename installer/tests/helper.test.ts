@@ -21,6 +21,7 @@ import { installModBundle } from "../src/app/modInstall.js";
 import { inspectModBundle } from "../src/bundle/bundle.js";
 import { RELEASE_MANIFEST_FORMAT } from "../src/helper/release.js";
 import { DEFAULT_UPDATE_INTERVAL_MS, runHelperOnce } from "../src/helper/helper.js";
+import { isIdleRun } from "../src/helper/quiet.js";
 import { MIN_WINDOW_MS } from "../src/helper/health.js";
 import type { HelperPorts, HelperRunOptions, HelperRunReport } from "../src/helper/helper.js";
 import { helperStatePathFor, readHelperState, writeHelperState } from "../src/helper/state.js";
@@ -481,6 +482,51 @@ describe("not racing Discord's own updater", () => {
         const report = await harness.run();
 
         expect(report.repatched).toEqual([harness.fixture.install.rootPath]);
+    });
+});
+
+describe("0.2.1: woken by WatchPaths in the middle of an update", () => {
+    it("waits through the update with the default settle, then repairs exactly once", async () => {
+        patchForReal(harness);
+        await harness.run();
+        simulateDiscordUpdate(harness.fixture.install, "0.0.414");
+        // launchd starts the helper while the updater is still writing: every
+        // sample says Resources was written "now" for the next 20s.
+        const updateEndsAt = harness.clock + 20_000;
+        harness.ports.mtimeOf = () => Math.min(harness.clock, updateEndsAt);
+        const realPatch = harness.ports.patch;
+        let patches = 0;
+        harness.ports.patch = (install, options) => {
+            patches++;
+            // Nothing is written before the update has finished and gone quiet.
+            expect(harness.clock).toBeGreaterThanOrEqual(updateEndsAt);
+            return realPatch(install, options);
+        };
+
+        const report = await harness.run({ settle: {} });
+
+        expect(report.repatched).toEqual([harness.fixture.install.rootPath]);
+        expect(patches).toBe(1);
+        expect(report.failed).toEqual([]);
+        expect(harness.notifications.filter(n => n.code !== "restart-required")).toEqual([]);
+        // Seconds after the update, not a minute.
+        expect(harness.clock - updateEndsAt).toBeLessThan(30_000);
+    });
+
+    it("a run with nothing to do touches no network and counts as idle", async () => {
+        patchForReal(harness);
+        await harness.run({ forceUpdateCheck: false });
+        let fetches = 0;
+        harness.ports.fetchText = async () => { fetches++; return err("NETWORK_ERROR", "should not be called"); };
+        harness.ports.fetchBinary = async () => { fetches++; return err("NETWORK_ERROR", "should not be called"); };
+        harness.advance(5 * 60_000); // the next 5 minute run
+
+        const report = await harness.run();
+
+        expect(fetches).toBe(0);
+        expect(report.updateChecked).toBe(false);
+        expect(report.repatched).toEqual([]);
+        expect(isIdleRun(report)).toBe(true);
     });
 });
 

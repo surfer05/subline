@@ -35,6 +35,7 @@ import {
     createHelperPorts, createLaunchctl, createSchtasks, HELPER_FLAG, HELPER_LABEL, launchAgentPlistPath,
     readPendingAlerts, releaseManifestUrl, runHelperOnce
 } from "../helper/index.js";
+import { bufferedLogger, concludeHelperLog, managedResourcesPaths } from "../helper/quiet.js";
 import { productDirFor } from "../bundle/layout.js";
 import { inspectModBundle } from "../bundle/bundle.js";
 import { shippedModDirFor } from "../app/modInstall.js";
@@ -44,7 +45,7 @@ import { uninstallTargets } from "../patcher/locate.js";
 import { unpatchInstall } from "../patcher/patch.js";
 import { usingOriginalFs } from "../patcher/realFs.js";
 import {
-    createFlowPorts, forceQuit, installHelperFor, listProcesses, logDirFor, removeHelperFor,
+    createFlowPorts, ensureHelperFromHelper, forceQuit, installHelperFor, listProcesses, logDirFor, removeHelperFor,
     requestQuit, uninstallPaths
 } from "./ports.js";
 import type { HelperWiring } from "./ports.js";
@@ -148,7 +149,14 @@ if (isHelperRun) {
     // No window, no dock icon, no IPC. Run once, write the log, exit.
     app.dock?.hide();
     void (async () => {
-        log.writeHeader({
+        // HELD BACK until the run is over. Since 0.2.1 the helper runs far more
+        // often (launchd WatchPaths on macOS, every 5 minutes on Windows), and
+        // nearly every run finds nothing to do: such a run writes ONE line
+        // (helper.idle), not a header and a dozen decisions, so the rotated log
+        // keeps the runs that mattered. Anything else, and any crash, writes
+        // everything, header first.
+        const held = bufferedLogger(log);
+        const writeHeader = (): void => log.writeHeader({
             productVersion: app.getVersion(),
             os: process.platform,
             osVersion: process.getSystemVersion(),
@@ -159,10 +167,21 @@ if (isHelperRun) {
             const report = await runHelperOnce(
                 createHelperPorts({
                     productVersion: app.getVersion(),
-                    log,
+                    log: held.logger,
                     releaseManifestUrl: RELEASE_MANIFEST_URL
                 })
             );
+            // Bring the registration itself up to date (WatchPaths, interval)
+            // when this build defines it differently from what is registered.
+            const registration = await ensureHelperFromHelper(helperWiring(), process.platform, app.getPath("home"));
+            const forceFull = registration.action === "rewritten" || registration.action === "failed";
+            if (concludeHelperLog(report, held, log, writeHeader, forceFull)) {
+                app.exit(0);
+                return;
+            }
+            if (registration.action === "rewritten" || registration.action === "failed") {
+                log.info("helper.registration", { action: registration.action, reason: registration.reason });
+            }
             log.info("helper.run", {
                 summary: report.summary,
                 found: report.found,
@@ -178,6 +197,8 @@ if (isHelperRun) {
         } catch (cause) {
             // A helper that throws is one nobody hears from again. The log is the
             // only record there is of a run nobody watched.
+            writeHeader();
+            held.flush();
             log.error("helper.crashed", { cause: String(cause) });
         }
         app.exit(0);
@@ -397,7 +418,15 @@ function helperWiring(): HelperWiring {
         // null on a platform we do not support, which leaves `workDir`
         // undefined and makes the Windows branch report a named failure rather
         // than writing the file somewhere arbitrary.
-        workDir: productDirFor() ?? undefined
+        workDir: productDirFor() ?? undefined,
+        // Read fresh every time a registration is rendered (install, repair,
+        // the already-set-up check, and the helper's own check), so WatchPaths
+        // always names the Discords Subline manages right now.
+        managedResources: () => {
+            const ports = createHelperPorts({ productVersion: app.getVersion(), log, releaseManifestUrl: null });
+            const remembered = new Set(Object.keys(ports.readState().installs));
+            return managedResourcesPaths(ports.locate, ports.inspect, remembered);
+        }
     };
 }
 

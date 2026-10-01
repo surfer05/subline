@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 .DS_Store
 
 # Build scratch: the pinned Vencord checkout and the assembled mod bundle.

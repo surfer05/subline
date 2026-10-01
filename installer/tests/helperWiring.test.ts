@@ -147,7 +147,7 @@ describe("registering the agent", () => {
         expect(xml).toContain(`<Arguments>${HELPER_FLAG}</Arguments>`);
         // Without the repetition the task runs only at logon, and a machine
         // left on for a fortnight never repairs a Discord that updated on day one.
-        expect(xml).toContain("<Interval>PT1H</Interval>");
+        expect(xml).toContain("<Interval>PT5M</Interval>");
         // The half that repairs a Discord which updated while the machine was off.
         expect(xml).toContain("<LogonTrigger>");
         expect(xml).toContain("<StartWhenAvailable>true</StartWhenAvailable>");
