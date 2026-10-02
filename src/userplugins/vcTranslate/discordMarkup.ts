@@ -23,15 +23,11 @@
  * rendered. The skip decision must keep running on the raw content, so this is
  * never applied before `shouldSkip`.
  *
- * Design choice: resolve-before-translate (option (a)), not mask-and-restore.
- * A sentinel-and-restore scheme would have to thread a per-message
- * id -> readable-text map from here, through the batcher, every engine, and the
- * result/beacon plumbing, then splice it back into the returned string — a
- * large surface across the whole batch flow for a token the existing prompt
- * rule ("leave usernames and names untranslated") already protects on the LLM
- * tiers. Resolving up front keeps the change to one pure function plus one
- * call site, and the neutral, human-readable tokens it emits ("@deniz",
- * ":blob:") are exactly what a translator handles best.
+ * WHAT THIS IS FOR NOW. The text that is TRANSLATED no longer goes through
+ * here: placeholders.ts masks every token as ⟦n⟧ and puts the original back
+ * after translation, because a readable ":blob:" came back mangled or as a
+ * leaked id. This readable form is still what the model reads as CONTEXT
+ * (with custom emoji dropped) and what a tooltip shows.
  */
 
 /**
@@ -99,11 +95,15 @@ function resolveOr(fn: (id: string) => string | undefined, id: string, fallback:
  *   <@&id>         -> "@" + role name       (fallback "@role")
  *   <:name:id>     -> ":name:"  (animated <a:name:id> too)
  *
+ * With `emoji: "drop"` a custom emoji becomes nothing instead: the CONTEXT
+ * form (placeholders.ts), so the model never sees a :name: it could copy into
+ * an answer.
+ *
  * `@everyone` / `@here` and every other character are left untouched. Pure and
  * total: it never throws and every unresolved id becomes a neutral placeholder,
  * never the number.
  */
-export function renderDiscordMarkup(text: string, resolvers: MarkupResolvers): string {
+export function renderDiscordMarkup(text: string, resolvers: MarkupResolvers, opts: { emoji?: "name" | "drop" } = {}): string {
     if (typeof text !== "string" || text.length === 0) return text;
     if (text.indexOf("<") === -1) return text;   // no possible entity — cheap exit
 
@@ -118,7 +118,7 @@ export function renderDiscordMarkup(text: string, resolvers: MarkupResolvers): s
             roleId: string | undefined,
             userId: string | undefined
         ): string => {
-            if (emojiName !== undefined) return `:${emojiName}:`;
+            if (emojiName !== undefined) return opts.emoji === "drop" ? "" : `:${emojiName}:`;
             if (channelId !== undefined) return "#" + resolveOr(resolvers.channel, channelId, CHANNEL_FALLBACK);
             if (roleId !== undefined) return "@" + resolveOr(resolvers.role, roleId, ROLE_FALLBACK);
             if (userId !== undefined) return "@" + resolveOr(resolvers.user, userId, USER_FALLBACK);

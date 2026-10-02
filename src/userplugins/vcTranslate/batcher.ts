@@ -59,7 +59,7 @@ export function createBatcher(opts: BatcherOptions): Batcher {
         // copies of each, halving the real context the model sees. Linear scan
         // is fine — the ring is contextSize (8) long.
         if (s.context.some(c => c.id === msg.id)) return;
-        s.context.push({ id: msg.id, author: msg.author, text: msg.text });
+        s.context.push({ id: msg.id, author: msg.author, text: msg.contextText ?? msg.text });
         if (s.context.length > opts.contextSize) {
             s.context.splice(0, s.context.length - opts.contextSize);
         }

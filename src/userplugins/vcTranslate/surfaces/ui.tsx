@@ -25,7 +25,9 @@
 import { React } from "@webpack/common";
 
 import { languageLabel } from "../langLabel";
+import { repairTranslation } from "../placeholders";
 import { isRomanizedGuess } from "../romanized";
+import { renderTranslated } from "../translationRender";
 import { MIN_DETECT_CONFIDENCE } from "../types";
 import { normalizeSurfaceText, type SurfaceEntry } from "./cache";
 import type { SurfaceText } from "./extract";
@@ -141,11 +143,15 @@ export function SurfaceLines({ texts }: { texts: SurfaceText[]; }) {
             const long = LONG_KINDS.has(t.kind);
             const shown = displayFor(service.want(t.text, { long }), t.text);
             if (shown === null) continue;
+            // Its tokens are already back (translateSurfaceBatch); this also
+            // cleans lines cached before that, then draws emoji as emoji.
+            const body = repairTranslation(shown.text, t.text);
+            if (body === "") continue;
             const partial = long && fitLongText(normalizeSurfaceText(t.text)).partial;
             lines.push(
                 <div key={`${t.kind}:${t.text}`} style={LINE_STYLE} data-subline-surface={t.kind}>
                     <span>{LABELLED_KINDS.has(t.kind) ? `${t.label} · ` : ""}{shown.glyph}{langSuffix(shown.lang)} · </span>
-                    <span dir={translationDir()}>{shown.text}</span>
+                    <span dir={translationDir()}>{renderTranslated(body) as any}</span>
                     {partial && <span data-subline-partial="">{" · "}{PARTIAL_NOTE}</span>}
                 </div>
             );
@@ -202,7 +208,7 @@ export function TightSwap({ original, text, tooltip, render }: {
     try {
         const t = typeof text === "string" ? tightTranslation(text) : null;
         if (t === null) return (original ?? null) as any;
-        const shown = render ? render(t.text) : t.text;
+        const shown = render ? render(t.text) : renderTranslated(repairTranslation(t.text, text)) || null;
         if (shown === null || shown === undefined) return (original ?? null) as any;
         const swapped = <TranslatedInPlace original={tooltip ?? text} translation={shown} glyph={t.glyph} />;
         // Discord's text sometimes carries a leading space (after an emoji).

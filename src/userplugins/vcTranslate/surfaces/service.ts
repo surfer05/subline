@@ -20,6 +20,7 @@
  * caller builds the request.
  */
 
+import { tokenSpans } from "../placeholders";
 import { normalizeSurfaceText, type SurfaceCache, type SurfaceEntry, surfaceKey } from "./cache";
 
 export type SurfaceTier = "fast" | "quality";
@@ -114,6 +115,12 @@ export function fitLongText(text: string): { text: string; partial: boolean; } {
     if (cut < 0 && sentence >= floor) cut = sentence;
     if (cut < 0) cut = head.lastIndexOf(" ");
     if (cut < floor) cut = max;
+    // Never inside a Discord token (a code block, a link, an emoji): half of
+    // one would reach the translator as text. Cut before it instead.
+    for (const [start, end] of tokenSpans(text)) {
+        if (cut > start && cut < end) { cut = start; break; }
+    }
+    if (cut <= 0) cut = max;
     // Never end on half of a surrogate pair.
     const code = text.charCodeAt(cut - 1);
     if (code >= 0xd800 && code <= 0xdbff) cut--;

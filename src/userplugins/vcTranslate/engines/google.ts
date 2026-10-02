@@ -174,10 +174,10 @@ export interface TextPiece { text: string; sep: string; }
 
 /**
  * Spans no cut may land inside: Discord markup (a mention, a custom emoji, a
- * timestamp) and links. Cutting one would hand Google half a token, which it
+ * timestamp), links, and the ⟦n⟧ placeholders those are sent as (placeholders.ts). Cutting one would hand Google half a token, which it
  * then translates or mangles.
  */
-const ATOMS = /<a?:\w+:\d+>|<#\d+>|<@&\d+>|<@!?\d+>|<t:-?\d+(?::[a-zA-Z])?>|https?:\/\/\S+/gu;
+const ATOMS = /<a?:\w+:\d+>|<#\d+>|<@&\d+>|<@!?\d+>|<t:-?\d+(?::[a-zA-Z])?>|https?:\/\/\S+|\u27E6\s*\d+\s*\u27E7/gu;
 
 /** The coarsest cut first: lines, then sentences, then words. */
 const CUT_LEVELS: RegExp[] = [

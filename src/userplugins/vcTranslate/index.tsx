@@ -16,6 +16,8 @@ import { createBatcher, type Batcher } from "./batcher";
 import { forgetNotices, putNotice, takeNotice } from "./sublineNotice";
 import { fitLlmRequest, LLM_TEXT_MAX, shrinkAfterRefusal } from "./fitRequest";
 import { renderDiscordMarkup, type MarkupResolvers } from "./discordMarkup";
+import { maskTokens, repairTranslation, restoreTokens } from "./placeholders";
+import { renderTranslated } from "./translationRender";
 import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel, toggleChannelOptOut } from "./channels";
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
 import { DECODED_TITLE, decodedPrefix, decodeMessage, translatableText } from "./decode";
@@ -2517,8 +2519,9 @@ function isOversizeRefusal(engine: EngineId, error: string): boolean {
  * Keep every ✦ text inside the relay's per-text limit. Mention expansion can
  * push a near-4,000-character message past it (`<#id>` becomes a channel name
  * of up to 100 characters), and one such text made the relay refuse the whole
- * batch. Such a message is sent as Discord stored it instead; if even that is
- * too long it is left to ≈, because no ✦ request could carry it.
+ * batch. Such a message is sent as Discord stored it (decode undone, tokens
+ * still masked) instead; if even that is too long it is left to ≈, because no
+ * ✦ request could carry it.
  */
 function withinTextLimit(req: BatchRequest, channelId: string | undefined): BatchRequest {
     if (!req.messages.some(m => m.text.length > LLM_TEXT_MAX)) return req;
@@ -2534,8 +2537,10 @@ function withinTextLimit(req: BatchRequest, channelId: string | undefined): Batc
         } catch {
             raw = undefined;
         }
-        if (typeof raw === "string" && raw.trim() !== "" && raw.length <= LLM_TEXT_MAX) {
-            messages.push({ ...m, text: raw });
+        // Still masked: a raw token must never reach the translator.
+        const plain = typeof raw === "string" ? maskTokens(raw).text : "";
+        if (plain.trim() !== "" && plain.length <= LLM_TEXT_MAX) {
+            messages.push({ ...m, text: plain });
         } else {
             // Charged so catch-up does not pick it again on every open: no ✦
             // request can ever carry it.
@@ -2607,7 +2612,7 @@ async function forceQualityTranslate(message: Message): Promise<void> {
         messages: [{
             id: message.id,
             author: message.author?.username ?? "unknown",
-            text: translatableText(message.content ?? ""),
+            text: sendText(message.content ?? ""),
             replyToId: replyParentId(message)
         }],
         // The messages immediately BEFORE this one, read from the store.
@@ -2690,7 +2695,7 @@ async function previewPress(message: Message): Promise<void> {
     forcedInFlight.add(message.id);
     notifyForcedInFlight();
     try {
-        await requestPreview(message, readableContent(message.content ?? "", message.channel_id), googleText);
+        await requestPreview(message, sendText(message.content ?? ""), googleText);
     } finally {
         forcedInFlight.delete(message.id);
         notifyForcedInFlight();
@@ -2893,15 +2898,52 @@ function markupResolversFor(channelId: string): MarkupResolvers {
 }
 
 /**
- * Rewrite Discord entity markup (`<@id>`, `<#id>`, `<@&id>`, `<:name:id>`) in a
- * message's content to the readable text Discord itself paints, so the
- * translator sees and returns "@deniz"/"#general"/":blob:" instead of a numeric
- * id it would mistranslate or mangle. See discordMarkup.ts for why this is
- * resolve-before-translate rather than mask-and-restore.
+ * What a message SENDS to a translator: decoded / normalised first (decode.ts),
+ * then every Discord token (custom emoji, mentions, timestamps, links, code)
+ * masked as ⟦n⟧ (placeholders.ts). The stored translation keeps the
+ * placeholders; they are put back from the message's own content when the
+ * line is drawn (translatedLine), so no per-message map has to travel.
  */
-function readableContent(text: string, channelId: string): string {
-    // Decoded / normalised first (decode.ts), so the translator reads letters.
-    return renderDiscordMarkup(translatableText(text), markupResolversFor(channelId));
+function sendText(raw: string): string {
+    return maskTokens(translatableText(raw)).text;
+}
+
+/**
+ * What a message is as CONTEXT for other messages' requests: mentions as the
+ * names Discord shows ("@deniz", "#general"), custom emoji dropped, no
+ * placeholders (another message's ⟦1⟧ stands for a different token, and a
+ * model that copied it would put the wrong token back).
+ */
+function contextContent(raw: string, channelId: string): string {
+    return renderDiscordMarkup(translatableText(raw), markupResolversFor(channelId), { emoji: "drop" })
+        .replace(/[ \t]{2,}/g, " ")
+        .trim();
+}
+
+/** The readable form of a text, for a tooltip: mentions as names, emoji as :name:. */
+function readableFor(raw: string, channelId: string | null): string {
+    if (channelId === null) return raw;
+    try {
+        return renderDiscordMarkup(raw, markupResolversFor(channelId));
+    } catch {
+        return raw;
+    }
+}
+
+/**
+ * A stored translation of `sourceText` (the text that was sent, before
+ * masking), put back together and drawn: placeholders turned back into the
+ * original tokens, mangled leftovers repaired or removed (translations stored
+ * before placeholders existed included), then Discord's parser so emoji and
+ * mentions show as they do in the message. Null when nothing is left to show.
+ */
+function translatedLine(
+    translation: string, sourceText: string, channelId: string | null,
+    opts: { parse?: (text: string) => unknown; inPlace?: boolean; } = {}
+): unknown {
+    const repaired = repairTranslation(translation, sourceText);
+    if (repaired === "") return null;
+    return renderTranslated(repaired, { channelId, parse: opts.parse, always: opts.inPlace === true });
 }
 
 /**
@@ -2939,17 +2981,22 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true, r
     // heuristic mistake would otherwise outlive the session.
     const skipReason = localSkipReason(pending.text, isOwn);
 
-    // Rewrite Discord entity markup to readable text for EVERYTHING downstream:
-    // the batch text sent to the translator, the phrase-cache key, and the
-    // conversation context handed to other messages' batches. Done AFTER the
+    // Prepare the text for EVERYTHING downstream: the batch text sent to the
+    // translator, the phrase-cache key, and the conversation context handed
+    // to other messages' batches. Done AFTER the
     // skip decision above ON PURPOSE — shouldSkip/isConfidentlyTargetLanguage
     // must keep judging the raw content (a bare "<@123>" is still nothing to
     // translate and is still skipped; this is the separate transform skip.ts's
-    // header calls out). renderDiscordMarkup never throws and never emits the
-    // numeric id, so this cannot change whether a message is enqueued, only
-    // what text it carries once it is.
-    const readable = readableContent(pending.text, pending.channelId);
-    if (readable !== pending.text) pending = { ...pending, text: readable };
+    // header calls out). Neither transform throws, so this cannot change
+    // whether a message is enqueued, only what text it carries once it is.
+    //
+    // What is SENT has every token masked as ⟦n⟧ (placeholders.ts); what other
+    // messages read as context has mentions as names and no placeholders.
+    pending = {
+        ...pending,
+        text: sendText(pending.text),
+        contextText: contextContent(pending.text, pending.channelId)
+    };
 
     if (skipReason !== null) {
         // Guarded, not just quiet: with the setting off this must cost
@@ -3168,9 +3215,9 @@ function contextBefore(message: any, size: number): { author: string; text: stri
     return all
         .slice(Math.max(0, index - size), index)
         .filter(m => typeof m?.content === "string" && m.content.trim() !== "")
-        // Same readable-markup rewrite the enqueue path applies, so forced-path
-        // context shows the model "@deniz"/"#general" instead of raw "<@123>".
-        .map(m => ({ author: m.author?.username ?? "unknown", text: readableContent(m.content as string, channelId) }));
+        // The same context form the enqueue path records: "@deniz"/"#general"
+        // instead of raw "<@123>", custom emoji dropped, no placeholders.
+        .map(m => ({ author: m.author?.username ?? "unknown", text: contextContent(m.content as string, channelId) }));
 }
 
 function onMessageCreate({ message, optimistic }: { message: Message; optimistic?: boolean; }) {
@@ -3583,8 +3630,8 @@ function forcedHintDisplay(hint: ForcedHint): { text: string; title: string } {
  * "✦ reads this as: the leak says the… Upgrade" — the real ✦ translation's
  * first few words, under a ≈ line rated rough. See requestPreview.
  */
-function previewLine(messageId: string) {
-    const preview = previews.get(messageId);
+function previewLine(message: Message) {
+    const preview = previews.get(message.id);
     if (preview === undefined) return null;
     if (preview.same) {
         return (
@@ -3595,7 +3642,7 @@ function previewLine(messageId: string) {
     }
     return (
         <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-            ✦ reads this as: <span dir={translationDir()}>{preview.text}{preview.truncated ? "…" : ""}</span>{" "}
+            ✦ reads this as: <span dir={translationDir()}>{(translatedLine(preview.text, translatableText(message.content ?? ""), message.channel_id ?? null) ?? "") as any}{preview.truncated ? "…" : ""}</span>{" "}
             <a
                 href={PRICING_URL}
                 target="_blank"
@@ -3716,7 +3763,7 @@ function translationLines(message: Message) {
     // is a real, reachable state, not a dead one.
     if ("skipped" in entry) {
         // A ⚡ preview of a message Google skipped still has something to say.
-        if (!forcing && !hint && previews.has(message.id)) return previewLine(message.id);
+        if (!forcing && !hint && previews.has(message.id)) return previewLine(message);
         if (forcing) {
             return (
                 <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
@@ -3804,6 +3851,12 @@ function translationLines(message: Message) {
     // chain — same split as before, just with the provenance glyph replacing
     // the decorative ⤷. `title` spells the glyph out on hover, since a symbol
     // alone can't teach its own meaning.
+    // The line itself: placeholders put back from this message's own
+    // content, mangled leftovers removed, then Discord's parser so custom
+    // emoji and mentions show as they do in the message. Nothing left (a
+    // translation that was only junk) is nothing to show.
+    const line = translatedLine(entry.text.trim(), translatableText(message.content ?? ""), message.channel_id ?? null);
+    if (line === null) return entry.via === "google" && previews.has(message.id) ? previewLine(message) : null;
     const provenance = ENGINE_PROVENANCE[entry.via];
     // Google reports how sure it is about the language it detected, and on
     // short replies it is often barely sure at all — "ne" came back as Hausa
@@ -3866,7 +3919,7 @@ function translationLines(message: Message) {
               * "auto" for left-to-right targets, so a line that is still in
               * the source script takes its own direction.
               */}
-            <span dir={translationDir()} style={TRANSLATION_TEXT_STYLE}>{entry.text.trim()}</span>
+            <span dir={translationDir()} style={TRANSLATION_TEXT_STYLE}>{line as any}</span>
             {offerPreview && (
                 <span style={{ color: "var(--text-muted)" }}>
                     {" · "}
@@ -3901,7 +3954,7 @@ function translationLines(message: Message) {
                     {" "}· {forcedHintDisplay(hint).text}
                 </span>
             )}
-            {entry.via === "google" && previewLine(message.id)}
+            {entry.via === "google" && previewLine(message)}
         </div>
     );
 }
@@ -4244,8 +4297,11 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
         // does not wait.
         if (inFlightQuality.size > 0 || !tryAcquireIdleSlot(2)) return "busy";
     }
+    // Discord tokens (custom emoji in a bio, a mention in an embed, a link)
+    // go out as ⟦n⟧ and come back as themselves (placeholders.ts).
+    const masks = texts.map(text => maskTokens(text));
     const req: BatchRequest = {
-        messages: texts.map((text, i) => ({ id: `s${i}`, author: "", text })),
+        messages: masks.map((m, i) => ({ id: `s${i}`, author: "", text: m.text })),
         context: [],
         targetLang: settings.store.targetLang,
         ...(engine === "google" ? { maxConcurrency: 1 } : {})
@@ -4294,7 +4350,11 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
         // "target" skip (already in the reader's language) is a verdict.
         if (r.skip) return r.reason === "unsure" || r.reason === "same" ? "unsure" : "skip";
         if (r.truncated) return "fail";
-        return r.conf === undefined ? { lang: r.lang, text: r.text } : { lang: r.lang, text: r.text, conf: r.conf };
+        const text = restoreTokens(r.text, masks[i]!);
+        // Only junk came back (a translator that answered with a mangled id):
+        // nothing to show, asked again later.
+        if (text === "") return "fail";
+        return r.conf === undefined ? { lang: r.lang, text } : { lang: r.lang, text, conf: r.conf };
     });
 }
 
@@ -4344,7 +4404,9 @@ function SurfaceAccessoryImpl({ message }: { message: Message; }) {
     // opted in is translated like its messages are.
     if (typeof channelId !== "string" || !channelActive(channelId)) return null;
     const texts: SurfaceText[] = messageSurfaceTexts(message)
-        .map(t => ({ ...t, text: readableContent(t.text, channelId) }));
+        // Raw text: translateSurfaceBatch masks Discord tokens before sending
+        // and puts them back after, and the line is drawn with them.
+        .map(t => ({ ...t, text: translatableText(t.text) }));
 
     // Reply previews are NOT here: a "Reply" line above the message's own
     // line read as the message's translation. The quoted message's
@@ -4496,61 +4558,24 @@ export function decorateParsed(parser: string, args: unknown[], out: unknown, re
         const spec = PARSER_SURFACES[parser];
         if (spec === undefined) return out;
         if (spec.guildOnly && !parserStateAllowed(parser, args[2])) return out;
-        // What goes to the relay is the READABLE text: mentions as names,
-        // custom emoji as :name:. Never raw <#id>, <@id> or <:name:id> tokens.
-        const channelId = (args[2] as { channelId?: unknown } | null | undefined)?.channelId;
-        const markup = markupFor(source, typeof channelId === "string" ? channelId : null);
-        const texts: SurfaceText[] = [{ kind: spec.kind, label: spec.label, text: markup.readable }];
+        // The text as Discord stored it. translateSurfaceBatch masks its
+        // tokens (<#id>, <@id>, <:name:id>, links) as ⟦n⟧ before sending and
+        // puts them back after, so nothing raw reaches a translator.
+        const rawChannel = (args[2] as { channelId?: unknown } | null | undefined)?.channelId;
+        const channelId = typeof rawChannel === "string" ? rawChannel : null;
+        const texts: SurfaceText[] = [{ kind: spec.kind, label: spec.label, text: source }];
         if (!spec.tight) return [out, <SurfaceLines key="subline-surface" texts={texts} />];
         return (
             <TightSwap
                 key="subline-surface"
                 original={out}
-                text={markup.readable}
-                tooltip={markup.readable}
-                render={translation => renderWithMarkup(translation, markup.tokens, reparse)}
+                text={source}
+                tooltip={readableFor(source, channelId)}
+                render={translation => translatedLine(translation, source, channelId, { parse: reparse, inPlace: true })}
             />
         );
     } catch {
         return out;
-    }
-}
-
-/** Raw Discord tokens: a custom emoji, a channel, role or user mention. */
-const RAW_TOKEN = /<a?:\w+:\d+>|<#\d+>|<@&\d+>|<@!?\d+>/;
-const RAW_TOKENS = /<a?:\w+:\d+>|<#\d+>|<@&\d+>|<@!?\d+>/g;
-
-/**
- * A text's readable form (what is sent), plus each raw token paired with its
- * readable form, so the translation can have its mentions and emoji put back
- * before Discord's own parser renders it.
- */
-function markupFor(source: string, channelId: string | null): { readable: string; tokens: Array<[string, string]>; } {
-    const resolve = (text: string) => channelId === null ? text : readableContent(text, channelId);
-    const tokens: Array<[string, string]> = [];
-    for (const raw of new Set(source.match(RAW_TOKENS) ?? [])) {
-        const readable = resolve(raw);
-        if (readable !== raw && readable !== "") tokens.push([readable, raw]);
-    }
-    // Longest first, so "@Ann" never eats part of "@Anna".
-    tokens.sort((a, b) => b[0].length - a[0].length);
-    return { readable: resolve(source), tokens };
-}
-
-/**
- * The translated text as Discord renders it: readable mentions and emoji
- * turned back into Discord's tokens, then Discord's own parser. Null (keep
- * Discord's original) when the model answered with raw tokens of its own,
- * or when anything throws.
- */
-function renderWithMarkup(translation: string, tokens: Array<[string, string]>, parse?: (text: string) => unknown): unknown {
-    try {
-        if (RAW_TOKEN.test(translation)) return null;
-        let restored = translation;
-        for (const [readable, raw] of tokens) restored = restored.split(readable).join(raw);
-        return parse ? parse(restored) : restored;
-    } catch {
-        return null;
     }
 }
 
@@ -4613,16 +4638,19 @@ function ReplyQuoteImpl({ original, referenced }: { original: unknown; reference
     const content = typeof quoted?.content === "string" ? quoted.content : "";
     const channelId = quoted?.channel_id;
     if (typeof quoted?.id !== "string" || typeof channelId !== "string" || content.trim() === "") return fallback;
-    const markup = markupFor(content, channelId);
+    // What the quoted message SENDS (decoded, tokens masked later) and what
+    // its tooltip shows (mentions as names).
+    const source = translatableText(content);
+    const tooltip = readableFor(content, channelId);
     // A quoted message with a code in it shows decoded, in place, the way a
     // translation does (original on hover). Decoding is local and free, so
     // this is on every plan, wherever the message's own decoded line shows.
     const decoded = channelActive(channelId) ? decodedInPlace(content, channelId) : null;
     if (!isPaidSurfaceUser()) return decoded ?? fallback;
-    // Discord's markdown parser renders the translation, so mentions, links
-    // and emoji look as they do in the original.
-    const render = (translation: string) =>
-        renderWithMarkup(translation, markup.tokens, text => Parser.parse(text, true, { channelId }));
+    // Placeholders put back from the quoted message's own content, then
+    // Discord's markdown parser, so mentions, links and emoji look as they
+    // do in the original.
+    const render = (translation: string) => translatedLine(translation, source, channelId, { inPlace: true });
     const existing = getTranslation(makeKey(quoted.id, settings.store.targetLang));
     if (existing !== undefined && "skipped" in existing) return decoded ?? fallback;
     if (isRealTranslation(existing)) {
@@ -4638,14 +4666,14 @@ function ReplyQuoteImpl({ original, referenced }: { original: unknown; reference
         if (shown === null || shown === undefined) return fallback;
         const glyph = ENGINE_PROVENANCE[existing.via].glyph;
         return (
-            <span title={markup.readable} data-subline-surface="in-place">
+            <span title={tooltip} data-subline-surface="in-place">
                 <span style={{ opacity: 0.75 }}>{glyph} </span><span dir={translationDir()}>{shown as any}</span>
             </span>
         );
     }
     if (decoded !== null) return decoded;
     if (!channelActive(channelId) || isLoadedInChannel(channelId, quoted.id)) return fallback;
-    return <TightSwap original={original} text={markup.readable} tooltip={markup.readable} render={render} />;
+    return <TightSwap original={original} text={source} tooltip={tooltip} render={render} />;
 }
 const ReplyQuote = safe("reply quote", ReplyQuoteImpl, surfaceDebug);
 

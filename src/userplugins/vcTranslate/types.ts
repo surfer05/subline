@@ -93,7 +93,14 @@ export function effectiveGroqModel(stored?: string): string {
 export interface PendingMessage {
     id: string;
     author: string;
+    /** What is sent: Discord tokens masked as ⟦n⟧ (placeholders.ts). */
     text: string;
+    /**
+     * What other messages' requests read as CONTEXT: mentions as names,
+     * custom emoji dropped, no placeholders (another message's ⟦1⟧ would mean
+     * a different token). Falls back to `text` when absent.
+     */
+    contextText?: string;
     channelId: string;
     /**
      * The message this one replies to, when Discord says it is a reply.
