@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { splitForUrl } from "../engines/google";
 import { fitLlmRequest } from "../fitRequest";
-import { maskTokens, placeholder, repairTranslation, restoreTokens, tokenSpans } from "../placeholders";
+import { contentTokens, fastKeepsWhatQualityLost, maskTokens, placeholder, repairTranslation, restoreTokens, tokenSpans, withContent } from "../placeholders";
 import { fitLongText } from "../surfaces/service";
 
 /** Clearly fake snowflakes. */
@@ -200,5 +200,59 @@ describe("long texts never cut a placeholder or a token", () => {
         const fitted = fitLongText(s).text;
         expect(fitted.length).toBeLessThanOrEqual(4_000);
         expect((fitted.match(/```/g) ?? []).length % 2).toBe(0);
+    });
+});
+
+describe("content-bearing tokens (✦ that drops placeholders)", () => {
+    const U2 = "<@444444444444444444>";
+    const R2 = "<@&555555555555555555>";
+    const C2 = "<#666666666666666666>";
+    const T2 = "<t:1790000000:t>";
+    const L2 = "https://example.com/x";
+    const K2 = "`npm i`";
+    const B2 = "```js\nlet a = 1\n```";
+    const EM = "<:SHAKE:222222222222222222>";
+    const EA = "<a:wave:333333333333333333>";
+    const SRC = `${U2} ${R2} ${C2} at ${T2} see ${L2} run ${K2} ${EM}${EA}\n${B2} @everyone`;
+
+    it("lists every content-bearing kind once, in source order, and no custom emoji", () => {
+        expect(contentTokens(`${SRC} ${U2}`)).toEqual([U2, R2, C2, T2, L2, K2, B2, "@everyone"]);
+        expect(contentTokens(`${EM} hi ${EA}`)).toEqual([]);
+        expect(contentTokens("plain text")).toEqual([]);
+    });
+
+    it("withContent appends only what was lost, in source order, and drops nothing that was kept", () => {
+        expect(withContent(`hi ${C2} done`, SRC)).toBe(`hi ${C2} done ${U2} ${R2} ${T2} ${L2} ${K2} ${B2} @everyone`);
+        expect(withContent(`all ${U2} ${R2} ${C2} ${T2} ${L2} ${K2} ${B2} @everyone`, SRC)).toBe(`all ${U2} ${R2} ${C2} ${T2} ${L2} ${K2} ${B2} @everyone`);
+        expect(withContent("", SRC)).toBe("");
+    });
+
+    it("a mention kept in its readable form (a line stored before placeholders) counts as kept", () => {
+        const readable = (t: string) => t === U2 ? "@viktor" : null;
+        expect(withContent("@viktor happy birthday", `${U2} wszystkiego najlepszego`, readable)).toBe("@viktor happy birthday");
+        expect(withContent("happy birthday", `${U2} wszystkiego najlepszego`, readable)).toBe(`happy birthday ${U2}`);
+        // A readable form that throws is treated as absent, never as kept.
+        expect(withContent("happy birthday", `${U2} hola`, () => { throw new Error("x"); })).toBe(`happy birthday ${U2}`);
+    });
+
+    it("fastKeepsWhatQualityLost: only when ✦ lost content that ≈ kept, all of it", () => {
+        const src = `¿vienes a las ${T2}? mira ${L2} ${EM}`;
+        const q = "Are you coming at the ? Look";
+        const fAll = `EN ¿vienes a las ⟦1⟧? mira ⟦2⟧ ⟦3⟧`;
+        const fHalf = `EN ¿vienes a las ⟦1⟧? mira`;
+        expect(fastKeepsWhatQualityLost(q, fAll, src)).toBe(true);
+        expect(fastKeepsWhatQualityLost(q, fHalf, src)).toBe(false);
+        expect(fastKeepsWhatQualityLost(`Are you coming at ⟦1⟧? Look ⟦2⟧`, fAll, src)).toBe(false);   // ✦ lost only the emoji
+        expect(fastKeepsWhatQualityLost(q, "", src)).toBe(false);
+        expect(fastKeepsWhatQualityLost("thanks", "EN gracias", `${EM} gracias`)).toBe(false);          // no content at all
+    });
+
+    it("many placeholders: 40 links, half dropped by ✦, come back at the end in order", () => {
+        const links = Array.from({ length: 40 }, (_, i) => `https://e.example/${i}`);
+        const src = links.map((l, i) => `w${i} ${l}`).join(" ");
+        const kept = links.filter((_, i) => i % 2 === 0);
+        const lost = links.filter((_, i) => i % 2 === 1);
+        const restored = kept.join(" ");
+        expect(withContent(restored, src)).toBe(`${restored} ${lost.join(" ")}`);
     });
 });

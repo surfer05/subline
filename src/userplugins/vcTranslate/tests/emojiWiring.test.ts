@@ -28,7 +28,7 @@ import * as DataStore from "./stubs/api-datastore";
 import { __getPopoverButton, __reset as resetPopover } from "./stubs/api-messagepopover";
 import { __resetNotices } from "./stubs/api-notices";
 import { __resetSettings } from "./stubs/api-settings";
-import { __resetWebpackCommon, __stubSetChannelName, __stubSetSelectedChannel, __stubSetUser, FluxDispatcher, stubMessages } from "./stubs/webpack-common";
+import { __resetWebpackCommon, __stubSetChannelName, __stubSetSelectedChannel, __stubSetUser, FluxDispatcher, stubMessageById, stubMessages } from "./stubs/webpack-common";
 
 const HOUR = 3_600_000;
 const P = (n: number) => placeholder(n);
@@ -223,5 +223,152 @@ describe("worst cases", () => {
         await send(msg("16", ar));
         expect(sent("relay")[0].messages[0].text).toBe(`${P(1)} مبروك يا صديقي ${P(2)}`);
         expect(rendered(msg("16", ar))).toContain(`<md:${E1} Congratulations my friend ${E2}|c1>`);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// The live model dropped every ⟦n⟧ (0.2.1, gpt-oss-120b). What a ✦ line that
+// lost content shows: the ≈ line when ≈ kept it, else ✦ with the lost
+// content-bearing tokens at the end. Dropped custom emoji are just left out.
+describe("✦ that drops placeholders", () => {
+    const T = "<t:1790000000:t>";
+    const L = "https://example.com/plan";
+    const C = "<#666666666666666666>";
+    const SPANISH = `${U} ¿vienes a las ${T}? mira ${L} ${E1}${E1} jaja`;
+    /** Store the message where sentSourceFor finds it, then send it. */
+    async function sendKnown(m: any) {
+        stubMessageById.set(`c1:${m.id}`, m);
+        await send(m);
+    }
+    const via = (id: string) => (getTranslation(makeKey(id, "en")) as any)?.via;
+
+    it("the field case: ✦ lost the mention and every emoji, ≈ kept them: ≈ is drawn, with the mention", async () => {
+        answer(() => "HAPPY BIRTHDAY! Happy birthday! My dear 19-year-old boy");
+        await start();
+        await sendKnown(msg("9", FIELD));
+        expect(via("9")).toBe("relay");   // ✦ still won the store, so it is not asked again
+        const out = rendered(msg("9", FIELD));
+        expect(out).toContain(`≈`);
+        expect(out).toContain(U);
+        expect(out).not.toContain("My dear 19-year-old boy");
+    });
+
+    it("the Spanish case: ✦ \"are you coming at the ?\" never shows; ≈ with the time and the link does", async () => {
+        answer(() => "Are you coming at the ? Look haha");
+        await start();
+        await sendKnown(msg("10", SPANISH));
+        const out = rendered(msg("10", SPANISH));
+        expect(out).not.toContain("Are you coming at the ?");
+        expect(out).toContain(T);
+        expect(out).toContain(L);
+        expect(out).toContain("≈");
+    });
+
+    it("≈ arriving AFTER the lossy ✦ is attached and drawn", async () => {
+        let releaseGoogle!: () => void;
+        const googleGate = new Promise<void>(r => { releaseGoogle = r; });
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) => {
+            const p = JSON.parse(payload);
+            if (engine === "google") await googleGate;
+            return {
+                ok: true,
+                results: p.messages.map((m: any) => engine === "google"
+                    ? { id: m.id, lang: "es", text: `EN ${m.text}`, skip: false, conf: 0.99 }
+                    : { id: m.id, lang: "es", text: "Are you coming at the ? Look haha", skip: false })
+            };
+        });
+        await start();
+        await sendKnown(msg("11", SPANISH));
+        expect(via("11")).toBe("relay");
+        expect(rendered(msg("11", SPANISH))).toContain(T);   // appended meanwhile, never lost
+        releaseGoogle();
+        await vi.advanceTimersByTimeAsync(1_000);
+        await flush();
+        const e = getTranslation(makeKey("11", "en")) as any;
+        expect(e.via).toBe("relay");
+        expect(e.alt?.text).toContain("EN ");
+        const out = rendered(msg("11", SPANISH));
+        expect(out).toContain("≈");
+        expect(out).not.toContain("Are you coming at the ?");
+    });
+
+    it("≈ lost them too: ✦ is drawn with the lost content-bearing tokens at the end, in source order, emoji left out", async () => {
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) => {
+            const p = JSON.parse(payload);
+            return {
+                ok: true,
+                results: p.messages.map((m: any) => ({
+                    id: m.id, lang: "es", skip: false, conf: 0.99,
+                    text: engine === "google" ? "EN are you coming? look haha" : "Are you coming? Look haha"
+                }))
+            };
+        });
+        await start();
+        await sendKnown(msg("12", SPANISH));
+        const out = rendered(msg("12", SPANISH));
+        expect(out).toContain("✦");
+        expect(out).toContain(`Are you coming? Look haha ${U} ${T} ${L}`);
+        expect(out).not.toContain(E1);
+        expect(out).not.toMatch(/:111111111111111111:/);
+    });
+
+    it("only custom emoji dropped: ✦ stays, nothing appended", async () => {
+        const text = `${E1} gracias amigo ${E2}`;
+        answer(() => "thanks friend");
+        await start();
+        await sendKnown(msg("13", text));
+        const out = rendered(msg("13", text));
+        expect(out).toContain("✦");
+        expect(out).toContain("thanks friend");
+        expect(out).not.toContain("≈");
+        expect(out).not.toContain(E1);
+    });
+
+    it("a ✦ that keeps every placeholder is drawn as ✦, no alternative stored", async () => {
+        answer(t => t.replace("¿vienes a las", "are you coming at").replace("mira", "look"));
+        await start();
+        await sendKnown(msg("14", SPANISH));
+        const e = getTranslation(makeKey("14", "en")) as any;
+        expect(e.via).toBe("relay");
+        expect(e.alt).toBeUndefined();
+        const out = rendered(msg("14", SPANISH));
+        expect(out).toContain("✦");
+        expect(out).toContain(`are you coming at ${T}`);
+    });
+
+    it("a ✦ skip still blanks the ≈ line (bias to silence), whatever ≈ kept", async () => {
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) => {
+            const p = JSON.parse(payload);
+            return {
+                ok: true,
+                results: p.messages.map((m: any) => engine === "google"
+                    ? { id: m.id, lang: "es", text: `EN ${m.text}`, skip: false, conf: 0.99 }
+                    : { id: m.id, lang: "es", text: "", skip: true })
+            };
+        });
+        await start();
+        await sendKnown(msg("15", SPANISH));
+        expect(getTranslation(makeKey("15", "en"))).toMatchObject({ skipped: true, via: "relay" });
+    });
+
+    it("the reply bar shows the ≈ the message line shows", async () => {
+        answer(() => "Are you coming at the ? Look haha");
+        await start();
+        const q = msg("16", SPANISH);
+        await sendKnown(q);
+        const el: any = (plugin as any).replyQuoteChildren("ORIGINAL", { referencedMessage: { state: 0, message: q } });
+        const walk = (n: any): string => n == null || n === false ? "" : typeof n === "string" ? n : Array.isArray(n) ? n.map(walk).join("") : n.type && typeof n.type === "function" ? walk(n.type(n.props)) : walk(n.props?.children ?? n.children);
+        const out = walk(el);
+        expect(out).toContain("≈");
+        expect(out).toContain(T);
+        expect(out).not.toContain("Are you coming at the ?");
+    });
+
+    it("a message gone from Discord's store at write time is still mended where it is drawn", async () => {
+        answer(() => "Are you coming at the ? Look haha");
+        await start();
+        await send(msg("17", SPANISH));   // not in stubMessageById: nothing decided at write time
+        const out = rendered(msg("17", SPANISH));
+        expect(out).toContain(`Are you coming at the ? Look haha ${U} ${T} ${L}`);
     });
 });

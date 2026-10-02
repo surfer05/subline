@@ -16,7 +16,7 @@ import { createBatcher, type Batcher } from "./batcher";
 import { forgetNotices, putNotice, takeNotice } from "./sublineNotice";
 import { fitLlmRequest, LLM_TEXT_MAX, shrinkAfterRefusal } from "./fitRequest";
 import { renderDiscordMarkup, type MarkupResolvers } from "./discordMarkup";
-import { maskTokens, repairTranslation, restoreTokens } from "./placeholders";
+import { fastKeepsWhatQualityLost, maskTokens, type ReadableForm, repairTranslation, restoreTokens, withContent } from "./placeholders";
 import { renderTranslated } from "./translationRender";
 import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel, toggleChannelOptOut } from "./channels";
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
@@ -2471,7 +2471,31 @@ async function runTier(
             // (approximate) instead of claiming ✦. Routed through
             // writeResult(): the two tiers write the same key from different
             // latencies, so this write has to ask whether it is an improvement.
-            const value: StoredTranslation = { lang: r.lang, text: r.text, via: engine, conf: r.conf };
+            let value: StoredTranslation = { lang: r.lang, text: r.text, via: engine, conf: r.conf };
+            // CONTENT KEPT. A ✦ line can lose a link, a time, a mention or
+            // code (the model drops the placeholder). ✦ still wins the store
+            // (the upgrade rule is unchanged, so ✦ is not asked for again),
+            // but the ≈ line it replaces rides along as `alt`; where the line
+            // is drawn, ≈ is shown instead whenever it kept what ✦ lost
+            // ("are you coming at the ?" reads worse than Google's rougher
+            // line with the time in it). A ≈ that arrives AFTER the ✦ is
+            // attached the same way. Any other loss is mended where the line
+            // is drawn: the lost tokens go at its end (see translatedLine).
+            const source = channelId !== undefined ? sentSourceFor(channelId, r.id) : null;
+            if (source !== null) {
+                const existing = getTranslation(key);
+                if (isQuality && isRealTranslation(existing) && existing.via === "google"
+                    && fastKeepsWhatQualityLost(r.text, existing.text, source, readableFormIn(channelId ?? null))) {
+                    value = { ...value, alt: { lang: existing.lang, text: existing.text, conf: existing.conf } };
+                    if (debug) logger.debug(`[write] ${key}: ✦ lost content ≈ has; ≈ kept as its alternative`);
+                }
+                if (!isQuality && isRealTranslation(existing) && existing.via !== "google" && existing.alt === undefined
+                    && fastKeepsWhatQualityLost(existing.text, r.text, source, readableFormIn(channelId ?? null))) {
+                    if (debug) logger.debug(`[write] ${key}: ≈ attached to a ✦ line that lost content`);
+                    setTranslation(key, { ...existing, alt: { lang: r.lang, text: r.text, conf: r.conf } });
+                    continue;
+                }
+            }
             writeResult(key, value);
             // Recorded from the SENT text, so the lookup in enqueue() keys on
             // exactly what a later identical message will present.
@@ -2936,14 +2960,60 @@ function readableFor(raw: string, channelId: string | null): string {
  * original tokens, mangled leftovers repaired or removed (translations stored
  * before placeholders existed included), then Discord's parser so emoji and
  * mentions show as they do in the message. Null when nothing is left to show.
+ *
+ * A link, time, mention or code the translator dropped is never lost: it goes
+ * at the end of the line, in source order (withContent). Dropped custom emoji
+ * are simply left out. A ✦ preview is cut on purpose, so it passes
+ * `keepContent: false` and gets nothing appended.
  */
 function translatedLine(
     translation: string, sourceText: string, channelId: string | null,
-    opts: { parse?: (text: string) => unknown; inPlace?: boolean; } = {}
+    opts: { parse?: (text: string) => unknown; inPlace?: boolean; keepContent?: boolean; } = {}
 ): unknown {
     const repaired = repairTranslation(translation, sourceText);
     if (repaired === "") return null;
-    return renderTranslated(repaired, { channelId, parse: opts.parse, always: opts.inPlace === true });
+    const line = opts.keepContent === false ? repaired : withContent(repaired, sourceText, readableFormIn(channelId));
+    return renderTranslated(line, { channelId, parse: opts.parse, always: opts.inPlace === true });
+}
+
+/**
+ * How a token reads in this channel ("@viktor", "#general"), for the
+ * content check: a translation stored before placeholders existed carries
+ * mentions in that form, and they must count as kept.
+ */
+function readableFormIn(channelId: string | null): ReadableForm | undefined {
+    if (channelId === null) return undefined;
+    return (token: string) => {
+        const r = renderDiscordMarkup(token, markupResolversFor(channelId));
+        return typeof r === "string" && r !== token ? r : null;
+    };
+}
+
+/**
+ * The text a message was sent to the translators as, before masking: what
+ * translatedLine restores against. Null when the message is no longer in
+ * Discord's store (then nothing content-aware is decided at write time; the
+ * line is still mended where it is drawn).
+ */
+function sentSourceFor(channelId: string, messageId: string): string | null {
+    try {
+        const raw = (MessageStore.getMessage(channelId, messageId) as any)?.content;
+        return typeof raw === "string" ? translatableText(raw) : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * The entry to DRAW for a stored translation of `sourceText`: the ✦ line, or
+ * the ≈ line it carries as `alt` when ✦ lost a link, time, mention or code
+ * that ≈ kept (see the write loop). The ≈ comes back as a Google entry, so it
+ * wears ≈ and its own confidence marks. Anything else is returned unchanged.
+ */
+function shownEntry<T extends StoredTranslation | undefined>(entry: T, sourceText: string): T | { lang: string; text: string; via: EngineId; conf?: number; } {
+    if (!isRealTranslation(entry) || entry.alt === undefined || entry.via === "google") return entry;
+    if (!fastKeepsWhatQualityLost(entry.text, entry.alt.text, sourceText)) return entry;
+    return { lang: entry.alt.lang, text: entry.alt.text, via: "google", conf: entry.alt.conf };
 }
 
 /**
@@ -3642,7 +3712,7 @@ function previewLine(message: Message) {
     }
     return (
         <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-            ✦ reads this as: <span dir={translationDir()}>{(translatedLine(preview.text, translatableText(message.content ?? ""), message.channel_id ?? null) ?? "") as any}{preview.truncated ? "…" : ""}</span>{" "}
+            ✦ reads this as: <span dir={translationDir()}>{(translatedLine(preview.text, translatableText(message.content ?? ""), message.channel_id ?? null, { keepContent: false }) ?? "") as any}{preview.truncated ? "…" : ""}</span>{" "}
             <a
                 href={PRICING_URL}
                 target="_blank"
@@ -3710,7 +3780,7 @@ function translationLines(message: Message) {
     // it is read from. That is what makes a Google-produced translation
     // visible while an LLM engine is selected.
     const key = makeKey(message.id, settings.store.targetLang);
-    const entry: StoredTranslation | undefined = getTranslation(key);
+    const entry: StoredTranslation | undefined = shownEntry(getTranslation(key), translatableText(message.content ?? "")) as StoredTranslation | undefined;
 
     // A manual ⚡ click currently out for this message. Read AFTER the store
     // lookup above but used throughout below — this is the one thing in this
@@ -4651,7 +4721,7 @@ function ReplyQuoteImpl({ original, referenced }: { original: unknown; reference
     // Discord's markdown parser, so mentions, links and emoji look as they
     // do in the original.
     const render = (translation: string) => translatedLine(translation, source, channelId, { inPlace: true });
-    const existing = getTranslation(makeKey(quoted.id, settings.store.targetLang));
+    const existing = shownEntry(getTranslation(makeKey(quoted.id, settings.store.targetLang)), translatableText(content)) as StoredTranslation | undefined;
     if (existing !== undefined && "skipped" in existing) return decoded ?? fallback;
     if (isRealTranslation(existing)) {
         // The message's own line says "≈ rough" for a Google guess it cannot

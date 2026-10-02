@@ -244,3 +244,101 @@ export function tokenSpans(text: string): Array<[number, number]> {
     for (const m of text.matchAll(TOKEN)) spans.push([m.index!, m.index! + m[0].length]);
     return spans;
 }
+
+/* ------------------------------------------------------- content tokens -- */
+
+/** A custom emoji: decoration. Dropping one loses nothing a reader needs. */
+const DECORATIVE = /^<a?:\w+:\d+>$/;
+/** A lone ⟦ or ⟧ the author typed: masked only to keep placeholders unambiguous. */
+const LONE_BRACKET = new RegExp(`^[${PH_OPEN}${PH_CLOSE}]$`);
+
+/**
+ * The source's CONTENT-BEARING tokens, deduplicated, in source order: links,
+ * timestamps, user/role/channel/command mentions, @everyone/@here, inline code
+ * and code blocks, and a placeholder lookalike the author really typed. These
+ * carry meaning a sentence can depend on ("are you coming at ⟦2⟧?"). Custom
+ * emoji are decoration and are not listed.
+ */
+export function contentTokens(source: string): string[] {
+    const out: string[] = [];
+    for (const t of maskTokens(source).tokens) {
+        if (DECORATIVE.test(t) || LONE_BRACKET.test(t)) continue;
+        if (!out.includes(t)) out.push(t);
+    }
+    return out;
+}
+
+/**
+ * Is `token` in `text` as a whole token? A plain substring test would call
+ * https://x/1 kept when only https://x/10 is there: the character after a
+ * match must not continue it (a link continues with any non-space, non-<>
+ * character, except the punctuation Discord leaves out of a bare link).
+ */
+function containsToken(text: string, token: string): boolean {
+    for (let i = text.indexOf(token); i !== -1; i = text.indexOf(token, i + 1)) {
+        const next = text[i + token.length];
+        if (next === undefined || /[\s<>]/.test(next)) return true;
+        if (/[.,:;!?'")\]}]/.test(next)) {
+            const after = text[i + token.length + 1];
+            if (after === undefined || /[\s<>.,:;!?'")\]}]/.test(after)) return true;
+            continue;
+        }
+        if (!/^https?:\/\//.test(token) && !/^@(everyone|here)$/.test(token)) return true;
+    }
+    return false;
+}
+
+/**
+ * How a token reads as plain text ("@viktor" for a user mention), or null.
+ * A translation stored before placeholders existed carries a mention in that
+ * readable form; it counts as kept, so the mention is not appended twice.
+ */
+export type ReadableForm = (token: string) => string | null;
+
+/**
+ * The content-bearing tokens of `source` that a restored translation lost, in
+ * source order. `restored` is a translation already put back together
+ * (restoreTokens / repairTranslation), so a kept token is present verbatim
+ * (or, with `readable`, in its readable form).
+ */
+export function missingContent(restored: string, source: string, readable?: ReadableForm): string[] {
+    if (typeof restored !== "string") return contentTokens(source);
+    return contentTokens(source).filter(t => {
+        if (containsToken(restored, t)) return false;
+        let r: string | null = null;
+        try { r = readable ? readable(t) : null; } catch { r = null; }
+        return !(typeof r === "string" && r !== "" && r !== t && restored.includes(r));
+    });
+}
+
+/**
+ * A restored translation that never loses content: any content-bearing token
+ * the translator dropped is appended at the end, in source order, separated
+ * by a space. Dropped custom emoji are simply left out. An empty translation
+ * stays empty (nothing to append to: the caller shows nothing).
+ */
+export function withContent(restored: string, source: string, readable?: ReadableForm): string {
+    if (typeof restored !== "string" || restored === "") return "";
+    const missing = missingContent(restored, source, readable);
+    return missing.length === 0 ? restored : `${restored} ${missing.join(" ")}`;
+}
+
+/**
+ * Should a ≈ line be shown instead of a ✦ line for the same source? Only when
+ * ✦ lost a content-bearing token that ≈ kept, and ≈ kept every one of them:
+ * a sentence left as "are you coming at the ?" reads worse than Google's
+ * rougher line with the time in it. Both arguments are raw stored texts; they
+ * are restored here.
+ */
+export function fastKeepsWhatQualityLost(qualityText: string, fastText: string, source: string, readable?: ReadableForm): boolean {
+    try {
+        const content = contentTokens(source);
+        if (content.length === 0) return false;
+        const q = repairTranslation(qualityText, source);
+        if (missingContent(q, source, readable).length === 0) return false;
+        const f = repairTranslation(fastText, source);
+        return f !== "" && missingContent(f, source, readable).length === 0;
+    } catch {
+        return false;
+    }
+}

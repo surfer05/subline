@@ -26,7 +26,7 @@ export const ENGINE_RANK: Record<EngineId, number> = {
 /** A stored entry that actually carries text to show, as opposed to a marker. */
 export function isRealTranslation(
     e: StoredTranslation | undefined
-): e is { lang: string; text: string; via: EngineId; conf?: number } {
+): e is { lang: string; text: string; via: EngineId; conf?: number; alt?: { lang: string; text: string; conf?: number } } {
     return e !== undefined && "lang" in e;
 }
 

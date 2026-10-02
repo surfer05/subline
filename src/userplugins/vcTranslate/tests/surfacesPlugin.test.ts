@@ -1010,7 +1010,7 @@ describe("markup in tight swaps: tokens out as placeholders, Discord's parser in
         expect(out.props.title).toBe("Zocken mit @deniz :party:");
     });
 
-    it("a model that answers with raw Discord tokens the source never had: they are removed, never shown", async () => {
+    it("a model that answers with raw Discord tokens the source never had: they are removed, never shown; the source's own dropped channel goes at the end", async () => {
         native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => ({
             ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "de", text: "Read the rules in <#999> <@&42>", skip: false }))
         }));
@@ -1018,7 +1018,7 @@ describe("markup in tight swaps: tokens out as placeholders, Discord's parser in
         parseWith("topic-truncated", topic);
         await settle();
         const out = text(parseWith("topic-truncated", topic));
-        expect(out).toBe("✦ <p:Read the rules in>");
+        expect(out).toBe("✦ <p:Read the rules in <#700000000000000007>>");
         expect(out).not.toMatch(/999|<@&42>/);
     });
 
@@ -1079,6 +1079,52 @@ describe("markup in tight swaps: tokens out as placeholders, Discord's parser in
         expect(line).toContain("<:blobwave:123456789012345678>");
         expect(line).toContain("<a:party:223456789012345678>");
         expect(line.replace(/<a?:\w+:\d+>/g, "")).not.toMatch(/\d{15,}|:party:|:blobwave:/);
+    });
+
+    it("tight: a ✦ that dropped the channel and the link gets them back at the end, in source order; the emoji is just left out", async () => {
+        native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => ({
+            ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "de", text: "Read the rules", skip: false }))
+        }));
+        const topic = "Regeln lesen in <#700000000000000007> und https://example.com/regeln <:blobwave:123456789012345678>";
+        parseWith("topic-truncated", topic);
+        await settle();
+        const out = text(parseWith("topic-truncated", topic));
+        expect(out).toBe("✦ <p:Read the rules <#700000000000000007> https://example.com/regeln>");
+    });
+
+    it("tight status in the member list: a ✦ that dropped the link gets it back at the end", async () => {
+        native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => ({
+            ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "de", text: "Streaming now, come watch", skip: false }))
+        }));
+        const status = "Streame gerade https://example.com/live kommt vorbei";
+        stubActivities.set("u5", [{ type: 4, state: status }]);
+        decorator("u5");
+        await settle();
+        expect(text(decorator("u5"))).toBe("✦ <md:Streaming now, come watch https://example.com/live|>");
+    });
+
+    it("roomy: a ✦ bio that lost the link shows the ≈ that kept it; one where ≈ lost it too shows ✦ with the link appended", async () => {
+        const bio = "Mein Kanal: https://example.com/kanal und mehr Infos dort";
+        const answerWith = (fast: (t: string) => string) => native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) => ({
+            ok: true, results: JSON.parse(payload).messages.map((m: any) => engine === "google"
+                ? { id: m.id, lang: "de", text: fast(m.text), skip: false, conf: 0.99 }
+                : { id: m.id, lang: "de", text: "My channel: and more info there", skip: false })
+        }));
+        answerWith(t => `EN ${t}`);
+        bioLine({ userId: "u1", userBio: bio });
+        await settle();
+        const kept = text(bioLine({ userId: "u1", userBio: bio }));
+        expect(kept).toContain("≈");
+        expect(kept).toContain("https://example.com/kanal");
+        expect(kept).not.toContain("My channel: and more info there");
+
+        const bio2 = "Mein Server: https://example.com/server und mehr Infos dort";
+        answerWith(() => "EN my server and more info there");
+        bioLine({ userId: "u2", userBio: bio2 });
+        await settle();
+        const appended = text(bioLine({ userId: "u2", userBio: bio2 }));
+        expect(appended).toContain("✦");
+        expect(appended).toContain("My channel: and more info there https://example.com/server");
     });
 
     it("the reply bar: a quoted translation stored with placeholders is drawn with the quoted message's own tokens", () => {

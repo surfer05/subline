@@ -51,6 +51,9 @@ export function previewText(text: string): { text: string; truncated: boolean } 
     let out = words.slice(0, PREVIEW_WORDS).join(" ");
     const cps = Array.from(out);
     if (cps.length > PREVIEW_MAX_CODE_POINTS) out = cps.slice(0, PREVIEW_MAX_CODE_POINTS).join("").trimEnd();
+    // A cut never leaves half a placeholder (⟦1 of ⟦12⟧): the client could
+    // not put it back, so the fragment goes.
+    out = out.replace(/\u27E6\s*\d*\s*$/u, "").trimEnd();
     return { text: out, truncated: out !== full };
 }
 
@@ -106,6 +109,7 @@ export function buildPrompt(req: BatchRequest): string {
         + "romanised Arabic written in Latin letters with digits for letters, e.g. 3 for ع, 7 for ح) "
         + "are ordinary chat, not errors. Translate them as confidently as the standard form.",
         "- Leave usernames, game terms, and custom emote names untranslated.",
+        "- Messages may contain placeholders like ⟦1⟧ that stand for emoji, mentions, links, times or code. Keep every placeholder exactly as written, once, in the position where it belongs in your translation.",
         "- Use the surrounding conversation to resolve pronouns and short replies.",
         "- Translate a repeated phrase the same way every time it appears.",
         "- Set lang to the BCP-47 code of the message's original language.",
