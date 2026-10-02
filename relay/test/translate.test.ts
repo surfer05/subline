@@ -27,9 +27,6 @@ describe("buildPrompt — drift guard", () => {
             "3 for ع, 7 for ح", "Keep slang as slang and profanity as profanity",
             "Return exactly one entry per message id given",
             "JSON-encoded strings", "BCP-47",
-            // Placeholders (0.2.1 field bug): the live model dropped every ⟦n⟧.
-            "Messages may contain placeholders like ⟦1⟧ that stand for emoji, mentions, links, times or code. "
-            + "Keep every placeholder exactly as written, once, in the position where it belongs in your translation.",
             // Line breaks (field report, 0.1.6): a two-line message came back
             // as one line. The model must keep them, written as \n.
             "Your reply must be valid JSON: escape quotes, backslashes and line breaks as JSON requires. "

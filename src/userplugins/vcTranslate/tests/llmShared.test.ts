@@ -335,21 +335,3 @@ describe("line breaks survive the round trip", () => {
         expect(restoreLineBreaks("a\nb \\n c", "x\ny")).toBe("a\nb \\n c");
     });
 });
-
-describe("placeholders (0.2.1 field bug: the live model dropped every ⟦n⟧)", () => {
-    const RULE = "- Messages may contain placeholders like ⟦1⟧ that stand for emoji, mentions, links, times or code. "
-        + "Keep every placeholder exactly as written, once, in the position where it belongs in your translation.";
-
-    it("the prompt carries the one general rule, once, after the emote-name rule", () => {
-        const prompt = buildPrompt({ messages: [{ id: "1", author: "a", text: "⟦1⟧ hola ⟦2⟧" }], context: [], targetLang: "en" });
-        expect(prompt.split(RULE)).toHaveLength(2);
-        expect(prompt.indexOf(RULE)).toBeGreaterThan(prompt.indexOf("- Leave usernames, game terms, and custom emote names untranslated."));
-        expect(prompt).toContain(JSON.stringify("⟦1⟧ hola ⟦2⟧"));
-    });
-
-    it("mirrors the relay's prompt line exactly (drift guard)", async () => {
-        const { readFileSync } = await import("node:fs");
-        const relay = readFileSync(new URL("../../../../relay/src/translate.ts", import.meta.url), "utf8");
-        expect(relay).toContain(JSON.stringify(RULE));
-    });
-});

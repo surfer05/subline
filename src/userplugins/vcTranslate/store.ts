@@ -39,7 +39,7 @@ const logger = new Logger("VcTranslate");
 // itself detected confidently — otherwise one bad detection would propagate
 // down an entire reply chain.
 export type StoredTranslation =
-    | { lang: string; text: string; via: EngineId; conf?: number; alt?: { lang: string; text: string; conf?: number } }
+    | { lang: string; text: string; via: EngineId; conf?: number }
     | { failed: true }
     // `via` matters here: Google reports "already in the target language" for
     // short messages it simply failed to identify — it returns "ne" unchanged,

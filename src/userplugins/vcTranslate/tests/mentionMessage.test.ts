@@ -95,9 +95,7 @@ describe("a short foreign message that starts with a mention", () => {
                 expect(engines).toContain("google");
                 expect(engines).toContain("relay");
                 const relayText = JSON.parse(native.translateBatch.mock.calls.find(c => c[0] === "relay")![2]).messages[0].text;
-                // A real mention goes out as a placeholder (placeholders.ts); a typed
-                // "@danna" is plain text.
-                expect(relayText).toMatch(/^(\u27E61\u27E7|@\S+) balhin ubos$/);
+                expect(relayText).toMatch(/^@\S+ balhin ubos$/);
                 expect(stored).toMatchObject({ via: "relay", text: "@danna move down" });
             });
         }

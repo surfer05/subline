@@ -36,9 +36,6 @@ export function previewText(text: string): { text: string; truncated: boolean } 
     let out = words.slice(0, PREVIEW_WORDS).join(" ");
     const chars = Array.from(out);
     if (chars.length > PREVIEW_MAX_CHARS) out = chars.slice(0, PREVIEW_MAX_CHARS).join("").trimEnd();
-    // A cut never leaves half a placeholder (⟦1 of ⟦12⟧): the client could
-    // not put it back, so the fragment goes.
-    out = out.replace(/\u27E6\s*\d*\s*$/u, "").trimEnd();
     return { text: out, truncated: out !== full };
 }
 

@@ -20,7 +20,6 @@
  * caller builds the request.
  */
 
-import { tokenSpans } from "../placeholders";
 import { normalizeSurfaceText, type SurfaceCache, type SurfaceEntry, surfaceKey } from "./cache";
 
 export type SurfaceTier = "fast" | "quality";
@@ -96,6 +95,9 @@ export const SURFACE_MAX_TEXT_CHARS = 2_000;
  */
 export const SURFACE_MAX_LONG_TEXT_CHARS = 4_000;
 
+/** Spans a long-text cut may not land inside. */
+const UNCUTTABLE = /```[\s\S]*?```|`[^`\n]+`|<a?:\w+:\d+>|<#\d+>|<@&\d+>|<@!?\d+>|<t:-?\d+(?::[a-zA-Z])?>|https?:\/\/\S+/g;
+
 /**
  * A long text cut to fit SURFACE_MAX_LONG_TEXT_CHARS: at the last paragraph
  * break, else the last sentence end, else the last space, at or under the
@@ -115,10 +117,13 @@ export function fitLongText(text: string): { text: string; partial: boolean; } {
     if (cut < 0 && sentence >= floor) cut = sentence;
     if (cut < 0) cut = head.lastIndexOf(" ");
     if (cut < floor) cut = max;
-    // Never inside a Discord token (a code block, a link, an emoji): half of
-    // one would reach the translator as text. Cut before it instead.
-    for (const [start, end] of tokenSpans(text)) {
+    // Never inside a Discord token (a code block, inline code, a link, a
+    // mention, an emoji, a timestamp): half of one would reach the
+    // translator as text. Cut before it instead.
+    for (const m of text.matchAll(UNCUTTABLE)) {
+        const start = m.index!, end = start + m[0].length;
         if (cut > start && cut < end) { cut = start; break; }
+        if (start >= cut) break;
     }
     if (cut <= 0) cut = max;
     // Never end on half of a surrogate pair.

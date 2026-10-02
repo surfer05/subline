@@ -966,7 +966,7 @@ describe("the custom status line under the profile bubble", () => {
     });
 });
 
-describe("markup in tight swaps: tokens out as placeholders, Discord's parser in", () => {
+describe("markup in tight swaps: readable text out, Discord's parser in", () => {
     beforeEach(() => {
         paid();
         __stubSetUser("900000000000000009", { username: "deniz" });
@@ -985,18 +985,18 @@ describe("markup in tight swaps: tokens out as placeholders, Discord's parser in
     const parseWith = (parser: string, source: string, state: unknown = { channelId: "c1" }) =>
         deep(P.wrapParser(parser, (t: string, _i: unknown, st: any) => { rendered.push(`${t}|${st?.channelId}`); return [`<p:${t}>`]; })(source, true, state));
 
-    it("a header topic with a link, a channel mention and a custom emoji: placeholders go out, the translation is rendered by the same parser with its tokens back", async () => {
+    it("a header topic with a link, a channel mention and a custom emoji: readable text goes out with the emoji dropped, the translation is rendered by the same parser with its mention back", async () => {
         echoTranslation();
         const topic = "Regeln lesen in <#700000000000000007> und https://example.com/regeln <:blobwave:123456789012345678>";
         expect(parseWith("topic-truncated", topic)).toEqual([`<p:${topic}>`]);
         await settle();
-        expect(sentTexts()).toEqual(["Regeln lesen in ⟦1⟧ und ⟦2⟧ ⟦3⟧"]);
+        expect(sentTexts()).toEqual(["Regeln lesen in #allgemein und https://example.com/regeln"]);
         rendered.length = 0;
         const out = parseWith("topic-truncated", topic);
-        expect(out.props.title).toBe("Regeln lesen in #allgemein und https://example.com/regeln :blobwave:");
+        expect(out.props.title).toBe("Regeln lesen in #allgemein und https://example.com/regeln");
         // Discord's parser gets the translation with the raw tokens restored, and the same state.
-        expect(rendered).toContain(`EN Regeln lesen in <#700000000000000007> und https://example.com/regeln <:blobwave:123456789012345678>|c1`);
-        expect(text(out)).toBe(`✦ <p:EN Regeln lesen in <#700000000000000007> und https://example.com/regeln <:blobwave:123456789012345678>>`);
+        expect(rendered).toContain(`EN Regeln lesen in <#700000000000000007> und https://example.com/regeln|c1`);
+        expect(text(out)).toBe(`✦ <p:EN Regeln lesen in <#700000000000000007> und https://example.com/regeln>`);
     });
 
     it("a voice status with a custom emoji and a user mention renders the same way", async () => {
@@ -1004,22 +1004,20 @@ describe("markup in tight swaps: tokens out as placeholders, Discord's parser in
         const status = "Zocken mit <@900000000000000009> <a:party:223456789012345678>";
         parseWith("voice-status", status);
         await settle();
-        expect(sentTexts()).toContain("Zocken mit ⟦1⟧ ⟦2⟧");
+        expect(sentTexts()).toContain("Zocken mit @deniz");
         const out = parseWith("voice-status", status);
-        expect(text(out)).toBe("✦ <p:EN Zocken mit <@900000000000000009> <a:party:223456789012345678>>");
-        expect(out.props.title).toBe("Zocken mit @deniz :party:");
+        expect(text(out)).toBe("✦ <p:EN Zocken mit <@900000000000000009>>");
+        expect(out.props.title).toBe("Zocken mit @deniz");
     });
 
-    it("a model that answers with raw Discord tokens the source never had: they are removed, never shown; the source's own dropped channel goes at the end", async () => {
+    it("a model that answers with raw Discord tokens: Discord's original stays", async () => {
         native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => ({
             ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "de", text: "Read the rules in <#999> <@&42>", skip: false }))
         }));
         const topic = "Lies die Regeln im Kanal <#700000000000000007>";
         parseWith("topic-truncated", topic);
         await settle();
-        const out = text(parseWith("topic-truncated", topic));
-        expect(out).toBe("✦ <p:Read the rules in <#700000000000000007>>");
-        expect(out).not.toMatch(/999|<@&42>/);
+        expect(parseWith("topic-truncated", topic)).toEqual([`<p:${topic}>`]);
     });
 
     it("a parser that throws on the translation: Discord's original stays", async () => {
@@ -1033,105 +1031,65 @@ describe("markup in tight swaps: tokens out as placeholders, Discord's parser in
         expect(deep(wrapped(source, true, { channelId: "c1" }))).toEqual([`<p:${source}>`]);
     });
 
-    it("the reply bar renders the translation with Discord's markdown parser, placeholders out, readable text as the tooltip", async () => {
+    it("the reply bar renders the translation with Discord's markdown parser, readable text out and as the tooltip", async () => {
         echoTranslation();
         const q = { id: "q20", channel_id: "c1", content: "Frag <@900000000000000009> in <#700000000000000007> <:blobwave:123456789012345678>" };
         const props = { referencedMessage: { state: 0, message: q } };
         expect(deep(P.replyQuoteChildren(ORIGINAL, props))).toEqual(ORIGINAL);
         await settle();
-        expect(sentTexts()).toContain("Frag ⟦1⟧ in ⟦2⟧ ⟦3⟧");
+        expect(sentTexts()).toContain("Frag @deniz in #allgemein");
         const out = deep(P.replyQuoteChildren(ORIGINAL, props));
-        expect(out.props.title).toBe("Frag @deniz in #allgemein :blobwave:");
-        expect(text(out)).toBe("✦ <md:EN Frag <@900000000000000009> in <#700000000000000007> <:blobwave:123456789012345678>|c1>");
+        expect(out.props.title).toBe("Frag @deniz in #allgemein");
+        expect(text(out)).toBe("✦ <md:EN Frag <@900000000000000009> in <#700000000000000007>|c1>");
     });
 
-    it("a reply whose cached translation carries raw tokens the source never had shows the line without them", () => {
-        setTranslation(makeKey("q21", "en"), { lang: "de", text: "Ask <@12345> about it", via: "relay" });
-        const q = { id: "q21", channel_id: "c1", content: "Frag ihn danach" };
-        const out = text(deep(P.replyQuoteChildren(ORIGINAL, { referencedMessage: { state: 0, message: q } })));
-        expect(out).toBe("✦ <md:Ask about it|c1>");
-        expect(out).not.toContain("12345");
+    it("the reply bar: a cached translation with emoji junk (an id, :NAME:) is shown clean", () => {
+        const content = "Alles Gute <@900000000000000009><:cake:111111111111111111> bis morgen<a:SHAKE:222222222222222222>";
+        setTranslation(makeKey("q30", "en"), { lang: "de", text: "Happy birthday @deniz:111111111111111111: see you tomorrow:SHAKE:", via: "relay" });
+        const out = deep(P.replyQuoteChildren(ORIGINAL, { referencedMessage: { state: 0, message: { id: "q30", channel_id: "c1", content } } }));
+        const shown = text(out);
+        expect(shown).not.toMatch(/111111111111111111|:SHAKE:|:cake:/i);
+        // The mention is put back for Discord's parser; the emoji are not.
+        expect(shown).toBe("✦ <md:Happy birthday <@900000000000000009> see you tomorrow|c1>");
     });
 
-    it("a bio with custom emoji: placeholders go out, the line shows the emoji back through Discord's parser", async () => {
-        echoTranslation();
-        const bio = "Hola <:blobwave:123456789012345678> soy de Madrid <a:party:223456789012345678>";
+    it("the reply bar: only emoji junk in the cache keeps Discord's own line", () => {
+        const content = "<:cake:111111111111111111> <a:SHAKE:222222222222222222>gg";
+        setTranslation(makeKey("q31", "en"), { lang: "de", text: ":cake: :111111111111111111:", via: "relay" });
+        expect(deep(P.replyQuoteChildren(ORIGINAL, { referencedMessage: { state: 0, message: { id: "q31", channel_id: "c1", content } } }))).toEqual(ORIGINAL);
+    });
+
+    it("a bio with custom emoji: they never go out, and an answer that brings them back as junk is shown clean", async () => {
+        native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => ({
+            ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "de", text: "I love :party: pizza :111111111111111111: and long walks", skip: false }))
+        }));
+        const bio = "Ich liebe <a:party:111111111111111111> Pizza <:cake:333333333333333333> und lange Spaziergänge";
         bioLine({ userId: "u1", userBio: bio });
         await settle();
-        const out = surfaceCalls().flatMap(c => JSON.parse(c[2]).messages.map((m: any) => m.text as string));
-        expect(out.length).toBeGreaterThan(0);
-        for (const t of out) {
-            expect(t).toBe("Hola \u27E61\u27E7 soy de Madrid \u27E62\u27E7");
-            expect(t).not.toMatch(/\d{15,}/);
-        }
-        const line = text(bioLine({ userId: "u1", userBio: bio }));
-        expect(line).toContain("<md:EN Hola <:blobwave:123456789012345678> soy de Madrid <a:party:223456789012345678>|>");
+        const sent = surfaceCalls().flatMap(c => JSON.parse(c[2]).messages.map((m: any) => m.text as string));
+        expect(sent.length).toBeGreaterThan(0);
+        for (const t of sent) expect(t).toBe("Ich liebe Pizza und lange Spaziergänge");
+        const out = text(bioLine({ userId: "u1", userBio: bio }));
+        expect(out).toContain("I love pizza and long walks");
+        expect(out).not.toMatch(/\d{15,}|:party:/);
     });
 
-    it("a bio line cached with \":id:\" junk before the fix is drawn clean", async () => {
+    it("a tight member-list status with an emoji and junk in the answer shows clean in place", async () => {
         native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => ({
-            ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "es", text: "Hi :123456789012345678: I am from Madrid :party:", skip: false }))
+            ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "de", text: "Back soon :wave:", skip: false }))
         }));
-        const bio = "Hola <:blobwave:123456789012345678> soy de Madrid <a:party:223456789012345678>";
-        bioLine({ userId: "u1", userBio: bio });
-        await settle();
-        const line = text(bioLine({ userId: "u1", userBio: bio }));
-        expect(line).toContain("<:blobwave:123456789012345678>");
-        expect(line).toContain("<a:party:223456789012345678>");
-        expect(line.replace(/<a?:\w+:\d+>/g, "")).not.toMatch(/\d{15,}|:party:|:blobwave:/);
-    });
-
-    it("tight: a ✦ that dropped the channel and the link gets them back at the end, in source order; the emoji is just left out", async () => {
-        native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => ({
-            ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "de", text: "Read the rules", skip: false }))
-        }));
-        const topic = "Regeln lesen in <#700000000000000007> und https://example.com/regeln <:blobwave:123456789012345678>";
-        parseWith("topic-truncated", topic);
-        await settle();
-        const out = text(parseWith("topic-truncated", topic));
-        expect(out).toBe("✦ <p:Read the rules <#700000000000000007> https://example.com/regeln>");
-    });
-
-    it("tight status in the member list: a ✦ that dropped the link gets it back at the end", async () => {
-        native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => ({
-            ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "de", text: "Streaming now, come watch", skip: false }))
-        }));
-        const status = "Streame gerade https://example.com/live kommt vorbei";
-        stubActivities.set("u5", [{ type: 4, state: status }]);
+        stubActivities.set("u5", [{ type: 4, state: "Bin gleich zurück <:wave:444444444444444444>" }]);
         decorator("u5");
         await settle();
-        expect(text(decorator("u5"))).toBe("✦ <md:Streaming now, come watch https://example.com/live|>");
+        const sent = surfaceCalls().flatMap(c => JSON.parse(c[2]).messages.map((m: any) => m.text as string));
+        expect(sent).toContain("Bin gleich zurück");
+        expect(text(decorator("u5"))).toBe("✦ Back soon");
     });
 
-    it("roomy: a ✦ bio that lost the link shows the ≈ that kept it; one where ≈ lost it too shows ✦ with the link appended", async () => {
-        const bio = "Mein Kanal: https://example.com/kanal und mehr Infos dort";
-        const answerWith = (fast: (t: string) => string) => native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) => ({
-            ok: true, results: JSON.parse(payload).messages.map((m: any) => engine === "google"
-                ? { id: m.id, lang: "de", text: fast(m.text), skip: false, conf: 0.99 }
-                : { id: m.id, lang: "de", text: "My channel: and more info there", skip: false })
-        }));
-        answerWith(t => `EN ${t}`);
-        bioLine({ userId: "u1", userBio: bio });
-        await settle();
-        const kept = text(bioLine({ userId: "u1", userBio: bio }));
-        expect(kept).toContain("≈");
-        expect(kept).toContain("https://example.com/kanal");
-        expect(kept).not.toContain("My channel: and more info there");
-
-        const bio2 = "Mein Server: https://example.com/server und mehr Infos dort";
-        answerWith(() => "EN my server and more info there");
-        bioLine({ userId: "u2", userBio: bio2 });
-        await settle();
-        const appended = text(bioLine({ userId: "u2", userBio: bio2 }));
-        expect(appended).toContain("✦");
-        expect(appended).toContain("My channel: and more info there https://example.com/server");
-    });
-
-    it("the reply bar: a quoted translation stored with placeholders is drawn with the quoted message's own tokens", () => {
-        setTranslation(makeKey("q30", "en"), { lang: "pl", text: "\u27E61\u27E7 happy birthday \u27E62\u27E7", via: "relay" });
-        const q = { id: "q30", channel_id: "c1", content: "<@900000000000000009> wszystkiego najlepszego <:SHAKE:222222222222222222>" };
-        const out = text(deep(P.replyQuoteChildren(ORIGINAL, { referencedMessage: { state: 0, message: q } })));
-        expect(out).toBe("✦ <md:<@900000000000000009> happy birthday <:SHAKE:222222222222222222>|c1>");
+    it("a reply whose cached translation carries raw tokens keeps Discord's line", () => {
+        setTranslation(makeKey("q21", "en"), { lang: "de", text: "Ask <@12345> about it", via: "relay" });
+        const q = { id: "q21", channel_id: "c1", content: "Frag ihn danach" };
+        expect(deep(P.replyQuoteChildren(ORIGINAL, { referencedMessage: { state: 0, message: q } }))).toEqual(ORIGINAL);
     });
 
     it("the thread title and stage topic keep a real aria-label: the translation once known, else the original", async () => {

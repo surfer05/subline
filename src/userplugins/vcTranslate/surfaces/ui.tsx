@@ -22,12 +22,11 @@
  * plugin is stopped) or nothing to show.
  */
 
+import { cleanTranslation } from "../customEmoji";
 import { React } from "@webpack/common";
 
 import { languageLabel } from "../langLabel";
-import { fastKeepsWhatQualityLost, repairTranslation, withContent } from "../placeholders";
 import { isRomanizedGuess } from "../romanized";
-import { renderTranslated } from "../translationRender";
 import { MIN_DETECT_CONFIDENCE } from "../types";
 import { normalizeSurfaceText, type SurfaceEntry } from "./cache";
 import type { SurfaceText } from "./extract";
@@ -63,17 +62,17 @@ export function fastUnsure(fast: { lang: string; conf?: number; }, source: strin
 /** What to show for an entry, or null. The ≈ line is held back when it is unsure. */
 export function displayFor(entry: SurfaceEntry | null | undefined, source: string): SurfaceDisplay | null {
     if (!entry) return null;
+    // Custom emoji junk (ids, :NAME:) never shows, whatever was cached.
+    if (entry.quality) return shownOrNull({ glyph: "✦", lang: entry.quality.lang, text: cleanTranslation(entry.quality.text.trim(), source) });
     const fast = entry.fast;
-    if (entry.quality) {
-        // ✦ lost a link, time, mention or code that a trusted ≈ kept: show ≈.
-        if (fast && !fastUnsure(fast, source) && fastKeepsWhatQualityLost(entry.quality.text, fast.text, source)) {
-            return { glyph: "≈", lang: fast.lang, text: fast.text.trim() };
-        }
-        return { glyph: "✦", lang: entry.quality.lang, text: entry.quality.text.trim() };
-    }
     if (!fast) return null;
     if (fastUnsure(fast, source)) return null;
-    return { glyph: "≈", lang: fast.lang, text: fast.text.trim() };
+    return shownOrNull({ glyph: "≈", lang: fast.lang, text: cleanTranslation(fast.text.trim(), source) });
+}
+
+/** A line that is empty once cleaned is not shown at all. */
+function shownOrNull(d: SurfaceDisplay): SurfaceDisplay | null {
+    return d.text.trim() === "" ? null : d;
 }
 
 let rtlTarget: () => boolean = () => false;
@@ -149,17 +148,11 @@ export function SurfaceLines({ texts }: { texts: SurfaceText[]; }) {
             const long = LONG_KINDS.has(t.kind);
             const shown = displayFor(service.want(t.text, { long }), t.text);
             if (shown === null) continue;
-            // Its tokens are already back (translateSurfaceBatch); this also
-            // cleans lines cached before that, then draws emoji as emoji.
-            // A link, time, mention or code the translator dropped goes at
-            // the end, so nothing the text says is lost (withContent).
-            const body = withContent(repairTranslation(shown.text, t.text), t.text);
-            if (body === "") continue;
             const partial = long && fitLongText(normalizeSurfaceText(t.text)).partial;
             lines.push(
                 <div key={`${t.kind}:${t.text}`} style={LINE_STYLE} data-subline-surface={t.kind}>
                     <span>{LABELLED_KINDS.has(t.kind) ? `${t.label} · ` : ""}{shown.glyph}{langSuffix(shown.lang)} · </span>
-                    <span dir={translationDir()}>{renderTranslated(body) as any}</span>
+                    <span dir={translationDir()}>{shown.text}</span>
                     {partial && <span data-subline-partial="">{" · "}{PARTIAL_NOTE}</span>}
                 </div>
             );
@@ -180,18 +173,15 @@ export function tightTranslation(text: string): { lang: string; text: string; gl
     if (service === null) return null;
     const entry = service.want(text, { tight: true });
     const q = entry?.quality;
-    const f = entry?.fast;
-    if (q && q.text.trim() !== "") {
-        // ✦ lost content a trusted ≈ kept: ≈ in place instead.
-        if (f && f.text.trim() !== "" && !fastUnsure(f, text) && fastKeepsWhatQualityLost(q.text, f.text, text)) {
-            return { lang: f.lang, text: f.text.trim(), glyph: "≈" };
-        }
-        return { lang: q.lang, text: q.text.trim(), glyph: "✦" };
-    }
+    const qText = q ? cleanTranslation(q.text.trim(), text) : "";
+    if (q && qText.trim() !== "") return { lang: q.lang, text: qText, glyph: "✦" };
     if (service.tightQualityOnly()) return null;
+    const f = entry?.fast;
     if (!f || f.text.trim() === "") return null;
     if (fastUnsure(f, text)) return null;
-    return { lang: f.lang, text: f.text.trim(), glyph: "≈" };
+    const fText = cleanTranslation(f.text.trim(), text);
+    if (fText.trim() === "") return null;
+    return { lang: f.lang, text: fText, glyph: "≈" };
 }
 
 const PREFIX_STYLE = { opacity: 0.75 } as const;
@@ -222,7 +212,7 @@ export function TightSwap({ original, text, tooltip, render }: {
     try {
         const t = typeof text === "string" ? tightTranslation(text) : null;
         if (t === null) return (original ?? null) as any;
-        const shown = render ? render(t.text) : renderTranslated(withContent(repairTranslation(t.text, text), text)) || null;
+        const shown = render ? render(t.text) : t.text;
         if (shown === null || shown === undefined) return (original ?? null) as any;
         const swapped = <TranslatedInPlace original={tooltip ?? text} translation={shown} glyph={t.glyph} />;
         // Discord's text sometimes carries a leading space (after an emoji).

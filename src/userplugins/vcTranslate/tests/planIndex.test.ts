@@ -538,6 +538,23 @@ describe("entering a code", () => {
 
 // ---------------------------------------------------------------------------
 describe("an Automatic owner", () => {
+    it("a ✦ preview never shows custom emoji junk, and its request carries no emoji tokens", async () => {
+        await startAutomatic({ automatic: true, previews: { used: 0, cap: 3 } });
+        const content = `${ROMANIZED} <:cake:111111111111111111>`;
+        answer({
+            google: { lang: "ar", text: "I want to walk the house now", conf: 1 },
+            relay: m => ({ id: m.id, lang: "ar", text: ":cake: I want :111111111111111111: to go", skip: false }),
+            relayQuota: { used: 1, cap: 3 }
+        });
+        setTranslation(key("1"), { lang: "ar", text: "I want to walk the house now", via: "google", conf: 1 });
+        clickables(render(msg("1", content))).find(c => c.label === "Preview ✦")!.onClick();
+        await flush();
+        expect(payloadOf(calls("relay")[0]!).messages[0].text).toBe(ROMANIZED);
+        const shown = text(render(msg("1", content)));
+        expect(shown).toContain("✦ reads this as: I want to go");
+        expect(shown).not.toMatch(/:cake:|111111111111111111/);
+    });
+
     it("labels a rough ≈ line and offers a ✦ preview, which goes to the relay in preview mode", async () => {
         await startAutomatic({ automatic: true, previews: { used: 0, cap: 3 } });
         answer({
