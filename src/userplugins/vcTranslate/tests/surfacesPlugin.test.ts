@@ -11,7 +11,7 @@ const native = vi.hoisted(() => {
     return { translateBatch, readStagedBuildId, relayStatus };
 });
 
-import plugin, { __surfaceService, SURFACE_ACCESSORY_ID } from "../index";
+import plugin, { __surfaceService, STATUS_LINE_CSS, SURFACE_ACCESSORY_ID } from "../index";
 import settings from "../settings";
 import { clearStore, makeKey, setTranslation } from "../store";
 import { toggleChannel, toggleChannelOptOut } from "../channels";
@@ -254,11 +254,11 @@ describe("a paid install", () => {
         expect(req.context).toEqual([]);
         expect(req.messages.map((m: any) => m.text)).toEqual(["Neue Pizzeria in der Stadt", "Die beste Pizza weit und breit"]);
         const out = text(accessory(embedMessage()));
-        expect(out).toContain("✦ de · sharp: Neue Pizzeria in der Stadt");
-        expect(out).toContain("✦ de · sharp: Die beste Pizza weit und breit");
+        expect(out).toContain("✦ sharp: Neue Pizzeria in der Stadt");
+        expect(out).toContain("✦ sharp: Die beste Pizza weit und breit");
     });
 
-    it("polls and forwards get lines too, the forward labelled", async () => {
+    it("polls and forwards get lines too, with no kind word", async () => {
         const message = {
             ...embedMessage("m2"), embeds: [],
             poll: { question: { text: "Pizza oder Pasta heute?" }, answers: [{ poll_media: { text: "Lieber Pasta" } }] },
@@ -269,7 +269,7 @@ describe("a paid install", () => {
         const out = text(accessory(message));
         expect(out).toContain("sharp: Pizza oder Pasta heute?");
         expect(out).toContain("sharp: Lieber Pasta");
-        expect(out).toContain("Forwarded · ✦ de · sharp: Schau dir das an");
+        expect(out).toContain("✦ sharp: Schau dir das an");
     });
 
     it("a reply gets no \"Reply\" line under it: only its own embeds, polls and forwards", async () => {
@@ -319,7 +319,7 @@ describe("a paid install", () => {
             await settle(61_000);
             const out = parsed(p, text);
             expect(out[0]).toEqual([`<${text}>`]);
-            expect(text2(out[1])).toContain(`✦ de · sharp: ${text}`);
+            expect(text2(out[1])).toContain(`✦ sharp: ${text}`);
         }
     });
 
@@ -359,7 +359,7 @@ describe("a paid install", () => {
         bioLine({ userId: "u1", userBio: "Ich liebe Pizza und lange Spaziergänge" });
         await settle();
         const out = text(bioLine({ userId: "u1", userBio: "Ich liebe Pizza und lange Spaziergänge" }));
-        expect(out).toContain("✦ de · sharp: Ich liebe Pizza und lange Spaziergänge");
+        expect(out).toContain("✦ sharp: Ich liebe Pizza und lange Spaziergänge");
         expect(out).not.toContain("Bin gleich zurück");
     });
 
@@ -371,7 +371,7 @@ describe("a paid install", () => {
         // Discord's own element comes first, unchanged; the line follows it.
         expect(node.children[0]).toEqual(ORIGINAL);
         expect(P.bioWithLine(ORIGINAL, bio).children[0]).toBe(ORIGINAL);
-        expect(text(node.children.slice(1))).toContain("✦ de · sharp: " + bio);
+        expect(text(node.children.slice(1))).toContain("✦ sharp: " + bio);
         // An empty or missing bio keeps Discord's element as it was.
         expect(P.bioWithLine(ORIGINAL, "")).toBe(ORIGINAL);
         expect(P.bioWithLine(ORIGINAL, undefined)).toBe(ORIGINAL);
@@ -437,7 +437,7 @@ describe("a paid install", () => {
         bioLine({ userId: "u1", userBio: "Ich liebe Pizza und lange Spaziergänge" });
         await settle();
         const out = text(bioLine({ userId: "u1", userBio: "Ich liebe Pizza und lange Spaziergänge" }));
-        expect(out).toContain("✦ · sharp: Ich liebe Pizza und lange Spaziergänge");
+        expect(out).toContain("✦ sharp: Ich liebe Pizza und lange Spaziergänge");
         expect(out).not.toContain("und ·");
     });
 
@@ -448,9 +448,9 @@ describe("a paid install", () => {
         const both = onboarding(prompt);
         expect(both[0]).toEqual(ORIGINAL);
         const out = text(both[1]);
-        expect(out).toContain("Question · ✦ de · sharp: Was spielst du gern?");
-        expect(out).toContain("Option · ✦ de · sharp: Rollenspiele");
-        expect(out).toContain("Option · ✦ de · sharp: Lange Abende mit Freunden");
+        expect(out).toContain("✦ sharp: Was spielst du gern?");
+        expect(out).toContain("✦ sharp: Rollenspiele");
+        expect(out).toContain("✦ sharp: Lange Abende mit Freunden");
     });
 
     it("text already in the reader's language costs nothing", async () => {
@@ -469,7 +469,7 @@ describe("a paid install", () => {
         const saved = await DataStore.get<unknown[]>(SURFACE_CACHE_KEY);
         expect(Array.isArray(saved) && saved.length).toBeGreaterThan(0);
         await settle(100);
-        expect(text(accessory(embedMessage()))).toContain("✦ de · sharp: Neue Pizzeria in der Stadt");
+        expect(text(accessory(embedMessage()))).toContain("✦ sharp: Neue Pizzeria in der Stadt");
         await settle();
         expect(surfaceCalls().length).toBe(sent);
     });
@@ -621,7 +621,7 @@ describe("size limits", () => {
         expect(sent.some((t: string) => t.length > 4000)).toBe(false);
         expect(sent.some((t: string) => t.startsWith("Das ist ein sehr langer"))).toBe(true);
         const out = text(accessory(message));
-        expect(out).toContain("✦ de · sharp: Neue Pizzeria in der Stadt");
+        expect(out).toContain("✦ sharp: Neue Pizzeria in der Stadt");
         expect(out).toContain("sharp: Das ist ein sehr langer");
         expect(out).toContain("Translated the first part. The rest is too long.");
     });
@@ -726,7 +726,7 @@ describe("budget and priority: messages always come first", () => {
         // places kept Discord's original, so for the rest of the day an AI
         // reader saw less than an Automatic owner. Paying more must never
         // show less.
-        expect(text(accessory(embedMessage()))).toContain("≈ de · google: Neue Pizzeria in der Stadt");
+        expect(text(accessory(embedMessage()))).toContain("≈ google: Neue Pizzeria in der Stadt");
         expect(text(decorator("u1"))).toContain("≈ google: Bin gleich zurück, muss kochen");
 
         __stubSetSelectedChannel("c1");
@@ -885,6 +885,13 @@ describe("the reply bar", () => {
         setTranslation(makeKey("q8", "en"), { lang: "de", text: "Where do we meet tomorrow morning?", via: "relay" });
         expectInPlace(bar(quoted("q8", "c1", "Wo treffen wir uns morgen früh?")), "Wo treffen wir uns morgen früh?", "<md:Where do we meet tomorrow morning?|c1>");
     });
+
+    it("a quoted message ⚡ said is already in your language keeps Discord's own line", async () => {
+        paid();
+        stubMessages.set("c1", [{ id: "q9", channel_id: "c1", content: "see you tomorrow" }]);
+        setTranslation(makeKey("q9", "en"), { lang: "en", text: "see you tomorrow", via: "relay", same: true });
+        expect(bar(quoted("q9", "c1", "see you tomorrow"))).toEqual(ORIGINAL);
+    });
 });
 
 describe("the custom status line under the profile bubble", () => {
@@ -905,14 +912,37 @@ describe("the custom status line under the profile bubble", () => {
         expect(deep(P.statusLine(undefined))).toBeNull();
     });
 
-    it("paid: its own \"Status · ✦\" line, ≈ first", async () => {
+    it("lines up with the bubble's text in every profile layout (inset + 1px border + 12px padding)", () => {
+        const rules = STATUS_LINE_CSS.split("\n");
+        expect(rules).toEqual([
+            ".user-profile-popout [data-subline-status]{margin-inline:118px 12px}",
+            ".user-profile-sidebar [data-subline-status]{margin-inline:122px 8px}",
+            ".user-profile-modal [data-subline-status]{margin-inline:174px 16px}",
+            ".user-profile-modal-v2 [data-subline-status]{margin-inline:calc(var(--custom-modal-v2-profile-card-padding) + var(--custom-user-profile-avatar-size) + var(--space-20) + 13px) var(--space-16)}"
+        ]);
+        expect(STATUS_LINE_CSS).not.toContain("custom-user-profile-theme");
+    });
+
+    it("sits 6px under the bubble, or 16px when the bubble is expandable so the line clears its chevron", async () => {
+        paid();
+        deep(P.statusLine({ text: status }));
+        await settle();
+        expect(deep(P.statusLine({ text: status })).props.style.marginTop).toBe(6);
+        expect(deep(P.statusLine({ text: status }, false)).props.style.marginTop).toBe(6);
+        expect(deep(P.statusLine({ text: status }, true)).props.style.marginTop).toBe(16);
+        // Whatever truthy value Discord's flag holds.
+        expect(deep(P.statusLine({ text: status }, 1)).props.style.marginTop).toBe(16);
+        expect(deep(P.statusLine({ text: status }, undefined)).props.style.marginTop).toBe(6);
+    });
+
+    it("paid: its own line is just \"✦ translation\": no kind word, no language code, ≈ first", async () => {
         paid();
         const first = deep(P.statusLine({ text: status }));
         expect(first === null || text(first) === "").toBe(true);
         await settle();
         const line = deep(P.statusLine({ text: status }));
         expect(line.props["data-subline-status"]).toBe("");
-        expect(text(line)).toBe("Status · ✦ de · sharp: " + status);
+        expect(text(line)).toBe("✦ sharp: " + status);
     });
 
     // THE FIELD BUG, 2026-10-01: the ✦ line sat INSIDE Discord's status text,

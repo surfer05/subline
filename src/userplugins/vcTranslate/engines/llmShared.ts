@@ -74,6 +74,17 @@ const LINE_SEPS = new RegExp(
 export const enc = (s: string): string =>
     JSON.stringify(s.replace(LINE_SEPS, " "));
 
+/**
+ * A forced (⚡) request's rule, used INSTEAD of the skip rule. Mirrors the
+ * relay's forcedRule (relay/src/translate.ts) word for word.
+ */
+export function forcedRule(tgt: string): string {
+    return "- The reader asked for every message below to be translated. Translate each one into " + tgt
+        + ", even if it looks like a name, slang, or is already written in " + tgt
+        + ". Never skip: always set skip to false and put the translation in text. "
+        + "If a message is already in " + tgt + ", give it back as it is.";
+}
+
 export function buildPrompt(req: BatchRequest): string {
     const parts: string[] = [];
 
@@ -82,16 +93,18 @@ export function buildPrompt(req: BatchRequest): string {
         "",
         "Rules:",
         `- Translate each message into ${req.targetLang}.`,
-        "- Set skip to true and text to \"\" whenever a message does NOT need translating into "
-        + req.targetLang + ". That covers two cases. (1) The message is already written in "
-        + req.targetLang + " — INCLUDING slang, abbreviations, and memes written in "
-        + req.targetLang + ". (2) The message is not really another language: a proper noun, "
-        + "username, brand or game name, an emoji or reaction, or a short abbreviation or bit of "
-        + "gibberish with no translatable meaning. Only translate a message genuinely written in a "
-        + "DIFFERENT language than " + req.targetLang + " — foreign-language slang still gets "
-        + "translated. Use your own knowledge of the language, not a fixed word list: for an English "
-        + "reader, things like \"og\", \"gng\", \"less go\" are English and should skip; for a reader "
-        + "whose language is not English, English text should still be translated.",
+        req.force === true
+            ? forcedRule(req.targetLang)
+            : "- Set skip to true and text to \"\" whenever a message does NOT need translating into "
+            + req.targetLang + ". That covers two cases. (1) The message is already written in "
+            + req.targetLang + " — INCLUDING slang, abbreviations, and memes written in "
+            + req.targetLang + ". (2) The message is not really another language: a proper noun, "
+            + "username, brand or game name, an emoji or reaction, or a short abbreviation or bit of "
+            + "gibberish with no translatable meaning. Only translate a message genuinely written in a "
+            + "DIFFERENT language than " + req.targetLang + " — foreign-language slang still gets "
+            + "translated. Use your own knowledge of the language, not a fixed word list: for an English "
+            + "reader, things like \"og\", \"gng\", \"less go\" are English and should skip; for a reader "
+            + "whose language is not English, English text should still be translated.",
         // The register rules earned their length. "Preserve the casual register"
         // alone produced "hello kids" for a Persian greeting whose colloquial
         // sense is "hey guys" — a literally defensible reading that no speaker

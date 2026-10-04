@@ -142,6 +142,14 @@ export interface BatchRequest {
      * for the older relay contract. Absent everywhere else.
      */
     mode?: "auto" | "preview";
+    /**
+     * The reader pressed ⚡ on this message: translate it, never skip. Set
+     * only by forceQualityTranslate, which always sends its message alone, so
+     * a forced request is never merged with an automatic batch. Survives
+     * fitLlmRequest/shrinkAfterRefusal (they spread the request), so every
+     * piece of a split is forced too. A relay that predates it ignores it.
+     */
+    force?: true;
 }
 
 /**

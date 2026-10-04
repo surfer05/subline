@@ -18,6 +18,23 @@ export interface BatchRequest {
     messages: Message[];
     context: { author: string; text: string }[];
     targetLang: string;
+    /**
+     * The reader pressed ⚡: translate every message, never skip. Optional, so
+     * an older client (or any request without it) gets the exact prompt it
+     * always got.
+     */
+    force?: true;
+}
+
+/**
+ * The rule a forced request gets INSTEAD of the skip rule. General wording,
+ * no examples: the reader asked for these messages, so nothing is skipped.
+ */
+export function forcedRule(tgt: string): string {
+    return "- The reader asked for every message below to be translated. Translate each one into " + tgt
+        + ", even if it looks like a name, slang, or is already written in " + tgt
+        + ". Never skip: always set skip to false and put the translation in text. "
+        + "If a message is already in " + tgt + ", give it back as it is.";
 }
 export type Result =
     // `truncated` is set only by preview mode (see previewText), never by a
@@ -75,6 +92,20 @@ const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 const LINE_SEPS = new RegExp("[" + String.fromCharCode(0x2028) + String.fromCharCode(0x2029) + "]", "gu");
 const enc = (s: string): string => JSON.stringify((s ?? "").replace(LINE_SEPS, " "));
 
+/** The normal rule: skip what does not need translating. */
+function skipRule(tgt: string): string {
+    return "- Set skip to true and text to \"\" whenever a message does NOT need translating into "
+        + tgt + ". That covers two cases. (1) The message is already written in "
+        + tgt + " — INCLUDING slang, abbreviations, and memes written in "
+        + tgt + ". (2) The message is not really another language: a proper noun, "
+        + "username, brand or game name, an emoji or reaction, or a short abbreviation or bit of "
+        + "gibberish with no translatable meaning. Only translate a message genuinely written in a "
+        + "DIFFERENT language than " + tgt + " — foreign-language slang still gets "
+        + "translated. Use your own knowledge of the language, not a fixed word list: for an English "
+        + "reader, things like \"og\", \"gng\", \"less go\" are English and should skip; for a reader "
+        + "whose language is not English, English text should still be translated.";
+}
+
 export function buildPrompt(req: BatchRequest): string {
     // The target language is untrusted input like everything else: enc() it so
     // a crafted "targetLang" cannot inject instructions into the system prompt.
@@ -86,16 +117,7 @@ export function buildPrompt(req: BatchRequest): string {
         "",
         "Rules:",
         `- Translate each message into ${tgt}.`,
-        "- Set skip to true and text to \"\" whenever a message does NOT need translating into "
-        + tgt + ". That covers two cases. (1) The message is already written in "
-        + tgt + " — INCLUDING slang, abbreviations, and memes written in "
-        + tgt + ". (2) The message is not really another language: a proper noun, "
-        + "username, brand or game name, an emoji or reaction, or a short abbreviation or bit of "
-        + "gibberish with no translatable meaning. Only translate a message genuinely written in a "
-        + "DIFFERENT language than " + tgt + " — foreign-language slang still gets "
-        + "translated. Use your own knowledge of the language, not a fixed word list: for an English "
-        + "reader, things like \"og\", \"gng\", \"less go\" are English and should skip; for a reader "
-        + "whose language is not English, English text should still be translated.",
+        req.force === true ? forcedRule(tgt) : skipRule(tgt),
         "- Write what a native speaker would actually say in " + tgt + ", not a word-by-word rendering.",
         "- Everyday address terms are the most common mistake. A word that literally means "
         + "'children', 'sacrifice', 'my eyes', 'my soul' is usually just 'guys', 'mate', 'dude' "

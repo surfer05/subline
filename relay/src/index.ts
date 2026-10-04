@@ -186,7 +186,11 @@ export function normalizeBatch(v: unknown): NormalizedBatch | null {
     }));
     const size = (cs: BatchRequest["context"]) => cs.reduce((n, c) => n + c.text.length + c.author.length, 0);
     while (context.length > 0 && size(context) > MAX_CONTEXT_CHARS) context = context.slice(1);
-    return { batch: { messages, context, targetLang: b.targetLang }, tooLong };
+    // force: the reader pressed ⚡ on these messages and wants them translated
+    // even where the model would normally skip. Only an exact `true` counts,
+    // and never for a preview (a preview is cut and counted, not forced).
+    const force = b.force === true && b.mode !== "preview";
+    return { batch: { messages, context, targetLang: b.targetLang, ...(force ? { force: true } : {}) }, tooLong };
 }
 
 /** The first `max` UTF-16 units of `s`, never splitting a surrogate pair. */

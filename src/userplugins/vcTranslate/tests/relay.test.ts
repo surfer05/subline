@@ -56,6 +56,15 @@ describe("translateWithRelay", () => {
         expect(await translateWithRelayDetailed(req(["hola"]), "slp_abc", fetchImpl as any)).toEqual({ results: [], rpmLimit: undefined });
     });
 
+    it("sends force for a ⚡ request, and nothing extra for an automatic one", async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ ok: true, results: [] }) });
+        await translateWithRelayDetailed({ ...req(["hola"]), force: true }, "slp_abc", fetchImpl as any);
+        await translateWithRelayDetailed(req(["hola"]), "slp_abc", fetchImpl as any);
+        const bodies = fetchImpl.mock.calls.map((c: any[]) => JSON.parse(c[1].body));
+        expect(bodies[0].force).toBe(true);
+        expect(bodies[1]).not.toHaveProperty("force");
+    });
+
     it("carries the ceiling a rate-limit 429 states, on the error the renderer retunes from", async () => {
         const fetchImpl = vi.fn().mockResolvedValue({
             ok: false, status: 429,

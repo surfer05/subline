@@ -140,9 +140,12 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
                 // positioned bubble. The line goes between them, in flow, so
                 // it takes its own height below the bubble and is never
                 // clamped. `arguments[0]` is the bubble's props: the returns
-                // sit in its forwardRef function body.
-                match: /(\(0,\i\.jsxs\)\(\i\.Fragment,\{children:\[\i,)(?=\(0,\i\.jsxs\)\("div",\{ref:\i,className:\i\(\)\(\i\.\i,\i\))/g,
-                replace: "$1$self.statusLine(arguments[0]),"
+                // sit in its forwardRef function body. The second capture is
+                // the bubble's "expandable" flag (the chevron under a long
+                // status): with it the line needs more room above it to clear
+                // the chevron.
+                match: /(\(0,\i\.jsxs\)\(\i\.Fragment,\{children:\[\i,)(?=\(0,\i\.jsxs\)\("div",\{ref:\i,className:\i\(\)\(\i\.\i,\i\),[^]{0,400}?children:\[\i,\i\?\.\((\i)\),\i\]\}\))/g,
+                replace: "$1$self.statusLine(arguments[0],$2),"
             },
             {
                 // The outer component knows whether this is the reader's own

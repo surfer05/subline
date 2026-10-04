@@ -101,6 +101,9 @@ export const UPGRADE_COPY = {
     popoverPreview: "Preview ✦ ({n} left today)",
     /** The ⚡ popover once today's previews are used. */
     popoverUpgrade: "Add AI ✦",
+    // A ⚡ press on a message ✦ says is already in the reader's language: no
+    // duplicate line, just this.
+    alreadyYourLanguage: "✦ already in your language",
     /** The link after a ✦ preview. */
     previewLink: "Add AI",
     /** Hover text on a ≈ line waiting for Google. */

@@ -394,8 +394,31 @@ describe("surface rendering", () => {
         SurfaceLines({ texts });
         await c.advance(2_000);
         const out = text(SurfaceLines({ texts }));
-        expect(out).toContain("Reply · ✦ de · ");
+        expect(out).toContain("✦ ");
         expect(out).toContain("Q:Titel des Artikels");
+    });
+
+    it("every kind of line is just the glyph and the translation: no kind word, no language code", async () => {
+        const { service, c } = setup();
+        setSurfaceService(service);
+        const kinds = [
+            "embed-title", "embed-description", "embed-field", "poll-question", "poll-answer", "reply", "forward",
+            "status", "bio", "topic", "thread-title", "forum-tag", "event", "voice-status", "stage-topic",
+            "rule", "guidelines", "onboarding"
+        ] as const;
+        const texts = kinds.map(k => ({ kind: k, label: `Label-${k}`, text: `Ein Text für ${k}` }));
+        SurfaceLines({ texts });
+        await c.advance(2_000);
+        const root: any = SurfaceLines({ texts });
+        const lines: any[] = [root.children].flat(2);
+        expect(lines).toHaveLength(kinds.length);
+        for (let i = 0; i < kinds.length; i++) {
+            expect(text(lines[i])).toBe(`✦ Q:Ein Text für ${kinds[i]}`);
+        }
+        const all = text(root);
+        expect(all).not.toContain("Label-");
+        expect(all).not.toContain(" de ");
+        expect(all).not.toContain(" · ");
     });
 
     it("the tight form shows Discord's original until ✦ lands, then \"✦ translation\" in its place, the original as its tooltip", async () => {

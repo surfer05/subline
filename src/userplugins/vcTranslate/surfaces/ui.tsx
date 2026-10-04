@@ -25,7 +25,6 @@
 import { cleanTranslation } from "../customEmoji";
 import { React } from "@webpack/common";
 
-import { languageLabel } from "../langLabel";
 import { isRomanizedGuess } from "../romanized";
 import { MIN_DETECT_CONFIDENCE } from "../types";
 import { normalizeSurfaceText, type SurfaceEntry } from "./cache";
@@ -91,12 +90,6 @@ export function translationDir(): "rtl" | "auto" {
     }
 }
 
-/** " es" after the glyph, or nothing when the engine named no language ("und"). */
-function langSuffix(lang: unknown): string {
-    const label = languageLabel(lang);
-    return label === null ? "" : ` ${label}`;
-}
-
 /** Re-render when any surface translation lands. */
 function useSurfaceUpdates(): void {
     const [, force] = React.useReducer((n: number) => n + 1, 0);
@@ -122,9 +115,6 @@ export function safe<P>(name: string, render: (props: P) => any, log?: (message:
 
 const LINE_STYLE = { fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic", whiteSpace: "pre-wrap" } as const;
 
-/** Lines that sit away from what they translate say what they are. */
-const LABELLED_KINDS = new Set(["reply", "forward", "status", "onboarding"]);
-
 /** Kinds Discord lets run past 2,000 characters (an embed description allows 4,096). */
 const LONG_KINDS = new Set(["embed-description", "forward", "rule", "guidelines"]);
 
@@ -132,9 +122,10 @@ const LONG_KINDS = new Set(["embed-description", "forward", "rule", "guidelines"
 export const PARTIAL_NOTE = "Translated the first part. The rest is too long.";
 
 /**
- * Roomy: one small line per foreign text, under the original. A reply or
- * forward preview's line is prefixed with its label, since it does not sit
- * right under the text it translates.
+ * Roomy: one small line per foreign text, under the original. The line is
+ * just the glyph and the translation ("✦ translation" or "≈ translation"):
+ * no kind word ("Status", "About me", ...) and no language code. Where it sits
+ * already says what it translates.
  */
 export function SurfaceLines({ texts }: { texts: SurfaceText[]; }) {
     useSurfaceUpdates();
@@ -151,7 +142,7 @@ export function SurfaceLines({ texts }: { texts: SurfaceText[]; }) {
             const partial = long && fitLongText(normalizeSurfaceText(t.text)).partial;
             lines.push(
                 <div key={`${t.kind}:${t.text}`} style={LINE_STYLE} data-subline-surface={t.kind}>
-                    <span>{LABELLED_KINDS.has(t.kind) ? `${t.label} · ` : ""}{shown.glyph}{langSuffix(shown.lang)} · </span>
+                    <span>{shown.glyph} </span>
                     <span dir={translationDir()}>{shown.text}</span>
                     {partial && <span data-subline-partial="">{" · "}{PARTIAL_NOTE}</span>}
                 </div>

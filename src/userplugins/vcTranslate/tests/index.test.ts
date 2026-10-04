@@ -3313,6 +3313,18 @@ describe("the force-quality popover action (⚡)", () => {
         expect(btn!.label).toBe("Preview ✦ (5 left today)");
     });
 
+    it("an Automatic owner's preview is still hidden once ✦ has spoken (the preview path is unchanged)", async () => {
+        plugin.stop!();
+        DataStore.setEntitlementForTest({ automatic: true, ai: false, tokenExpiresAt: Date.now() + 86_400_000 });
+        await plugin.start!();
+        settings.store.engine = "google";
+        setTranslation(key("1"), { lang: "es", text: "hi", via: "relay" });
+        expect(forceButton(discordMessage("1", "hola"))).toBeNull();
+        setTranslation(key("2"), { skipped: true, via: "relay" });
+        expect(forceButton(discordMessage("2", "hola"))).toBeNull();
+        expect(forceButton(discordMessage("3", "hola"))).not.toBeNull();
+    });
+
     it("is not offered at all to an install that owns nothing", async () => {
         plugin.stop!();
         DataStore.clearEntitlementForTest();
@@ -3338,16 +3350,91 @@ describe("the force-quality popover action (⚡)", () => {
         expect(forceButton(discordMessage("2", "que tal"))).toBeNull();
     });
 
-    it("does not appear for a message that already has a real LLM translation", () => {
+    /** Every string the accessory renders for a message. */
+    function accessoryText(message: any): string {
+        const el: any = plugin.renderMessageAccessory!({ message } as any);
+        if (!el) return "";
+        const node = el.type(el.props);
+        const walk = (n: any): string => {
+            if (n === null || n === undefined || n === false) return "";
+            if (typeof n === "string" || typeof n === "number") return String(n);
+            if (Array.isArray(n)) return n.map(walk).join("");
+            return walk(n.children);
+        };
+        return walk(node);
+    }
+    const sentPayloads = (engine: string) =>
+        native.translateBatch.mock.calls.filter((c: any[]) => c[0] === engine).map((c: any[]) => JSON.parse(c[2]));
+
+    // ⚡ FOR AI SUBSCRIBERS (2026-10-04): an AI reader sees ⚡ on every
+    // message, including one ✦ already translated or skipped, and a press is
+    // a FORCED request: translate it, never skip.
+    it("an AI reader still gets ⚡ on a message ✦ already translated, and the press is forced", async () => {
         useGemini();
         setTranslation(key("1"), { lang: "es", text: "ya bueno", via: "gemini" });
-        expect(forceButton(discordMessage("1", "hola"))).toBeNull();
+        const btn = forceButton(discordMessage("1", "hola"));
+        expect(btn).not.toBeNull();
+        native.translateBatch.mockClear();
+        native.translateBatch.mockResolvedValue({ ok: true, results: [{ id: "1", lang: "es", text: "well then", skip: false }] });
+        btn!.onClick!(undefined as any);
+        await flush();
+        const sent = sentPayloads("gemini");
+        expect(sent).toHaveLength(1);
+        expect(sent[0].force).toBe(true);
+        expect(sent[0].messages.map((m: any) => m.id)).toEqual(["1"]);
+        expect(getTranslation(key("1"))).toMatchObject({ text: "well then", via: "gemini" });
     });
 
-    it("does not appear for a message an LLM already skipped (an authoritative verdict, not just a Google guess)", () => {
+    it("an AI reader still gets ⚡ on a message ✦ skipped", () => {
         useGemini();
         setTranslation(key("1"), { skipped: true, via: "gemini" });
-        expect(forceButton(discordMessage("1", "hola"))).toBeNull();
+        expect(forceButton(discordMessage("1", "hola"))).not.toBeNull();
+    });
+
+    it("a forced answer that is the message itself shows \"✦ already in your language\", never the message twice", async () => {
+        useGemini();
+        setTranslation(key("1"), { lang: "en", text: "see you tomorrow", via: "google", conf: 0.99 });
+        native.translateBatch.mockClear();
+        native.translateBatch.mockResolvedValue({ ok: true, results: [{ id: "1", lang: "en", text: "  See You   Tomorrow ", skip: false }] });
+        forceButton(discordMessage("1", "see you tomorrow"))!.onClick!(undefined as any);
+        await flush();
+        expect(getTranslation(key("1"))).toMatchObject({ same: true, via: "gemini" });
+        const out = accessoryText(discordMessage("1", "see you tomorrow"));
+        expect(out).toBe("✦ already in your language");
+    });
+
+    it("a relay that ignores force and answers skip never takes the ≈ line away", async () => {
+        useGemini();
+        setTranslation(key("1"), { lang: "es", text: "hi there", via: "google", conf: 0.99 });
+        native.translateBatch.mockClear();
+        native.translateBatch.mockResolvedValue({ ok: true, results: [{ id: "1", skip: true }] });
+        forceButton(discordMessage("1", "hola tio"))!.onClick!(undefined as any);
+        await flush();
+        expect(getTranslation(key("1"))).toMatchObject({ text: "hi there", via: "google" });
+        expect(accessoryText(discordMessage("1", "hola tio"))).toContain("hi there");
+    });
+
+    it("a forced skip on a message with no line at all says it is already in your language", async () => {
+        useGemini();
+        setTranslation(key("1"), { skipped: true, via: "google" });
+        native.translateBatch.mockClear();
+        native.translateBatch.mockResolvedValue({ ok: true, results: [{ id: "1", skip: true }] });
+        forceButton(discordMessage("1", "ok bro"))!.onClick!(undefined as any);
+        await flush();
+        expect(accessoryText(discordMessage("1", "ok bro"))).toBe("✦ already in your language");
+    });
+
+    it("an automatic batch is never forced", async () => {
+        useGemini();
+        native.translateBatch.mockClear();
+        native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => ({
+            ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "es", text: "x", skip: false }))
+        }));
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("9", "hola que tal amigo") });
+        await settle();
+        const sent = sentPayloads("gemini");
+        expect(sent.length).toBeGreaterThan(0);
+        for (const p of sent) expect(p).not.toHaveProperty("force");
     });
 
     it("does not bypass the cooldown — with the engine cooling down, no request is sent", async () => {

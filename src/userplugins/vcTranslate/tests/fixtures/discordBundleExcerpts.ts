@@ -117,8 +117,8 @@ export const BUNDLE_SITES: Array<{ patch: number; replacement: number; module: s
         "replacement": 0,
         "module": "394816",
         "sites": [
-            "(0,l.jsxs)(l.Fragment,{children:[eT,(0,l.jsxs)(\"div\",{ref:M,className:r()(ex.kL,E)",
-            "(0,l.jsxs)(l.Fragment,{children:[eT,(0,l.jsxs)(\"div\",{ref:M,className:r()(ex.kL,E)"
+            "(0,l.jsxs)(l.Fragment,{children:[eh,(0,l.jsxs)(\"div\",{ref:M,className:a()(ex.kL,E),onMouseEnter:()=>{I({action:\"HOVER_CUSTOM_STATUS\"}),ei(!0)},onMouseLeave:()=>{ei(!1)},children:[eT,C?.(z),eS]})",
+            "(0,l.jsxs)(l.Fragment,{children:[eh,(0,l.jsxs)(\"div\",{ref:M,className:a()(ex.kL,E),onFocus:()=>{y(!0)},onBlur:e=>{M.current?.contains(e.relatedTarget)||y(!1)},onMouseEnter:()=>{I({action:\"HOVER_CUSTOM_STATUS\"}),y(!0),ei(!0)},onMouseLeave:()=>{y(!1),ei(!1)},children:[eT,C?.(z),eS]})"
         ]
     },
     {
@@ -126,7 +126,7 @@ export const BUNDLE_SITES: Array<{ patch: number; replacement: number; module: s
         "replacement": 1,
         "module": "394816",
         "sites": [
-            "I=!y&&!n.bot&&!A;if(g){let e=null!=p&&\"\"!==p?p:null;return(0,l.jsx)(E.f5,{value:T,children:(0,l.jsx)(eR,{emoji:c??null,text:e,statusLabel:b,placeholderText:d,ref:t,...S})"
+            "I=!C&&!n.bot&&!A;if(g){let e=null!=R&&\"\"!==R?R:null;return(0,l.jsx)(E.f5,{value:h,children:(0,l.jsx)(ep,{emoji:c??null,text:e,statusLabel:L,placeholderText:d,ref:t,...S})"
         ]
     },
     {

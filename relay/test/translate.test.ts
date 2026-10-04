@@ -35,6 +35,18 @@ describe("buildPrompt — drift guard", () => {
         ]) expect(p, clause).toContain(clause);
         expect(p).not.toContain("never emit escape sequences");
     });
+    it("a forced (⚡) prompt keeps every load-bearing rule except the skip rule, which it replaces", () => {
+        const plain = buildPrompt(req(["hola"]));
+        const forced = buildPrompt({ ...req(["hola"]), force: true });
+        for (const clause of [
+            "'children', 'sacrifice'", "Keep slang as slang and profanity as profanity",
+            "Return exactly one entry per message id given", "JSON-encoded strings", "BCP-47",
+            "Keep the same line breaks as the message, line for line."
+        ]) expect(forced, clause).toContain(clause);
+        expect(plain).toContain("Set skip to true");
+        expect(forced).not.toContain("Set skip to true");
+        expect(forced).toContain("Never skip: always set skip to false");
+    });
     it("repairs a RAW newline inside a JSON string; the rest of the batch still returns", async () => {
         const raw = '{"translations":[{"id":"0","lang":"de","skip":false,"text":"Mommo\'s\nBut pizza"},'
             + '{"id":"1","lang":"es","skip":false,"text":"hi"}]}';

@@ -39,7 +39,10 @@ const logger = new Logger("VcTranslate");
 // itself detected confidently — otherwise one bad detection would propagate
 // down an entire reply chain.
 export type StoredTranslation =
-    | { lang: string; text: string; via: EngineId; conf?: number }
+    // `same`: a ⚡ (forced) answer that is the source text itself, i.e. the
+    // message is already in the reader's language. Shown as one short line
+    // instead of a duplicate of the message.
+    | { lang: string; text: string; via: EngineId; conf?: number; same?: true }
     | { failed: true }
     // `via` matters here: Google reports "already in the target language" for
     // short messages it simply failed to identify — it returns "ne" unchanged,

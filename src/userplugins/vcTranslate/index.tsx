@@ -1968,6 +1968,12 @@ function needsQuality(key: string): boolean {
  * already failed. Only a verdict actually sitting in the store — the one
  * thing forcing another request cannot improve on — closes the door here.
  */
+/** The same text, ignoring case and whitespace: a forced answer that changed nothing. */
+export function sameText(a: string, b: string): boolean {
+    const norm = (s: string) => s.toLocaleLowerCase().replace(/\s+/g, "");
+    return norm(a) === norm(b);
+}
+
 function hasQualityVerdict(key: string): boolean {
     const e = getTranslation(key);
     if (e === undefined) return false;
@@ -2447,6 +2453,20 @@ async function runTier(
                 }
                 continue;
             }
+            // A ⚡ (forced) answer that is the message itself, or a skip from
+            // a relay that predates `force`: the message is already in the
+            // reader's language. Said in one short line, never a duplicate.
+            // A forced skip never takes a readable line away, though: it is
+            // only written where there is no translation to keep.
+            if (req.force === true && isQuality) {
+                const sent = req.messages.find(m => m.id === r.id);
+                if (r.skip || (sent !== undefined && sameText(r.text, sent.text))) {
+                    const existing = getTranslation(key);
+                    if (r.skip && isRealTranslation(existing)) continue;
+                    writeResult(key, { lang: r.skip ? req.targetLang : r.lang, text: sent?.text ?? "", via: engine, same: true });
+                    continue;
+                }
+            }
             if (r.skip) {
                 // A skip has nothing to DISPLAY, but something must still be
                 // WRITTEN, for the same "no entry looks like never requested"
@@ -2631,7 +2651,9 @@ async function forceQualityTranslate(message: Message): Promise<void> {
         // This is also the request that can least afford to be wrong: the user
         // clicked a button and is watching for the answer.
         context: contextBefore(message, FORCED_CONTEXT_SIZE),
-        targetLang: settings.store.targetLang
+        targetLang: settings.store.targetLang,
+        // Translate it, never skip: the reader asked for this one.
+        force: true
     };
     // Whichever way runTier settles — success, failure, cooldown block, a
     // stale-generation drop or a rate-gate rejection — the manual indicator
@@ -3804,6 +3826,17 @@ function translationLines(message: Message) {
         );
     }
 
+    // ⚡ said this message is already in the reader's language: one short
+    // line, never the message again.
+    if (entry.same === true) {
+        return (
+            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }} data-subline-same="">
+                {UPGRADE_COPY.alreadyYourLanguage}
+                {forcing && " · ⚡ translating…"}
+            </div>
+        );
+    }
+
     // The prefix says both WHAT language this was and WHERE it came from. The
     // whole prefix stays on the muted token and the body on the --text-default
     // chain — same split as before, just with the provenance glyph replacing
@@ -3955,9 +3988,12 @@ function forceQualityPopoverRender(message: Message) {
     if (!isLlmEngine(engine) && !preview) return null;
 
     const key = makeKey(message.id, settings.store.targetLang);
-    if (hasQualityVerdict(key)) return null;
 
     if (preview) {
+        // An Automatic owner's preview: nothing to ask once ✦ has spoken.
+        // An AI subscriber keeps ⚡ on every message (below), even one ✦
+        // translated or skipped: pressing it asks again, forced.
+        if (hasQualityVerdict(key)) return null;
         // A new UTC day is a new five, so yesterday's "used up" never
         // outlives midnight on the button.
         if (rolloverTasteIfNewUtcDay()) void refreshEntitlement();
@@ -4397,27 +4433,36 @@ function StatusLineImpl(props: any) {
     const text = props?.text;
     if (typeof text !== "string" || text.trim() === "") return null;
     return (
-        <div data-subline-status="" style={STATUS_LINE_STYLE}>
+        <div data-subline-status="" style={statusLineStyle(props?.sublineExpandable === true)}>
             <SurfaceLines texts={[{ kind: "status", label: "Status", text }]} />
         </div>
     );
 }
 const StatusLine = safe("status line", StatusLineImpl, surfaceDebug);
 
-const STATUS_LINE_STYLE = { marginTop: 4, overflowWrap: "anywhere" } as const;
+/** Space above the line: 6px, or 16px to clear the chevron of an expandable bubble. */
+export const STATUS_LINE_MARGIN_TOP = 6;
+export const STATUS_LINE_MARGIN_TOP_EXPANDABLE = 16;
+
+/** In flow, never clamped: a long translation wraps onto as many lines as it needs. */
+export function statusLineStyle(expandable: boolean) {
+    return {
+        marginTop: expandable ? STATUS_LINE_MARGIN_TOP_EXPANDABLE : STATUS_LINE_MARGIN_TOP,
+        overflowWrap: "anywhere"
+    } as const;
+}
 
 /**
- * The status line's side margins, mirrored from Discord's own rules for the
- * bubble's reference container (853855.css), keyed by the same profile
- * classes, so the line lines up with the bubble in every profile layout and
- * custom theme. Without the sheet the line still shows, just unindented.
+ * The status line's side margins, keyed by the profile layout classes, so
+ * the line's start edge equals the bubble's TEXT start (the bubble's inset,
+ * plus its 1px border, plus its 12px padding) in every layout. Without the
+ * sheet the line still shows, just unindented.
  */
-const STATUS_LINE_CSS = [
-    ".user-profile-popout [data-subline-status]{margin-inline:109px 12px}",
-    ".custom-user-profile-theme .user-profile-popout [data-subline-status]{margin-inline:105px 8px}",
-    ".user-profile-sidebar [data-subline-status]{margin-inline:109px 8px}",
-    ".user-profile-modal [data-subline-status]{margin-inline:161px 16px}",
-    ".user-profile-modal-v2 [data-subline-status]{margin-inline:calc(var(--custom-modal-v2-profile-card-padding) + var(--custom-user-profile-avatar-size) - var(--space-8)) 12px}"
+export const STATUS_LINE_CSS = [
+    ".user-profile-popout [data-subline-status]{margin-inline:118px 12px}",
+    ".user-profile-sidebar [data-subline-status]{margin-inline:122px 8px}",
+    ".user-profile-modal [data-subline-status]{margin-inline:174px 16px}",
+    ".user-profile-modal-v2 [data-subline-status]{margin-inline:calc(var(--custom-modal-v2-profile-card-padding) + var(--custom-user-profile-avatar-size) + var(--space-20) + 13px) var(--space-16)}"
 ].join("\n");
 const STATUS_LINE_STYLE_ID = "subline-status-line-style";
 
@@ -4636,6 +4681,8 @@ function ReplyQuoteImpl({ original, referenced }: { original: unknown; reference
         renderWithMarkup(translation, markup.tokens, text => Parser.parse(text, true, { channelId }), content);
     const existing = getTranslation(makeKey(quoted.id, settings.store.targetLang));
     if (existing !== undefined && "skipped" in existing) return decoded ?? fallback;
+    // Already in the reader's language (a ⚡ answer): the original stays.
+    if (isRealTranslation(existing) && existing.same === true) return decoded ?? fallback;
     if (isRealTranslation(existing)) {
         // The message's own line says "≈ rough" for a Google guess it cannot
         // trust (romanized text, a low-confidence detection). In place there
@@ -4793,7 +4840,7 @@ export default definePlugin({
     // The profile custom status: its own "Status · ✦" line under the bubble,
     // in flow and unclamped (see the patch). Nothing for the reader's own
     // status, which includes the live preview while they type one.
-    statusLine: (props: unknown) => <StatusLine {...((props ?? {}) as object)} />,
+    statusLine: (props: unknown, expandable?: unknown) => <StatusLine {...((props ?? {}) as object)} sublineExpandable={!!expandable} />,
     // The reply bar's quoted line. Nothing for a blocked, ignored or
     // suspended author: Discord's own line, and nothing is sent.
     replyQuoteChildren: (original: unknown, props: any) => {
