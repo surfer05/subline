@@ -24,6 +24,9 @@ export const React = {
     createElement(type: unknown, props: unknown, ...children: unknown[]) {
         return { type, props, children };
     },
+    cloneElement(element: any, props: unknown) {
+        return { ...element, props: { ...(element?.props ?? {}), ...(props as object) } };
+    },
     Fragment: "Fragment"
 };
 

@@ -3391,7 +3391,7 @@ describe("the force-quality popover action (⚡)", () => {
         expect(forceButton(discordMessage("1", "hola"))).not.toBeNull();
     });
 
-    it("a forced answer that is the message itself shows \"✦ already in your language\", never the message twice", async () => {
+    it("a forced answer that is the message itself shows \"✦ nothing to translate here\", never the message twice", async () => {
         useGemini();
         setTranslation(key("1"), { lang: "en", text: "see you tomorrow", via: "google", conf: 0.99 });
         native.translateBatch.mockClear();
@@ -3400,7 +3400,7 @@ describe("the force-quality popover action (⚡)", () => {
         await flush();
         expect(getTranslation(key("1"))).toMatchObject({ same: true, via: "gemini" });
         const out = accessoryText(discordMessage("1", "see you tomorrow"));
-        expect(out).toBe("✦ already in your language");
+        expect(out).toBe("✦ nothing to translate here");
     });
 
     it("a relay that ignores force and answers skip never takes the ≈ line away", async () => {
@@ -3414,14 +3414,14 @@ describe("the force-quality popover action (⚡)", () => {
         expect(accessoryText(discordMessage("1", "hola tio"))).toContain("hi there");
     });
 
-    it("a forced skip on a message with no line at all says it is already in your language", async () => {
+    it("a forced skip on a message with no line at all says there is nothing to translate here", async () => {
         useGemini();
         setTranslation(key("1"), { skipped: true, via: "google" });
         native.translateBatch.mockClear();
         native.translateBatch.mockResolvedValue({ ok: true, results: [{ id: "1", skip: true }] });
         forceButton(discordMessage("1", "ok bro"))!.onClick!(undefined as any);
         await flush();
-        expect(accessoryText(discordMessage("1", "ok bro"))).toBe("✦ already in your language");
+        expect(accessoryText(discordMessage("1", "ok bro"))).toBe("✦ nothing to translate here");
     });
 
     it("an automatic batch is never forced", async () => {

@@ -23,6 +23,7 @@
  */
 
 import { cleanTranslation } from "../customEmoji";
+import { IN_PLACE_COPY } from "../upgradeCopy";
 import { React } from "@webpack/common";
 
 import { isRomanizedGuess } from "../romanized";
@@ -211,5 +212,159 @@ export function TightSwap({ original, text, tooltip, render }: {
         return lead === "" ? swapped : <>{lead}{swapped}</>;
     } catch {
         return (original ?? null) as any;
+    }
+}
+
+/* ------------------------------------------------- in place, with a toggle -- */
+
+/**
+ * Which in-place texts the reader flipped back to the original. Keyed by
+ * "user id + text", so a changed status or bio starts over on its
+ * translation. In memory only, and bounded: the oldest flips are forgotten
+ * first, so many profiles opened in one session cost a fixed amount.
+ */
+export const MAX_IN_PLACE_FLIPS = 500;
+const showingOriginal = new Set<string>();
+const flipListeners = new Set<() => void>();
+
+export function inPlaceKey(userId: unknown, text: string): string {
+    return `${typeof userId === "string" ? userId : ""}\u0000${text}`;
+}
+
+export function isShowingOriginal(key: string): boolean {
+    return showingOriginal.has(key);
+}
+
+export function flipInPlace(key: string): void {
+    if (showingOriginal.has(key)) showingOriginal.delete(key);
+    else {
+        showingOriginal.add(key);
+        while (showingOriginal.size > MAX_IN_PLACE_FLIPS) {
+            const oldest = showingOriginal.values().next();
+            if (oldest.done) break;
+            showingOriginal.delete(oldest.value);
+        }
+    }
+    for (const l of [...flipListeners]) {
+        try { l(); } catch { /* a listener never breaks a flip */ }
+    }
+}
+
+/** For tests: forget every flip. */
+export function resetInPlaceFlips(): void {
+    showingOriginal.clear();
+}
+
+export function inPlaceFlipCount(): number {
+    return showingOriginal.size;
+}
+
+/**
+ * A number that changes whenever a surface translation lands or an in-place
+ * toggle flips. Discord's status bubble adds it to the inputs it measures its
+ * copies by, so the clamp and the chevron follow what is shown.
+ */
+export function useSurfaceVersion(): number {
+    const [version, bump] = React.useReducer((n: number) => n + 1, 0);
+    React.useEffect(() => {
+        flipListeners.add(bump);
+        const off = service?.subscribe(bump);
+        return () => { flipListeners.delete(bump); off?.(); };
+    }, []);
+    return version;
+}
+
+const TOGGLE_STYLE = { cursor: "pointer", opacity: 0.75, marginInlineStart: "0.3em", userSelect: "none", whiteSpace: "nowrap" } as const;
+
+/** Stops an event at the toggle: the bubble's hover, expand and toolbar never see it. */
+function stopHere(e: any): void {
+    try {
+        e?.stopPropagation?.();
+    } catch { /* nothing to stop */ }
+}
+
+/**
+ * The toggle at the end of an in-place text. Its glyph says what shows: the
+ * translation's glyph, or ↩ for the original. A click flips it; the click, the
+ * press and the key never reach Discord's handlers around it.
+ */
+export function InPlaceToggle({ flipKey, glyph }: { flipKey: string; glyph: string; }) {
+    const original = isShowingOriginal(flipKey);
+    const label = original ? IN_PLACE_COPY.showTranslation : IN_PLACE_COPY.showOriginal;
+    return (
+        <span
+            role="button"
+            tabIndex={-1}
+            data-subline-toggle=""
+            aria-label={label}
+            title={label}
+            style={TOGGLE_STYLE}
+            onMouseDown={stopHere}
+            onPointerDown={stopHere}
+            onKeyDown={stopHere}
+            onClick={(e: any) => {
+                stopHere(e);
+                try { e?.preventDefault?.(); } catch { /* nothing to prevent */ }
+                flipInPlace(flipKey);
+            }}
+        >
+            {original ? IN_PLACE_COPY.originalGlyph : glyph}
+        </span>
+    );
+}
+
+/** Re-render when a toggle flips (and when a translation lands). */
+function useInPlaceUpdates(): void {
+    useSurfaceVersion();
+}
+
+/**
+ * The status text inside Discord's profile status bubble: the translation IN
+ * PLACE of the original, with the toggle at its end. Discord renders this one
+ * element in every copy of the bubble (the reference, the clamped and the
+ * full measuring copies, and the visible one), so its own clamp, chevron and
+ * expand work on whatever shows. Until a translation is there, when it is
+ * skipped (already the reader's language) or failed: the original, no toggle.
+ */
+export function StatusBubbleText({ text, userId }: { text: string; userId?: unknown; }) {
+    useInPlaceUpdates();
+    try {
+        const t = tightTranslation(text);
+        if (t === null) return text as any;
+        const key = inPlaceKey(userId, text);
+        const shown = isShowingOriginal(key) ? text : <span dir={translationDir()}>{t.text}</span>;
+        return <>{shown}<InPlaceToggle flipKey={key} glyph={t.glyph} /></>;
+    } catch {
+        return text as any;
+    }
+}
+
+const BIO_ROW_STYLE = { display: "flex", alignItems: "flex-end" } as const;
+const BIO_TEXT_STYLE = { flex: "1 1 auto", minWidth: 0 } as const;
+
+/**
+ * A bio translated IN PLACE: Discord's own bio renderer, handed the
+ * translation instead of the original, so Discord's bio markdown (links,
+ * mentions, emoji, formatting) renders it exactly as it renders a bio. The
+ * toggle sits at the end of the last line. Until a translation is there, when
+ * it is skipped or failed: Discord's element, untouched.
+ */
+export function BioInPlace({ element, bio, userId }: { element: any; bio: string; userId?: unknown; }) {
+    useInPlaceUpdates();
+    try {
+        if (service === null) return element;
+        const shown = displayFor(service.want(bio), bio);
+        if (shown === null) return element;
+        const key = inPlaceKey(userId ?? element?.props?.userId, bio);
+        const original = isShowingOriginal(key);
+        const body = original ? element : React.cloneElement(element, { userBio: shown.text });
+        return (
+            <div style={BIO_ROW_STYLE} data-subline-surface="bio-in-place">
+                <div style={BIO_TEXT_STYLE} dir={original ? undefined : translationDir()}>{body}</div>
+                <InPlaceToggle flipKey={key} glyph={shown.glyph} />
+            </div>
+        );
+    } catch {
+        return element;
     }
 }

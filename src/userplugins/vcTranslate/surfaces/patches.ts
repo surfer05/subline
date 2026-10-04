@@ -112,12 +112,12 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
         }]
     },
     {
-        surface: "profile bio (line under the bio: popout, full profile, DM side profile)",
-        source: "written against the current bundle (the About Me section every profile surface renders)",
+        surface: "profile bio in the About Me section (popout, DM side profile redesign): translated in place, with a toggle",
+        source: "written against the current bundle (the About Me section: its measuring div wraps the bio renderer, so the \"View full bio\" check counts the translation and the toggle)",
         find: "getBoundingClientRect().height>57.75",
         replacement: [{
-            match: /(?<=isHoveringOrFocusing:\i\}\)\}\))(?=,\(\i\|\|\i\)&&)/,
-            replace: ",$self.renderBioLine(arguments[0])"
+            match: /(\(0,\i\.jsx\)\(\i\.A,\{userId:\i,userBio:(\i),setLineClamp:!1,textColor:"text-strong",animateOnHoverOrFocusOnly:\i,isHoveringOrFocusing:\i\}\))/,
+            replace: "$self.bioInPlace($1,$2)"
         }]
     },
     {
@@ -130,31 +130,32 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
         }]
     },
     {
-        surface: "custom status in the profile header: an unclamped \"Status · ✦\" line under the bubble",
-        source: "written against the current bundle (the profile custom status bubble). WAS a line INSIDE the bubble's text, which Discord clamps (2 lines, 8 on hover, max 144px): a long status hid its translation completely",
+        surface: "custom status in the profile header: the translation IN PLACE of the status text, with a toggle at its end",
+        source: "written against the current bundle (the profile custom status bubble). The status text element is built once and rendered in every copy (the hidden reference, the clamped and the full measuring copies, and the visible animated one), so Discord's own 2-line clamp, chevron and expand work on the translation",
         find: "action:\"HOVER_CUSTOM_STATUS\"",
         replacement: [
             {
-                // Both return branches start the same Fragment: the hidden,
-                // in-flow reference container first, then the absolutely
-                // positioned bubble. The line goes between them, in flow, so
-                // it takes its own height below the bubble and is never
-                // clamped. `arguments[0]` is the bubble's props: the returns
-                // sit in its forwardRef function body. The second capture is
-                // the bubble's "expandable" flag (the chevron under a long
-                // status): with it the line needs more room above it to clear
-                // the chevron.
-                match: /(\(0,\i\.jsxs\)\(\i\.Fragment,\{children:\[\i,)(?=\(0,\i\.jsxs\)\("div",\{ref:\i,className:\i\(\)\(\i\.\i,\i\),[^]{0,400}?children:\[\i,\i\?\.\((\i)\),\i\]\}\))/g,
-                replace: "$1$self.statusLine(arguments[0],$2),"
+                // The status text: `null!=r?<Text …>{r}</Text>:null`, then the
+                // placeholder. arguments[0] is the bubble's props (its
+                // forwardRef body): who it belongs to rides on them (below).
+                match: /(\i=null!=(\i)\?\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-sm\/normal",className:\i\.\i,children:)\2\}\):null,(?=\i=void 0!==)/,
+                replace: "$1$self.statusBubbleText($2,arguments[0])}):null,"
             },
             {
-                // The outer component knows whether this is the reader's own
-                // status (the live preview while typing one is always theirs).
-                // Its rest props reach the bubble in every branch, so the flag
-                // rides along on them: own status and own typing are never
-                // translated.
-                match: /(?<=(\i)=!(\i)&&!\i\.bot&&!\i;)if\((\i)\)\{(?=let \i=null!=\i&&""!==\i\?\i:null;return\(0,\i\.jsx\)\(\i\.\i,\{value:\i,children:\(0,\i\.jsx\)\(\i,\{emoji:\i\?\?null,text:\i,statusLabel:\i,placeholderText:\i,ref:\i,\.\.\.(\i)\}\))/,
-                replace: "if($4.sublineSelf=$2,$3){"
+                // The bubble measures its copies once per change of its own
+                // inputs. This adds "a translation landed or a toggle flipped"
+                // to them, so the clamp and the chevron follow what is shown.
+                match: /(maxHeight:`\$\{\i\?Math\.min\(\i\.current,\i\):\i\}px`\}\)\},\[\i,\i,\i,\i,\i,\i,\i)\]/,
+                replace: "$1,$self.useSurfaceVersion()]"
+            },
+            {
+                // The outer component knows whose status this is and whether
+                // it is the reader's own (the live preview while typing one is
+                // always theirs). Its rest props reach the bubble in every
+                // branch, so both ride along on them: own status and own
+                // typing are never translated, and a toggle is per user.
+                match: /(?<=(\i)=!(\i)&&!(\i)\.bot&&!\i;)if\((\i)\)\{(?=let \i=null!=\i&&""!==\i\?\i:null;return\(0,\i\.jsx\)\(\i\.\i,\{value:\i,children:\(0,\i\.jsx\)\(\i,\{emoji:\i\?\?null,text:\i,statusLabel:\i,placeholderText:\i,ref:\i,\.\.\.(\i)\}\))/,
+                replace: "if($5.sublineSelf=$2,$5.sublineUser=$3?.id,$4){"
             }
         ]
     },
@@ -168,36 +169,37 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
         }]
     },
     {
-        surface: "profile bio in the full profile (modal): line under the bio",
+        surface: "profile bio in the full profile (modal): translated in place, with a toggle",
         source: "written against the current bundle (UserProfileModalV2 renders the bio renderer directly, not the About Me wrapper the popout uses)",
         find: "friendsSinceDate:",
         replacement: [{
             match: /(?<=hideHeading:!\i,headingIcon:\i,children:\i\?\(0,\i\.jsx\)\(\i,\{displayProfile:\i,className:\i\.\i\}\):)(\(0,\i\.jsx\)\(\i\.\i,\{userBio:(\i),setLineClamp:!1\}\))/,
-            replace: "$self.bioWithLine($1,$2)"
+            // The renderer here carries no userId: the profile's own does.
+            replace: "$self.bioInPlace($1,$2,arguments[0]?.displayProfile?.userId)"
         }]
     },
     {
-        surface: "profile bio in the DM side profile (non-redesign layout): line under the bio, both About Me sites",
+        surface: "profile bio in the DM side profile (non-redesign layout): translated in place, with a toggle, both About Me sites",
         source: "written against the current bundle (the DM side panel module; its redesign branch uses the About Me wrapper and is covered by the popout patch)",
         find: "DMSidePanelWishlistItemCard",
         replacement: [
             {
                 match: /(?<=headingColor:"text-strong",children:)(\(0,\i\.jsx\)\(\i\.A,\{userBio:(\i\?\.bio),userId:\i\.id,animateOnHoverOrFocusOnly:!0,isHoveringOrFocusing:\i\}\))/,
-                replace: "$self.bioWithLine($1,$2)"
+                replace: "$self.bioInPlace($1,$2)"
             },
             {
                 match: /(?<=headingColor:"text-strong",children:)(\(0,\i\.jsx\)\(\i\.A,\{userId:\i\.id,userBio:(\i\.bio),isHoveringOrFocusing:\i,animateOnHoverOrFocusOnly:!0\}\))/,
-                replace: "$self.bioWithLine($1,$2)"
+                replace: "$self.bioInPlace($1,$2)"
             }
         ]
     },
     {
-        surface: "profile bio in the minimal user popout: line under the bio",
+        surface: "profile bio in the minimal user popout: translated in place, with a toggle",
         source: "written against the current bundle (a popout variant that renders the bio renderer directly)",
         find: "setLineClamp:!1,textColor:\"text-strong\"}",
         replacement: [{
             match: /(\(0,\i\.jsx\)\(\i\.E,\{userId:\i\.id,userBio:(\i\?\.bio),setLineClamp:!1,textColor:"text-strong"\}\))/,
-            replace: "$self.bioWithLine($1,$2)"
+            replace: "$self.bioInPlace($1,$2)"
         }]
     }
 ];

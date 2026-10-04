@@ -103,7 +103,7 @@ export const UPGRADE_COPY = {
     popoverUpgrade: "Add AI ✦",
     // A ⚡ press on a message ✦ says is already in the reader's language: no
     // duplicate line, just this.
-    alreadyYourLanguage: "✦ already in your language",
+    nothingToTranslate: "✦ nothing to translate here",
     /** The link after a ✦ preview. */
     previewLink: "Add AI",
     /** Hover text on a ≈ line waiting for Google. */
@@ -112,3 +112,15 @@ export const UPGRADE_COPY = {
 
 /** Where the device-limit sentence sends the reader to ask for a reset. */
 export const RESET_HELP_URL = "https://github.com/surfer05/subline/issues";
+
+/**
+ * The small toggle at the end of a status or bio that is shown translated in
+ * place. Its glyph says what is showing: the translation's own glyph (✦, or ≈
+ * for Google's), or ↩ for the original. The label is its tooltip and its
+ * screen-reader name, and says what a click does.
+ */
+export const IN_PLACE_COPY = {
+    originalGlyph: "↩",
+    showOriginal: "Show the original",
+    showTranslation: "Show the translation"
+} as const;

@@ -68,7 +68,8 @@ import {
 import { SURFACE_PATCHES } from "./surfaces/patches";
 import { SurfaceService, type SurfaceOutcome, type SurfaceTier } from "./surfaces/service";
 import {
-    safe, setSurfaceRtl, setSurfaceService, SurfaceLines, tightTranslation, TightSwap
+    BioInPlace, resetInPlaceFlips, safe, setSurfaceRtl, setSurfaceService, StatusBubbleText, SurfaceLines, tightTranslation, TightSwap,
+    useSurfaceVersion
 } from "./surfaces/ui";
 import { __resetWeeklyStats, closeWeekIfDue, countShown, loadWeeklyStats } from "./weeklyNote";
 
@@ -3831,7 +3832,7 @@ function translationLines(message: Message) {
     if (entry.same === true) {
         return (
             <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }} data-subline-same="">
-                {UPGRADE_COPY.alreadyYourLanguage}
+                {UPGRADE_COPY.nothingToTranslate}
                 {forcing && " · ⚡ translating…"}
             </div>
         );
@@ -4398,20 +4399,6 @@ function SurfaceAccessoryImpl({ message }: { message: Message; }) {
 }
 const SurfaceAccessory = safe("message accessory", SurfaceAccessoryImpl, surfaceDebug);
 
-/**
- * The line under a profile's About Me: the bio's translation. (The custom
- * status has its own line inside its bubble, see statusBubbleChildren.)
- */
-function BioLineImpl(props: any) {
-    // The reader's own bio is never translated, so editing it does not send
-    // every half-typed version.
-    if (!isPaidSurfaceUser() || isCurrentUser(props?.userId)) return null;
-    const bio = props?.userBio;
-    if (typeof bio !== "string" || bio.trim() === "") return null;
-    return <SurfaceLines texts={[{ kind: "bio", label: "About me", text: bio }]} />;
-}
-const BioLine = safe("bio line", BioLineImpl, surfaceDebug);
-
 /** Is `userId` the reader themselves? Their own text is never translated. */
 function isCurrentUser(userId: unknown): boolean {
     try {
@@ -4419,67 +4406,6 @@ function isCurrentUser(userId: unknown): boolean {
     } catch {
         return false;
     }
-}
-
-/**
- * The custom status's translation, as its own line under the profile's
- * status bubble. WAS a second line INSIDE the bubble text, which Discord
- * clamps to 2 lines (8 on hover, at most 144px): a 128-character status
- * filled them and its translation ended in "…" or never showed. This line
- * sits in flow below the bubble, with no clamp and no max height.
- */
-function StatusLineImpl(props: any) {
-    if (!isPaidSurfaceUser() || props?.sublineSelf === true) return null;
-    const text = props?.text;
-    if (typeof text !== "string" || text.trim() === "") return null;
-    return (
-        <div data-subline-status="" style={statusLineStyle(props?.sublineExpandable === true)}>
-            <SurfaceLines texts={[{ kind: "status", label: "Status", text }]} />
-        </div>
-    );
-}
-const StatusLine = safe("status line", StatusLineImpl, surfaceDebug);
-
-/** Space above the line: 6px, or 16px to clear the chevron of an expandable bubble. */
-export const STATUS_LINE_MARGIN_TOP = 6;
-export const STATUS_LINE_MARGIN_TOP_EXPANDABLE = 16;
-
-/** In flow, never clamped: a long translation wraps onto as many lines as it needs. */
-export function statusLineStyle(expandable: boolean) {
-    return {
-        marginTop: expandable ? STATUS_LINE_MARGIN_TOP_EXPANDABLE : STATUS_LINE_MARGIN_TOP,
-        overflowWrap: "anywhere"
-    } as const;
-}
-
-/**
- * The status line's side margins, keyed by the profile layout classes, so
- * the line's start edge equals the bubble's TEXT start (the bubble's inset,
- * plus its 1px border, plus its 12px padding) in every layout. Without the
- * sheet the line still shows, just unindented.
- */
-export const STATUS_LINE_CSS = [
-    ".user-profile-popout [data-subline-status]{margin-inline:118px 12px}",
-    ".user-profile-sidebar [data-subline-status]{margin-inline:122px 8px}",
-    ".user-profile-modal [data-subline-status]{margin-inline:174px 16px}",
-    ".user-profile-modal-v2 [data-subline-status]{margin-inline:calc(var(--custom-modal-v2-profile-card-padding) + var(--custom-user-profile-avatar-size) + var(--space-20) + 13px) var(--space-16)}"
-].join("\n");
-const STATUS_LINE_STYLE_ID = "subline-status-line-style";
-
-function addStatusLineStyle(): void {
-    try {
-        if (typeof document === "undefined" || document.getElementById(STATUS_LINE_STYLE_ID)) return;
-        const el = document.createElement("style");
-        el.id = STATUS_LINE_STYLE_ID;
-        el.textContent = STATUS_LINE_CSS;
-        document.head.appendChild(el);
-    } catch { /* the line still shows without it */ }
-}
-
-function removeStatusLineStyle(): void {
-    try {
-        if (typeof document !== "undefined") document.getElementById(STATUS_LINE_STYLE_ID)?.remove();
-    } catch { /* nothing to undo */ }
 }
 
 /**
@@ -4792,17 +4718,17 @@ export default definePlugin({
     // For anyone who is not a paid install each returns exactly what Discord
     // would have had there: null where the patch appends a child, and the
     // original child where it wraps one.
-    renderBioLine: (props: any) => isPaidSurfaceUser() ? <BioLine {...(props ?? {})} /> : null,
-    // The profile modal, the DM side profile (non-redesign) and the minimal
-    // popout render the bio renderer directly, so the About Me hook above
-    // never runs there. This wraps that one element: Discord's own bio, then
-    // the line under it. Discord's element unchanged for anyone not paid,
-    // for an empty bio, or on any throw.
-    bioWithLine: (original: unknown, userBio: unknown) => {
+    // Every profile bio (the About Me section, the full profile, the DM side
+    // profile, the minimal popout): Discord's own bio renderer element,
+    // translated IN PLACE with a toggle at its end. Discord's element
+    // unchanged for anyone not paid, for an empty bio, for the reader's own
+    // bio, or on any throw.
+    bioInPlace: (original: unknown, userBio: unknown, userId?: unknown) => {
         try {
-            if (!isPaidSurfaceUser() || typeof userBio !== "string" || userBio.trim() === "") return original;
-            if (isCurrentUser((original as any)?.props?.userId)) return original;
-            return <>{original}<BioLine userBio={userBio} /></>;
+            if (!isPaidSurfaceUser() || original == null || typeof userBio !== "string" || userBio.trim() === "") return original;
+            const uid = userId ?? (original as any)?.props?.userId;
+            if (isCurrentUser(uid)) return original;
+            return <BioInPlace element={original} bio={userBio} userId={uid} />;
         } catch {
             return original;
         }
@@ -4837,10 +4763,20 @@ export default definePlugin({
             return heading;
         }
     },
-    // The profile custom status: its own "Status · ✦" line under the bubble,
-    // in flow and unclamped (see the patch). Nothing for the reader's own
-    // status, which includes the live preview while they type one.
-    statusLine: (props: unknown, expandable?: unknown) => <StatusLine {...((props ?? {}) as object)} sublineExpandable={!!expandable} />,
+    // The profile custom status: the translation IN PLACE of the status text
+    // inside Discord's bubble, with a toggle at its end (see the patch). The
+    // status string itself for anyone not paid, for the reader's own status
+    // (which includes the live preview while they type one), or on a throw.
+    statusBubbleText: (text: unknown, props: any) => {
+        try {
+            if (!isPaidSurfaceUser() || props?.sublineSelf === true || typeof text !== "string" || text.trim() === "") return text;
+            return <StatusBubbleText text={text} userId={props?.sublineUser} />;
+        } catch {
+            return text;
+        }
+    },
+    // Called inside the bubble's render, as an input to its measuring effect.
+    useSurfaceVersion,
     // The reply bar's quoted line. Nothing for a blocked, ignored or
     // suspended author: Discord's own line, and nothing is sent.
     replyQuoteChildren: (original: unknown, props: any) => {
@@ -4929,7 +4865,6 @@ export default definePlugin({
         // Text outside messages (paid only). Registered first so a slow read
         // below delays nothing; the service sends nothing for a free install.
         startSurfaces();
-        addStatusLineStyle();
         addMessageAccessory(SURFACE_ACCESSORY_ID, props => <SurfaceAccessory message={props.message} />);
         void surfaceCache?.load();
         void surfaceBudget?.load();
@@ -5080,7 +5015,7 @@ export default definePlugin({
 
     stop() {
         removeMessageAccessory(SURFACE_ACCESSORY_ID);
-        removeStatusLineStyle();
+        resetInPlaceFlips();
         // Nothing queued is sent after this, and the cache is saved as it is.
         surfaceService?.stop();
         void surfaceCache?.persistNow();

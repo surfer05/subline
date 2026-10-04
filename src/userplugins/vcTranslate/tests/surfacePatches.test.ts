@@ -28,10 +28,7 @@ describe("surface patches against Discord's current public bundle", () => {
         const total = SURFACE_PATCHES.reduce((n, p) => n + p.replacement.length, 0);
         expect(BUNDLE_SITES).toHaveLength(total);
         // Minimal substrings only, never whole stretches of Discord's code.
-        // The profile status bubble (394816) is the one exception: its match
-        // looks ahead across the bubble's event handlers to the expandable
-        // flag, so its sites run to about 300 characters.
-        for (const e of BUNDLE_SITES) for (const site of e.sites) expect(site.length).toBeLessThan(e.module === "394816" ? 400 : 200);
+        for (const e of BUNDLE_SITES) for (const site of e.sites) expect(site.length).toBeLessThan(200);
     });
 
     for (const ex of BUNDLE_SITES) {
@@ -74,13 +71,15 @@ describe("surface patches against Discord's current public bundle", () => {
     });
 });
 
-describe("the profile status line patch", () => {
+describe("the profile status bubble patch", () => {
     // Pieces of the bubble module (394816, 2026-10-04) in their real order:
-    // the clamped status text, both return branches, and the outer component.
+    // the status text element (built once, rendered in every copy), the
+    // measuring effect's inputs, both return branches, and the outer component.
     const MODULE = [
-        "ea=null!=r?(0,l.jsx)(f.E,{variant:\"text-sm/normal\",className:ex.qS,children:r}):null,",
-        "return null==y?" + "(0,l.jsxs)(l.Fragment,{children:[eh,(0,l.jsxs)(\"div\",{ref:M,className:a()(ex.kL,E),onMouseEnter:()=>{I({action:\"HOVER_CUSTOM_STATUS\"}),ei(!0)},onMouseLeave:()=>{ei(!1)},children:[eT,C?.(z),eS]})" + "]}):",
-        "(0,l.jsxs)(l.Fragment,{children:[eh,(0,l.jsxs)(\"div\",{ref:M,className:a()(ex.kL,E),onFocus:()=>{y(!0)},onBlur:e=>{M.current?.contains(e.relatedTarget)||y(!1)},onMouseEnter:()=>{I({action:\"HOVER_CUSTOM_STATUS\"}),y(!0),ei(!0)},onMouseLeave:()=>{y(!1),ei(!1)},children:[eT,C?.(z),eS]})" + "]})}),",
+        "ea=null!=r?(0,l.jsx)(f.E,{variant:\"text-sm/normal\",className:ex.qS,children:r}):null,es=void 0!==j&&null==n?null:null,",
+        "eu=(0,l.jsxs)(\"div\",{className:ex.Qs,children:[er,eo]}),ec=(0,l.jsxs)(\"div\",{ref:O,className:a()(ex.Qs,ex.mj),children:[er,eo]}),ef=(0,l.jsxs)(\"div\",{ref:$,className:a()(ex.Qs,ex.m2,ex.mj),children:[er,eo]}),",
+        "el({maxHeight:`${B?Math.min(w.current,b):n}px`})},[X,r,n,el,B,b,Z]);",
+        "return null==y?" + "(0,l.jsxs)(l.Fragment,{children:[eh,(0,l.jsxs)(\"div\",{ref:M,className:a()(ex.kL,E),onMouseEnter:()=>{I({action:\"HOVER_CUSTOM_STATUS\"}),ei(!0)},onMouseLeave:()=>{ei(!1)},children:[eT,C?.(z),eS]})" + "]}):null;",
         "ev=i.forwardRef(function(e,t){let{user:n,disableToolbar:A=!1,...S}=e,C=(0,o.bG)([j.default],()=>j.default.getId()===n.id),",
         "I=!C&&!n.bot&&!A;if(g){let e=null!=R&&\"\"!==R?R:null;return(0,l.jsx)(E.f5,{value:h,children:(0,l.jsx)(ep,{emoji:c??null,text:e,statusLabel:L,placeholderText:d,ref:t,...S})" + "})}"
     ].join("");
@@ -92,18 +91,22 @@ describe("the profile status line patch", () => {
         return src;
     }
 
-    it("leaves the clamped status text exactly as Discord wrote it", () => {
-        expect(patched()).toContain("className:ex.qS,children:r}):null,");
-        expect(patched()).not.toContain("statusBubbleChildren");
-    });
-
-    it("puts the line in flow, between the reference container and the bubble, in both branches, with the expandable flag", () => {
+    it("swaps the status text in the one element every copy renders (reference, clamped, full, visible)", () => {
         const src = patched();
-        expect(src.match(/\$self\.statusLine\(arguments\[0\],z\)/g)).toHaveLength(2);
-        expect(src).toContain("children:[eh,$self.statusLine(arguments[0],z),(0,l.jsxs)(\"div\",{ref:M");
+        expect(src).toContain("className:ex.qS,children:$self.statusBubbleText(r,arguments[0])}):null,");
+        // The copies still render that same element: nothing else changed.
+        expect(src.match(/children:\[er,eo\]/g)).toHaveLength(3);
     });
 
-    it("marks the reader's own status on the props every branch passes on", () => {
-        expect(patched()).toContain("if(S.sublineSelf=C,g){");
+    it("re-measures the bubble when a translation lands or a toggle flips", () => {
+        expect(patched()).toContain("[X,r,n,el,B,b,Z,$self.useSurfaceVersion()]");
+    });
+
+    it("no status line under the bubble any more", () => {
+        expect(patched()).not.toContain("statusLine");
+    });
+
+    it("marks the reader's own status and whose status it is on the props every branch passes on", () => {
+        expect(patched()).toContain("if(S.sublineSelf=C,S.sublineUser=n?.id,g){");
     });
 });

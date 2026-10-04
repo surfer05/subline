@@ -11,7 +11,8 @@ const native = vi.hoisted(() => {
     return { translateBatch, readStagedBuildId, relayStatus };
 });
 
-import plugin, { __surfaceService, STATUS_LINE_CSS, SURFACE_ACCESSORY_ID } from "../index";
+import plugin, { __surfaceService, SURFACE_ACCESSORY_ID } from "../index";
+import { inPlaceFlipCount, MAX_IN_PLACE_FLIPS, resetInPlaceFlips } from "../surfaces/ui";
 import settings from "../settings";
 import { clearStore, makeKey, setTranslation } from "../store";
 import { toggleChannel, toggleChannelOptOut } from "../channels";
@@ -95,7 +96,31 @@ const statusOf = (userId: string): string =>
     ((stubActivities.get(userId) ?? []) as any[]).find(a => a?.type === 4)?.state ?? "";
 /** Discord's member-list / DM-list custom status text for a user, as the patch hands it over. */
 const decorator = (userId: string) => { const st = statusOf(userId); return deep(P.statusTextChildren(st, st)); };
-const bioLine = (props: any) => deep(P.renderBioLine(props));
+/** Discord's bio renderer element, as the patches hand it over. */
+const BIO_EL = (bio: unknown, userId = "u1") => ({ type: "discord-bio", props: { userId, userBio: bio }, children: [] });
+/** A bio as the patch renders it: Discord's renderer, handed whatever shows. */
+const bioIn = (bio: string, userId = "u1") => deep(P.bioInPlace(BIO_EL(bio, userId), bio));
+/** The first node (depth first) that `pred` accepts. */
+function findNode(node: any, pred: (n: any) => boolean): any {
+    if (node === null || typeof node !== "object") return undefined;
+    if (Array.isArray(node)) {
+        for (const c of node) { const f = findNode(c, pred); if (f !== undefined) return f; }
+        return undefined;
+    }
+    if (pred(node)) return node;
+    return findNode(node.children, pred);
+}
+/** The bio text Discord's renderer is handed in a bioIn tree. */
+const bioShown = (node: any): unknown => findNode(node, n => n?.type === "discord-bio")?.props?.userBio;
+/** The in-place toggle in a tree. */
+const toggleOf = (node: any) => findNode(node, n => n?.props?.["data-subline-toggle"] === "");
+/** The profile status bubble's text, as the patch hands it over. */
+const bubble = (t: unknown, props: any = { sublineUser: "u1" }) => deep(P.statusBubbleText(t, props));
+/** A click that records whether it was stopped. */
+function clickEvent() {
+    const e = { stopped: 0, prevented: 0, stopPropagation() { e.stopped++; }, preventDefault() { e.prevented++; } };
+    return e;
+}
 const GUILD_CHANNEL = { id: "c1", guild_id: "g1" };
 /** Discord's own child, which a non-paid install must get back as the SAME value. */
 const ORIGINAL = { type: "discord-original", props: {}, children: [] };
@@ -136,6 +161,7 @@ beforeEach(async () => {
     __resetWebpackCommon();
     __resetMessagePopover();
     DataStore.__reset();
+    resetInPlaceFlips();
     settings.store.targetLang = "en";
     settings.store.engine = "google";
     __stubSetSelectedChannel(null);
@@ -180,7 +206,8 @@ describe("an install that owns nothing sees no change", () => {
         return [
             accessory(embedMessage()),
             decorator("u1"),
-            bioLine({ userId: "u1", userBio: "Ich liebe Pizza" }),
+            bioIn("Ich liebe Pizza"),
+            bubble("Bin gleich zurück"),
             tag("Hilfe gesucht")
         ];
     }
@@ -193,10 +220,11 @@ describe("an install that owns nothing sees no change", () => {
         expect(P.stageTopicProps(title, GUILD_CHANNEL)).toEqual({ children: title });
         expect(P.forumTitleChildren(ORIGINAL, { ...GUILD_CHANNEL, name: "Hilfe beim Kochen" })).toBe(ORIGINAL);
         expect(P.onboardingHeading(ORIGINAL, { title: "Was spielst du gern?", options: [] })).toBe(ORIGINAL);
-        expect(P.bioWithLine(ORIGINAL, "Ich liebe Pizza")).toBe(ORIGINAL);
+        const bio = BIO_EL("Ich liebe Pizza");
+        expect(P.bioInPlace(bio, "Ich liebe Pizza")).toBe(bio);
+        expect(P.statusBubbleText("Bin gleich zurück", { sublineUser: "u1" })).toBe("Bin gleich zurück");
         expect(P.statusTextChildren(ORIGINAL, "Bin gleich zurück")).toBe(ORIGINAL);
         expect(P.forumTagChildren("Hilfe gesucht")).toBe("Hilfe gesucht");
-        expect(deep(P.statusLine({ text: "Bin gleich zurück" }))).toBeNull();
         expect(P.replyQuoteChildren(ORIGINAL, { referencedMessage: { message: { id: "q1", channel_id: "c1", content: "Kommst du?" } } })).toBe(ORIGINAL);
     }
 
@@ -209,7 +237,7 @@ describe("an install that owns nothing sees no change", () => {
 
     it("renders nothing extra and sends zero surface requests", async () => {
         await restart(() => DataStore.clearEntitlementForTest());
-        expect(renderEverything()).toEqual([null, "Bin gleich zurück", null, "Hilfe gesucht"]);
+        expect(renderEverything()).toEqual([null, "Bin gleich zurück", BIO_EL("Ich liebe Pizza"), "Bin gleich zurück", "Hilfe gesucht"]);
         parsersUntouched();
         childrenUntouched();
         await settle();
@@ -233,7 +261,7 @@ describe("an install that owns nothing sees no change", () => {
     it("a paid install with the setting off sends zero surface requests", async () => {
         paid();
         settings.store.translateSurfaces = false;
-        expect(renderEverything()).toEqual([null, "Bin gleich zurück", null, "Hilfe gesucht"]);
+        expect(renderEverything()).toEqual([null, "Bin gleich zurück", BIO_EL("Ich liebe Pizza"), "Bin gleich zurück", "Hilfe gesucht"]);
         parsersUntouched();
         childrenUntouched();
         await settle();
@@ -354,33 +382,80 @@ describe("a paid install", () => {
         expect(stage("Wir reden heute über Bücher")).toBe("Wir reden heute über Bücher");
     });
 
-    it("the bio gets its line under it (the status has its own, in its bubble)", async () => {
-        stubActivities.set("u1", [{ type: 4, state: "Bin gleich zurück" }]);
-        bioLine({ userId: "u1", userBio: "Ich liebe Pizza und lange Spaziergänge" });
-        await settle();
-        const out = text(bioLine({ userId: "u1", userBio: "Ich liebe Pizza und lange Spaziergänge" }));
-        expect(out).toContain("✦ sharp: Ich liebe Pizza und lange Spaziergänge");
-        expect(out).not.toContain("Bin gleich zurück");
-    });
-
-    it("the profile modal, DM side profile and minimal popout bio (bioWithLine): Discord's bio, then the line", async () => {
+    it("a bio is translated IN PLACE: Discord's renderer gets the translation, a toggle sits at its end, no line under it", async () => {
         const bio = "Ich liebe Pizza und lange Spaziergänge";
-        deep(P.bioWithLine(ORIGINAL, bio));
+        // Until a translation is there: Discord's own element, no toggle.
+        expect(bioIn(bio)).toEqual(BIO_EL(bio));
         await settle();
-        const node = deep(P.bioWithLine(ORIGINAL, bio));
-        // Discord's own element comes first, unchanged; the line follows it.
-        expect(node.children[0]).toEqual(ORIGINAL);
-        expect(P.bioWithLine(ORIGINAL, bio).children[0]).toBe(ORIGINAL);
-        expect(text(node.children.slice(1))).toContain("✦ sharp: " + bio);
-        // An empty or missing bio keeps Discord's element as it was.
-        expect(P.bioWithLine(ORIGINAL, "")).toBe(ORIGINAL);
-        expect(P.bioWithLine(ORIGINAL, undefined)).toBe(ORIGINAL);
+        const node = bioIn(bio);
+        expect(bioShown(node)).toBe("sharp: " + bio);
+        expect(findNode(node, n => n?.type === "discord-bio").props.userId).toBe("u1");
+        expect(text(toggleOf(node))).toBe("✦");
+        expect(toggleOf(node).props["aria-label"]).toBe("Show the original");
+        expect(toggleOf(node).props.title).toBe("Show the original");
+        expect(P.renderBioLine).toBeUndefined();
+        expect(P.bioWithLine).toBeUndefined();
     });
 
-    it("bioWithLine fails safe: anything that throws hands back Discord's element", () => {
+    it("the toggle flips the bio to the original and back, and its click never reaches Discord's handlers", async () => {
+        const bio = "Ich liebe Pizza und lange Spaziergänge";
+        bioIn(bio);
+        await settle();
+        const e = clickEvent();
+        toggleOf(bioIn(bio)).props.onClick(e);
+        expect(e.stopped).toBe(1);
+        const original = bioIn(bio);
+        expect(bioShown(original)).toBe(bio);
+        expect(text(toggleOf(original))).toBe("↩");
+        expect(toggleOf(original).props["aria-label"]).toBe("Show the translation");
+        // The press and the key are stopped too.
+        for (const h of ["onMouseDown", "onPointerDown", "onKeyDown"]) {
+            const ev = clickEvent();
+            toggleOf(original).props[h](ev);
+            expect(ev.stopped, h).toBe(1);
+        }
+        toggleOf(original).props.onClick(clickEvent());
+        expect(bioShown(bioIn(bio))).toBe("sharp: " + bio);
+    });
+
+    it("every bio layout (About Me, full profile, DM side profile, minimal popout) goes through the same in-place path", async () => {
+        const bio = "Ich liebe Pizza und lange Spaziergänge";
+        // The full profile's renderer carries no userId: the profile's own is passed.
+        const modal = { type: "discord-bio", props: { userBio: bio, setLineClamp: false }, children: [] };
+        deep(P.bioInPlace(modal, bio, "u9"));
+        await settle();
+        for (const node of [deep(P.bioInPlace(modal, bio, "u9")), bioIn(bio, "u3")]) {
+            expect(bioShown(node)).toBe("sharp: " + bio);
+            expect(toggleOf(node)).toBeDefined();
+        }
+        // Flipping one user's bio leaves another user's same bio translated.
+        toggleOf(deep(P.bioInPlace(modal, bio, "u9"))).props.onClick(clickEvent());
+        expect(bioShown(deep(P.bioInPlace(modal, bio, "u9")))).toBe(bio);
+        expect(bioShown(bioIn(bio, "u3"))).toBe("sharp: " + bio);
+        // An empty or missing bio keeps Discord's element as it was.
+        expect(P.bioInPlace(modal, "")).toBe(modal);
+        expect(P.bioInPlace(modal, undefined)).toBe(modal);
+        expect(P.bioInPlace(undefined, bio)).toBeUndefined();
+    });
+
+    it("a bio already in the reader's language, or one that failed, stays Discord's own with no toggle", async () => {
+        const english = "I love pizza and long walks on the beach";
+        bioIn(english);
+        await settle();
+        expect(bioIn(english)).toEqual(BIO_EL(english));
+        native.translateBatch.mockResolvedValue({ ok: false, error: "relay: HTTP 500 upstream" });
+        const failing = "Wir reden heute über Bücher und Kaffee";
+        bioIn(failing);
+        await settle();
+        expect(bioIn(failing)).toEqual(BIO_EL(failing));
+    });
+
+    it("bioInPlace fails safe: anything that throws hands back Discord's element", () => {
         const spy = vi.spyOn(React, "createElement").mockImplementation(() => { throw new Error("boom"); });
         try {
-            expect(P.bioWithLine(ORIGINAL, "Ich liebe Pizza")).toBe(ORIGINAL);
+            const bio = BIO_EL("Ich liebe Pizza");
+            expect(P.bioInPlace(bio, "Ich liebe Pizza")).toBe(bio);
+            expect(P.statusBubbleText("Bin gleich zurück", { sublineUser: "u1" })).toBe("Bin gleich zurück");
         } finally {
             spy.mockRestore();
         }
@@ -394,10 +469,10 @@ describe("a paid install", () => {
                 ? { id: m.id, skip: true, reason: "unsure" }
                 : { id: m.id, lang: "ast", text: `sharp: ${m.text}`, skip: false })
         }));
-        bioLine({ userId: "u1", userBio: bio });
+        bioIn(bio);
         await settle();
         expect(surfaceCalls("relay").length).toBeGreaterThan(0);
-        expect(text(bioLine({ userId: "u1", userBio: bio }))).toContain(`sharp: ${bio}`);
+        expect(bioShown(bioIn(bio))).toBe(`sharp: ${bio}`);
     });
 
     it("a romanized status Google hands back unchanged (\"same\") still gets ✦, shown in place", async () => {
@@ -423,10 +498,10 @@ describe("a paid install", () => {
                 ? { id: m.id, skip: true, reason: "same" }
                 : { id: m.id, lang: "hi", text: `sharp: ${m.text}`, skip: false })
         }));
-        bioLine({ userId: "u1", userBio: bio });
+        bioIn(bio);
         await settle();
         expect(surfaceCalls("relay").length).toBeGreaterThan(0);
-        expect(text(bioLine({ userId: "u1", userBio: bio }))).toContain(`sharp: ${bio}`);
+        expect(bioShown(bioIn(bio))).toBe(`sharp: ${bio}`);
     });
 
     it("a line whose language the engine could not name shows no language label", async () => {
@@ -434,11 +509,11 @@ describe("a paid install", () => {
             ok: true,
             results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "und", text: `${engine === "relay" ? "sharp" : "rough"}: ${m.text}`, skip: false }))
         }));
-        bioLine({ userId: "u1", userBio: "Ich liebe Pizza und lange Spaziergänge" });
+        bioIn("Ich liebe Pizza und lange Spaziergänge");
         await settle();
-        const out = text(bioLine({ userId: "u1", userBio: "Ich liebe Pizza und lange Spaziergänge" }));
-        expect(out).toContain("✦ sharp: Ich liebe Pizza und lange Spaziergänge");
-        expect(out).not.toContain("und ·");
+        const node = bioIn("Ich liebe Pizza und lange Spaziergänge");
+        expect(bioShown(node)).toBe("sharp: Ich liebe Pizza und lange Spaziergänge");
+        expect(text(node)).not.toContain("und");
     });
 
     it("an onboarding question gets lines for itself and its options", async () => {
@@ -482,7 +557,9 @@ describe("a paid install", () => {
         expect(P.forumTagChildren(undefined)).toBeUndefined();
         expect(P.replyQuoteChildren(null, {})).toBeNull();
         expect(deep(P.replyQuoteChildren(ORIGINAL, undefined))).toEqual(ORIGINAL);
-        expect(bioLine(undefined)).toBeNull();
+        expect(P.bioInPlace(undefined, undefined)).toBeUndefined();
+        expect(P.statusBubbleText(undefined, undefined)).toBeUndefined();
+        expect(() => deep(P.statusBubbleText("Hallo", undefined))).not.toThrow();
         expect(deep(P.onboardingHeading(ORIGINAL, 42))[1]).toBeNull();
         expect(parsed("topic", 42 as any)).toEqual(["<42>"]);
     });
@@ -894,7 +971,7 @@ describe("the reply bar", () => {
     });
 });
 
-describe("the custom status line under the profile bubble", () => {
+describe("the custom status in the profile bubble: translated in place, with a toggle", () => {
     const status = "Só sei que nada sei, mas gosto de aprender";
 
     /** Every style object on the way down to the text. */
@@ -906,53 +983,133 @@ describe("the custom status line under the profile bubble", () => {
         return out;
     }
 
-    it("a non-paid install gets nothing", async () => {
+    it("a non-paid install gets Discord's status string back, untouched", async () => {
         await restart(() => DataStore.clearEntitlementForTest());
-        expect(deep(P.statusLine({ text: status }))).toBeNull();
-        expect(deep(P.statusLine(undefined))).toBeNull();
-    });
-
-    it("lines up with the bubble's text in every profile layout (inset + 1px border + 12px padding)", () => {
-        const rules = STATUS_LINE_CSS.split("\n");
-        expect(rules).toEqual([
-            ".user-profile-popout [data-subline-status]{margin-inline:118px 12px}",
-            ".user-profile-sidebar [data-subline-status]{margin-inline:122px 8px}",
-            ".user-profile-modal [data-subline-status]{margin-inline:174px 16px}",
-            ".user-profile-modal-v2 [data-subline-status]{margin-inline:calc(var(--custom-modal-v2-profile-card-padding) + var(--custom-user-profile-avatar-size) + var(--space-20) + 13px) var(--space-16)}"
-        ]);
-        expect(STATUS_LINE_CSS).not.toContain("custom-user-profile-theme");
-    });
-
-    it("sits 6px under the bubble, or 16px when the bubble is expandable so the line clears its chevron", async () => {
-        paid();
-        deep(P.statusLine({ text: status }));
+        expect(P.statusBubbleText(status, { sublineUser: "u1" })).toBe(status);
+        expect(P.statusBubbleText(undefined, undefined)).toBeUndefined();
         await settle();
-        expect(deep(P.statusLine({ text: status })).props.style.marginTop).toBe(6);
-        expect(deep(P.statusLine({ text: status }, false)).props.style.marginTop).toBe(6);
-        expect(deep(P.statusLine({ text: status }, true)).props.style.marginTop).toBe(16);
-        // Whatever truthy value Discord's flag holds.
-        expect(deep(P.statusLine({ text: status }, 1)).props.style.marginTop).toBe(16);
-        expect(deep(P.statusLine({ text: status }, undefined)).props.style.marginTop).toBe(6);
+        expect(surfaceCalls()).toEqual([]);
     });
 
-    it("paid: its own line is just \"✦ translation\": no kind word, no language code, ≈ first", async () => {
+    it("pending shows the original with no toggle; then the translation replaces it, with a ✦ toggle at its end", async () => {
         paid();
-        const first = deep(P.statusLine({ text: status }));
-        expect(first === null || text(first) === "").toBe(true);
+        const first = bubble(status);
+        expect(text(first)).toBe(status);
+        expect(toggleOf(first)).toBeUndefined();
         await settle();
-        const line = deep(P.statusLine({ text: status }));
-        expect(line.props["data-subline-status"]).toBe("");
-        expect(text(line)).toBe("✦ sharp: " + status);
+        const node = bubble(status);
+        expect(text(node)).toBe("sharp: " + status + "✦");
+        expect(text(toggleOf(node))).toBe("✦");
+        expect(toggleOf(node).props["aria-label"]).toBe("Show the original");
     });
 
-    // THE FIELD BUG, 2026-10-01: the ✦ line sat INSIDE Discord's status text,
-    // which its CSS clamps to 2 lines (8 on hover, at most 144px). A 128-char
-    // status filled them, so its translation ended in "…" or never showed.
+    it("no kind word and no language code: just the translation and the toggle", async () => {
+        paid();
+        bubble(status);
+        await settle();
+        const out = text(bubble(status));
+        expect(out).toBe("sharp: " + status + "✦");
+        expect(out).not.toMatch(/Status|·/);
+    });
+
+    it("the toggle flips to the original (↩) and back; its click, press and key never reach the bubble", async () => {
+        paid();
+        bubble(status);
+        await settle();
+        const e = clickEvent();
+        toggleOf(bubble(status)).props.onClick(e);
+        expect(e.stopped).toBe(1);
+        expect(e.prevented).toBe(1);
+        const original = bubble(status);
+        expect(text(original)).toBe(status + "↩");
+        expect(toggleOf(original).props["aria-label"]).toBe("Show the translation");
+        for (const h of ["onMouseDown", "onPointerDown", "onKeyDown"]) {
+            const ev = clickEvent();
+            toggleOf(original).props[h](ev);
+            expect(ev.stopped, h).toBe(1);
+        }
+        toggleOf(original).props.onClick(clickEvent());
+        expect(text(bubble(status))).toBe("sharp: " + status + "✦");
+    });
+
+    it("every copy of the bubble (reference, clamped, full, visible) shows the same text and toggle state", async () => {
+        paid();
+        bubble(status);
+        await settle();
+        // Discord renders the one element in four places: each renders the same.
+        const copies = [bubble(status), bubble(status), bubble(status), bubble(status)].map(text);
+        expect(new Set(copies).size).toBe(1);
+        toggleOf(bubble(status)).props.onClick(clickEvent());
+        const after = [bubble(status), bubble(status), bubble(status), bubble(status)].map(text);
+        expect(new Set(after)).toEqual(new Set([status + "↩"]));
+    });
+
+    it("the toggle is per user, and a changed status starts over on its translation", async () => {
+        paid();
+        const other = "Hoje vou dormir cedo, amanhã trabalho";
+        for (const t of [status, other]) { bubble(t, { sublineUser: "u1" }); bubble(t, { sublineUser: "u2" }); }
+        await settle();
+        toggleOf(bubble(status, { sublineUser: "u1" })).props.onClick(clickEvent());
+        expect(text(bubble(status, { sublineUser: "u1" }))).toBe(status + "↩");
+        expect(text(bubble(status, { sublineUser: "u2" }))).toBe("sharp: " + status + "✦");
+        // u1 changes their status: the new one shows translated.
+        expect(text(bubble(other, { sublineUser: "u1" }))).toBe("sharp: " + other + "✦");
+    });
+
+    it("a status that changes while its translation is pending shows each text's own state", async () => {
+        paid();
+        bubble(status);
+        const next = "Agora estou a jogar com amigos";
+        expect(text(bubble(next))).toBe(next);
+        await settle();
+        expect(text(bubble(status))).toBe("sharp: " + status + "✦");
+        expect(text(bubble(next))).toBe("sharp: " + next + "✦");
+    });
+
+    it("a status already in the reader's language, or one that failed, is the original with no toggle", async () => {
+        paid();
+        const english = "be right back, grabbing food";
+        expect(bubble(english)).toBe(english);
+        await settle();
+        expect(bubble(english)).toBe(english);
+        native.translateBatch.mockResolvedValue({ ok: false, error: "relay: HTTP 500 upstream" });
+        const failing = "Estou muito cansado hoje";
+        bubble(failing);
+        await settle();
+        expect(text(bubble(failing))).toBe(failing);
+        expect(toggleOf(bubble(failing))).toBeUndefined();
+        // An emoji-only status has no text: Discord renders none, and nothing is asked.
+        expect(P.statusBubbleText("", { sublineUser: "u1" })).toBe("");
+        expect(P.statusBubbleText("   ", { sublineUser: "u1" })).toBe("   ");
+    });
+
+    it("an Automatic owner sees Google's ≈ in place, with a ≈ toggle", async () => {
+        await restart(() => DataStore.setEntitlementForTest({ automatic: true, ai: false, tokenExpiresAt: Date.now() + 7 * DAY_MS }));
+        paid();
+        bubble(status);
+        await settle();
+        const node = bubble(status);
+        expect(text(node)).toBe("rough: " + status + "≈");
+        expect(surfaceCalls("relay")).toEqual([]);
+    });
+
+    it("a right-to-left reading language marks the translation's direction", async () => {
+        paid();
+        settings.store.targetLang = "ar";
+        bubble(status);
+        await settle();
+        const span = findNode(bubble(status), n => n?.props?.dir !== undefined);
+        expect(span.props.dir).toBe("rtl");
+    });
+
+    // A 128-char status and a 300-char translation: Discord's own clamp
+    // (2 lines, 8 on hover, at most 144px) and chevron decide what shows, since
+    // the translation is the bubble's text. Nothing of ours clamps or cuts it.
     for (const [name, source] of [
         ["Latin", "Hoje estou muito cansado depois do trabalho, mas amanhã vou jogar com vocês a noite toda, prometo que não vou faltar!!".padEnd(128, "!")],
         ["CJK", "今日は仕事でとても疲れたけど、明日は一晩中みんなと一緒にゲームをする約束だよ。絶対に休まないからね。".repeat(4).slice(0, 128)]
     ] as const) {
-        it(`a 128-char ${name} status shows all of a 300-char translation, with no clamp anywhere`, async () => {
+        it(`a 128-char ${name} status carries all of a 300-char translation, with no clamp or cut of ours`, async () => {
             paid();
             const long = "This is a very long translation that keeps going. ".repeat(6).slice(0, 300);
             native.translateBatch.mockImplementation(async (_e: string, _k: string, payload: string) => ({
@@ -960,12 +1117,11 @@ describe("the custom status line under the profile bubble", () => {
                 results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "pt", text: long, skip: false, conf: 0.99 }))
             }));
             expect(source.length).toBe(128);
-            deep(P.statusLine({ text: source }));
+            bubble(source);
             await settle();
-            const line = deep(P.statusLine({ text: source }));
-            expect(text(line)).toContain(long.trim());
-            expect(long.trim().length).toBeGreaterThan(290);
-            for (const st of styles(line)) {
+            const node = bubble(source);
+            expect(text(node)).toContain(long.trim());
+            for (const st of styles(node)) {
                 expect(st.WebkitLineClamp).toBeUndefined();
                 expect(st.maxHeight).toBeUndefined();
                 expect(st.overflow).toBeUndefined();
@@ -973,13 +1129,25 @@ describe("the custom status line under the profile bubble", () => {
         });
     }
 
+    it("many profiles opened in one session: the remembered flips stay bounded", async () => {
+        paid();
+        bubble(status);
+        await settle();
+        const toggle = toggleOf(bubble(status));
+        for (let i = 0; i < MAX_IN_PLACE_FLIPS + 50; i++) {
+            toggleOf(bubble(status, { sublineUser: "x" + i }))?.props.onClick(clickEvent());
+        }
+        expect(toggle).toBeDefined();
+        expect(inPlaceFlipCount()).toBeLessThanOrEqual(MAX_IN_PLACE_FLIPS);
+    });
+
     // Typing your own status renders a live preview of it on every key, and
     // each prefix was a ✦ request: a 58-char status spent 62 of the day's 200.
     it("the reader's own status, and the live preview while typing it, is never sent", async () => {
         paid();
         const target = "Estoy cocinando, vuelvo en un rato, no me esperen";
         for (let i = 1; i <= target.length; i++) {
-            deep(P.statusLine({ text: target.slice(0, i), sublineSelf: true }));
+            expect(P.statusBubbleText(target.slice(0, i), { sublineSelf: true, sublineUser: "me" })).toBe(target.slice(0, i));
             await vi.advanceTimersByTimeAsync(180);
         }
         await settle(60_000);
@@ -988,9 +1156,10 @@ describe("the custom status line under the profile bubble", () => {
 
     it("the reader's own bio is never sent, on any profile surface", async () => {
         paid();
-        expect(deep(P.renderBioLine({ userId: "me", userBio: "Me encanta cocinar y jugar" }))).toBeNull();
         const own = { type: "bio", props: { userId: "me", userBio: "Me encanta cocinar y jugar" }, children: [] };
-        expect(P.bioWithLine(own, "Me encanta cocinar y jugar")).toBe(own);
+        expect(P.bioInPlace(own, "Me encanta cocinar y jugar")).toBe(own);
+        const modal = { type: "bio", props: { userBio: "Me encanta cocinar y jugar" }, children: [] };
+        expect(P.bioInPlace(modal, "Me encanta cocinar y jugar", "me")).toBe(modal);
         await settle(60_000);
         expect(surfaceCalls()).toEqual([]);
     });
@@ -1094,12 +1263,12 @@ describe("markup in tight swaps: readable text out, Discord's parser in", () => 
             ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "de", text: "I love :party: pizza :111111111111111111: and long walks", skip: false }))
         }));
         const bio = "Ich liebe <a:party:111111111111111111> Pizza <:cake:333333333333333333> und lange Spaziergänge";
-        bioLine({ userId: "u1", userBio: bio });
+        bioIn(bio);
         await settle();
         const sent = surfaceCalls().flatMap(c => JSON.parse(c[2]).messages.map((m: any) => m.text as string));
         expect(sent.length).toBeGreaterThan(0);
         for (const t of sent) expect(t).toBe("Ich liebe Pizza und lange Spaziergänge");
-        const out = text(bioLine({ userId: "u1", userBio: bio }));
+        const out = String(bioShown(bioIn(bio)));
         expect(out).toContain("I love pizza and long walks");
         expect(out).not.toMatch(/\d{15,}|:party:/);
     });
