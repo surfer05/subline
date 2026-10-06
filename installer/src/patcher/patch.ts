@@ -119,7 +119,7 @@ export function patchInstall(install: DiscordInstall, options: PatchOptions): Re
     if (!bundleResult.ok) return bundleResult;
     const bundle = bundleResult.value;
 
-    const stateResult = inspectInstall(install);
+    const stateResult = inspectInstall(install, { ownLoaderPaths: [bundle.loaderPath] });
     if (!stateResult.ok) return stateResult;
     const state = stateResult.value;
 
@@ -131,10 +131,13 @@ export function patchInstall(install: DiscordInstall, options: PatchOptions): Re
     // build routinely arrives behind an unchanged loaderPath — and short-
     // circuiting there would leave the marker naming the previous build's id,
     // which would then fail every verification of a perfectly good install.
+    // A missing or disagreeing marker is never "nothing to do": the marker is
+    // what the helper and every later verification read, so it is rewritten.
     if (
         state.kind === "patched-by-us"
         && state.loaderPath === bundle.loaderPath
         && state.marker?.pluginBuildId === bundle.buildId
+        && !needsMarkerRewrite(state)
     ) {
         return ok({
             install,
@@ -151,7 +154,128 @@ export function patchInstall(install: DiscordInstall, options: PatchOptions): Re
         });
     }
 
+    // OUR stub, already loading this bundle, with only the marker missing or
+    // wrong: write the marker and leave app.asar alone (a rename over it fails
+    // on Windows while Discord runs, and there is nothing to change in it).
+    if (state.kind === "patched-by-us" && needsMarkerRewrite(state) && state.loaderPath === bundle.loaderPath) {
+        const adopted = adoptPatch(install, { modBundleDir: options.modBundleDir, productVersion: options.productVersion });
+        if (adopted.ok) {
+            return ok({
+                install,
+                loaderPath: adopted.value.loaderPath,
+                pluginBuildId: adopted.value.pluginBuildId,
+                backupPath: install.backupPath,
+                markerPath: adopted.value.markerPath,
+                backupCreated: false,
+                alreadyPatched: false,
+                replacedMod: null,
+                discordVersion: adopted.value.discordVersion,
+                previousState: state.kind,
+                bundle
+            });
+        }
+        // Anything off (a damaged stub or backup): the full patch below decides.
+    }
+
     return applyPatch(install, state, options, bundle);
+}
+
+/** Our stub with no marker, or a marker that spells or names the loader differently. */
+export function needsMarkerRewrite(state: InstallState): boolean {
+    return state.warnings.includes("marker-missing") || state.warnings.includes("marker-mismatch");
+}
+
+export interface AdoptOptions {
+    /** The installed mod bundle; the loader path and build id are read from it, as in patchInstall. */
+    modBundleDir: string;
+    /** Installer version, recorded in the marker. */
+    productVersion: string;
+}
+
+export interface AdoptReport {
+    install: DiscordInstall;
+    loaderPath: string;
+    pluginBuildId: string;
+    markerPath: string;
+    discordVersion: string | null;
+    /** Why the marker was rewritten: it was missing, or it disagreed with the stub. */
+    warning: "marker-missing" | "marker-mismatch";
+}
+
+/**
+ * RE-ADOPT our own stub: write the marker beside it, and touch nothing else.
+ *
+ * For an install whose app.asar already loads THIS bundle's loader (byte for
+ * byte the stub we write, either form) and whose _app.asar is Discord's
+ * original, but whose marker is missing or wrong. That is exactly what
+ * Vencord's host-update repatch leaves in a new Windows app-x.y.z folder. Only
+ * the marker is written, never app.asar, so it is safe while Discord is
+ * running (Windows locks app.asar, not the folder). Anything else (a stub that
+ * loads another Subline path, a damaged stub or backup) is refused with
+ * NOT_ADOPTABLE and goes through a full patch instead.
+ */
+export function adoptPatch(install: DiscordInstall, options: AdoptOptions): Result<AdoptReport> {
+    const bundleResult = inspectModBundle(options.modBundleDir);
+    if (!bundleResult.ok) return bundleResult;
+    const bundle = bundleResult.value;
+
+    const stateResult = inspectInstall(install, { ownLoaderPaths: [bundle.loaderPath] });
+    if (!stateResult.ok) return stateResult;
+    const state = stateResult.value;
+    const warning = state.warnings.includes("marker-missing")
+        ? "marker-missing"
+        : state.warnings.includes("marker-mismatch") ? "marker-mismatch" : null;
+    if (state.kind !== "patched-by-us" || warning === null || state.loaderPath !== bundle.loaderPath) {
+        return err<AdoptReport>(
+            "NOT_ADOPTABLE",
+            state.kind !== "patched-by-us"
+                ? `This install is not carrying Subline's stub with a usable backup (${state.kind}).`
+                : warning === null
+                    ? "The marker already agrees with the stub."
+                    : `The stub loads ${state.loaderPath ?? "nothing"}, not this bundle's loader, so it needs a full patch.`,
+            { path: install.rootPath }
+        );
+    }
+
+    const markerPath = markerPathFor(install.resourcesPath);
+    let previousMarker: Buffer | null = null;
+    try {
+        if (existsSync(markerPath)) previousMarker = readFileSync(markerPath);
+    } catch (cause) {
+        return fsError<AdoptReport>(cause, markerPath, "read the patch marker");
+    }
+
+    const buildInfo = readDiscordVersion(install);
+    const discordVersion = buildInfo.ok ? buildInfo.value.version : null;
+    const written = writeMarker(install.resourcesPath, {
+        format: MARKER_FORMAT,
+        product: "subline",
+        productVersion: options.productVersion,
+        loaderPath: bundle.loaderPath,
+        pluginBuildId: bundle.buildId,
+        discordVersion,
+        backupPath: install.backupPath,
+        patchedAt: new Date().toISOString()
+    });
+    if (!written.ok) return written;
+
+    // Same standard as a patch: read everything back, and undo on a mismatch.
+    const verified = verifyPatch(install, { loaderPath: bundle.loaderPath, buildId: bundle.buildId });
+    if (!verified.ok) {
+        try {
+            if (previousMarker !== null) writeFileSync(markerPath, previousMarker);
+            else removeMarker(install.resourcesPath);
+        } catch {
+            // The marker is a sidecar: Discord starts either way.
+        }
+        return rewrap<AdoptReport>(verified.error, {
+            code: "VERIFICATION_FAILED",
+            message: `${verified.error.message} The marker was put back as it was.`,
+            path: install.asarPath
+        });
+    }
+
+    return ok({ install, loaderPath: bundle.loaderPath, pluginBuildId: bundle.buildId, markerPath, discordVersion, warning });
 }
 
 /** All the reasons we refuse to touch an install, each with its own named error. */
@@ -440,6 +564,12 @@ export interface UnpatchOptions {
      * under Vencord is not something to do without the user saying so.
      */
     removeForeignMod?: boolean;
+    /**
+     * Loader paths known to be ours (the installed bundle's patcher.js), so a
+     * stub that loads one is restored even with its marker missing. Any
+     * `…/Subline/mod/patcher.js` is recognised without it.
+     */
+    ownLoaderPaths?: readonly string[];
 }
 
 export interface UnpatchReport {
@@ -455,7 +585,7 @@ export interface UnpatchReport {
 }
 
 export function unpatchInstall(install: DiscordInstall, options: UnpatchOptions = {}): Result<UnpatchReport> {
-    const stateResult = inspectInstall(install);
+    const stateResult = inspectInstall(install, { ownLoaderPaths: options.ownLoaderPaths ?? [] });
     if (!stateResult.ok) return stateResult;
     const state = stateResult.value;
 

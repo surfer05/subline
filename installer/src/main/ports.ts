@@ -55,6 +55,7 @@ import type { SchtasksPort } from "../helper/scheduledTask.js";
 import { modBundleDirFor, productDirFor } from "../bundle/layout.js";
 import { locateDiscordInstalls } from "../patcher/locate.js";
 import type { DiscordBranch, DiscordInstall } from "../patcher/locate.js";
+import { loaderPathFor } from "../bundle/spec.js";
 import { patchInstall } from "../patcher/patch.js";
 import { err, ok } from "../patcher/result.js";
 import type { Result } from "../patcher/result.js";
@@ -645,7 +646,7 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
                 // tell them apart, and it costs one log line to do so.
                 onIgnoredError: detail => options.log.warn("locate.skipped", detail)
             }),
-        inspect: install => inspectInstall(install),
+        inspect: install => inspectInstall(install, { ownLoaderPaths: runtimeDir === null ? [] : [loaderPathFor(runtimeDir)] }),
 
         listProcesses: () => listProcesses(platform, exec, options.log),
         requestQuit: branch => requestQuit(branch, platform, exec),

@@ -29,7 +29,7 @@ import type { Alert } from "../src/helper/alerts.js";
 import { DEFAULT_REPEAT_MS, readPendingAlerts } from "../src/helper/alerts.js";
 import type { DiscordInstall } from "../src/patcher/locate.js";
 import { readMarker } from "../src/patcher/marker.js";
-import { patchInstall, verifyPatch } from "../src/patcher/patch.js";
+import { adoptPatch, patchInstall, verifyPatch } from "../src/patcher/patch.js";
 import { err, ok } from "../src/patcher/result.js";
 import type { Result } from "../src/patcher/result.js";
 import { inspectInstall } from "../src/patcher/state.js";
@@ -161,6 +161,8 @@ function makeHarness(): Harness {
         verifyPatch: (install, expected) => verifyPatch(install, expected),
         patch: (install, options) =>
             patchInstall(install, { modBundleDir: options.modBundleDir, productVersion: PRODUCT_VERSION }),
+        adopt: (install, options) =>
+            adoptPatch(install, { modBundleDir: options.modBundleDir, productVersion: PRODUCT_VERSION }),
 
         inspectBundle: dir => inspectModBundle(dir),
         installBundle: sourceDir => installModBundle({ sourceDir, destDir: runtimeDir }),
@@ -404,6 +406,82 @@ describe("trigger A — Discord updated and wiped the injection", () => {
 
             const stub = readStub(harness.fixture.install.asarPath);
             expect(stub.ok && stub.value?.loaderPath).toBe(join(foreign.dir, "patcher.js"));
+        } finally {
+            foreign.cleanup();
+        }
+    });
+});
+
+describe("our stub without our marker (Windows field bug, 2026-10-04)", () => {
+    // Vencord's host-update repatch, bundled in our patcher.js, copies the old
+    // folder's app.asar (our stub) into the new one and leaves the marker behind.
+    function dropMarker(): void {
+        unlinkSync(join(harness.fixture.install.resourcesPath, "subline-patch.json"));
+    }
+
+    it("is re-adopted, never abandoned as another client mod: marker rewritten, app.asar untouched", async () => {
+        patchForReal(harness);
+        await harness.run();
+        dropMarker();
+        const before = readFileSync(harness.fixture.install.asarPath);
+
+        const report = await harness.run();
+        expect(report.managed).toBe(1);
+        expect(harness.logged).not.toContain("helper.scan foreign-mod");
+        const scan = report.decisions.find(d => d.kind === "scan" && d.outcome === "re-adopt");
+        expect(scan?.fields.marker).toBe("missing");
+        expect(scan?.fields.loader).toBe(join(harness.runtimeDir, "patcher.js"));
+        expect(report.decisions.some(d => d.kind === "repatch" && d.outcome === "re-adopted")).toBe(true);
+        const marker = readMarker(harness.fixture.install.resourcesPath);
+        expect(marker.ok && marker.value?.pluginBuildId).toBe(harness.shipped.buildId);
+        expect(readFileSync(harness.fixture.install.asarPath).equals(before)).toBe(true);
+
+        // And it stays managed: the next run has nothing to do.
+        const again = await harness.run();
+        expect(again.decisions.some(d => d.outcome === "re-adopt")).toBe(false);
+        expect(again.managed).toBe(1);
+    });
+
+    it("on Windows, with Discord running, the marker is still rewritten at once (it never touches app.asar)", async () => {
+        patchForReal(harness);
+        await harness.run();
+        dropMarker();
+        harness.platform = "win32";
+        harness.discordOpen = true;
+
+        const report = await harness.run();
+        expect(report.deferred).toEqual([]);
+        expect(report.decisions.some(d => d.kind === "repatch" && d.outcome === "re-adopted")).toBe(true);
+        expect(existsSync(join(harness.fixture.install.resourcesPath, "subline-patch.json"))).toBe(true);
+    });
+
+    it("without the adopt port it still treats the install as ours and takes the full repair path", async () => {
+        patchForReal(harness);
+        await harness.run();
+        dropMarker();
+        (harness.ports as { adopt?: unknown }).adopt = undefined;
+
+        const report = await harness.run();
+        expect(report.managed).toBe(1);
+        expect(report.repatched).toHaveLength(1);
+        expect(readMarker(harness.fixture.install.resourcesPath).ok).toBe(true);
+    });
+
+    it("a genuine foreign mod is still left alone, and the log names its loader and whether a marker is there", async () => {
+        patchForReal(harness);
+        await harness.run();
+        const foreign = makeModBundleFixture({ buildId: "aaaabbbbccccdddd" });
+        try {
+            writeFileSync(
+                harness.fixture.install.asarPath,
+                (await import("../src/patcher/stub.js")).buildStubAsar(join(foreign.dir, "patcher.js"))
+            );
+            dropMarker();
+            const report = await harness.run();
+            expect(report.managed).toBe(0);
+            const scan = report.decisions.find(d => d.kind === "scan" && d.outcome === "foreign-mod");
+            expect(scan?.fields.loader).toBe(join(foreign.dir, "patcher.js"));
+            expect(scan?.fields.marker).toBe("missing");
         } finally {
             foreign.cleanup();
         }

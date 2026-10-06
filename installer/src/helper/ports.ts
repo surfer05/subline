@@ -19,13 +19,13 @@ import { readPatchedInstalls } from "../app/patchedInstalls.js";
 import { isDiscordRunning } from "../app/discordProcess.js";
 import { inspectModBundle } from "../bundle/bundle.js";
 import { modBundleDirFor, productDirFor } from "../bundle/layout.js";
-import { manifestPathFor } from "../bundle/spec.js";
+import { loaderPathFor, manifestPathFor } from "../bundle/spec.js";
 import { listProcesses } from "../main/ports.js";
 import { locateDiscordInstalls, locateRemembered } from "../patcher/locate.js";
 import type { DiscordInstall } from "../patcher/locate.js";
 import { isOtherAccountLoader } from "../patcher/ownership.js";
 import { readMarker } from "../patcher/marker.js";
-import { patchInstall, verifyPatch } from "../patcher/patch.js";
+import { adoptPatch, patchInstall, verifyPatch } from "../patcher/patch.js";
 import type { Exec } from "../patcher/exec.js";
 import { hiddenExec } from "../patcher/exec.js";
 import { err, fsError, ok } from "../patcher/result.js";
@@ -355,7 +355,8 @@ export function createHelperPorts(options: RealHelperPortsOptions): HelperPorts 
             }
             return ok(merged);
         },
-        inspect: install => inspectInstall(install),
+        // The installed bundle's loader is ours by definition, wherever it lives.
+        inspect: install => inspectInstall(install, { ownLoaderPaths: modDir === null ? [] : [loaderPathFor(modDir)] }),
         readMarker: resourcesPath => readMarker(resourcesPath),
         readDiscordVersion: install => readDiscordVersion(install),
         verifyPatch: (install, expected) => verifyPatch(install, expected),
@@ -367,6 +368,9 @@ export function createHelperPorts(options: RealHelperPortsOptions): HelperPorts 
                 // that could patch over another mod would do it while nobody was
                 // there to consent (spec §3 step 4).
             }),
+
+        adopt: (install, adoptOptions) =>
+            adoptPatch(install, { modBundleDir: adoptOptions.modBundleDir, productVersion: options.productVersion }),
 
         inspectBundle: dir => inspectModBundle(dir),
         installBundle: sourceDir =>

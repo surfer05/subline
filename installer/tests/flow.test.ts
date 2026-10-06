@@ -652,6 +652,18 @@ describe("a Discord we already patched", () => {
         expect(h.engineReasserts).toBeGreaterThan(0);
     });
 
+    // FIELD BUG 2026-10-04 (Windows): Discord's update left our stub in a new
+    // folder without our marker. That install is ours, but "already set up"
+    // would leave the marker missing; it continues as an update, whose patch
+    // rewrites it.
+    it("our stub with its marker missing is not 'already set up': it continues to the patch", async () => {
+        const st = { ...installState("patched-by-us", "subline"), marker: null, warnings: ["marker-missing" as const] };
+        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: true });
+        const first = await h.flow.start();
+        expect(first.step).not.toBe("already-installed");
+        expect(h.patchCalls.length).toBeGreaterThan(0);
+    });
+
     // PAID ONLY, and an update is not the gate. Discord already runs Subline;
     // the new mod asks for activation inside Discord, where the relay knows
     // the plugin's own install id (early users get Automatic there).

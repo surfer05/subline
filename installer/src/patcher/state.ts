@@ -18,6 +18,8 @@ import { readMarker } from "./marker.js";
 import type { PatchMarker } from "./marker.js";
 import type { Result } from "./result.js";
 import { err, ok } from "./result.js";
+import { isSublineLoaderPath, sameLoaderPath } from "./ownership.js";
+import type { LoaderPathContext } from "./ownership.js";
 import { readStub } from "./stub.js";
 import type { StubContents } from "./stub.js";
 
@@ -58,7 +60,16 @@ export type StateWarning =
     /** A leftover `_app.asar` next to a genuine Discord `app.asar` — typically a Discord update that orphaned a patch (spec §7). */
     | "stale-backup"
     /** Our marker says one loader, the stub `require()`s another. */
-    | "marker-loader-mismatch";
+    | "marker-loader-mismatch"
+    /**
+     * The stub loads Subline's own loader but no marker sits beside it. On
+     * Windows this is what Vencord's host-update repatch leaves in a new
+     * app-x.y.z folder (it copies app.asar and nothing else). Still ours; the
+     * marker is rewritten by the next patch, repatch or helper run.
+     */
+    | "marker-missing"
+    /** The stub loads Subline's loader, but the marker spells it differently or names another path. Still ours; rewritten. */
+    | "marker-mismatch";
 
 export interface InstallState {
     kind: InstallStateKind;
@@ -107,9 +118,13 @@ export function hasUnpackedAppDir(resourcesPath: string): boolean {
     }
 }
 
-/** Identify a foreign mod from the path its stub loads. Never used to claim ownership *for us*. */
-export function identifyModFromLoaderPath(loaderPath: string | null): KnownMod {
+/**
+ * Identify a mod from the path its stub loads. Subline's own loader is named as
+ * such (see isSublineLoaderPath), so our stub can never be labelled foreign.
+ */
+export function identifyModFromLoaderPath(loaderPath: string | null, context: InspectOptions = {}): KnownMod {
     if (!loaderPath) return "unknown";
+    if (isSublineLoaderPath(loaderPath, context.ownLoaderPaths ?? [], context)) return "subline";
     const lower = loaderPath.toLowerCase();
     if (lower.includes("betterdiscord")) return "betterdiscord";
     if (lower.includes("equicord")) return "equicord";
@@ -140,11 +155,20 @@ function broken(
 }
 
 /**
+ * What the caller knows about its own loader. `ownLoaderPaths` is the installed
+ * bundle's loader (patcher.js), so a dev build outside the standard
+ * `…/Subline/mod` folder is recognised too. The rest is for tests.
+ */
+export interface InspectOptions extends LoaderPathContext {
+    ownLoaderPaths?: readonly string[];
+}
+
+/**
  * Inspect one installation. Only genuinely unusable situations (the path is
  * not a Discord install at all) come back as an error — everything else is a
  * *reported state*, because the GUI has to explain it rather than fail.
  */
-export function inspectInstall(install: DiscordInstall): Result<InstallState> {
+export function inspectInstall(install: DiscordInstall, options: InspectOptions = {}): Result<InstallState> {
     if (!existsSync(install.resourcesPath)) {
         return err<InstallState>(
             "NOT_A_DISCORD_INSTALL",
@@ -238,26 +262,35 @@ export function inspectInstall(install: DiscordInstall): Result<InstallState> {
         });
     }
 
-    return classifyStub(install, stub, marker, hasBackup);
+    return classifyStub(install, stub, marker, hasBackup, options);
 }
 
 function classifyStub(
     install: DiscordInstall,
     stub: StubContents,
     marker: PatchMarker | null,
-    hasBackup: boolean
+    hasBackup: boolean,
+    options: InspectOptions
 ): Result<InstallState> {
     const loaderPath = stub.loaderPath;
-    const isOurs = marker !== null && loaderPath !== null && marker.loaderPath === loaderPath;
+    // OWNERSHIP BY LOADER. The marker agreeing (in any spelling) proves it, and
+    // so does the stub loading Subline's own loader with no marker or a
+    // disagreeing one: that is the file Discord actually runs.
+    const markerAgrees = marker !== null && loaderPath !== null && sameLoaderPath(marker.loaderPath, loaderPath, options);
+    const isOurs = loaderPath !== null
+        && (markerAgrees || isSublineLoaderPath(loaderPath, options.ownLoaderPaths ?? [], options));
 
     if (isOurs) {
+        const warnings: StateWarning[] = marker === null
+            ? ["marker-missing"]
+            : marker.loaderPath !== loaderPath ? ["marker-mismatch"] : [];
         if (!hasBackup) {
             return ok(
                 broken(
                     install,
                     "our-patch-without-backup",
                     "Subline's patch is installed but Discord's original app.asar backup is missing, so it cannot be restored.",
-                    { mod: "subline", modName: MOD_NAMES.subline, loaderPath, marker, asarIsStub: true }
+                    { mod: "subline", modName: MOD_NAMES.subline, loaderPath, marker, asarIsStub: true, warnings }
                 )
             );
         }
@@ -271,12 +304,12 @@ function classifyStub(
             hasBackup,
             marker,
             reason: null,
-            warnings: [],
+            warnings,
             summary: "Subline is installed and Discord's original app.asar is backed up."
         });
     }
 
-    const mod = identifyModFromLoaderPath(loaderPath);
+    const mod = identifyModFromLoaderPath(loaderPath, options);
     const modName = MOD_NAMES[mod];
     const warnings: StateWarning[] =
         marker !== null && loaderPath !== null && marker.loaderPath !== loaderPath

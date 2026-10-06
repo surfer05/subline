@@ -44,6 +44,8 @@ export type PatcherErrorCode =
     | "FOREIGN_MOD_PRESENT"
     /** Our stub is present but `_app.asar` is gone — we cannot restore Discord. */
     | "BACKUP_MISSING"
+    /** Our stub is present but cannot be re-adopted by writing the marker alone; a full patch is needed. */
+    | "NOT_ADOPTABLE"
     /** `_app.asar` exists but is not a usable original asar. */
     | "BACKUP_CORRUPT"
     /** Wrote the patch, read it back, and it did not match. Rolled back. */

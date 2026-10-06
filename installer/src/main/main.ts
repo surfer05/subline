@@ -43,6 +43,7 @@ import { rememberedResourcesPath, uninstallTargets } from "../patcher/locate.js"
 import { hiddenExec } from "../patcher/exec.js";
 import { readPatchedInstalls } from "../app/patchedInstalls.js";
 import { unpatchInstall } from "../patcher/patch.js";
+import { loaderPathFor } from "../bundle/spec.js";
 import { usingOriginalFs } from "../patcher/realFs.js";
 import {
     createFlowPorts, ensureHelperFromHelper, forceQuit, installHelperFor, listProcesses, logDirFor, removeHelperFor,
@@ -656,7 +657,16 @@ ipcMain.handle("uninstall:run", async (
         discordRunning: discordRunning.length
     });
     return uninstall(
-        { unpatch: (install, opts) => unpatchInstall(install, opts), ...uninstallPaths(), log },
+        {
+            // Our own loader by path too, so a stub whose marker went missing (a
+            // Windows Discord update copies app.asar without it) is still restored.
+            unpatch: (install, opts) => {
+                const modDir = uninstallPaths().modBundleDir;
+                return unpatchInstall(install, { ...opts, ownLoaderPaths: modDir === null ? [] : [loaderPathFor(modDir)] });
+            },
+            ...uninstallPaths(),
+            log
+        },
         {
             installs,
             keepSettings: options.keepSettings,

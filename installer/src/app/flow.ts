@@ -918,6 +918,15 @@ export class InstallFlow {
         // skipping the language step, whose answer is the user's saved setting
         // and must not be asked twice. The code screen is skipped only when a
         // code is already saved — see afterDiscordClosed.
+        // OUR STUB WITHOUT OUR MARKER (Windows: a Discord update copied the
+        // stub into a new app folder and left the marker behind). Not "already
+        // set up": continue as an update, whose patch rewrites the marker.
+        if (installState.warnings.includes("marker-missing") || installState.warnings.includes("marker-mismatch")) {
+            this.ports.log.info("flow.marker-rewrite", { path: install.rootPath, warnings: installState.warnings.join(",") });
+            this.updating = true;
+            return this.checkRunning();
+        }
+
         const installedId = installState.marker?.pluginBuildId ?? null;
         const shipped = this.ports.inspectShippedBundle();
         if (shipped.ok && installedId !== null && shipped.value.buildId !== installedId) {

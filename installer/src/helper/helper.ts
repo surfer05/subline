@@ -43,7 +43,7 @@ import type { FlowLogger } from "../app/flow.js";
 import type { InstalledModBundle } from "../app/modInstall.js";
 import type { ModBundle } from "../bundle/bundle.js";
 import type { DiscordInstall } from "../patcher/locate.js";
-import type { PatchIdentity, PatchReport } from "../patcher/patch.js";
+import type { AdoptReport, PatchIdentity, PatchReport } from "../patcher/patch.js";
 import type { PatchMarker } from "../patcher/marker.js";
 import type { PatcherError, PatcherErrorCode, Result } from "../patcher/result.js";
 import type { InstallState } from "../patcher/state.js";
@@ -84,6 +84,12 @@ export interface HelperPorts {
     verifyPatch(install: DiscordInstall, expected: PatchIdentity): Result<true>;
     /** `patchInstall`. The one and only way this helper writes to Discord. */
     patch(install: DiscordInstall, options: { modBundleDir: string }): Result<PatchReport>;
+    /**
+     * `adoptPatch`: write the marker beside OUR stub when it is missing or wrong,
+     * touching nothing else (safe while Discord runs). Optional so a port set
+     * without it still works: the install then goes through a full patch.
+     */
+    adopt?(install: DiscordInstall, options: { modBundleDir: string }): Result<AdoptReport>;
 
     inspectBundle(dir: string): Result<ModBundle>;
     /** Copy a freshly downloaded bundle to the runtime location. */
@@ -470,12 +476,26 @@ function collectManaged(run: Run): ManagedInstall[] {
 
         if (state.kind === "patched-by-other") {
             // Someone installed another client mod over us. A background process
-            // cannot ask, and spec §3 step 4 forbids deciding for them.
+            // cannot ask, and spec §3 step 4 forbids deciding for them. The loader
+            // and marker go in the log, so a misjudged one can be told apart.
             run.decide("scan", "foreign-mod", "another client mod now owns this install, so Subline will not touch it", {
                 path: install.rootPath,
-                mod: state.modName ?? "unknown"
+                mod: state.modName ?? "unknown",
+                loader: state.loaderPath ?? null,
+                marker: state.marker === null ? "missing" : "present"
             });
             continue;
+        }
+
+        if (state.warnings.includes("marker-missing") || state.warnings.includes("marker-mismatch")) {
+            // Our stub without our marker: on Windows, Vencord's host-update
+            // repatch copied the stub into a new app folder and left the marker
+            // behind. Never abandoned: it is ours, and the marker is rewritten.
+            run.decide("scan", "re-adopt", "the stub loads Subline's loader but its marker is missing or wrong, so Subline takes it back", {
+                path: install.rootPath,
+                loader: state.loaderPath ?? null,
+                marker: state.marker === null ? "missing" : "mismatch"
+            });
         }
 
         const marker = run.ports.readMarker(install.resourcesPath);
@@ -497,6 +517,7 @@ function collectManaged(run: Run): ManagedInstall[] {
 
 type RepatchReason =
     | "none"
+    | "marker-missing"
     | "injection-wiped"
     | "build-changed"
     | "patch-damaged"
@@ -517,6 +538,12 @@ function decideRepatch(run: Run, entry: ManagedInstall, bundle: ModBundle): { re
         case "patched-by-other":
             return { reason: "none", detail: "another mod owns this install" };
         case "patched-by-us": {
+            if (entry.state.warnings.includes("marker-missing") || entry.state.warnings.includes("marker-mismatch")) {
+                return {
+                    reason: "marker-missing",
+                    detail: "the stub loads Subline's loader but its marker is missing or wrong"
+                };
+            }
             const verified = run.ports.verifyPatch(entry.install, {
                 loaderPath: bundle.loaderPath,
                 buildId: bundle.buildId
@@ -546,7 +573,33 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
         });
     }
 
-    const { reason, detail } = decideRepatch(run, entry, bundle);
+    let { reason, detail } = decideRepatch(run, entry, bundle);
+
+    // RE-ADOPT first: the marker alone, never app.asar, so a running Discord
+    // does not block it. Only when the stub already loads this very bundle;
+    // anything else (or a failed adoption) takes the full repair path below.
+    if (reason === "marker-missing" && run.ports.adopt !== undefined) {
+        const adopted = run.ports.adopt(install, { modBundleDir: bundle.dir });
+        if (adopted.ok) {
+            run.decide("repatch", "re-adopted", "Subline's own stub was taken back: its marker was rewritten", {
+                path: install.rootPath,
+                trigger,
+                was: adopted.value.warning,
+                discord: adopted.value.discordVersion,
+                buildId: adopted.value.pluginBuildId
+            });
+            const after = run.ports.inspect(install);
+            const marker = run.ports.readMarker(install.resourcesPath);
+            if (after.ok) entry = { ...entry, state: after.value, marker: marker.ok ? marker.value : entry.marker };
+            ({ reason, detail } = decideRepatch(run, entry, bundle));
+        } else {
+            run.decide("repatch", "adopt-refused", adopted.error.message, {
+                path: install.rootPath,
+                code: adopted.error.code
+            });
+        }
+    }
+
     if (reason === "none") {
         // Still record what we saw: next run's "changed?" comparison is only as
         // good as the last observation.
