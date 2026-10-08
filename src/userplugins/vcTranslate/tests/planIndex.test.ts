@@ -654,7 +654,7 @@ describe("an Automatic owner", () => {
         expect(el.props.actions.map((a: any) => a.text)).toEqual(["$1.99 a month", "$19.99 a year · Save 16%"]);
         // The body is a component: render it.
         const body = text(el.children.map((c: any) => typeof c?.type === "function" ? c.type(c.props ?? {}) : c));
-        expect(body).toBe("Coupon? Enter it on the payment page.");
+        expect(body).toBe("Coupon? Pick $1.99 a month, then enter it on the payment page.");
         // No price table and no "Pay in your browser" footnote any more.
         expect(body).not.toContain("Monthly");
         expect(body).not.toContain("Pay in your browser");

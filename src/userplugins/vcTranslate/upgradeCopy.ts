@@ -69,9 +69,11 @@ export const UPGRADE_COPY = {
     panelSubtitle: "✦ reads the whole conversation, so slang and replies come out right.",
     /**
      * The only line under the AI plans in the Add AI panel (P3): a Dodo coupon
-     * goes on the checkout page, not in Subline.
+     * goes on the checkout page, not in Subline. Coupons are made for the
+     * monthly plan only (relay createCoupon: restricted_to [monthly]), so the
+     * yearly page refuses them: the line says which button to press.
      */
-    couponHint: "Coupon? Enter it on the payment page.",
+    couponHint: "Coupon? Pick $1.99 a month, then enter it on the payment page.",
     monthlyButton: "$1.99 a month",
     annualButton: `$19.99 a year · ${ANNUAL_NOTE}`,
     aiNeedsAutomatic: "AI needs Automatic first.",

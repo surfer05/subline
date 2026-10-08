@@ -15,7 +15,7 @@ import type { Message } from "@vencord/discord-types";
 
 import { CONTEXT_RING_SIZE, createBatcher, type Batcher } from "./batcher";
 import { forgetNotices, putNotice, takeNotice } from "./sublineNotice";
-import { clipParentText, fitLlmRequest, fitMessageText, LLM_TEXT_MAX, shrinkAfterRefusal } from "./fitRequest";
+import { clipParentText, fitLlmRequest, joinParts, LLM_TEXT_MAX, partId, shrinkAfterRefusal, splitTextToLimit } from "./fitRequest";
 import { cleanTranslation, dropCustomEmoji } from "./customEmoji";
 import { renderDiscordMarkup, type MarkupResolvers } from "./discordMarkup";
 import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel, toggleChannelOptOut } from "./channels";
@@ -51,7 +51,7 @@ import {
 import {
     ENGINE_CAPS, FAST_DEBOUNCE_MS, GOOGLE_COOLDOWN_MS, FAST_MAX_BATCH, MIN_DETECT_CONFIDENCE,
     QUALITY_DEBOUNCE_MS, QUALITY_MAX_BATCH, SHORT_TEXT_MAX,
-    type BatchRequest, type EngineId, type PendingMessage
+    type BatchRequest, type EngineId, type PendingMessage, type Result
 } from "./types";
 import { ENGINE_RANK, isRealTranslation, mayReplace } from "./upgrade";
 import { createCheckoutFlow, type CheckoutFlow, type Plan } from "./checkout";
@@ -509,9 +509,14 @@ const LLM_ENGINES = {
  * "Gemini rejected the API key" / "Subline rejected your Subline code". The
  * bring-your-own-key wording is unchanged; the relay names the code.
  */
+/** "cannot reach..." -> "Cannot reach...": a reason opening a toast. */
+function sentenceCase(text: string): string {
+    return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 function rejectedCredentialText(engine: LlmEngineId): string {
     return engine === "relay"
-        ? "Subline rejected your Subline code"
+        ? "Your Subline code wasn't accepted"
         : `${LLM_ENGINES[engine].label} rejected the API key`;
 }
 
@@ -1764,9 +1769,8 @@ function announceCooldownOnce(
 
     if (typeof quotaModel === "string" && quotaModel !== "") {
         type = Toasts.Type.FAILURE;
-        message = `VcTranslate: ${label} model "${quotaModel}" is over quota (429). This model may `
-            + "have no free-tier availability on your key. Change the model in VcTranslate "
-            + "settings to try another. Translations are using Google (≈) meanwhile.";
+        message = `${label} model "${quotaModel}" is over its quota. It may have no free `
+            + "availability on your key. Pick another model in settings. Using Google (≈) meanwhile.";
     } else if (dailyLimit) {
         message = "Today's ✦ allowance is used up. ≈ keeps working. ✦ is back tomorrow.";
     } else if (monthlyLimit) {
@@ -1895,7 +1899,7 @@ function fallBackToGoogle(reason: string, kind: FallbackKind = "key") {
         Toasts.show({
             id: Toasts.genId(),
             type: Toasts.Type.FAILURE,
-            message: `VcTranslate: ${reason}. Using Google for this session.`
+            message: `${sentenceCase(reason)}. Using Google (≈) for now.`
         });
     }
     rebuildBatcher();
@@ -1927,7 +1931,7 @@ function announceMissingKeyOnce() {
     Toasts.show({
         id: Toasts.genId(),
         type: Toasts.Type.FAILURE,
-        message: `VcTranslate: no ${credential} set. Using Google until you add one.`
+        message: `No ${credential} set. Using Google (≈) until you add one.`
     });
 }
 
@@ -2147,7 +2151,10 @@ async function runTier(
     // The edit counter of each message when its text was fixed (at flush).
     // Only a split passes it down, so a part sent later still compares
     // against the text it actually carries.
-    epochs?: ReadonlyMap<string, number>
+    epochs?: ReadonlyMap<string, number>,
+    // G2: the parts of ONE long message (runLongMessage). Their rows go here
+    // instead of the store, so only the whole message is ever written.
+    sink?: (results: Result[]) => void
 ): Promise<void> {
     const isQuality = engine !== "google";
     // The in-flight set belonging to THIS tier. The other tier's request for
@@ -2238,12 +2245,21 @@ async function runTier(
         // channel. Each part of a split goes through the gate on its own.
         if (isQuality) {
             req = withinTextLimit(req, channelId);
+            // G2: a message still over the per-text limit is translated whole,
+            // in parts, on its own (runLongMessage). Never cut to its start.
+            if (sink === undefined) {
+                const long = req.messages.filter(m => m.text.length > LLM_TEXT_MAX);
+                if (long.length > 0) {
+                    req = { ...req, messages: req.messages.filter(m => m.text.length <= LLM_TEXT_MAX) };
+                    for (const m of long) await runLongMessage(engine, m, req, myGeneration, channelId, report, sentEpoch);
+                }
+            }
             if (req.messages.length === 0) return;
             const parts = fitLlmRequest(req);
             if (parts.length > 1) {
                 if (debug) logger.debug(`[flush] ${engine}: request too large, split into ${parts.length}`);
                 for (const part of parts) for (const m of part.messages) delegated.add(m.id);
-                for (const part of parts) await runTier(engine, part, myGeneration, channelId, report, sentEpoch);
+                for (const part of parts) await runTier(engine, part, myGeneration, channelId, report, sentEpoch, sink);
                 return;
             }
             req = parts[0]!;
@@ -2295,7 +2311,8 @@ async function runTier(
         // attempt happened and catch-up re-requests it forever. See
         // `qualityAttempted`.
         if (isQuality) {
-            for (const m of req.messages) markQualityAttempted(makeKey(m.id, req.targetLang));
+            // A part of a long message is not a message: runLongMessage charged the message.
+            if (sink === undefined) for (const m of req.messages) markQualityAttempted(makeKey(m.id, req.targetLang));
         }
 
         // `null` means the IPC call itself rejected — distinct from an
@@ -2355,7 +2372,7 @@ async function runTier(
                 if (smaller.length > 0) {
                     logger.info(`[flush] ${engine}: request refused for its size; re-sending in ${smaller.length} smaller part(s)`);
                     for (const part of smaller) for (const m of part.messages) delegated.add(m.id);
-                    for (const part of smaller) await runTier(engine, part, myGeneration, channelId, report, sentEpoch);
+                    for (const part of smaller) await runTier(engine, part, myGeneration, channelId, report, sentEpoch, sink);
                     return;
                 }
             }
@@ -2519,6 +2536,10 @@ async function runTier(
             }
         }
 
+        if (sink !== undefined) {
+            sink(res.results);
+            return;
+        }
         for (const r of res.results) {
             const key = makeKey(r.id, req.targetLang);
             if (isStale(r.id)) {
@@ -2628,19 +2649,20 @@ function isOversizeRefusal(engine: EngineId, error: string): boolean {
 }
 
 /**
- * Keep every ✦ text inside the relay's per-text limit. Mention expansion can
- * push a near-4,000-character message past it (`<#id>` becomes a channel name
- * of up to 100 characters), and one such text made the relay refuse the whole
- * batch. Such a message is sent as Discord stored it when that fits; anything
- * longer is sent as its first part (fitMessageText), so it still gets ✦ (G2).
+ * Keep every ✦ text inside the relay's per-text limit where that costs
+ * nothing. Mention expansion can push a near-4,000-character message past it
+ * (`<#id>` becomes a channel name of up to 100 characters), and one such text
+ * made the relay refuse the whole batch. Such a message is sent as Discord
+ * stored it when that fits. Anything still longer is translated in parts
+ * (runLongMessage, G2).
  */
 function withinTextLimit(req: BatchRequest, channelId: string | undefined): BatchRequest {
     if (!req.messages.some(m => m.text.length > LLM_TEXT_MAX)) return req;
-    return { ...req, messages: req.messages.map(m => fitOneText(m, channelId)) };
+    return { ...req, messages: req.messages.map(m => rawIfItFits(m, channelId)) };
 }
 
-/** One message of a ✦ request, inside the per-text limit (see withinTextLimit). */
-function fitOneText<M extends { id: string; text: string; }>(m: M, channelId: string | undefined): M {
+/** One over-long message as Discord stored it, when that fits the limit. */
+function rawIfItFits<M extends { id: string; text: string; }>(m: M, channelId: string | undefined): M {
     if (m.text.length <= LLM_TEXT_MAX) return m;
     let raw: unknown;
     try {
@@ -2648,10 +2670,67 @@ function fitOneText<M extends { id: string; text: string; }>(m: M, channelId: st
     } catch {
         raw = undefined;
     }
-    if (typeof raw === "string" && raw.trim() !== "" && raw.length <= LLM_TEXT_MAX) return { ...m, text: raw };
-    const text = fitMessageText(m.text);
-    logger.info(`[flush] ${m.id}: ${m.text.length} characters, over the ✦ limit; sending the first ${text.length}`);
-    return { ...m, text };
+    return typeof raw === "string" && raw.trim() !== "" && raw.length <= LLM_TEXT_MAX ? { ...m, text: raw } : m;
+}
+
+/** A message over the per-text limit, as the parts that are sent for it (G2). */
+function partsRequest(m: BatchRequest["messages"][number], base: BatchRequest): {
+    req: BatchRequest; parts: string[]; seps: string[];
+} {
+    const { parts, seps } = splitTextToLimit(m.text, LLM_TEXT_MAX);
+    const { id: _id, text: _text, replyToId, replyTo, ...rest } = m;
+    return {
+        parts,
+        seps,
+        req: {
+            ...base,
+            // The reply link rides on the first part, where the model reads it first.
+            messages: parts.map((text, i) => ({
+                ...rest, id: partId(m.id, i), text,
+                ...(i === 0 && replyToId !== undefined ? { replyToId } : {}),
+                ...(i === 0 && replyTo !== undefined ? { replyTo } : {})
+            }))
+        }
+    };
+}
+
+/**
+ * G2. Translate one message over the relay's per-text limit WHOLE: its parts
+ * go through runTier (same gate, cooldowns and error handling, consecutive
+ * requests when they do not fit one), and the ✦ line is written only when
+ * every part came back. A part that failed leaves the ≈ line as it is: a ✦
+ * of only part of the message never replaces a ≈ of all of it.
+ */
+async function runLongMessage(
+    engine: EngineId, m: BatchRequest["messages"][number], base: BatchRequest, myGeneration: number,
+    channelId: string | undefined, report: ((outcome: ForcedHint) => void) | undefined,
+    epochs: ReadonlyMap<string, number>
+): Promise<void> {
+    const key = makeKey(m.id, base.targetLang);
+    markQualityAttempted(key);
+    const { req, parts, seps } = partsRequest(m, base);
+    const rows = new Map<string, Result>();
+    await runTier(engine, req, myGeneration, channelId, report, undefined, results => {
+        for (const r of results) rows.set(r.id, r);
+    });
+    if (myGeneration !== batcherGeneration) return;
+    // Edited while out: these words no longer exist.
+    if ((editEpoch.get(m.id) ?? 0) !== (epochs.get(m.id) ?? 0)) return;
+    // Nothing came back at all (a cooldown, a failed request): as the batch
+    // path does, the message may be asked again while nothing readable shows.
+    if (rows.size === 0 && !isRealTranslation(getTranslation(key))) qualityAttempted.delete(key);
+    const whole = joinParts(m.id, parts, seps, rows);
+    if (whole === null) {
+        logger.info(`[flush] ${m.id}: ${parts.length} parts, not all came back; the ≈ line stays`);
+        return;
+    }
+    if ("failed" in whole) return;
+    if (whole.skip) {
+        // A forced skip never takes a readable line away (as in runTier).
+        if (!(base.force === true && isRealTranslation(getTranslation(key)))) writeResult(key, { skipped: true, via: engine });
+        return;
+    }
+    writeResult(key, { lang: whole.lang, text: whole.text, via: engine });
 }
 
 /**
@@ -2856,38 +2935,47 @@ async function previewPress(message: Message): Promise<void> {
 async function sendPreview(message: Message): Promise<boolean> {
     const { credential, install } = await relayCredentials();
     const content = message.content ?? "";
-    const req: BatchRequest = {
-        // Over the relay's per-text limit, the first part is previewed (G2).
-        messages: [fitOneText({
-            id: message.id,
-            author: message.author?.username ?? "unknown",
-            text: readableContent(content, message.channel_id),
-            replyToId: replyParentId(message),
-            ...withReplyCopy(message)
-        }, message.channel_id)],
+    const base: BatchRequest = {
+        messages: [],
         context: contextBefore(message, FORCED_CONTEXT_SIZE),
         targetLang: settings.store.targetLang,
         // The reader asked for this one: translate it, never skip.
         force: true,
         mode: "preview"
     };
-    let res: Awaited<ReturnType<typeof Native.translateBatch>> | null;
-    try {
-        res = await Native.translateBatch("relay", credential, JSON.stringify(req), undefined, settings.store.debugLogging, install);
-    } catch {
-        res = null;
+    const one = rawIfItFits({
+        id: message.id,
+        author: message.author?.username ?? "unknown",
+        text: readableContent(content, message.channel_id),
+        replyToId: replyParentId(message),
+        ...withReplyCopy(message)
+    }, message.channel_id);
+    // G2: over the relay's per-text limit, the whole message is previewed in
+    // parts (consecutive requests when they do not fit one), never its start.
+    const split = one.text.length > LLM_TEXT_MAX ? partsRequest(one, base) : null;
+    const requests = split === null ? [{ ...base, messages: [one] }] : fitLlmRequest(split.req);
+    const rows = new Map<string, Result>();
+    for (const req of requests) {
+        let res: Awaited<ReturnType<typeof Native.translateBatch>> | null;
+        try {
+            res = await Native.translateBatch("relay", credential, JSON.stringify(req), undefined, settings.store.debugLogging, install);
+        } catch {
+            res = null;
+        }
+        if (res !== null) noteRelayClock(res.serverNow);
+        if (res === null || !res.ok) {
+            if (res !== null && isDailyLimit(res.error)) markTasteExhausted();
+            if (res !== null && isEntitlementRefusal(res.errorCode)) refreshAfterRefusal();
+            tasteLog(`${message.id}: no preview (${res === null ? "IPC call rejected" : "the relay refused"})`);
+            return false;
+        }
+        if (!(typeof res.quotaCap === "number" && res.quotaCap > TASTE_CAP)) recordTasteQuota(res.quotaUsed, res.quotaCap);
+        for (const r of res.results) rows.set(r.id, r);
     }
-    if (res !== null) noteRelayClock(res.serverNow);
-    if (res === null || !res.ok) {
-        if (res !== null && isDailyLimit(res.error)) markTasteExhausted();
-        if (res !== null && isEntitlementRefusal(res.errorCode)) refreshAfterRefusal();
-        tasteLog(`${message.id}: no preview (${res === null ? "IPC call rejected" : "the relay refused"})`);
-        return false;
-    }
-    if (!(typeof res.quotaCap === "number" && res.quotaCap > TASTE_CAP)) recordTasteQuota(res.quotaUsed, res.quotaCap);
-    const r = res.results.find(x => x.id === message.id);
-    // No row, or a failed row: nothing to show, so the reader may press again.
-    // The relay counts that retry as this same preview.
+    const r = split === null ? rows.get(message.id) : joinParts(message.id, split.parts, split.seps, rows) ?? undefined;
+    // No row, a failed row, or a part missing: nothing to show (never part
+    // of a message), so the reader may press again. The relay counts that
+    // retry as this same preview.
     if (r === undefined || "failed" in r) {
         tasteLog(`${message.id}: no preview (the relay returned no translation)`);
         return false;
@@ -3745,19 +3833,17 @@ function forcedHintDisplay(hint: ForcedHint): { text: string; title: string } {
         case "cooldown":
             return {
                 text: "⚡ cooling down",
-                title: "VcTranslate: this engine is cooling down after a rate limit. "
-                    + "The request was never sent. Try ⚡ again in a moment."
+                title: "✦ is cooling down after a rate limit. Nothing was sent. Try ⚡ again in a moment."
             };
         case "gate":
             return {
                 text: "⚡ rate limited",
-                title: "VcTranslate: the request was still waiting for a rate-limit slot "
-                    + "when it was superseded, so nothing was sent. Try ⚡ again."
+                title: "Nothing was sent: the request was still waiting for its turn. Try ⚡ again."
             };
         case "failed":
             return {
                 text: "⚡ translation failed",
-                title: `VcTranslate: the request went out and failed (${describeFailureReason(hint.code)}).`
+                title: `The request failed (${describeFailureReason(hint.code)}).`
             };
         case "preview":
             return { text: PREVIEW_FAILED_HINT, title: PREVIEW_FAILED_HINT };
@@ -4365,8 +4451,7 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
             <div
                 style={indicatorStyle}
                 title={
-                    `VcTranslate: ${label} is cooling down after a rate limit. The ⚡ `
-                    + `force-translate action will not send anything for another ${countdown}.`
+                    `${label} is cooling down after a rate limit. ⚡ sends nothing for another ${countdown}.`
                 }
             >
                 ✦ {countdown}
@@ -4379,8 +4464,7 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
             <div
                 style={indicatorStyle}
                 title={
-                    `VcTranslate: ${label} is ready. The ⚡ force-translate action will send `
-                    + "immediately."
+                    `${label} is ready. ⚡ sends right away.`
                 }
             >
                 ✦
@@ -4400,13 +4484,12 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
     const countdown = formatCountdown(quota.remainingMs);
     const why = quota.source === "provider"
         ? `${label} itself reports no requests left in its current window`
-        : `this plugin is pacing requests to ${label} to stay within safe usage limits`;
+        : `Subline is pacing requests to ${label} to stay within safe usage limits`;
 
     return (
         <div
             style={indicatorStyle}
-            title={`VcTranslate: ${why}. The ⚡ force-translate action will not send anything `
-                + `for another ${countdown}.`}
+            title={`${why}. ⚡ sends nothing for another ${countdown}.`}
         >
             ✦ {countdown}
         </div>

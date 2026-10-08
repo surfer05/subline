@@ -66,7 +66,7 @@ describe("the Windows test round's wording", () => {
         expect(UPGRADE_COPY.panelTitle).toBe("Add AI");
         expect(UPGRADE_COPY.monthlyButton).toBe("$1.99 a month");
         expect(UPGRADE_COPY.annualButton).toBe("$19.99 a year · Save 16%");
-        expect(UPGRADE_COPY.couponHint).toBe("Coupon? Enter it on the payment page.");
+        expect(UPGRADE_COPY.couponHint).toBe("Coupon? Pick $1.99 a month, then enter it on the payment page.");
         expect(UPGRADE_COPY.paymentPending).toBe("Payment being confirmed");
         expect(UPGRADE_COPY.popoverPreview.replace("{n}", "4")).toBe("Preview ✦ (4 left today)");
         expect(UPGRADE_COPY.popoverUpgrade).toBe("Add AI ✦");
@@ -117,6 +117,6 @@ describe("the Windows test round's wording", () => {
         expect(UPGRADE_COPY.codeRateLimited).toBe("Too many codes tried from this network today. Try again after midnight UTC.");
         expect(installer).toContain(`errRateLimited: "${UPGRADE_COPY.codeRateLimited}"`);
         // P3: the owner's line, which replaced "Have a coupon? Pick Monthly...".
-        expect(UPGRADE_COPY.couponHint).toBe("Coupon? Enter it on the payment page.");
+        expect(UPGRADE_COPY.couponHint).toBe("Coupon? Pick $1.99 a month, then enter it on the payment page.");
     });
 });

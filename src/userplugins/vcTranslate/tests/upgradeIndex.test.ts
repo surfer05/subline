@@ -143,8 +143,8 @@ describe("the Add AI panel", () => {
         expect(el.props.actions.map((a: any) => a.text)).toEqual(["$1.99 a month", "$19.99 a year · Save 16%"]);
         // P3: no price table under the buttons, only the coupon line.
         const flat = JSON.stringify(el.children[0].type({}));
-        expect(flat).toContain("Coupon? Enter it on the payment page.");
-        expect(flat).not.toContain("$1.99");
+        expect(flat).toContain("Coupon? Pick $1.99 a month, then enter it on the payment page.");
+        expect(flat).not.toContain("$19.99");
     });
 
     it("falls back to the pricing page once the plugin is stopped", () => {

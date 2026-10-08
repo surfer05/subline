@@ -3825,7 +3825,7 @@ describe("the Subline code in the plugin", () => {
         const rejected = shownToasts.filter(t => /Subline code/.test(t.message));
         expect(rejected).toHaveLength(1);
         expect(rejected[0].message).toBe(
-            "VcTranslate: Subline rejected your Subline code. Using Google for this session."
+            "Your Subline code wasn't accepted. Using Google (≈) for now."
         );
         expect(shownToasts.some(t => /API key/.test(t.message))).toBe(false);
 
@@ -3843,7 +3843,7 @@ describe("the Subline code in the plugin", () => {
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
         expect(shownToasts.some(t =>
-            t.message === "VcTranslate: no Subline code set. Using Google until you add one.")).toBe(true);
+            t.message === "No Subline code set. Using Google (≈) until you add one.")).toBe(true);
         expect(shownToasts.some(t => /API key/.test(t.message))).toBe(false);
     });
 });
@@ -4845,7 +4845,7 @@ describe("the quota indicator reflects the PROVIDER's own report when the provid
         settings.store.geminiApiKey = "AIza-test";
         for (let i = 0; i < BURST_CAPACITY; i++) await acquireSlot();
         const title = titleOf(render())!;
-        expect(title).toContain("this plugin is pacing requests");
+        expect(title).toContain("Subline is pacing requests");
         expect(title).not.toContain("itself reports no requests left");
     });
 

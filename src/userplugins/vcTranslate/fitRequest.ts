@@ -1,4 +1,4 @@
-import type { BatchRequest } from "./types";
+import type { BatchRequest, Result } from "./types";
 
 /**
  * Fitting a ✦ request inside what the relay (and the keyed providers) accept.
@@ -80,13 +80,57 @@ export function fitTextToLimit(text: string, max: number): { text: string; parti
 }
 
 /**
- * A message text that fits the relay's per-text limit (G2). Over the limit
- * the relay answers that message with a failed row, so it could never get ✦
- * or a preview. The first part is sent instead, cut where fitTextToLimit
- * cuts. The ✦ line then translates that part, shown as it came back.
+ * G2. A message over the relay's per-text limit, in parts that each fit:
+ * cut where fitTextToLimit cuts (paragraph, sentence, space, never inside a
+ * Discord token), with `seps[i]` the whitespace the original had between
+ * part i and part i + 1, so the translated parts are joined the same way.
+ * Every part is sent and the whole message is translated: a ✦ line never
+ * covers only its first part.
  */
-export function fitMessageText(text: string): string {
-    return fitTextToLimit(text, LLM_TEXT_MAX).text;
+export function splitTextToLimit(text: string, max: number): { parts: string[]; seps: string[]; } {
+    const parts: string[] = [];
+    const seps: string[] = [];
+    let rest = text;
+    while (rest.length > max) {
+        let head = fitTextToLimit(rest, max).text;
+        if (head === "") head = rest.slice(0, max);
+        const after = rest.slice(head.length);
+        const ws = /^\s*/.exec(after)![0];
+        parts.push(head);
+        seps.push(ws);
+        rest = after.slice(ws.length);
+    }
+    if (rest !== "") parts.push(rest);
+    else seps.pop();
+    return { parts, seps };
+}
+
+/** The id one part of a split message is sent under. */
+export function partId(id: string, index: number): string {
+    return `${id}~p${index}`;
+}
+
+/**
+ * The split message's ✦ line from its parts' rows, or null when it cannot be
+ * whole: a part failed, was missing, or was cut short. A part ✦ says is
+ * already in the reader's language keeps its own words. Every part skipped
+ * is a skip for the message.
+ */
+export function joinParts(
+    id: string, parts: string[], seps: string[], rows: ReadonlyMap<string, Result>
+): Result | null {
+    const texts: string[] = [];
+    let lang: string | undefined;
+    for (let i = 0; i < parts.length; i++) {
+        const r = rows.get(partId(id, i));
+        if (r === undefined || "failed" in r) return null;
+        if (r.skip) { texts.push(parts[i]!); continue; }
+        if (r.truncated === true) return null;
+        lang ??= r.lang;
+        texts.push(r.text.trim());
+    }
+    if (lang === undefined) return { id, skip: true };
+    return { id, lang, text: texts.map((t, i) => i === 0 ? t : (seps[i - 1] || "") + t).join(""), skip: false };
 }
 
 const encoder = new TextEncoder();
