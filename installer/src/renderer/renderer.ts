@@ -19,7 +19,7 @@ import type { FlowAction, FlowActionType, FlowState } from "../app/flow.js";
 import type { LanguageOption } from "../app/language.js";
 import { pendingAlertLines } from "../app/pendingAlerts.js";
 import type { UninstallReport } from "../app/uninstall.js";
-import { UNINSTALL_COPY, uninstallReportTitle, uninstallStartView } from "../app/uninstallScreen.js";
+import { deleteAppLine, UNINSTALL_COPY, uninstallReportTitle, uninstallStartView } from "../app/uninstallScreen.js";
 import { emphasisParts } from "./emphasis.js";
 
 interface SublineApi {
@@ -648,6 +648,13 @@ function showUninstall(report: UninstallReport, mayRetry: boolean): void {
         if (footerUninstall !== null) footerUninstall.disabled = true;
     }
     extra.replaceChildren();
+    if (report.clean) {
+        // The app is the last thing to go, and only now (audit #42).
+        const note = document.createElement("p");
+        note.className = "note";
+        note.textContent = deleteAppLine(IS_MAC ? "darwin" : "win32");
+        extra.append(note);
+    }
     actionBar.replaceChildren();
 
     errorBox.hidden = report.problems.length === 0;

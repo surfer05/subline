@@ -15,7 +15,7 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 // stat opened app.asar and kept the handle for the life of the helper, so every
 // Windows repatch then failed to rename it, and the settle check read a fake
 // mtime. The bundle lookups below use it too; it is the same call on a folder.
-import { statSync, writeFileSync } from "../patcher/realFs.js";
+import { existsSync, statSync, writeFileSync } from "../patcher/realFs.js";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -42,6 +42,7 @@ import { verifyOnce } from "../verify/verify.js";
 import type { Alert } from "./alerts.js";
 import type { HelperPorts } from "./helper.js";
 import type { LaunchctlPort } from "./launchAgent.js";
+import { launchAgentPlistPath } from "./launchAgent.js";
 import type { SchtasksPort } from "./scheduledTask.js";
 import { HELPER_TASK_NAME, taskCommandFromXml, taskIntervalFromXml } from "./scheduledTask.js";
 import { helperStatePathFor, helperStateUnreadable, readHelperState, writeHelperState } from "./state.js";
@@ -336,6 +337,32 @@ export function createSchtasks(exec: Exec = run): SchtasksPort {
             } catch {
                 // Not running, or already gone.
             }
+        },
+        async run(name: string): Promise<Result<true>> {
+            try {
+                await exec("schtasks", ["/Run", "/TN", name]);
+                return ok(true);
+            } catch (cause) {
+                return err<true>("HELPER_REGISTRATION_FAILED", "Windows did not start the Subline helper task.", { path: name, cause });
+            }
+        },
+        async isRunning(name: string): Promise<boolean | null> {
+            const split = name.lastIndexOf("\\");
+            const taskPath = name.slice(0, split + 1);
+            const taskName = name.slice(split + 1);
+            // Single quotes, doubled inside: the names are our own constants,
+            // but nothing reaches the command line unquoted.
+            const quote = (value: string): string => `'${value.replace(/'/g, "''")}'`;
+            try {
+                const { stdout } = await exec("powershell.exe", [
+                    "-NoProfile", "-NonInteractive", "-Command",
+                    `(Get-ScheduledTask -TaskPath ${quote(taskPath)} -TaskName ${quote(taskName)}).State`
+                ]);
+                const state = stdout.trim();
+                return state === "" ? null : state === "Running";
+            } catch {
+                return null;
+            }
         }
     };
 }
@@ -453,9 +480,17 @@ export function createHelperPorts(options: RealHelperPortsOptions): HelperPorts 
         verifyBeacon: verifyOptions => verifyOnce({ ...verifyOptions, platform, env, home }),
         notify: alert => notify(alert, platform, exec, options.log),
 
+        // Is Subline still installed? Asked before every write. macOS too
+        // (audit 2026-10-06 #46): when `launchctl print` failed while the job
+        // was loaded, Uninstall deleted the plist under a live job, and the
+        // job then downloaded the bundle and patched Discord again. The plist
+        // is always written by temp file and rename, so it is never briefly
+        // missing.
         ...(platform === "win32"
             ? { stillRegistered: () => createSchtasks(exec).exists(HELPER_TASK_NAME) }
-            : {}),
+            : platform === "darwin"
+                ? { stillRegistered: async () => existsSync(launchAgentPlistPath(home)) }
+                : {}),
         recoverBundle: dir => recoverModBundle(dir, platform),
         unpatch: install => unpatchInstall(install, {
             ownLoaderPaths: modDir === null ? [] : [loaderPathFor(modDir)],

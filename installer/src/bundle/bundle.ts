@@ -78,20 +78,53 @@ export function inspectModBundle(bundleDir: string): Result<ModBundle> {
  * of ours to remove" — is the honest answer for a bundle that was already gone.
  */
 export function removeModBundle(bundleDir: string): Result<boolean> {
-    if (!existsSync(bundleDir)) return ok(false);
-
-    if (!existsSync(manifestPathFor(bundleDir))) {
-        return err<boolean>(
-            "MOD_BUNDLE_INVALID",
-            `${bundleDir} has no ${MOD_MANIFEST_FILENAME}, so Subline will not delete it. It is not a mod bundle we installed.`,
-            { path: bundleDir }
-        );
+    let removed = false;
+    if (existsSync(bundleDir)) {
+        if (!existsSync(manifestPathFor(bundleDir))) {
+            return err<boolean>(
+                "MOD_BUNDLE_INVALID",
+                `${bundleDir} has no ${MOD_MANIFEST_FILENAME}, so Subline will not delete it. It is not a mod bundle we installed.`,
+                { path: bundleDir }
+            );
+        }
+        try {
+            rmSync(bundleDir, { recursive: true, force: true });
+        } catch (cause) {
+            return fsError<boolean>(cause, bundleDir, "remove the installed mod bundle");
+        }
+        removed = true;
     }
+    // WHAT AN INTERRUPTED SWAP LEFT BESIDE IT (audit 2026-10-06 #45). The
+    // aside copy was a live bundle, so it carries our manifest and the same
+    // guard applies. The staging copy may be a partial copy with no manifest
+    // yet; its name is Subline's own, under Subline's own folder.
+    const old = `${bundleDir}${BUNDLE_OLD_SUFFIX}`;
+    if (existsSync(old) && existsSync(manifestPathFor(old))) {
+        try {
+            rmSync(old, { recursive: true, force: true });
+            removed = true;
+        } catch (cause) {
+            return fsError<boolean>(cause, old, "remove the previous Subline mod");
+        }
+    }
+    const removedStaging = removeStagingCopy(bundleDir);
+    if (!removedStaging.ok) return removedStaging;
+    return ok(removed || removedStaging.value);
+}
 
+/** Where the live bundle waits while a new one is swapped in. */
+export const BUNDLE_OLD_SUFFIX = ".subline-old";
+/** Where a new bundle is copied before it is renamed into place. */
+export const BUNDLE_STAGING_SUFFIX = ".subline-staging";
+
+/** Remove a staging copy. Never referenced by any stub, so always safe to go. */
+export function removeStagingCopy(bundleDir: string): Result<boolean> {
+    const staging = `${bundleDir}${BUNDLE_STAGING_SUFFIX}`;
+    if (!existsSync(staging)) return ok(false);
     try {
-        rmSync(bundleDir, { recursive: true, force: true });
+        rmSync(staging, { recursive: true, force: true });
+        return ok(true);
     } catch (cause) {
-        return fsError<boolean>(cause, bundleDir, "remove the installed mod bundle");
+        return fsError<boolean>(cause, staging, "remove an unfinished copy of the Subline mod");
     }
-    return ok(true);
 }

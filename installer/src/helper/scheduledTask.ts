@@ -194,7 +194,21 @@ export interface SchtasksPort {
     queryDefinition?(name: string): Promise<{ command: string | null; interval: string | null } | null>;
     /** `schtasks /End /TN <name>`: stop a run in progress. Failure is ignored. Optional. */
     end?(name: string): Promise<void>;
+    /**
+     * `schtasks /Run /TN <name>`: start a run now (audit #49, #28). The task's
+     * IgnoreNew policy drops it when a run is already going. Optional.
+     */
+    run?(name: string): Promise<Result<true>>;
+    /**
+     * Is a run of the task going right now? From the task's State, which is
+     * not localised (schtasks' own text is). null when it cannot be read.
+     * Optional.
+     */
+    isRunning?(name: string): Promise<boolean | null>;
 }
+
+/** How long Uninstall waits for an ended helper run to be gone: 10 looks, 500 ms apart. */
+export const HELPER_STOP_WAIT = { polls: 10, intervalMs: 500 } as const;
 
 /** The first repetition `<Interval>` of a task definition from `schtasks /Query /XML`. */
 export function taskIntervalFromXml(document: string): string | null {
@@ -340,6 +354,8 @@ export async function removeScheduledTask(options: {
     name?: string;
     schtasks: SchtasksPort;
     platform?: NodeJS.Platform;
+    /** Injected by tests so nothing waits. */
+    sleep?: (ms: number) => Promise<void>;
 }): Promise<Result<boolean>> {
     const platform = options.platform ?? process.platform;
     if (platform !== "win32") return ok(false);
@@ -352,6 +368,27 @@ export async function removeScheduledTask(options: {
     // the uninstall. (Not synchronous, so the helper also re-checks that its
     // task exists before every write: helper.ts stillRegistered.)
     await options.schtasks.end?.(name);
+
+    // AND WAIT FOR IT TO BE GONE (audit 2026-10-06 #45). /End is not
+    // synchronous. A helper killed a moment later, in the middle of swapping
+    // the mod folder, can undo the bundle Uninstall just put back. A run that
+    // will not stop refuses the uninstall, with nothing changed; a state that
+    // cannot be read (null) does not block it.
+    if (options.schtasks.isRunning !== undefined) {
+        const sleep = options.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)));
+        let running = await options.schtasks.isRunning(name);
+        for (let poll = 0; running === true && poll < HELPER_STOP_WAIT.polls; poll++) {
+            await sleep(HELPER_STOP_WAIT.intervalMs);
+            running = await options.schtasks.isRunning(name);
+        }
+        if (running === true) {
+            return err<boolean>(
+                "HELPER_REGISTRATION_FAILED",
+                "The Subline helper is still running and would not stop.",
+                { path: name }
+            );
+        }
+    }
 
     const removed = await options.schtasks.remove(name);
     if (!removed.ok) return removed as Result<boolean>;

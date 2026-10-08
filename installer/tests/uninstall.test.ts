@@ -4,7 +4,7 @@
  * require() of a path inside it.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -914,5 +914,44 @@ describe("uninstall — Discords put back are released before the helper returns
         const p = partial();
         await uninstall({ ...p.ports, unpatch: failsOnWrite("FILE_IN_USE") }, { installs: [INSTALL] });
         expect(p.forgot).toEqual([]);
+    });
+});
+
+describe("a bundle an interrupted swap left aside (audit 2026-10-06 #45)", () => {
+    function moveAside(suffix: string): void {
+        renameSync(modDir, `${modDir}${suffix}`);
+    }
+
+    it("only mod.subline-old, a restore fails: the bundle is back at mod for the Discord that keeps it", async () => {
+        moveAside(".subline-old");
+        const report = await uninstall(ports({ unpatch: failsOnWrite("FILE_IN_USE") }), { installs: [INSTALL] });
+        expect(report.modBundleKeptForSafety).toBe(true);
+        expect(existsSync(join(modDir, "patcher.js"))).toBe(true);
+        expect(existsSync(`${modDir}.subline-old`)).toBe(false);
+        expect(logged).toContain("info:uninstall.bundle-recovered");
+        expect(report.summary).not.toContain("files are missing");
+    });
+
+    it("only a complete mod.subline-staging, a restore fails: promoted to mod", async () => {
+        moveAside(".subline-staging");
+        await uninstall(ports({ unpatch: failsOnWrite("FILE_IN_USE") }), { installs: [INSTALL] });
+        expect(existsSync(join(modDir, "patcher.js"))).toBe(true);
+    });
+
+    it("a clean uninstall removes the aside copy and a partial staging copy too", async () => {
+        cpSync(modDir, `${modDir}.subline-old`, { recursive: true });
+        mkdirSync(`${modDir}.subline-staging`, { recursive: true });
+        writeFileSync(join(`${modDir}.subline-staging`, "half-copied.js"), "x");
+        const report = await uninstall(ports(), { installs: [INSTALL], keepSettings: true });
+        expect(report.modBundleRemoved).toBe(true);
+        expect(existsSync(modDir)).toBe(false);
+        expect(existsSync(`${modDir}.subline-old`)).toBe(false);
+        expect(existsSync(`${modDir}.subline-staging`)).toBe(false);
+    });
+
+    it("no bundle anywhere and a Discord still loads Subline: the summary says Discord may not start", async () => {
+        rmSync(modDir, { recursive: true, force: true });
+        const report = await uninstall(ports({ unpatch: failsOnWrite("FILE_IN_USE") }), { installs: [INSTALL] });
+        expect(report.summary).toContain("Subline's own files are missing, so Discord may not start.");
     });
 });

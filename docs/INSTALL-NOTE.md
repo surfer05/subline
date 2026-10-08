@@ -38,7 +38,9 @@ one replaces it (✦, AI with conversation context).
   only to the translator (Google or your chosen AI), never anywhere
   else. Nothing is logged.
 - **Uninstall:** run Subline again → Uninstall. Discord goes back to
-  exactly as it was.
+  exactly as it was. Then delete the app (Trash on a Mac, Settings → Apps
+  on Windows). On Windows, uninstalling from Settings → Apps also puts
+  Discord back first.
 
 ## If something breaks
 

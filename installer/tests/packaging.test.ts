@@ -1074,3 +1074,36 @@ describe("the shortcut-ensure macro", () => {
         expect(nsh).toContain("WinShell::SetLnkAUMI");
     });
 });
+
+describe("Windows' own Uninstall puts Discord back first (audit 2026-10-06 #14, #42)", () => {
+    const nsh = (): string => readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "packaging", "installer.nsh"), "utf8");
+
+    it("runs Subline --uninstall from customUnInit, never from customUnInstall", () => {
+        const text = nsh();
+        expect(text).toContain("!macro customUnInit");
+        expect(text).not.toMatch(/!macro customUnInstall\b/);
+        const body = /!macro customUnInit([\s\S]*?)!macroend/.exec(text)?.[1] ?? "";
+        expect(body).toContain("${ifNot} ${isUpdated}");
+        expect(body).toContain("ExecWait '\"$INSTDIR\\${APP_EXECUTABLE_FILENAME}\" --uninstall");
+        expect(body).toContain("Abort");
+    });
+
+    it("reads the same exit codes the headless run returns, and deletes the task named in scheduledTask.ts", async () => {
+        const { UNINSTALL_EXIT, UNINSTALL_FLAG, CLOSE_DISCORD_FLAG } = await import("../src/app/headlessUninstall.js");
+        const { HELPER_TASK_NAME } = await import("../src/helper/scheduledTask.js");
+        const body = /!macro customUnInit([\s\S]*?)!macroend/.exec(nsh())?.[1] ?? "";
+        expect(body).toContain(`$R9 == ${UNINSTALL_EXIT.discordRunning}`);
+        expect(body).toContain(`$R9 == ${UNINSTALL_EXIT.notRemoved}`);
+        expect(body).toContain(UNINSTALL_FLAG);
+        expect(body).toContain(CLOSE_DISCORD_FLAG);
+        expect(body).toContain(`schtasks /Delete /TN "${HELPER_TASK_NAME}" /F`);
+    });
+
+    it("copy is plain: no em dashes, no Plugins or VcTranslate", () => {
+        const body = /!macro customUnInit([\s\S]*?)!macroend/.exec(nsh())?.[1] ?? "";
+        const strings = [...body.matchAll(/"([^"]*)"/g)].map(m => m[1] ?? "");
+        for (const text of strings) {
+            expect(text).not.toMatch(/—|–|Plugins|VcTranslate/);
+        }
+    });
+});

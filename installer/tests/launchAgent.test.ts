@@ -299,6 +299,39 @@ describe("removing it (spec §8 step 3)", () => {
         expect(existsSync(plistPath)).toBe(false);
     });
 
+    it("boots out even when launchctl print says not loaded, if the plist is there (audit #46)", async () => {
+        const launchctl = fakeLaunchctl();
+        await installLaunchAgent({ plistPath, spec: helperLaunchAgentSpec("/Applications/Subline.app"), uid: UID, launchctl, platform: "darwin" });
+        // print lies: the job IS loaded.
+        const realIsLoaded = launchctl.isLoaded.bind(launchctl);
+        launchctl.isLoaded = async () => false;
+        launchctl.calls.length = 0;
+        const result = await removeLaunchAgent({ plistPath, label: HELPER_LABEL, uid: UID, launchctl });
+        expect(result.ok).toBe(true);
+        expect(launchctl.calls.filter(call => call.startsWith("bootout"))).toEqual([`bootout gui/${UID}/${HELPER_LABEL}`]);
+        expect(await realIsLoaded(HELPER_LABEL, UID)).toBe(false);
+        expect(existsSync(plistPath)).toBe(false);
+    });
+
+    it("a failed bootout of a job that is not loaded still removes the plist", async () => {
+        const launchctl = fakeLaunchctl();
+        await installLaunchAgent({ plistPath, spec: helperLaunchAgentSpec("/Applications/Subline.app"), uid: UID, launchctl, platform: "darwin" });
+        launchctl.loaded.clear();
+        launchctl.failBootout = true;
+        const result = await removeLaunchAgent({ plistPath, label: HELPER_LABEL, uid: UID, launchctl });
+        expect(result.ok).toBe(true);
+        expect(existsSync(plistPath)).toBe(false);
+    });
+
+    it("a failed bootout of a job that IS loaded keeps the plist and says so", async () => {
+        const launchctl = fakeLaunchctl();
+        await installLaunchAgent({ plistPath, spec: helperLaunchAgentSpec("/Applications/Subline.app"), uid: UID, launchctl, platform: "darwin" });
+        launchctl.failBootout = true;
+        const result = await removeLaunchAgent({ plistPath, label: HELPER_LABEL, uid: UID, launchctl });
+        expect(result.ok).toBe(false);
+        expect(existsSync(plistPath)).toBe(true);
+    });
+
     it("reads back nothing for a plist that is not there", () => {
         expect(readLaunchAgentPlist(join(dir, "absent.plist"))).toBeNull();
     });
@@ -328,5 +361,13 @@ describe("this machine", () => {
         // the developer's environment rather than this code, and a legitimate
         // install turned the suite red.
         expect(realAgentFingerprint()).toBe(REAL_AGENT_BEFORE);
+    });
+});
+
+describe("an app in the Trash is never registered (audit 2026-10-06 #42)", () => {
+    it("is a temporary location", async () => {
+        const { temporaryAppLocation } = await import("../src/helper/launchAgent.js");
+        expect(await temporaryAppLocation("/Users/x/.Trash/Subline.app")).toEqual({ temporary: true, reason: "trash" });
+        expect(await temporaryAppLocation("/Applications/Subline.app")).toEqual({ temporary: false, reason: null });
     });
 });

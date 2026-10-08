@@ -11,7 +11,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { InstallFlow, isConfirmedSuccess } from "../src/app/flow.js";
@@ -27,6 +27,7 @@ import {
     uninstallPaths
 } from "../src/main/ports.js";
 import { createHelperPorts, scratchRootOf, unpackArchive } from "../src/helper/ports.js";
+import { launchAgentPlistPath } from "../src/helper/launchAgent.js";
 import { readMarker } from "../src/patcher/marker.js";
 import { readStub } from "../src/patcher/stub.js";
 import { makeDiscordFixture, makeFakeLaunchctl, makeModBundleFixture } from "./fixture.js";
@@ -529,5 +530,27 @@ describe("discarding an unpacked update (audit 2026-10-06 #25)", () => {
         helperPorts(fakeUnpack(true)).discardUnpacked(inner);
         expect(existsSync(inner)).toBe(true);
         rmSync(outside, { recursive: true, force: true });
+    });
+});
+
+describe("the macOS helper knows when Subline was removed (audit 2026-10-06 #46)", () => {
+    it("stillRegistered follows the LaunchAgent plist", async () => {
+        const home = mkdtempSync(join(tmpdir(), "subline-ports-home-"));
+        try {
+            const ports = createHelperPorts({
+                productVersion: "0.2.3",
+                log: { info: () => {}, warn: () => {}, error: () => {} },
+                platform: "darwin",
+                home,
+                exec: async () => ({ stdout: "" })
+            });
+            expect(ports.stillRegistered).toBeDefined();
+            expect(await ports.stillRegistered!()).toBe(false);
+            mkdirSync(dirname(launchAgentPlistPath(home)), { recursive: true });
+            writeFileSync(launchAgentPlistPath(home), "<plist/>");
+            expect(await ports.stillRegistered!()).toBe(true);
+        } finally {
+            rmSync(home, { recursive: true, force: true });
+        }
     });
 });

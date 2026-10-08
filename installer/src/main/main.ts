@@ -30,6 +30,8 @@ import {
     APP_MANAGEMENT_SETTINGS_URL, appManagementSummary, awaitAppManagement, isLoggedAttempt, probeAppManagement, worstAppManagementStatus
 } from "../app/appManagement.js";
 import { refusedReport, uninstall } from "../app/uninstall.js";
+import { UninstallSession } from "../app/uninstallSession.js";
+import { isHeadlessUninstall, runHeadlessUninstall, UNINSTALL_EXIT } from "../app/headlessUninstall.js";
 import type { UninstallReport } from "../app/uninstall.js";
 import {
     createHelperPorts, createLaunchctl, createSchtasks, HELPER_FLAG, HELPER_LABEL, launchAgentPlistPath,
@@ -66,7 +68,7 @@ let flow: InstallFlow | null = null;
  * window: no flow:start, flow:send or flow:restart may start (or restart) an
  * install while files are being put back.
  */
-let uninstallStarted = false;
+const session = new UninstallSession();
 
 const log = new DiagnosticsLog({ dir: logDirFor() });
 
@@ -130,6 +132,8 @@ const RELEASE_MANIFEST_URL: string | null = releaseManifestUrl();
  * ------------------------------------------------------------------------ */
 
 const isHelperRun = process.argv.includes(HELPER_FLAG);
+/** Windows' own uninstaller runs `Subline.exe --uninstall` (packaging/installer.nsh). No window. */
+const isUninstallRun = !isHelperRun && isHeadlessUninstall(process.argv);
 
 /**
  * The Start Menu shortcut, self-healed on every app launch.
@@ -144,7 +148,8 @@ const isHelperRun = process.argv.includes(HELPER_FLAG);
  * inconvenience, not a broken install.
  */
 function ensureStartMenuShortcut(): void {
-    if (process.platform !== "win32" || isHelperRun) return;
+    // Never from the headless uninstall: the shortcut is about to be deleted.
+    if (process.platform !== "win32" || isHelperRun || isUninstallRun) return;
     try {
         const lnk = join(
             app.getPath("appData"), "Microsoft", "Windows", "Start Menu", "Programs", "Subline.lnk"
@@ -323,7 +328,27 @@ function createWindow(): void {
     });
 }
 
-if (!isHelperRun) app.whenReady().then(() => {
+if (isUninstallRun) {
+    // No window, no dock icon. Run the uninstall, log it, exit with its code.
+    app.dock?.hide();
+    void app.whenReady().then(async () => {
+        let code: number = UNINSTALL_EXIT.crashed;
+        try {
+            log.writeHeader({
+                productVersion: app.getVersion(),
+                os: process.platform,
+                osVersion: process.getSystemVersion(),
+                arch: process.arch,
+                originalFs: usingOriginalFs
+            });
+            code = await runHeadlessUninstall({ argv: process.argv, run: options => runUninstall(options, false), log });
+        } finally {
+            app.exit(code);
+        }
+    });
+}
+
+if (!isHelperRun && !isUninstallRun) app.whenReady().then(() => {
     ensureStartMenuShortcut();
     log.writeHeader({
         productVersion: app.getVersion(),
@@ -372,18 +397,18 @@ ipcMain.handle("flow:start", () => guardedFlowCall(() => {
     // new bundle landed asks for its first state through this handler, and
     // starting the flow would run the old build's install.
     if (relaunchIfBundleChanged()) return null;
-    if (uninstallStarted) return null;
+    if (!session.mayDriveFlow) return null;
     return (flow ??= createFlow()).start();
 }, onFlowCrash));
 
 ipcMain.handle("flow:send", (_event, action: FlowAction) => guardedFlowCall(() => {
-    if (uninstallStarted) return null;
+    if (!session.mayDriveFlow) return null;
     flow ??= createFlow();
     return flow.send(action);
 }, onFlowCrash));
 
 ipcMain.handle("flow:restart", () => guardedFlowCall(() => {
-    if (uninstallStarted) return null;
+    if (!session.mayDriveFlow) return null;
     // The old flow may still have a background confirmation running (see
     // InstallFlow.verify); detach it so a late result cannot repaint the new
     // run's screen with the previous run's verdict.
@@ -499,7 +524,18 @@ ipcMain.handle("uninstall:cancel", () => {
 ipcMain.handle("uninstall:run", async (
     _event,
     options: { keepSettings: boolean; closeDiscord?: "ask" | "force" }
-): Promise<UninstallReport> => {
+): Promise<UninstallReport> => runUninstall(options, true));
+
+/**
+ * The uninstall, for the window (interactive) and for Windows' own
+ * uninstaller (headless, `--uninstall`). One body, so the two cannot drift.
+ * Headless never opens System Settings and never waits for a grant: a
+ * permission it does not have is a refusal with nothing changed.
+ */
+async function runUninstall(
+    options: { keepSettings: boolean; closeDiscord?: "ask" | "force" },
+    interactive: boolean
+): Promise<UninstallReport> {
     // uninstallTargets, not locateDiscordInstalls: the latter deliberately
     // returns only the NEWEST Windows app dir (right for installing), but a
     // helper patches whichever dir is newest at the time, so after a Discord
@@ -514,7 +550,7 @@ ipcMain.handle("uninstall:run", async (
     // landing, then started a patch and a helper registration interleaved
     // with the restore below. abort() ends the polls and waits for anything
     // already writing, so what it wrote is restored too.
-    uninstallStarted = true;
+    session.begin();
     if (flow !== null) {
         const running = flow;
         flow = null;
@@ -550,6 +586,13 @@ ipcMain.handle("uninstall:run", async (
         const message = appManagementSummary("not-writable");
         return refused(refusedReport(
             [{ code: "NOT_WRITABLE", message, path: installs[0]?.resourcesPath }],
+            `${message} Nothing has been changed.`
+        ));
+    }
+    if (status !== "granted" && status !== "not-required" && !interactive) {
+        const message = appManagementSummary(status);
+        return refused(refusedReport(
+            [{ code: "PERMISSION_DENIED", message, path: installs[0]?.resourcesPath }],
             `${message} Nothing has been changed.`
         ));
     }
@@ -660,7 +703,7 @@ ipcMain.handle("uninstall:run", async (
         code: report.problems[0]?.code ?? null
     });
     return refused(report);
-});
+}
 
 /**
  * unpatchInstall with our own loader known by path, so a stub whose marker
@@ -693,8 +736,7 @@ async function runningDiscord(branches: readonly DiscordInstall["branch"][]): Pr
  * 2026-10-06: after a refused uninstall nothing could be pressed).
  */
 function refused(report: UninstallReport): UninstallReport {
-    if (report.nothingChanged === true) uninstallStarted = false;
-    return report;
+    return session.finish(report);
 }
 
 /**

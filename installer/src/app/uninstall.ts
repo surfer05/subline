@@ -40,6 +40,7 @@ import { join } from "node:path";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "../patcher/realFs.js";
 
 import { removeModBundle } from "../bundle/bundle.js";
+import { recoverModBundle } from "./modInstall.js";
 import { MARKER_FILENAME } from "../patcher/marker.js";
 import type { DiscordBranch, DiscordInstall } from "../patcher/locate.js";
 import type { UnpatchReport } from "../patcher/patch.js";
@@ -369,6 +370,20 @@ export async function uninstall(
     }
     ports.log.info("uninstall.helper-stopped", { applicable: helper.applicable, removed: helper.removed });
 
+    // 3b. A BUNDLE AN INTERRUPTED SWAP LEFT ASIDE goes back first (audit
+    //     2026-10-06 #45). If a restore below fails, the bundle is kept for
+    //     the Discord that still loads it, and it must be really there. The
+    //     helper that would have put it back at its next run was just stopped.
+    if (ports.modBundleDir !== null) {
+        const recovered = recoverModBundle(ports.modBundleDir, ports.platform);
+        if (!recovered.ok) {
+            problems.push(recovered.error);
+            ports.log.error("uninstall.bundle-recover-failed", { code: recovered.error.code, path: recovered.error.path ?? null, cause: recovered.error.cause ?? null });
+        } else if (recovered.value) {
+            ports.log.info("uninstall.bundle-recovered", { dir: ports.modBundleDir });
+        }
+    }
+
     // 4. Every Discord (§8 steps 1–2: restore the archive, remove the sidecar
     //    — a stale one makes the NEXT install misread a foreign or absent patch
     //    as ours).
@@ -544,7 +559,8 @@ export async function uninstall(
             settingsRemoved,
             productDataRemoved,
             settingsAskedToGo: !keepSettings,
-            helperBack
+            helperBack,
+            bundlePresent: ports.modBundleDir === null || existsSync(ports.modBundleDir)
         })
     };
 }
@@ -602,6 +618,8 @@ function summarize(input: {
     settingsAskedToGo: boolean;
     /** null: the helper was not stopped or did not need to come back. */
     helperBack: boolean | null;
+    /** The mod bundle is on disk (or there is no bundle folder on this platform). */
+    bundlePresent: boolean;
 }): string {
     const aside = leftAloneLine(input.restores);
     const withAside = (parts: string[]): string => [...parts, ...(aside === null ? [] : [aside])].join(" ");
@@ -617,7 +635,9 @@ function summarize(input: {
             done > 0 && done < total
                 ? `Subline was removed from ${done} of ${total} Discords, but not from the rest.`
                 : UNINSTALL_COPY.couldNotRemove,
-            input.helperBack === true ? UNINSTALL_COPY.staysInstalledUpdating : UNINSTALL_COPY.staysInstalled
+            !input.bundlePresent
+                ? UNINSTALL_COPY.bundleMissing
+                : input.helperBack === true ? UNINSTALL_COPY.staysInstalledUpdating : UNINSTALL_COPY.staysInstalled
         ];
         if (input.helperBack === false) parts.push(UNINSTALL_COPY.helperNotBack);
         if (input.settingsAskedToGo) parts.push(UNINSTALL_COPY.settingsKept);

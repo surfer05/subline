@@ -363,7 +363,7 @@ class Run {
         }
         if (!registered) {
             this.uninstalled = true;
-            this.decide("scan", "uninstalled", "the helper's scheduled task is gone, so Subline was removed while this run was going; nothing more is written", { before });
+            this.decide("scan", "uninstalled", "the helper's registration (scheduled task or LaunchAgent) is gone, so Subline was removed while this run was going; nothing more is written", { before });
         }
         return registered;
     }

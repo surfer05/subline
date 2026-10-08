@@ -291,18 +291,24 @@ export async function removeLaunchAgent(options: {
 }): Promise<Result<boolean>> {
     const { plistPath, label, uid, launchctl } = options;
     const wasLoaded = await launchctl.isLoaded(label, uid);
-    if (wasLoaded) {
-        const booted = await launchctl.bootout(label, uid);
-        if (!booted.ok) {
-            return rewrap<boolean>(booted.error, {
+    const existed = existsSync(plistPath);
+    // BOOTOUT WHENEVER THERE IS ANYTHING TO BOOT OUT (audit 2026-10-06 #46).
+    // `launchctl print` can fail for a job that is loaded; gating bootout on it
+    // deleted the plist under a live job, which then patched Discord again.
+    // A failed bootout matters only when the job is still loaded afterwards.
+    let booted = false;
+    if (wasLoaded || existed) {
+        const result = await launchctl.bootout(label, uid);
+        booted = result.ok;
+        if (!result.ok && await launchctl.isLoaded(label, uid)) {
+            return rewrap<boolean>(result.error, {
                 code: "HELPER_REGISTRATION_FAILED",
-                message: `The Subline background helper could not be unregistered (${booted.error.message}), so its file was left in place rather than leaving a running agent with no configuration.`,
+                message: `The Subline background helper could not be unregistered (${result.error.message}), so its file was left in place rather than leaving a running agent with no configuration.`,
                 path: plistPath
             });
         }
     }
 
-    const existed = existsSync(plistPath);
     if (existed) {
         try {
             rmSync(plistPath, { force: true });
@@ -310,7 +316,7 @@ export async function removeLaunchAgent(options: {
             return fsError<boolean>(cause, plistPath, "remove the Subline helper's LaunchAgent");
         }
     }
-    return ok(wasLoaded || existed);
+    return ok(wasLoaded || existed || booted);
 }
 
 /** Read a plist back — used by tests and by the app's "is the helper installed?" check. */
@@ -341,7 +347,7 @@ export function readLaunchAgentPlist(plistPath: string): string | null {
 /** The mount points of every attached disk image (`hdiutil info -plist`). Injected, so tests never run hdiutil. */
 export type DiskImageMounts = () => Promise<Result<readonly string[]>>;
 
-export type TemporaryLocationReason = "translocated" | "disk-image" | "disk-image-unknown";
+export type TemporaryLocationReason = "translocated" | "disk-image" | "disk-image-unknown" | "trash";
 
 export type AppLocationVerdict =
     | { temporary: false; reason: null }
@@ -365,6 +371,10 @@ export function parseHdiutilMountPoints(plist: string): string[] {
 /** The one test every caller uses: install, the already-set-up repair, the helper's own check, and the flow. */
 export async function temporaryAppLocation(appPath: string, diskImageMounts?: DiskImageMounts): Promise<AppLocationVerdict> {
     if (appPath.includes("/AppTranslocation/")) return { temporary: true, reason: "translocated" };
+    // In the Trash (audit 2026-10-06 #42): the user is removing Subline. It
+    // is never registered or re-pointed from there; launchd stops finding it
+    // once the Trash is emptied.
+    if (appPath.includes("/.Trash/")) return { temporary: true, reason: "trash" };
     if (!appPath.startsWith("/Volumes/")) return { temporary: false, reason: null };
     if (diskImageMounts === undefined) return { temporary: true, reason: "disk-image-unknown" };
     let mounts: Result<readonly string[]>;

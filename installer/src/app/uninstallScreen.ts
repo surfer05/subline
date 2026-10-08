@@ -49,6 +49,8 @@ export const UNINSTALL_COPY = {
     staysInstalled: "Subline stays installed, so Discord keeps working as it does now.",
     staysInstalledUpdating: "Subline stays installed and keeps updating, so Discord keeps working as it does now.",
     helperNotBack: "Background updates could not be turned back on. Open Subline again to fix that.",
+    /** A Discord still loads Subline and Subline's own files are gone (audit #45). */
+    bundleMissing: "Subline's own files are missing, so Discord may not start. Run Subline again, or reinstall Discord from discord.com.",
     settingsKept: "Your settings and code were kept.",
     tryAgain: "Press Uninstall to try again. The diagnostics log has the details.",
     /* Discords that are not Subline's, listed and never touched (audit #2). */
@@ -63,8 +65,16 @@ export const UNINSTALL_COPY = {
     noDiscordWithSubline: "No Discord with Subline in it was found.",
     itsFiles: "its own files",
     itsUpdater: "its background updater",
-    settingsRemoved: "Your settings were removed."
+    settingsRemoved: "Your settings were removed.",
+    /* Under a clean removal: the app itself is the last thing to go (audit #42). */
+    deleteAppWindows: "You can now uninstall Subline in Windows Settings, under Apps.",
+    deleteAppMac: "You can now move Subline to the Trash."
 } as const;
+
+/** The line under a clean removal: how to remove the app itself, after Discord is back to normal. */
+export function deleteAppLine(platform: NodeJS.Platform): string {
+    return platform === "win32" ? UNINSTALL_COPY.deleteAppWindows : UNINSTALL_COPY.deleteAppMac;
+}
 
 /** Where Discord is when it is "still open". The Windows line is the field test's wording. */
 export function discordOpenLine(platform: NodeJS.Platform): string {
