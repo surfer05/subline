@@ -569,7 +569,7 @@ describe("a paid install", () => {
         accessory(embedMessage());
         await settle();
         expect(text(accessory(embedMessage()))).toBe("");
-        expect(shownToasts.some(t => t.type === "FAILURE")).toBe(false);
+        expect(shownToasts.some(t => t.type === "failure")).toBe(false);
         const first = surfaceCalls().length;
         expect(first).toBeGreaterThan(0);
         accessory(embedMessage());

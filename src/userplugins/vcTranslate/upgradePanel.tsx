@@ -10,7 +10,7 @@
  * Activate is pressed, so the modal needs no React state of its own, and a
  * refusal is said in a toast while the modal stays open for another try.
  */
-import { closeModal, Modal, openModal, React, Toasts } from "@webpack/common";
+import { closeModal, Modal, openModal, React, showToast } from "@webpack/common";
 
 import type { Plan } from "./checkout";
 import { PRICING_URL } from "./freePlan";
@@ -182,7 +182,7 @@ function openCodeConfirm(confirm: () => Promise<string | null>): void {
                             busy = true;
                             void confirm().then(error => {
                                 if (error === null) props.onClose();
-                                else Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message: error });
+                                else showToast(error, "failure");
                             }).finally(() => { busy = false; });
                         }
                     }
@@ -210,7 +210,7 @@ export function openCodeEntry(submit: (text: string) => Promise<CodeSubmitResult
                 try {
                     const result = await submit(value);
                     if (result === null) props.onClose();
-                    else if (typeof result === "string") Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message: result });
+                    else if (typeof result === "string") showToast(result, "failure");
                     else {
                         props.onClose();
                         openCodeConfirm(result.confirm);

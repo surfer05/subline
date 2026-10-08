@@ -116,7 +116,9 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
         source: "written against the current bundle (the About Me section: its measuring div wraps the bio renderer, so the \"View full bio\" check counts the translation and the toggle)",
         find: "getBoundingClientRect().height>57.75",
         replacement: [{
-            match: /(\(0,\i\.jsx\)\(\i\.A,\{userId:\i,userBio:(\i),setLineClamp:!1,textColor:"text-strong",animateOnHoverOrFocusOnly:\i,isHoveringOrFocusing:\i\}\))/,
+            // Discord 2026-10 added `guildId:<context>?.guildId` before
+            // userBio; the optional group matches the old and the new shape.
+            match: /(\(0,\i\.jsx\)\(\i\.A,\{userId:\i,(?:guildId:[^,{}()]+,)?userBio:(\i),setLineClamp:!1,textColor:"text-strong",animateOnHoverOrFocusOnly:\i,isHoveringOrFocusing:\i\}\))/,
             replace: "$self.bioInPlace($1,$2)"
         }]
     },
@@ -173,7 +175,9 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
         source: "written against the current bundle (UserProfileModalV2 renders the bio renderer directly, not the About Me wrapper the popout uses)",
         find: "friendsSinceDate:",
         replacement: [{
-            match: /(?<=hideHeading:!\i,headingIcon:\i,children:\i\?\(0,\i\.jsx\)\(\i,\{displayProfile:\i,className:\i\.\i\}\):)(\(0,\i\.jsx\)\(\i\.\i,\{userBio:(\i),setLineClamp:!1\}\))/,
+            match: /(?<=hideHeading:!\i,headingIcon:\i,children:\i\?\(0,\i\.jsx\)\(\i,\{displayProfile:\i,className:\i\.\i\}\):)(\(0,\i\.jsx\)\(\i\.\i,\{userBio:(\i),(?:guildId:[^,{}()]+,)?setLineClamp:!1\}\))/,
+            // Discord 2026-10 added `guildId:<context>?.guildId` after userBio;
+            // the optional group above matches the old and the new shape.
             // The renderer here carries no userId: the profile's own does.
             replace: "$self.bioInPlace($1,$2,arguments[0]?.displayProfile?.userId)"
         }]

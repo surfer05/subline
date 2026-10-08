@@ -1,6 +1,6 @@
 import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
-import { LocaleStore, React, Toasts } from "@webpack/common";
+import { LocaleStore, React, showToast } from "@webpack/common";
 
 import { copyToClipboard } from "@utils/clipboard";
 
@@ -100,9 +100,7 @@ export function PlanCard() {
                 type: "button",
                 "data-subline-copy": "",
                 onClick: () => {
-                    void copyToClipboard(code).then(() => Toasts.show({
-                        id: Toasts.genId(), type: Toasts.Type.SUCCESS, message: SETTINGS_COPY.plan.copied
-                    })).catch(() => { });
+                    void copyToClipboard(code).then(() => showToast(SETTINGS_COPY.plan.copied, "success")).catch(() => { });
                 }
             }, SETTINGS_COPY.plan.copy)
         ));

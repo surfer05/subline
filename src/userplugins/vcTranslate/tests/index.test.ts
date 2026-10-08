@@ -876,8 +876,8 @@ describe("a rate-limited LLM leaves the reader the fast tier's Google line", () 
         expect(shownToasts[0].message).toBe("✦ is catching up. Back in about 5m. ≈ keeps working.");
         // NEUTRAL. A wait is not a failure, and red is what made a five-minute
         // pause read as a dead plugin.
-        expect(shownToasts[0].type).toBe("MESSAGE");
-        expect(shownToasts[0].type).not.toBe("FAILURE");
+        expect(shownToasts[0].type).toBe("message");
+        expect(shownToasts[0].type).not.toBe("failure");
     });
 
     it("does not let a silent short pause use up the one announcement", async () => {
@@ -930,7 +930,7 @@ describe("a rate-limited LLM leaves the reader the fast tier's Google line", () 
         expect(shownToasts).toHaveLength(1);
         expect(shownToasts[0].message)
             .toBe("Today's ✦ allowance is used up. ≈ keeps working. ✦ is back tomorrow.");
-        expect(shownToasts[0].type).toBe("MESSAGE");
+        expect(shownToasts[0].type).toBe("message");
         // No countdown: waiting it out is not the remedy.
         expect(shownToasts[0].message).not.toMatch(/\d+[sm]\b/);
     });
@@ -951,7 +951,7 @@ describe("a rate-limited LLM leaves the reader the fast tier's Google line", () 
         expect(shownToasts).toHaveLength(1);
         expect(shownToasts[0].message)
             .toBe("This month's ✦ allowance is used up. ≈ keeps working. ✦ is back next month.");
-        expect(shownToasts[0].type).toBe("MESSAGE");
+        expect(shownToasts[0].type).toBe("message");
     });
 
     it("retunes the rate gate from the quota the 429 reported", async () => {
@@ -1043,7 +1043,7 @@ describe("a rate-limited LLM leaves the reader the fast tier's Google line", () 
 
         expect(shownToasts).toHaveLength(1);
         expect(shownToasts[0].message).not.toMatch(/settings/i);
-        expect(shownToasts[0].type).toBe("MESSAGE");
+        expect(shownToasts[0].type).toBe("message");
     });
 
     it("shows the model toast once per session too, not once per batch", async () => {
@@ -3835,7 +3835,7 @@ describe("the Subline code in the plugin", () => {
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
         expect(shownToasts.some(t => /no Subline code set/.test(t.message))).toBe(false);
-        expect(shownToasts.some(t => t.type === "FAILURE")).toBe(false);
+        expect(shownToasts.some(t => t.type === "failure")).toBe(false);
         expect(native.translateBatch.mock.calls.filter(c => c[0] === "relay")).toHaveLength(0);
     });
 

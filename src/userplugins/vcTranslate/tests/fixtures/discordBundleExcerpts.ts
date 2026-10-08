@@ -100,7 +100,9 @@ export const BUNDLE_SITES: Array<{ patch: number; replacement: number; module: s
         "replacement": 0,
         "module": "442228",
         "sites": [
-            "(0,l.jsx)(d.A,{userId:t,userBio:n,setLineClamp:!1,textColor:\"text-strong\",animateOnHoverOrFocusOnly:T,isHoveringOrFocusing:h})"
+            "(0,l.jsx)(d.A,{userId:t,userBio:n,setLineClamp:!1,textColor:\"text-strong\",animateOnHoverOrFocusOnly:T,isHoveringOrFocusing:h})",
+            // 2026-10-08 (Stable, PTB and Canary): guildId added before userBio.
+            "(0,l.jsx)(d.A,{userId:t,guildId:E?.guildId,userBio:n,setLineClamp:!1,textColor:\"text-strong\",animateOnHoverOrFocusOnly:T,isHoveringOrFocusing:h})"
         ]
     },
     {
@@ -149,7 +151,9 @@ export const BUNDLE_SITES: Array<{ patch: number; replacement: number; module: s
         "replacement": 0,
         "module": "808261",
         "sites": [
-            "hideHeading:!i,headingIcon:c,children:i?(0,t.jsx)(nh,{displayProfile:l,className:nv.u}):(0,t.jsx)(nl.A,{userBio:r,setLineClamp:!1})"
+            "hideHeading:!i,headingIcon:c,children:i?(0,t.jsx)(nh,{displayProfile:l,className:nv.u}):(0,t.jsx)(nl.A,{userBio:r,setLineClamp:!1})",
+            // 2026-10-08 (Stable, PTB and Canary; now module 235701): guildId added after userBio.
+            "hideHeading:!l,headingIcon:g,children:l?(0,i.jsx)(tS,{displayProfile:n,className:tN.u}):(0,i.jsx)(tu.A,{userBio:s,guildId:r?.guildId,setLineClamp:!1})"
         ]
     },
     {

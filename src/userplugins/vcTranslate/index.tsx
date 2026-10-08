@@ -9,7 +9,7 @@ import { relaunch } from "@utils/native";
 import { copyToClipboard } from "@utils/clipboard";
 import {
     ChannelStore, FluxDispatcher, GuildMemberStore, GuildRoleStore, LocaleStore, MessageStore,
-    Parser, React, SelectedChannelStore, Toasts, UserStore
+    Parser, React, SelectedChannelStore, showToast, UserStore
 } from "@webpack/common";
 import type { Message } from "@vencord/discord-types";
 
@@ -717,7 +717,7 @@ function showActivationNotice(message: string = UPGRADE_COPY.activateNotice): vo
  */
 function openResetHelp(): void {
     void copyToClipboard(SUPPORT_EMAIL)
-        .then(() => Toasts.show({ id: Toasts.genId(), type: Toasts.Type.SUCCESS, message: UPGRADE_COPY.emailCopied }))
+        .then(() => showToast(UPGRADE_COPY.emailCopied, "success"))
         .catch(() => { });
 }
 
@@ -1108,7 +1108,7 @@ function openUpgradeForLevel(): void {
     const level = entitlementLevel();
     if (level === "none" && deviceLimited) {
         // Buying again would not free a computer: the sentence and its link.
-        Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message: UPGRADE_COPY.deviceLimit });
+        showToast(UPGRADE_COPY.deviceLimit, "failure");
         // Back on screen if the reader closed it; never a second copy.
         showDeviceLimitNotice(true);
         return;
@@ -1129,20 +1129,20 @@ function startCheckout(plan: Plan): void {
     checkoutTarget = plan === "automatic" ? "automatic" : "ai";
     void getCheckoutFlow().start(plan).then(result => {
         if (result === true) {
-            Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message: UPGRADE_COPY.checkoutOpenedToast });
+            showToast(UPGRADE_COPY.checkoutOpenedToast, "message");
         } else if (result === "automatic_required") {
-            Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message: UPGRADE_COPY.aiNeedsAutomatic });
+            showToast(UPGRADE_COPY.aiNeedsAutomatic, "failure");
         } else if (result === "unavailable") {
-            Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message: UPGRADE_COPY.checkoutUnavailable });
+            showToast(UPGRADE_COPY.checkoutUnavailable, "failure");
         } else if (result === "already_owned") {
             // Nothing opened. AI owned means a second subscription was refused.
             const message = plan === "automatic" ? UPGRADE_COPY.alreadyAutomatic : UPGRADE_COPY.alreadyAi;
-            Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message });
+            showToast(message, "message");
             void refreshEntitlement();
         } else if (result === "purchase_pending") {
             // Nothing opened: buying again would charge twice. The flow keeps
             // asking the relay, so it switches on by itself when it lands.
-            Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message: UPGRADE_COPY.purchasePending });
+            showToast(UPGRADE_COPY.purchasePending, "message");
         }
     });
 }
@@ -1819,11 +1819,11 @@ function announceCooldownOnce(
 ): void {
     const { label } = LLM_ENGINES[engine];
 
-    let type: string = Toasts.Type.MESSAGE;
+    let type: "message" | "failure" = "message";
     let message: string;
 
     if (typeof quotaModel === "string" && quotaModel !== "") {
-        type = Toasts.Type.FAILURE;
+        type = "failure";
         message = `${label} model "${quotaModel}" is over its quota. It may have no free `
             + "availability on your key. Pick another model in settings. Using Google (≈) meanwhile.";
     } else if (dailyLimit) {
@@ -1844,7 +1844,7 @@ function announceCooldownOnce(
 
     if (announcedCooldown) return;
     announcedCooldown = true;
-    Toasts.show({ id: Toasts.genId(), type, message });
+    showToast(message, type);
 }
 
 /**
@@ -1951,11 +1951,7 @@ function fallBackToGoogle(reason: string, kind: FallbackKind = "key") {
     if (kind === "blocked" && settings.store.engine === "relay") {
         logger.info(`${reason}; ✦ paused for ${Math.round(BLOCKED_RETRY_AFTER_MS / 60_000)} minutes`);
     } else {
-        Toasts.show({
-            id: Toasts.genId(),
-            type: Toasts.Type.FAILURE,
-            message: `${sentenceCase(reason)}. Showing ≈ for now.`
-        });
+        showToast(`${sentenceCase(reason)}. Showing ≈ for now.`, "failure");
     }
     rebuildBatcher();
 }
@@ -1983,11 +1979,7 @@ function announceMissingKeyOnce() {
     if (apiKeyFor(configured).trim() !== "") return;
     announcedMissingKey = true;
     const { credential } = LLM_ENGINES[configured];
-    Toasts.show({
-        id: Toasts.genId(),
-        type: Toasts.Type.FAILURE,
-        message: `No ${credential} set. Showing ≈ until you add one.`
-    });
+    showToast(`No ${credential} set. Showing ≈ until you add one.`, "failure");
 }
 
 /** A short, human-readable description of a stored entry, for debug logging only. */
@@ -2052,7 +2044,7 @@ function writeResult(key: string, value: StoredTranslation): void {
 function showWeeklyNoteIfDue(): void {
     const note = closeWeekIfDue();
     if (note === null) return;
-    Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message: note });
+    showToast(note, "message");
 }
 
 /**
@@ -5198,11 +5190,7 @@ export default definePlugin({
                         // leaving an unhandled rejection. catchUp() is inside
                         // this try too, so a throw there can't escape unhandled
                         // either.
-                        Toasts.show({
-                            id: Toasts.genId(),
-                            type: Toasts.Type.FAILURE,
-                            message: CHANNEL_TOGGLE_FAILED
-                        });
+                        showToast(CHANNEL_TOGGLE_FAILED, "failure");
                     }
                 }
             };

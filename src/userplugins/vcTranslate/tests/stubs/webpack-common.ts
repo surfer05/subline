@@ -38,11 +38,10 @@ export const shownToasts: StubToast[] = [];
 
 let toastSeq = 0;
 
-export const Toasts = {
-    Type: { FAILURE: "FAILURE", SUCCESS: "SUCCESS", MESSAGE: "MESSAGE" },
-    genId: () => `toast-${++toastSeq}`,
-    show(toast: StubToast): void { shownToasts.push(toast); }
-};
+/** Vencord's `showToast(message, type = "message")` (@webpack/common): the one toast API that exists both before and after Vencord 1.15.10 removed `Toasts.genId` and `Toasts.Type`. */
+export function showToast(message: string, type: "message" | "success" | "failure" = "message"): void {
+    shownToasts.push({ id: `toast-${++toastSeq}`, type, message });
+}
 
 /* ---------------------------------------------------------------- Modals -- */
 

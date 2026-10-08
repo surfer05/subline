@@ -14,6 +14,6 @@
         "build instead of shipping."
     ],
     "repository": "https://github.com/Vendicated/Vencord.git",
-    "commit": "7f0c10cc29fd789f2f4828ae3dc947623e837920",
-    "version": "1.15.9"
+    "commit": "718c867256a9d181edc7a534afb296b9bb41ab58",
+    "version": "1.15.10"
 }

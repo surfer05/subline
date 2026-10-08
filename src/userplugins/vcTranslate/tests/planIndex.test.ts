@@ -440,7 +440,7 @@ describe("entering a code", () => {
         await flush();
         return { onClose };
     }
-    const failures = () => shownToasts.filter(t => t.type === "FAILURE").map(t => t.message);
+    const failures = () => shownToasts.filter(t => t.type === "failure").map(t => t.message);
 
     it("redeems a server's promo code for this install and switches on", async () => {
         await startNotActivated();
@@ -714,7 +714,7 @@ describe("the relay refuses ✦ on what the install owns", () => {
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
         await settle();
         expect(native.relayStatus.mock.calls.length).toBeGreaterThan(n);
-        expect(shownToasts.filter(t => t.type === "FAILURE")).toHaveLength(0);
+        expect(shownToasts.filter(t => t.type === "failure")).toHaveLength(0);
         // AI lapsed: the next message is Google only.
         const relayBefore = calls("relay").length;
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("2", "que tal amigo") });
