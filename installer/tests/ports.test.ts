@@ -554,3 +554,37 @@ describe("the macOS helper knows when Subline was removed (audit 2026-10-06 #46)
         }
     });
 });
+
+describe("Windows: Discord's own updater, by its path (audit 2026-10-06 #23)", () => {
+    it("only an Update.exe under this Discord's folder counts", async () => {
+        const home = mkdtempSync(join(tmpdir(), "subline-ports-home-"));
+        try {
+            let cim = "";
+            const p = createFlowPorts({
+                appResourcesPath: home,
+                productVersion: "0.2.3",
+                log: { info: () => {}, warn: () => {}, error: () => {} },
+                platform: "win32",
+                env: { LOCALAPPDATA: join(home, "AppData", "Local") },
+                home,
+                searchRoots: [],
+                helper: { appPath: home, uid: 0, launchctl: makeFakeLaunchctl() },
+                exec: async (file: string) => ({ stdout: file === "powershell.exe" ? cim : "" })
+            });
+            const install = {
+                branch: "stable" as const,
+                rootPath: "C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.2",
+                stableId: "C:\\Users\\x\\AppData\\Local\\Discord",
+                resourcesPath: "r", asarPath: "a", backupPath: "b", buildInfoPath: "i", fromExplicitPath: false
+            };
+            cim = "C:\\Users\\x\\AppData\\Local\\Slack\\Update.exe\r\n";
+            expect(await p.discordUpdaterRunning!(install)).toBe(false);
+            cim = "C:\\Users\\x\\AppData\\Local\\Discord\\Update.exe\r\n";
+            expect(await p.discordUpdaterRunning!(install)).toBe(true);
+            cim = "?\r\n";
+            expect(await p.discordUpdaterRunning!(install)).toBe(false);
+        } finally {
+            rmSync(home, { recursive: true, force: true });
+        }
+    });
+});

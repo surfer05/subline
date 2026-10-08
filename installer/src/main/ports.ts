@@ -59,6 +59,7 @@ import { locateDiscordInstalls } from "../patcher/locate.js";
 import type { DiscordBranch, DiscordInstall } from "../patcher/locate.js";
 import { loaderPathFor } from "../bundle/spec.js";
 import { adoptPatch, patchInstall } from "../patcher/patch.js";
+import { discordExecutablePaths, pathsHoldInstall } from "../app/processPaths.js";
 import { clearPendingLanguage, readPendingLanguage, writePendingLanguage } from "../app/pendingSetup.js";
 import { err, ok } from "../patcher/result.js";
 import type { Result } from "../patcher/result.js";
@@ -763,6 +764,18 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
                 overwriteForeignMod: patchOptions.overwriteForeignMod
             }),
         inspectInstalledBundle: dir => inspectModBundle(dir),
+        // Windows: Discord's Update.exe lives in the branch folder (the stable
+        // id). Only a path we can read under it counts; another app's
+        // Squirrel updater (also Update.exe) never blocks the install.
+        ...(platform === "win32"
+            ? {
+                discordUpdaterRunning: async (install: DiscordInstall) => {
+                    const paths = await discordExecutablePaths(exec, "Update.exe");
+                    if (paths === null) return false;
+                    return pathsHoldInstall(paths.filter((path): path is string => path !== null), install.stableId);
+                }
+            }
+            : {}),
         adoptPatch: (install, modBundleDir) => {
             const adopted = adoptPatch(install, { modBundleDir, productVersion: options.productVersion });
             return adopted.ok

@@ -120,6 +120,8 @@ interface Script {
     installedBundle?: Result<ModBundle>;
     /** adoptPatch's answer (audit #11). Absent: the port is not wired. */
     adopt?: Result<{ pluginBuildId: string; discordVersion: string | null }>;
+    /** Discord's updater per look (audit #23); the last entry repeats. Absent: the port is not wired. */
+    updaterRunning?: boolean[];
     /** A language chosen on an earlier run that stopped before activation (I6). */
     pendingLanguage?: string | null;
     inspect?: Result<InstallState> | ((install: DiscordInstall) => Result<InstallState>);
@@ -223,6 +225,7 @@ function harness(script: Script = {}): Harness {
         launchedTargets: []
     } as unknown as Harness;
     let locateCall = 0;
+    let updaterLook = 0;
     let statusCall = 0;
 
     const record = (level: string) => (event: string, fields: Record<string, unknown> = {}) => {
@@ -260,6 +263,12 @@ function harness(script: Script = {}): Harness {
             clearPendingLanguage: () => { h.pendingClears += 1; }
         }),
         rememberPatchedInstall: (install: DiscordInstall) => { h.remembered.push(install.rootPath); },
+        ...(script.updaterRunning === undefined ? {} : {
+            discordUpdaterRunning: async () => {
+                const answers = script.updaterRunning as boolean[];
+                return answers[Math.min(updaterLook++, answers.length - 1)] ?? false;
+            }
+        }),
         inspect: (install: DiscordInstall) => {
             if (typeof script.inspect === "function") return script.inspect(install);
             return script.inspect ?? { ok: true, value: installState("unpatched") };
@@ -3011,5 +3020,26 @@ describe("patch-failed names the remedy (audit #13, #16)", () => {
         const failed = await setLanguage(h.flow);
         expect(failed.detail).toContain("Reinstall Discord from discord.com, then run Subline again.");
         expect(failed.detail).not.toContain("Please report this");
+    });
+});
+
+describe("Discord's own updater is waited for before the patch (audit #23)", () => {
+    it("still unpacking for a few looks: waits, then patches", async () => {
+        const h = harness({ platform: "win32", permission: ["not-required"], updaterRunning: [true, true, false] });
+        await toDetection(h);
+        const done = await setLanguage(h.flow);
+        expect(done.step).toBe("done");
+        expect(h.patchCalls).toHaveLength(1);
+    });
+
+    it("still running after a minute: nothing is written, and Try again is offered", async () => {
+        const h = harness({ platform: "win32", permission: ["not-required"], updaterRunning: [true] });
+        await toDetection(h);
+        const failed = await setLanguage(h.flow);
+        expect(failed.step).toBe("patch-failed");
+        expect(failed.detail).toBe("Discord is still installing an update. Wait a minute and press Try again.");
+        expect(failed.actions).toContain("retry");
+        expect(h.patchCalls).toHaveLength(0);
+        expect(h.bundleInstalls).toBe(0);
     });
 });

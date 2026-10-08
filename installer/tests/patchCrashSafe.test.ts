@@ -14,6 +14,7 @@ import { patchInstall, unpatchInstall } from "../src/patcher/patch.js";
 import type { PatchOptions } from "../src/patcher/patch.js";
 import { inspectInstall } from "../src/patcher/state.js";
 import { buildStubAsar } from "../src/patcher/stub.js";
+import { buildAsar } from "../src/patcher/asar.js";
 import type { Fixture, ModBundleFixture } from "./fixture.js";
 import { makeDiscordFixture, makeModBundleFixture } from "./fixture.js";
 
@@ -211,6 +212,15 @@ describe("Uninstall repairs an unreadable app.asar from our backup (audit #13)",
         expect(existsSync(markerPathFor(fixture.install.resourcesPath))).toBe(false);
     });
 
+    it("an unreadable marker of ours with Discord's original in _app.asar: Uninstall restores it, as the screen says", () => {
+        fixture = makeDiscordFixture();
+        expect(patchInstall(fixture.install, options()).ok).toBe(true);
+        writeFileSync(markerPathFor(fixture.install.resourcesPath), "{ not json");
+        const result = unpatchInstall(fixture.install, { ownLoaderPaths: [bundle.loaderPath] });
+        expect(result.ok).toBe(true);
+        expect(readFileSync(fixture.install.asarPath).equals(fixture.originalAsar)).toBe(true);
+    });
+
     it("truncated app.asar with no marker of ours is still left alone", () => {
         fixture = makeDiscordFixture({ withBackup: true });
         writeFileSync(fixture.install.asarPath, Buffer.from([1, 2, 3, 4, 5, 6, 7, 8, 9]));
@@ -224,5 +234,25 @@ describe("Uninstall repairs an unreadable app.asar from our backup (audit #13)",
         fixture = makeDiscordFixture({ withoutAsar: true });
         const gone = inspectInstall(fixture.install);
         expect(gone.ok && gone.value.summary).toContain("Reinstall Discord from discord.com");
+    });
+
+    function summaryOf(setup: (f: Fixture) => void): { reason: string | null; summary: string } {
+        fixture?.cleanup();
+        fixture = makeDiscordFixture();
+        setup(fixture);
+        const state = inspectInstall(fixture.install, { ownLoaderPaths: [bundle.loaderPath] });
+        if (!state.ok) throw new Error(state.error.message);
+        return { reason: state.value.reason, summary: state.value.summary };
+    }
+
+    it.each([
+        ["our-patch-without-backup", (f: Fixture) => { patchInstall(f.install, options()); unlinkSync(f.install.backupPath); }, /Reinstall Discord from discord\.com/],
+        ["foreign-patch-without-backup", (f: Fixture) => { writeFileSync(f.install.asarPath, buildStubAsar("/Users/someone/dev/Vencord/dist/patcher.js")); }, /Reinstall Discord from discord\.com/],
+        ["asar-unrecognised", (f: Fixture) => { writeFileSync(f.install.asarPath, buildAsar([{ name: "index.js", content: Buffer.from("x") }])); }, /Reinstall Discord from discord\.com/],
+        ["marker-unreadable", (f: Fixture) => { patchInstall(f.install, options()); writeFileSync(markerPathFor(f.install.resourcesPath), "{ not json"); }, /Press Uninstall/]
+    ] as const)("%s names its remedy", (reason, setup, remedy) => {
+        const { reason: seen, summary } = summaryOf(setup);
+        expect(seen).toBe(reason);
+        expect(summary).toMatch(remedy);
     });
 });

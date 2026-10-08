@@ -118,6 +118,8 @@ export type PatcherErrorCode =
     | "CODE_REFUSED"
     /** Discord changed under the installer (its folder went away before the patch). */
     | "DISCORD_MOVED"
+    /** Windows: Discord's own updater is still installing a new version. Nothing was written. */
+    | "DISCORD_UPDATING"
     /** Something the installer did not expect threw. The cause is in the log. */
     | "UNEXPECTED"
     /** Anything else that came back from the filesystem. */

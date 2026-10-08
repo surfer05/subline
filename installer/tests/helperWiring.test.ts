@@ -700,6 +700,31 @@ describe("a temporary app location", () => {
         expect(readLaunchAgentPlist(launchAgentPlistPath(home))).toBe(before);
     });
 
+    // Audit #7/#17: the pieces the first part did not pin.
+    it("Uninstall run from the disk image still removes the agent (removal uses only uid and launchctl)", async () => {
+        await installHelperFor(wiring(), "darwin", home);
+        const dmgWiring: Parameters<typeof removeHelperFor>[0] = Object.assign({ ...wiring() }, { appPath: DMG_APP });
+        const removal = await removeHelperFor(dmgWiring, "darwin", home);
+        expect(removal).toEqual({ applicable: true, removed: true, error: null });
+        expect(existsSync(launchAgentPlistPath(home))).toBe(false);
+    });
+
+    it("an agent an older build left pointing at the disk image is re-pointed on the first run from Applications", async () => {
+        await installHelperFor({ ...wiring(), appPath: DMG_APP, diskImageMounts: images([]) }, "darwin", home);
+        expect(firstProgramArgument(readLaunchAgentPlist(launchAgentPlistPath(home))!)).toBe(`${DMG_APP}/Contents/MacOS/Subline`);
+        const result = await ensureHelperFor({ ...wiring(), diskImageMounts: images([]) }, "darwin", home);
+        expect(result.ok && result.value).toMatchObject({ action: "repaired", reason: "points-elsewhere" });
+        expect(firstProgramArgument(readLaunchAgentPlist(launchAgentPlistPath(home))!)).toBe("/Applications/Subline.app/Contents/MacOS/Subline");
+    });
+
+    it("the second run, from Applications, registers the agent the disk-image run could not", async () => {
+        await installHelperFor({ ...wiring(), appPath: DMG_APP, diskImageMounts: images(["/Volumes/Subline"]) }, "darwin", home);
+        expect(existsSync(launchAgentPlistPath(home))).toBe(false);
+        const result = await ensureHelperFor({ ...wiring(), diskImageMounts: images(["/Volumes/Subline"]) }, "darwin", home);
+        expect(result.ok && result.value).toMatchObject({ action: "repaired", reason: "missing" });
+        expect(launchctl.loaded.has(HELPER_LABEL)).toBe(true);
+    });
+
     it("ensureHelperFromHelper skips a translocated copy", async () => {
         await installHelperFor(wiring(), "darwin", home);
         const result = await ensureHelperFromHelper({ ...wiring(), appPath: TRANSLOCATED, diskImageMounts: images([]) }, "darwin", home, () => {});

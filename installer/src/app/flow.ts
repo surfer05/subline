@@ -295,7 +295,8 @@ export interface FlowLogger {
 /** patch-failed lines that replace the raw error (audit 2026-10-06 #13, #16). */
 export const PATCH_FAILED_COPY = {
     scanning: "Another program, often antivirus, is still scanning Discord's files. Wait a few seconds and press Try again.",
-    reinstall: "Reinstall Discord from discord.com, then run Subline again."
+    reinstall: "Reinstall Discord from discord.com, then run Subline again.",
+    updating: "Discord is still installing an update. Wait a minute and press Try again."
 } as const;
 
 /** The move-to-Applications screen (audit 2026-10-06 #24). Plain sentences, no dashes. */
@@ -417,6 +418,12 @@ export interface FlowPorts {
      * means "cannot say", never a reason to block.
      */
     inspectInstalledBundle?(dir: string): Result<ModBundle>;
+    /**
+     * Windows: is Discord's own updater (its Update.exe) running for this
+     * Discord right now? A forced quit can land while it is still unpacking
+     * a new app folder (audit 2026-10-06 #23). Absent: never.
+     */
+    discordUpdaterRunning?(install: DiscordInstall): Promise<boolean>;
     /**
      * Write the marker beside our stub when the stub already loads this
      * bundle (patch.ts adoptPatch). Writes nothing in app.asar, so it works
@@ -2117,6 +2124,17 @@ export class InstallFlow {
         // have spent minutes paying or granting permission since detection.
         // Discord is closed now (checked just above), so the folder it will run
         // next is settled: patch that one, never a folder it has left.
+        // DISCORD'S OWN UPDATER FIRST (audit #23): a new app folder that is
+        // still being unpacked can already look like Discord. Wait up to a
+        // minute for it; then say so and let the user try again.
+        if (!await this.updaterSettled(install)) {
+            return this.failPatch({
+                code: "DISCORD_UPDATING",
+                message: PATCH_FAILED_COPY.updating,
+                path: install.stableId
+            });
+        }
+        if (this.aborted) return this.current;
         const target = this.relocate(install);
         if (!target.ok) return this.failPatch(target.error);
         if (target.value !== install) {
@@ -2187,6 +2205,25 @@ export class InstallFlow {
      * screen says exactly that and offers to carry on, because refusing to finish
      * an install that is working would be a worse answer than a named warning.
      */
+    /** True once Discord's updater is not running for this Discord (or cannot be seen). Waits up to 60 s. */
+    private async updaterSettled(install: DiscordInstall): Promise<boolean> {
+        if (this.ports.discordUpdaterRunning === undefined) return true;
+        for (let look = 0; look <= 30; look++) {
+            let running: boolean;
+            try {
+                running = await this.ports.discordUpdaterRunning(install);
+            } catch (cause) {
+                this.ports.log.warn("patch.updater-check-failed", { cause: String(cause) });
+                return true;
+            }
+            if (!running) return true;
+            if (look === 0) this.ports.log.info("patch.waiting-for-discord-updater", { stableId: install.stableId });
+            if (look < 30) await this.ports.sleep(2_000);
+        }
+        this.ports.log.warn("patch.discord-updater-still-running", { stableId: install.stableId });
+        return false;
+    }
+
     /**
      * The install to patch now: the same Discord (stable id) as the one
      * chosen, as it is on disk now. Unchanged when nothing moved or the
