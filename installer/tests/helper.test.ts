@@ -1868,3 +1868,23 @@ describe("audit: the helper never abandons, never nags for nothing, and never un
         expect(looks.calls()).toBeLessThanOrEqual(2);
     });
 });
+
+describe("audit #4: rewriting an older stub is housekeeping", () => {
+    it("a refused rewrite is retried weekly, not every run", async () => {
+        patchForReal(harness);
+        await harness.run();
+        writeFileSync(harness.fixture.install.asarPath, buildStubAsar(join(harness.runtimeDir, "patcher.js"), legacyStubIndexSource));
+        let attempts = 0;
+        harness.ports.patch = () => { attempts += 1; return err("PERMISSION_DENIED", "App Management"); };
+        for (let i = 0; i < 12; i++) {
+            const report = await harness.run();
+            expect(report.failed).toEqual([]);
+            harness.advance(60 * 60_000);
+        }
+        expect(attempts).toBe(1);
+        expect(harness.notifications).toEqual([]);
+        harness.advance(7 * 24 * 60 * 60_000);
+        await harness.run();
+        expect(attempts).toBe(2);
+    });
+});

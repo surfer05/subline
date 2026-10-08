@@ -43,9 +43,7 @@ import { rememberedResourcesPath, uninstallTargets } from "../patcher/locate.js"
 import { isOtherAccountLoader } from "../patcher/ownership.js";
 import type { DiscordInstall } from "../patcher/locate.js";
 import { hiddenExec } from "../patcher/exec.js";
-import { forgetPatchedInstalls, readPatchedInstalls } from "../app/patchedInstalls.js";
-import { releaseHelperInstalls } from "../helper/state.js";
-import { ok } from "../patcher/result.js";
+import { readPatchedInstalls, releaseRestoredInstalls } from "../app/patchedInstalls.js";
 import { unpatchInstall } from "../patcher/patch.js";
 import { loaderPathFor } from "../bundle/spec.js";
 import { usingOriginalFs } from "../patcher/realFs.js";
@@ -638,13 +636,7 @@ ipcMain.handle("uninstall:run", async (
             },
             removeHelper: () => removeHelperFor(helperWiring(), process.platform, app.getPath("home")),
             restoreHelper: () => installHelperFor(helperWiring(), process.platform, app.getPath("home")),
-            forgetInstalls: stableIds => {
-                const productDir = productDirFor();
-                if (productDir === null) return ok(false);
-                const record = forgetPatchedInstalls(productDir, stableIds);
-                if (!record.ok) return record;
-                return releaseHelperInstalls(productDir, stableIds);
-            }
+            forgetInstalls: stableIds => releaseRestoredInstalls(productDirFor(), stableIds)
         },
         {
             installs,

@@ -50,6 +50,12 @@ export interface InstallMemory {
      * and never quit otherwise stays untranslated with no word to the user.
      */
     blockedByRunningSince?: number | null;
+    /**
+     * When rewriting an older stub form last failed. Housekeeping, so it is
+     * retried weekly, not every run (a lost App Management grant would
+     * otherwise be a write attempt, and a macOS prompt, every few minutes).
+     */
+    stubUpgradeFailedAt?: number | null;
 }
 
 /**
@@ -192,6 +198,8 @@ export function parseHelperState(raw: string): HelperState {
             };
             const blocked = num(value.blockedByRunningSince);
             if (blocked !== null) state.installs[rootPath]!.blockedByRunningSince = blocked;
+            const upgradeFailed = num(value.stubUpgradeFailedAt);
+            if (upgradeFailed !== null) state.installs[rootPath]!.stubUpgradeFailedAt = upgradeFailed;
         }
     }
 

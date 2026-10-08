@@ -181,6 +181,9 @@ export const QUIT_WATCH_WINDOW_MS = 30 * 60_000;
 export const QUIT_WATCH_WAIT_MS = 4 * 60_000 + 45_000;
 export const QUIT_WATCH_POLL_MS = 10_000;
 
+/** How long a failed rewrite of an older stub form waits before the next try. */
+export const STUB_UPGRADE_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
+
 /** What the helper asks a Windows user to do when a running Discord blocks a repair. */
 export const QUIT_COPY = {
     discordUpdated:
@@ -912,7 +915,8 @@ function rememberInstall(run: Run, entry: ManagedInstall, buildId: string, patch
         patchedAt: patchedNow ? run.ports.now() : (previous?.patchedAt ?? null),
         failures: patchedNow || verified ? 0 : (previous?.failures ?? 0),
         // Patched, or nothing to patch: nothing is waiting on Discord.
-        blockedByRunningSince: null
+        blockedByRunningSince: null,
+        ...(!patchedNow && previous?.stubUpgradeFailedAt != null ? { stubUpgradeFailedAt: previous.stubUpgradeFailedAt } : {})
     };
 }
 
@@ -925,7 +929,8 @@ function setBlockedSince(run: Run, entry: ManagedInstall, since: number | null):
         buildId: previous?.buildId ?? entry.marker?.pluginBuildId ?? null,
         patchedAt: previous?.patchedAt ?? null,
         failures: previous?.failures ?? 0,
-        blockedByRunningSince: since
+        blockedByRunningSince: since,
+        ...(previous?.stubUpgradeFailedAt != null ? { stubUpgradeFailedAt: previous.stubUpgradeFailedAt } : {})
     };
 }
 
@@ -973,6 +978,11 @@ async function upgradeStub(run: Run, entry: ManagedInstall, bundle: ModBundle, t
         run.decide("repatch", "stub-outdated-waiting", "the older stub form is rewritten once Discord is closed", { path: install.rootPath });
         return;
     }
+    const failedAt = run.state.installs[install.stableId]?.stubUpgradeFailedAt ?? null;
+    if (failedAt !== null && run.ports.now() - failedAt < STUB_UPGRADE_RETRY_MS) {
+        run.decide("repatch", "stub-outdated-waiting", "rewriting the older stub form failed recently; it is retried weekly", { path: install.rootPath });
+        return;
+    }
     const settled = await awaitDiscordSettled(install, {
         now: () => run.ports.now(),
         sleep: ms => run.ports.sleep(ms),
@@ -992,6 +1002,8 @@ async function upgradeStub(run: Run, entry: ManagedInstall, bundle: ModBundle, t
         run.decide("repatch", "stub-upgraded", "the older stub form was rewritten while Discord was closed", { path: install.rootPath, trigger });
     } else {
         run.decide("repatch", "stub-upgrade-skipped", patched.error.message, { path: install.rootPath, code: patched.error.code });
+        const memory = run.state.installs[install.stableId];
+        if (memory !== undefined) memory.stubUpgradeFailedAt = run.ports.now();
     }
 }
 
@@ -1068,7 +1080,8 @@ async function handlePatchFailure(
         buildId: previous?.buildId ?? null,
         patchedAt: previous?.patchedAt ?? null,
         failures,
-        blockedByRunningSince: null
+        blockedByRunningSince: null,
+        ...(previous?.stubUpgradeFailedAt != null ? { stubUpgradeFailedAt: previous.stubUpgradeFailedAt } : {})
     };
 
     // OBSERVED, not assumed. `patchInstall` rolls back on every failure path, but

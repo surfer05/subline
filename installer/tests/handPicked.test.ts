@@ -13,7 +13,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { installModBundle } from "../src/app/modInstall.js";
-import { forgetPatchedInstalls, readPatchedInstalls, rememberPatchedInstall } from "../src/app/patchedInstalls.js";
+import { forgetPatchedInstalls, readPatchedInstalls, releaseRestoredInstalls, rememberPatchedInstall } from "../src/app/patchedInstalls.js";
+import { helperStatePathFor, readHelperState, writeHelperState, emptyHelperState } from "../src/helper/state.js";
 import { uninstall } from "../src/app/uninstall.js";
 import { locateDiscordInstalls, rememberedResourcesPath, uninstallTargets } from "../src/patcher/locate.js";
 import { MARKER_FILENAME } from "../src/patcher/marker.js";
@@ -240,5 +241,32 @@ describe("forgetting Discords Uninstall put back", () => {
             a.cleanup();
             b.cleanup();
         }
+    });
+});
+
+describe("releasing the Discords Uninstall put back", () => {
+    it("drops them from the record and the helper's memory, and marks them released", () => {
+        const a = makeDiscordFixture({ appName: "Discord PTB.app" });
+        try {
+            rememberPatchedInstall(productDir, a.install);
+            const state = emptyHelperState();
+            state.installs[a.install.stableId] = { discordVersion: "1", buildId: "b", patchedAt: 1, failures: 0 };
+            state.lastRunAt = 7;
+            writeHelperState(helperStatePathFor(productDir), state);
+            expect(releaseRestoredInstalls(productDir, [a.install.stableId])).toEqual({ ok: true, value: true });
+            expect(readPatchedInstalls(productDir)).toEqual([]);
+            const after = readHelperState(helperStatePathFor(productDir));
+            expect(after.installs[a.install.stableId]).toBeUndefined();
+            expect(after.released).toEqual([a.install.stableId]);
+            expect(after.lastRunAt).toBe(7);
+        } finally {
+            a.cleanup();
+        }
+    });
+
+    it("never creates Subline's folder to write it down", () => {
+        const absent = join(productDir, "..", "NotThere");
+        expect(releaseRestoredInstalls(absent, ["x"])).toEqual({ ok: true, value: false });
+        expect(existsSync(absent)).toBe(false);
     });
 });
