@@ -15,14 +15,14 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 // stat opened app.asar and kept the handle for the life of the helper, so every
 // Windows repatch then failed to rename it, and the settle check read a fake
 // mtime. The bundle lookups below use it too; it is the same call on a folder.
-import { existsSync, statSync, writeFileSync } from "../patcher/realFs.js";
-import { homedir, tmpdir } from "node:os";
+import { existsSync, readFileSync, statSync, writeFileSync } from "../patcher/realFs.js";
+import { homedir, tmpdir, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 import type { FlowLogger } from "../app/flow.js";
 import { installModBundle, recoverModBundle } from "../app/modInstall.js";
 import { readPatchedInstalls } from "../app/patchedInstalls.js";
-import { isDiscordRunning } from "../app/discordProcess.js";
+import { isDiscordRunning, processNameFor } from "../app/discordProcess.js";
 import { inspectModBundle } from "../bundle/bundle.js";
 import { modBundleDirFor, productDirFor } from "../bundle/layout.js";
 import { loaderPathFor, manifestPathFor } from "../bundle/spec.js";
@@ -252,6 +252,48 @@ export function createLaunchctl(exec: Exec = run): LaunchctlPort {
  * found" from other failures only in localised text, and guessing at translated
  * strings is how a check silently inverts on a non-English Windows.
  */
+/**
+ * The executable path of every running process with this image name, one per
+ * line, from Get-CimInstance (audit 2026-10-06 #28). "?" is a process whose
+ * path Windows would not give (another session, elevated): it stays in the
+ * list as null, so it is never assumed to be elsewhere.
+ */
+export function parseExecutablePaths(stdout: string): Array<string | null> {
+    return stdout.replace(/\r/g, "").split("\n")
+        .map(line => line.trim())
+        .filter(line => line !== "")
+        .map(line => (line === "?" ? null : line));
+}
+
+/**
+ * Does any of these Discord processes run from this app folder? True when
+ * any path is unknown: only a path we can read and that is elsewhere lets
+ * the repair go ahead while Discord runs.
+ */
+export function pathsHoldInstall(paths: ReadonlyArray<string | null>, rootPath: string): boolean {
+    const norm = (path: string): string => path.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+    const root = `${norm(rootPath)}\\`;
+    return paths.some(path => path === null || norm(path).startsWith(root));
+}
+
+/** Get-CimInstance for one image name. null when the lookup itself failed. */
+async function discordExecutablePaths(exec: Exec, imageName: string): Promise<Array<string | null> | null> {
+    // The image name is ours (processNameFor), never user input; quoted anyway.
+    const name = imageName.replace(/'/g, "''");
+    try {
+        const { stdout } = await exec("powershell.exe", [
+            "-NoProfile", "-NonInteractive", "-Command",
+            `Get-CimInstance Win32_Process -Filter "Name='${name}'" | ForEach-Object { if ($_.ExecutablePath) { $_.ExecutablePath } else { '?' } }`
+        ]);
+        return parseExecutablePaths(stdout);
+    } catch {
+        return null;
+    }
+}
+
+/** Written by the mod's quit hook (scripts/vencordRewrites.mjs QUIT_HOOK_BLOCK). */
+export const DISCORD_QUIT_FILENAME = "discord-quit.json";
+
 export function createSchtasks(exec: Exec = run): SchtasksPort {
     /** One /Query /XML read: both the command and the interval come from it. */
     const queryXml = async (name: string): Promise<string | null> => {
@@ -439,6 +481,39 @@ export function createHelperPorts(options: RealHelperPortsOptions): HelperPorts 
                 // Discord is not a reason to tell this one to restart.
                 listProcesses: () => listProcesses(platform, exec, undefined, uid)
             })).length > 0,
+        ...(platform === "win32"
+            ? {
+                discordHoldsInstall: async (install: DiscordInstall) => {
+                    const running = await isDiscordRunning({
+                        branch: install.branch,
+                        platform,
+                        listProcesses: () => listProcesses(platform, exec, undefined, uid)
+                    });
+                    if (running.length === 0) return false;
+                    const paths = await discordExecutablePaths(exec, processNameFor(install.branch, "win32"));
+                    // The lookup failed or saw nothing: the name match decides, as before.
+                    // Fewer paths than processes: one was missed, so it may be here.
+                    if (paths === null || paths.length < running.length) return true;
+                    return pathsHoldInstall(paths, install.rootPath);
+                },
+                discordQuitAt: () => {
+                    if (productDir === null) return null;
+                    try {
+                        const at = (JSON.parse(readFileSync(join(productDir, DISCORD_QUIT_FILENAME), "utf8")) as { at?: unknown } | null)?.at;
+                        return typeof at === "number" && Number.isFinite(at) ? at : null;
+                    } catch {
+                        return null;
+                    }
+                }
+            }
+            : {}),
+        uptimeMs: () => {
+            try {
+                return uptime() * 1000;
+            } catch {
+                return null;
+            }
+        },
         mtimeOf: path => {
             try {
                 return statSync(path).mtimeMs;

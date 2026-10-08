@@ -483,7 +483,7 @@ function carryMarker() {
     } catch (cause) {
         fail(cause instanceof Error ? cause.message : String(cause));
     }
-    return `${PERSIST_FILE} now carries subline-patch.json across a host update`;
+    return `${PERSIST_FILE} now carries subline-patch.json across a host update and starts the helper on quit`;
 }
 
 function prunePlugins() {
@@ -594,7 +594,7 @@ function main() {
     // The host-update repatch must be in the loader, with our marker carry and
     // upstream's _app.asar guard (Vencord #4472). A pin without either fails.
     const loaderSource = readFileSync(join(OUT_DIR, "patcher.js"), "utf8");
-    for (const needle of ["Detected Host Update", "subline-patch.json", "[Subline] Could not carry the patch marker"]) {
+    for (const needle of ["Detected Host Update", "subline-patch.json", "[Subline] Could not carry the patch marker", "discord-quit.json", "[Subline] Could not start the background helper on quit"]) {
         if (!loaderSource.includes(needle)) fail(`the built patcher.js does not contain "${needle}".`);
     }
     const facts = inspectBundleDir(OUT_DIR);

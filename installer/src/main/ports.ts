@@ -207,9 +207,10 @@ function launchAgentSpecFor(wiring: HelperWiring) {
 export async function installHelperFor(
     wiring: HelperWiring,
     platform: NodeJS.Platform = process.platform,
-    home: string = homedir()
+    home: string = homedir(),
+    options: { runNow?: boolean } = {}
 ): Promise<Result<HelperInstallOutcome>> {
-    if (platform === "win32") return installWindowsHelper(wiring);
+    if (platform === "win32") return installWindowsHelper(wiring, options.runNow !== false);
     if (platform !== "darwin") {
         return ok({ applicable: false, installed: false, label: null, path: null });
     }
@@ -250,7 +251,7 @@ export async function installHelperFor(
  * required was introduced to close — every test green, every install helperless,
  * and the symptom only appearing weeks later when Discord updates.
  */
-async function installWindowsHelper(wiring: HelperWiring): Promise<Result<HelperInstallOutcome>> {
+async function installWindowsHelper(wiring: HelperWiring, runNow: boolean): Promise<Result<HelperInstallOutcome>> {
     if (wiring.schtasks === undefined || wiring.executablePath === undefined || wiring.workDir === undefined) {
         return err<HelperInstallOutcome>(
             "HELPER_REGISTRATION_FAILED",
@@ -264,6 +265,18 @@ async function installWindowsHelper(wiring: HelperWiring): Promise<Result<Helper
         platform: "win32"
     });
     if (!registered.ok) return registered as Result<HelperInstallOutcome>;
+    // ONE RUN NOW (audit 2026-10-06 #49). The first scheduled run is up to 5
+    // minutes away; a Discord update in that gap used to find a helper that
+    // had never seen this install. macOS gets the same from RunAtLoad. The
+    // helper tolerates a Discord that is open (it waits or defers), and a
+    // failure here changes nothing: the schedule still runs it.
+    if (runNow && registered.value.registered && wiring.schtasks.run !== undefined) {
+        try {
+            await wiring.schtasks.run(HELPER_TASK_NAME);
+        } catch {
+            // The 5 minute schedule covers it.
+        }
+    }
     return ok({
         applicable: true,
         // Queried back after creation, never the exit code. See `scheduledTask.ts`.
@@ -331,7 +344,9 @@ export async function ensureHelperFor(
             if (interval !== null && interval !== want) reason = "definition-changed";
         }
         if (reason === null) return ok({ action: "unchanged", reason: null, registered, expected });
-        const repaired = await installHelperFor(wiring, platform, home);
+        // From the helper itself (registerIfMissing false) there is no run to
+        // start: this IS the run, and IgnoreNew would drop it anyway.
+        const repaired = await installHelperFor(wiring, platform, home, { runNow: options.registerIfMissing !== false });
         if (!repaired.ok) return repaired as Result<HelperEnsureReport>;
         return ok({ action: "repaired", reason, registered, expected });
     }

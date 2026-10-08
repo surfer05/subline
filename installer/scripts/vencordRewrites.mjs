@@ -64,7 +64,51 @@ export const MARKER_CARRY_BLOCK = [
     ""
 ].join("\n");
 
-/** persistAfterDiscordUpdates.ts with the marker carried across a host update. */
+/** The import the quit hook needs, added after upstream's events import. */
+export const EVENTS_IMPORT = `import EventEmitter from "events";\n`;
+export const SPAWN_IMPORT = `import { spawn as sublineSpawn } from "child_process";\n`;
+
+/** Upstream's before-quit line. The quit hook goes right after it, inside the same platform block. */
+export const BEFORE_QUIT_ANCHOR = "    app.on(\"before-quit\", patchLatest);\n";
+
+/**
+ * Start Subline's background helper as Discord REALLY quits, on Windows
+ * (audit 2026-10-06 #28). A repair that needs app.asar written waits for
+ * Discord to be closed; the helper only looked every 5 minutes, so a quit
+ * and reopen inside that gap was never caught and the same "quit Discord"
+ * notice came back day after day.
+ *
+ * will-quit fires on a real quit only (closing the window to the tray is
+ * not one). It writes discord-quit.json in Subline's folder (only when that
+ * folder exists: Subline is installed for this account), so the helper knows
+ * Discord is on its way out and waits up to 30 s for it to finish exiting,
+ * then runs `schtasks /Run` on the helper task: a fixed command, detached and
+ * hidden, so Discord's quit is never held up. A task that is not there, or
+ * a run already going (IgnoreNew), is a no-op. Its own try: it can never
+ * stop Discord quitting.
+ *
+ * Plain JavaScript (no type syntax). Free names: app, existsSync,
+ * writeFileSync, join, sublineSpawn, process, console.
+ */
+export const QUIT_HOOK_BLOCK = [
+    "",
+    "    // Subline: start the background helper as Discord really quits (Windows).",
+    "    if (process.platform === \"win32\") app.on(\"will-quit\", () => {",
+    "        try {",
+    "            const sublineLocal = process.env.LOCALAPPDATA;",
+    "            if (!sublineLocal) return;",
+    "            const sublineDir = join(sublineLocal, \"Subline\");",
+    "            if (!existsSync(sublineDir)) return;",
+    "            writeFileSync(join(sublineDir, \"discord-quit.json\"), JSON.stringify({ at: Date.now(), pid: process.pid }) + \"\\n\", \"utf8\");",
+    "            sublineSpawn(\"schtasks.exe\", [\"/Run\", \"/TN\", \"\\\\Subline\\\\Helper\"], { detached: true, stdio: \"ignore\", windowsHide: true }).unref();",
+    "        } catch (sublineErr) {",
+    "            console.error(\"[Subline] Could not start the background helper on quit\", sublineErr);",
+    "        }",
+    "    });",
+    ""
+].join("\n");
+
+/** persistAfterDiscordUpdates.ts with the marker carried across a host update, and the quit hook. */
 export function carryMarkerOnHostUpdate(source) {
     let out = rewriteExactlyOnce(source, PERSIST_IMPORT, PERSIST_IMPORT_WITH_RW, {
         file: PERSIST_FILE,
@@ -73,6 +117,14 @@ export function carryMarkerOnHostUpdate(source) {
     out = rewriteExactlyOnce(out, PERSIST_ANCHOR, PERSIST_ANCHOR + MARKER_CARRY_BLOCK, {
         file: PERSIST_FILE,
         what: "host-update rename and copy block"
+    });
+    out = rewriteExactlyOnce(out, EVENTS_IMPORT, EVENTS_IMPORT + SPAWN_IMPORT, {
+        file: PERSIST_FILE,
+        what: "events import line"
+    });
+    out = rewriteExactlyOnce(out, BEFORE_QUIT_ANCHOR, BEFORE_QUIT_ANCHOR + QUIT_HOOK_BLOCK, {
+        file: PERSIST_FILE,
+        what: "before-quit line"
     });
     return out;
 }

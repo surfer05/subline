@@ -12,9 +12,11 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+    BEFORE_QUIT_ANCHOR,
     carryMarkerOnHostUpdate,
     MARKER_CARRY_BLOCK,
     PERSIST_ANCHOR,
+    QUIT_HOOK_BLOCK,
     rewriteExactlyOnce
 } from "../scripts/vencordRewrites.mjs";
 
@@ -150,6 +152,61 @@ describe("the carried marker, executed", () => {
     });
 });
 
+describe("the quit hook (audit 2026-10-06 #28)", () => {
+    let dir: string | null = null;
+    afterEach(() => {
+        if (dir !== null) rmSync(dir, { recursive: true, force: true });
+        dir = null;
+    });
+
+    it("sits inside upstream's Windows/Linux block, right after before-quit", () => {
+        const out = carryMarkerOnHostUpdate(PINNED);
+        expect(out.indexOf("app.on(\"will-quit\"")).toBeGreaterThan(out.indexOf(BEFORE_QUIT_ANCHOR));
+        expect(out).toContain('import { spawn as sublineSpawn } from "child_process";');
+        expect(out).toContain('if (process.platform === "win32") app.on("will-quit"');
+    });
+
+    it("fails the build when the before-quit line moved", () => {
+        expect(() => carryMarkerOnHostUpdate(PINNED.replace(BEFORE_QUIT_ANCHOR, ""))).toThrow(/before-quit line, found 0/);
+    });
+
+    function runHook(env: Record<string, string | undefined>, spawnImpl: (...args: unknown[]) => { unref(): void }): { errors: string[]; handler: (() => void) | null } {
+        const errors: string[] = [];
+        let handler: (() => void) | null = null;
+        const app = { on: (event: string, fn: () => void) => { if (event === "will-quit") handler = fn; } };
+        const fakeProcess = { platform: "win32", env, pid: 4242 };
+        // eslint-disable-next-line @typescript-eslint/no-implied-eval
+        const block = new Function("app", "existsSync", "writeFileSync", "join", "sublineSpawn", "process", "console", QUIT_HOOK_BLOCK);
+        block(app, existsSync, writeFileSync, join, spawnImpl, fakeProcess, { error: (...args: unknown[]) => errors.push(String(args[0])) });
+        return { errors, get handler() { return handler; } } as { errors: string[]; handler: (() => void) | null };
+    }
+
+    it("on a real quit: notes the time in Subline's folder and starts the helper task, detached and hidden", () => {
+        dir = mkdtempSync(join(tmpdir(), "subline-quit-"));
+        mkdirSync(join(dir, "Subline"));
+        const spawned: unknown[][] = [];
+        const hook = runHook({ LOCALAPPDATA: dir }, (...args) => { spawned.push(args); return { unref: () => {} }; });
+        hook.handler!();
+        expect(hook.errors).toEqual([]);
+        expect(spawned).toEqual([["schtasks.exe", ["/Run", "/TN", "\\Subline\\Helper"], { detached: true, stdio: "ignore", windowsHide: true }]]);
+        const note = JSON.parse(readFileSync(join(dir, "Subline", "discord-quit.json"), "utf8"));
+        expect(note.pid).toBe(4242);
+        expect(typeof note.at).toBe("number");
+    });
+
+    it("does nothing for an account without Subline, and never throws", () => {
+        dir = mkdtempSync(join(tmpdir(), "subline-quit-"));
+        let spawned = 0;
+        const none = runHook({ LOCALAPPDATA: dir }, () => { spawned += 1; return { unref: () => {} }; });
+        none.handler!();
+        expect(spawned).toBe(0);
+        mkdirSync(join(dir, "Subline"));
+        const failing = runHook({ LOCALAPPDATA: dir }, () => { throw new Error("ENOENT schtasks"); });
+        expect(() => failing.handler!()).not.toThrow();
+        expect(failing.errors[0]).toContain("[Subline] Could not start the background helper on quit");
+    });
+});
+
 describe("the built loader", () => {
     const patcher = join(here, "..", "build", "mod", "patcher.js");
     it.skipIf(!existsSync(patcher))("carries the marker rewrite next to upstream's host-update repatch", () => {
@@ -157,5 +214,6 @@ describe("the built loader", () => {
         expect(source).toContain("Detected Host Update");
         expect(source).toContain("subline-patch.json");
         expect(source).toContain("[Subline] Could not carry the patch marker");
+        expect(source).toContain("discord-quit.json");
     });
 });

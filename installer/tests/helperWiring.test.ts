@@ -781,3 +781,34 @@ const VERIFICATION = {
     problem: null,
     summary: "confirmed"
 };
+
+describe("Windows: the helper runs once right after it is registered (audit 2026-10-06 #49)", () => {
+    it("install starts one run; a failed start changes nothing", async () => {
+        const runs: string[] = [];
+        schtasks.run = async name => { runs.push(name); return { ok: true, value: true }; };
+        const result = await installHelperFor(windowsWiring(), "win32", home);
+        expect(result.ok).toBe(true);
+        expect(runs).toEqual([HELPER_TASK_NAME]);
+
+        schtasks.run = async () => { throw new Error("schtasks /Run refused"); };
+        const again = await installHelperFor(windowsWiring(), "win32", home);
+        expect(again.ok).toBe(true);
+    });
+
+    it("no run when the registration was not confirmed", async () => {
+        const runs: string[] = [];
+        schtasks.run = async name => { runs.push(name); return { ok: true, value: true }; };
+        schtasks.lieAboutRegistered = true;
+        await installHelperFor(windowsWiring(), "win32", home);
+        expect(runs).toEqual([]);
+    });
+
+    it("the helper re-registering itself never starts another run", async () => {
+        await installHelperFor({ ...windowsWiring(), executablePath: "C:\\Old\\Subline.exe" }, "win32", home);
+        const runs: string[] = [];
+        schtasks.run = async name => { runs.push(name); return { ok: true, value: true }; };
+        const self = await ensureHelperFromHelper(windowsWiring(), "win32", home);
+        expect(self.action).toBe("rewritten");
+        expect(runs).toEqual([]);
+    });
+});

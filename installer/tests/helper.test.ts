@@ -1888,3 +1888,121 @@ describe("audit #4: rewriting an older stub is housekeeping", () => {
         expect(attempts).toBe(2);
     });
 });
+
+/* ------------------------------------------------------------------------ *
+ * Audit 2026-10-06 #28 and #47 (part 2): Discord's own quit starts a run,
+ * the run just after logon may wait, and a Discord running the OLD app
+ * folder does not block the repair of the new one.
+ * ------------------------------------------------------------------------ */
+
+describe("#28 / #47: a repair is not missed between two scheduled runs", () => {
+    function scriptRunningAnswers(answers: boolean[]): { calls: () => number } {
+        let calls = 0;
+        harness.ports.discordRunning = async () => {
+            const answer = answers[Math.min(calls, answers.length - 1)] ?? false;
+            calls += 1;
+            return answer;
+        };
+        return { calls: () => calls };
+    }
+
+    function pendingRepair(): void {
+        harness.platform = "win32";
+        patchForReal(harness);
+    }
+
+    it("#28: a run started by Discord's quit waits for the exiting process and repairs in that run", async () => {
+        pendingRepair();
+        await harness.run({ settle: {} });
+        simulateDiscordUpdate(harness.fixture.install, "0.0.407");
+        harness.ports.discordQuitAt = () => harness.ports.now() - 1_000;
+        scriptRunningAnswers([true, true, false]);
+        const report = await harness.run({ settle: {} });
+        expect(report.repatched).toEqual([harness.fixture.install.rootPath]);
+        expect(report.deferred).toEqual([]);
+    });
+
+    it("#28: a quit noted long ago changes nothing (one look, deferred)", async () => {
+        pendingRepair();
+        await harness.run({ settle: {} });
+        simulateDiscordUpdate(harness.fixture.install, "0.0.407");
+        harness.ports.discordQuitAt = () => harness.ports.now() - 10 * 60_000;
+        const looks = scriptRunningAnswers([true, true, false]);
+        const report = await harness.run({ settle: {} });
+        expect(report.deferred).toEqual([harness.fixture.install.rootPath]);
+        expect(looks.calls()).toBeLessThanOrEqual(2);
+    });
+
+    it("#28: Discord running the OLD app folder does not hold the new one: repaired with Discord open, no quit notice", async () => {
+        pendingRepair();
+        await harness.run({ settle: {} });
+        simulateDiscordUpdate(harness.fixture.install, "0.0.407");
+        harness.discordOpen = true;
+        harness.ports.discordHoldsInstall = async () => false;
+        const report = await harness.run({ settle: {} });
+        expect(report.repatched).toEqual([harness.fixture.install.rootPath]);
+        expect(report.deferred).toEqual([]);
+        for (let i = 0; i < 8; i++) {
+            harness.advance(5 * 60_000);
+            await harness.run({ settle: {} });
+        }
+        expect(harness.notifications.filter(n => n.code === "quit-required")).toEqual([]);
+    });
+
+    it("#28: when the folder IS held, it still waits for Discord to close", async () => {
+        pendingRepair();
+        await harness.run({ settle: {} });
+        simulateDiscordUpdate(harness.fixture.install, "0.0.407");
+        harness.discordOpen = true;
+        harness.ports.discordHoldsInstall = async () => true;
+        const report = await harness.run({ settle: {} });
+        expect(report.deferred).toEqual([harness.fixture.install.rootPath]);
+    });
+
+    it("#47: the run right after logon may wait for Discord to close while a repair is pending", async () => {
+        pendingRepair();
+        await harness.run({ settle: {} });
+        simulateDiscordUpdate(harness.fixture.install, "0.0.407");
+        harness.ports.uptimeMs = () => 90_000;
+        scriptRunningAnswers([true, true, true, false]);
+        const report = await harness.run({ settle: {} });
+        expect(report.repatched).toEqual([harness.fixture.install.rootPath]);
+        expect(report.decisions.some(d => d.outcome === "logon-wait")).toBe(true);
+    });
+
+    it("#47: long after logon, nothing pending: one look per run", async () => {
+        pendingRepair();
+        await harness.run({ settle: {} });
+        harness.ports.uptimeMs = () => 3 * 60 * 60_000;
+        const looks = scriptRunningAnswers([true]);
+        await harness.run({ settle: {} });
+        expect(looks.calls()).toBeLessThanOrEqual(1);
+    });
+
+    it("#47: right after logon with nothing pending: still one look (the wait is only for a pending repair)", async () => {
+        pendingRepair();
+        await harness.run({ settle: {} });
+        harness.ports.uptimeMs = () => 60_000;
+        const looks = scriptRunningAnswers([true]);
+        await harness.run({ settle: {} });
+        expect(looks.calls()).toBeLessThanOrEqual(1);
+    });
+});
+
+describe("#28: which Discord holds which app folder (Windows process paths)", () => {
+    it("parses Get-CimInstance output; '?' is a process whose path Windows would not give", async () => {
+        const { parseExecutablePaths } = await import("../src/helper/ports.js");
+        expect(parseExecutablePaths("C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.1\\Discord.exe\r\n?\r\n\r\n"))
+            .toEqual(["C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.1\\Discord.exe", null]);
+    });
+
+    it("only a known path elsewhere frees the folder; case and separators do not matter", async () => {
+        const { pathsHoldInstall } = await import("../src/helper/ports.js");
+        const newRoot = "C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.2";
+        expect(pathsHoldInstall(["C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.1\\Discord.exe"], newRoot)).toBe(false);
+        expect(pathsHoldInstall(["c:/users/x/appdata/local/discord/APP-1.0.2/Discord.exe"], newRoot)).toBe(true);
+        expect(pathsHoldInstall([null], newRoot)).toBe(true);
+        // app-1.0.2 must not match app-1.0.20.
+        expect(pathsHoldInstall(["C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.20\\Discord.exe"], newRoot)).toBe(false);
+    });
+});

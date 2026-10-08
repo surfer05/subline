@@ -97,6 +97,19 @@ export interface HelperPorts {
     installBundle(sourceDir: string): Result<InstalledModBundle>;
 
     discordRunning(install: DiscordInstall): Promise<boolean>;
+    /**
+     * Windows: is a running Discord using THIS app folder (audit 2026-10-06
+     * #28)? The Discord still running the OLD app-1.0.x folder after an update
+     * does not hold the NEW folder's app.asar, so the repair can be written
+     * while the user keeps Discord open. Absent, or when the paths cannot be
+     * read: the same answer as discordRunning. Used only where a write needs
+     * Discord closed, never for "quit and reopen" notices.
+     */
+    discordHoldsInstall?(install: DiscordInstall): Promise<boolean>;
+    /** Windows: when Discord last really quit (the mod's quit hook writes it), or null. */
+    discordQuitAt?(): number | null;
+    /** Milliseconds since the computer started, or null. */
+    uptimeMs?(): number | null;
     mtimeOf(path: string): number | null;
 
     readState(): HelperState;
@@ -180,6 +193,21 @@ export const QUIT_WATCH_WINDOW_MS = 30 * 60_000;
 /** Inside a 5 minute task interval and its 10 minute limit, so a scheduled run is never dropped. */
 export const QUIT_WATCH_WAIT_MS = 4 * 60_000 + 45_000;
 export const QUIT_WATCH_POLL_MS = 10_000;
+/**
+ * A run started by Discord's own quit (the quit hook, audit #28): Discord is
+ * still in the process list for a few seconds while it exits. Wait up to
+ * 30 s, looking every 2 s, before calling it running.
+ */
+export const QUIT_HOOK_FRESH_MS = 2 * 60_000;
+export const QUIT_HOOK_WAIT_MS = 30_000;
+export const QUIT_HOOK_POLL_MS = 2_000;
+/**
+ * The runs just after logon (audit #47): Discord starts with Windows and
+ * races the helper. While a repair is pending, these runs may wait up to
+ * 2 minutes for Discord to close, looking every 10 s.
+ */
+export const LOGON_WINDOW_MS = 10 * 60_000;
+export const LOGON_WAIT_MS = 2 * 60_000;
 
 /** How long a failed rewrite of an older stub form waits before the next try. */
 export const STUB_UPGRADE_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
@@ -822,7 +850,7 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
     const settled = await awaitDiscordSettled(install, {
         now: () => run.ports.now(),
         sleep: ms => run.ports.sleep(ms),
-        discordRunning: target => run.ports.discordRunning(target),
+        discordRunning: target => holdsInstall(run, target),
         mtimeOf: path => run.ports.mtimeOf(path),
         readDiscordVersion: target => run.ports.readDiscordVersion(target)
     }, {
@@ -959,12 +987,36 @@ async function noteBlockedByRunningDiscord(run: Run, entry: ManagedInstall, bloc
     );
 }
 
-/** Settle options for the runs right after the user was asked to quit Discord (Windows). */
+/** Does a running Discord hold this install's files? (See HelperPorts.discordHoldsInstall.) */
+function holdsInstall(run: Run, install: DiscordInstall): Promise<boolean> {
+    return run.ports.discordHoldsInstall !== undefined
+        ? run.ports.discordHoldsInstall(install)
+        : run.ports.discordRunning(install);
+}
+
+/**
+ * How long a run whose repair waits on a running Discord may wait for it to
+ * close (Windows only; only reached when a repair is pending). The longest of:
+ * right after the quit notice (4m45s), right after Discord's own quit (30 s),
+ * right after logon (2 minutes). Every other run looks once.
+ */
 function quitWatch(run: Run): { waitForCloseMs?: number; closePollMs?: number } {
     if (run.ports.platform !== "win32") return {};
+    const now = run.ports.now();
     const asked = run.state.alerts["quit-required"]?.lastNotifiedAt;
-    if (asked === undefined || run.ports.now() - asked > QUIT_WATCH_WINDOW_MS) return {};
-    return { waitForCloseMs: QUIT_WATCH_WAIT_MS, closePollMs: QUIT_WATCH_POLL_MS };
+    if (asked !== undefined && now - asked <= QUIT_WATCH_WINDOW_MS) {
+        return { waitForCloseMs: QUIT_WATCH_WAIT_MS, closePollMs: QUIT_WATCH_POLL_MS };
+    }
+    const uptime = run.ports.uptimeMs?.() ?? null;
+    if (uptime !== null && uptime >= 0 && uptime <= LOGON_WINDOW_MS) {
+        run.decide("repatch", "logon-wait", "the computer started a few minutes ago; Discord may still be starting or updating", { uptimeMs: uptime });
+        return { waitForCloseMs: LOGON_WAIT_MS, closePollMs: QUIT_WATCH_POLL_MS };
+    }
+    const quitAt = run.ports.discordQuitAt?.() ?? null;
+    if (quitAt !== null && now - quitAt >= 0 && now - quitAt <= QUIT_HOOK_FRESH_MS) {
+        return { waitForCloseMs: QUIT_HOOK_WAIT_MS, closePollMs: QUIT_HOOK_POLL_MS };
+    }
+    return {};
 }
 
 /**
@@ -986,7 +1038,7 @@ async function upgradeStub(run: Run, entry: ManagedInstall, bundle: ModBundle, t
     const settled = await awaitDiscordSettled(install, {
         now: () => run.ports.now(),
         sleep: ms => run.ports.sleep(ms),
-        discordRunning: target => run.ports.discordRunning(target),
+        discordRunning: target => holdsInstall(run, target),
         mtimeOf: path => run.ports.mtimeOf(path),
         readDiscordVersion: target => run.ports.readDiscordVersion(target)
     }, { ...(run.options.settle ?? {}), requireDiscordClosed: true });
@@ -1031,7 +1083,7 @@ async function handleMissingBundle(run: Run, managed: ManagedInstall[]): Promise
         const settled = await awaitDiscordSettled(install, {
             now: () => run.ports.now(),
             sleep: ms => run.ports.sleep(ms),
-            discordRunning: target => run.ports.discordRunning(target),
+            discordRunning: target => holdsInstall(run, target),
             mtimeOf: path => run.ports.mtimeOf(path),
             readDiscordVersion: target => run.ports.readDiscordVersion(target)
         }, { ...(run.options.settle ?? {}), requireDiscordClosed: true });
