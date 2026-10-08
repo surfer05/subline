@@ -55,6 +55,7 @@ const ASAR_TOUCHING_OUTSIDE_PATCHER = ["app/uninstall.ts", "helper/ports.ts"];
  */
 const NEVER_SEES_A_DISCORD_PATH = new Set([
     "app/appManagement.ts", // a probe file of its own beside Discord's files, never an .asar
+    "app/appVersionFile.ts", // Subline's own app-version.json in its product folder
     "app/language.ts", // Vencord's and Discord's settings.json
     "app/log.ts", // Subline's own log folder
     "app/modInstall.ts", // Subline's mod folder
