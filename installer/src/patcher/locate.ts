@@ -399,6 +399,18 @@ export function uninstallTargets(
     return targets;
 }
 
+/**
+ * Windows: the OTHER app-x.y.z folders of this install's branch (its
+ * stableId), as installs. Empty elsewhere, and for a root that is not under a
+ * versioned branch folder.
+ */
+export function siblingAppInstalls(install: DiscordInstall, platform: NodeJS.Platform = process.platform): DiscordInstall[] {
+    if (platform !== "win32" || install.stableId === install.rootPath || !isDirectory(install.stableId)) return [];
+    return findWindowsAppDirs(install.stableId)
+        .filter(appDir => appDir !== install.rootPath)
+        .map(appDir => makeInstall(install.branch, appDir, platform, install.fromExplicitPath));
+}
+
 /** A Discord Subline remembers patching (app/patchedInstalls.ts). */
 export interface RememberedLocation {
     rootPath: string;

@@ -43,7 +43,9 @@ import { rememberedResourcesPath, uninstallTargets } from "../patcher/locate.js"
 import { isOtherAccountLoader } from "../patcher/ownership.js";
 import type { DiscordInstall } from "../patcher/locate.js";
 import { hiddenExec } from "../patcher/exec.js";
-import { readPatchedInstalls } from "../app/patchedInstalls.js";
+import { forgetPatchedInstalls, readPatchedInstalls } from "../app/patchedInstalls.js";
+import { releaseHelperInstalls } from "../helper/state.js";
+import { ok } from "../patcher/result.js";
 import { unpatchInstall } from "../patcher/patch.js";
 import { loaderPathFor } from "../bundle/spec.js";
 import { usingOriginalFs } from "../patcher/realFs.js";
@@ -446,7 +448,12 @@ function helperWiring(): HelperWiring {
         // always names the Discords Subline manages right now.
         managedResources: () => {
             const ports = createHelperPorts({ productVersion: app.getVersion(), log, releaseManifestUrl: null });
-            const remembered = new Set(Object.keys(ports.readState().installs));
+            // The installer's record too: a lost helper memory must not drop
+            // a Discord from WatchPaths (audit #34).
+            const remembered = new Set([
+                ...Object.keys(ports.readState().installs),
+                ...(ports.rememberedStableIds?.() ?? [])
+            ]);
             return managedResourcesPaths(ports.locate, ports.inspect, remembered, ports.isOtherAccountLoader);
         }
     };
@@ -630,7 +637,14 @@ ipcMain.handle("uninstall:run", async (
                 }
             },
             removeHelper: () => removeHelperFor(helperWiring(), process.platform, app.getPath("home")),
-            restoreHelper: () => installHelperFor(helperWiring(), process.platform, app.getPath("home"))
+            restoreHelper: () => installHelperFor(helperWiring(), process.platform, app.getPath("home")),
+            forgetInstalls: stableIds => {
+                const productDir = productDirFor();
+                if (productDir === null) return ok(false);
+                const record = forgetPatchedInstalls(productDir, stableIds);
+                if (!record.ok) return record;
+                return releaseHelperInstalls(productDir, stableIds);
+            }
         },
         {
             installs,

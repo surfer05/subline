@@ -67,6 +67,12 @@ export interface HealthObservation {
     memory: HealthMemory;
     /** True on the run where `suspect` became `broken` — the moment to tell someone. */
     escalated: boolean;
+    /**
+     * True when this status differs from the previous run's. A status that
+     * merely persists (erroring for days on a rate-limited engine) is not
+     * news, and the log keeps one line for it (audit 2026-10-06 #32).
+     */
+    changed: boolean;
     /** How many consecutive suspicious observations, including this one. */
     observations: number;
     /** How long the suspicion has been running, in ms. */
@@ -154,6 +160,7 @@ export function observeHealth(options: ObserveHealthOptions): HealthObservation 
                 observations: 0
             },
             escalated: false,
+            changed: previous.lastStatus !== raw,
             observations: 0,
             sustainedMs: 0,
             reason: reasonFor(raw, verification.status)
@@ -173,6 +180,7 @@ export function observeHealth(options: ObserveHealthOptions): HealthObservation 
         memory: { lastStatus: status, lastObservedAt: now, suspectSince, observations },
         // Only the transition, so the alert fires once rather than every run.
         escalated: qualifies && !wasBroken,
+        changed: previous.lastStatus !== status,
         observations,
         sustainedMs,
         reason: qualifies

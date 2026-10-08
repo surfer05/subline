@@ -80,7 +80,13 @@ export type AlertCode =
      * helper cannot close Discord, and saying nothing is how a user ends up
      * believing Subline is broken.
      */
-    | "quit-required";
+    | "quit-required"
+    /** Subline's mod bundle is gone or unusable and no update replaced it (audit #4). */
+    | "bundle-missing"
+    /** Discord cannot start (app.asar gone) and the helper could not repair it (audit #26, #44). */
+    | "discord-unstartable"
+    /** Another mod's unpacked resources/app loads in front of our stub, so Discord ignores Subline (audit #9). */
+    | "shadowed";
 
 export interface Alert {
     code: AlertCode;
@@ -116,7 +122,9 @@ export const REPEAT_MS_BY_CODE: Partial<Record<AlertCode, number>> = {
     // is still logged. NOT keyed on the error code: a captive portal that
     // flips between a refused connection and an HTML page would then count as
     // a new event every run and notify every six hours.
-    "update-failed": 7 * 24 * 60 * 60 * 1000
+    "update-failed": 7 * 24 * 60 * 60 * 1000,
+    // Discord does not start: worth repeating sooner than a day, never every run.
+    "discord-unstartable": 6 * 60 * 60 * 1000
 };
 
 /** How long `code` waits before notifying again. */

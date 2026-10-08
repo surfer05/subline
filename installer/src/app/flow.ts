@@ -367,7 +367,7 @@ export interface FlowPorts {
      * and the helper find it again even when it is not where detection looks
      * (a hand-picked PTB, Canary or unusual folder). Never fails the install.
      */
-    rememberPatchedInstall?(install: DiscordInstall): void;
+    rememberPatchedInstall?(install: DiscordInstall, patched?: { discordVersion: string | null; buildId: string }): void;
     /**
      * True when a loader path lives in ANOTHER user's home folder: the Discord
      * was set up by another account on this computer.
@@ -1971,7 +1971,12 @@ export class InstallFlow {
         this.patchReport = patched.value;
         this.patchedAt = this.ports.now();
         try {
-            this.ports.rememberPatchedInstall?.(install);
+            // BEFORE the helper is registered: macOS starts it at once, and its
+            // first run must already know this Discord is ours.
+            this.ports.rememberPatchedInstall?.(install, {
+                discordVersion: patched.value.discordVersion,
+                buildId: patched.value.pluginBuildId
+            });
         } catch (cause) {
             this.ports.log.warn("patch.remember-failed", { cause: String(cause) });
         }

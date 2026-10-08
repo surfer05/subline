@@ -99,6 +99,16 @@ export interface SettleOptions {
      * hazard: racing a half-written install, not touching a live one.
      */
     requireDiscordClosed?: boolean;
+    /**
+     * Wait this long for a running Discord to close before deferring
+     * (requireDiscordClosed only). Zero by default: a run normally looks once
+     * and goes. The helper sets it only right after it has asked the user to
+     * quit Discord (audit 2026-10-06 #47): a user who quits and reopens at
+     * once was otherwise never seen with Discord closed by a 5 minute task.
+     */
+    waitForCloseMs?: number;
+    /** How often to look while waiting for Discord to close. */
+    closePollMs?: number;
 }
 
 /*
@@ -128,6 +138,7 @@ export const DEFAULT_QUIET_MS = 8_000;
 export const DEFAULT_CONFIRM_MS = 5_000;
 export const DEFAULT_POLL_MS = 5_000;
 export const DEFAULT_MAX_WAIT_MS = 5 * 60_000;
+export const DEFAULT_CLOSE_POLL_MS = 10_000;
 
 /** The paths an updater touches while it replaces an install. */
 export function watchedPaths(install: DiscordInstall): string[] {
@@ -192,6 +203,30 @@ export async function awaitDiscordSettled(
     let attempts = 0;
 
     const requireClosed = options.requireDiscordClosed ?? true;
+
+    // A bounded wait for Discord to close, by COUNT like the loop below, so
+    // a clock that does not move cannot make it endless.
+    const waitForCloseMs = Math.max(0, options.waitForCloseMs ?? 0);
+    if (requireClosed && waitForCloseMs > 0) {
+        const closePollMs = Math.max(1, options.closePollMs ?? DEFAULT_CLOSE_POLL_MS);
+        const maxPolls = Math.floor(waitForCloseMs / closePollMs);
+        let polls = 0;
+        while (await ports.discordRunning(install)) {
+            if (polls >= maxPolls) {
+                return {
+                    status: "discord-running",
+                    settled: false,
+                    version: null,
+                    quietForMs: null,
+                    waitedMs: waited(),
+                    attempts: polls + 1,
+                    reason: `Discord stayed open for the whole ${Math.round(waitForCloseMs / 1000)}s wait`
+                };
+            }
+            await ports.sleep(closePollMs);
+            polls += 1;
+        }
+    }
 
     let lastReason: string;
     let lastStatus: SettleStatus;

@@ -43,9 +43,10 @@ import type { FlowLogger } from "../app/flow.js";
 import type { InstalledModBundle } from "../app/modInstall.js";
 import type { ModBundle } from "../bundle/bundle.js";
 import type { DiscordInstall } from "../patcher/locate.js";
-import type { AdoptReport, PatchIdentity, PatchReport } from "../patcher/patch.js";
+import type { AdoptReport, PatchIdentity, PatchReport, UnpatchReport } from "../patcher/patch.js";
 import type { PatchMarker } from "../patcher/marker.js";
 import type { PatcherError, PatcherErrorCode, Result } from "../patcher/result.js";
+import { sameLoaderPath } from "../patcher/ownership.js";
 import type { InstallState } from "../patcher/state.js";
 import type { DiscordBuildInfo } from "../patcher/version.js";
 import type { VerificationReport, VerifyOptions } from "../verify/verify.js";
@@ -130,6 +131,28 @@ export interface HelperPorts {
      * the other account, and the two helpers then fight over it).
      */
     isOtherAccountLoader?(loaderPath: string): boolean;
+    /**
+     * `unpatchInstall`: put Discord's own code back. Used only when Subline
+     * cannot run and an older stub would stop Discord starting (the bundle is
+     * gone under a pre-0.2.3 stub), or when an interrupted patch could not be
+     * finished. Optional: without it those cases are only reported.
+     */
+    unpatch?(install: DiscordInstall): Result<UnpatchReport>;
+    /**
+     * Stable ids the INSTALLER's own record names (patched-installs.json,
+     * written on every successful patch). Ownership evidence when the
+     * helper's memory is empty: a lost helper-state.json, or a Discord update
+     * before the helper's first run (audit 2026-10-06 #34, #49).
+     */
+    rememberedStableIds?(): ReadonlySet<string>;
+    /**
+     * Windows: another app-x.y.z folder of this install's branch still
+     * carries Subline's stub or marker (the folder the user's Discord ran
+     * before it updated). Evidence of ownership like the two above.
+     */
+    siblingCarriesOurMark?(install: DiscordInstall): boolean;
+    /** Size of a helper-state.json that exists but does not parse, or null. */
+    stateUnreadable?(): number | null;
 }
 
 export interface HelperRunOptions {
@@ -146,6 +169,27 @@ export interface HelperRunOptions {
 
 /** How long a repair may wait on a running Discord before the user is told to quit it (Windows). */
 export const QUIT_REQUIRED_AFTER_MS = 30 * 60_000;
+
+/**
+ * After the helper asks the user to quit Discord, the runs in this window wait
+ * (bounded) for Discord to close instead of looking once (audit #47). The
+ * user acts right after the notice, and a quit and reopen inside a 5 minute
+ * task interval was otherwise never seen.
+ */
+export const QUIT_WATCH_WINDOW_MS = 30 * 60_000;
+/** Inside a 5 minute task interval and its 10 minute limit, so a scheduled run is never dropped. */
+export const QUIT_WATCH_WAIT_MS = 4 * 60_000 + 45_000;
+export const QUIT_WATCH_POLL_MS = 10_000;
+
+/** What the helper asks a Windows user to do when a running Discord blocks a repair. */
+export const QUIT_COPY = {
+    discordUpdated:
+        "Discord updated. To turn Subline back on, right-click the Discord icon near the clock and choose Quit Discord. "
+        + "Leave it closed for a minute while Subline puts itself back, then open Discord again.",
+    repairNeeded:
+        "Subline needs to repair Discord. Right-click the Discord icon near the clock and choose Quit Discord. "
+        + "Leave it closed for a minute while Subline repairs it, then open Discord again."
+} as const;
 
 /** Six hours. Trigger A runs hourly; only trigger B touches the network. */
 export const DEFAULT_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -223,6 +267,12 @@ export interface HelperRunReport {
      * install, same reason). The log keeps one line for such a run.
      */
     repeatDeferral?: boolean;
+    /**
+     * Every Discord this run skipped (not ours) is the same set, for the same
+     * reasons, as the previous run's. False when the set changed. Undefined
+     * when nothing was skipped.
+     */
+    repeatUnmanaged?: boolean;
     /** Windows: the helper's task was removed (Uninstall) while this run was going. Nothing was written. */
     uninstalled?: boolean;
 }
@@ -245,6 +295,8 @@ class Run {
     uninstalled = false;
     /** What this run deferred, as stable keys (see HelperState.lastDeferralKey). */
     readonly deferralKeys: string[] = [];
+    /** What this run skipped, as stable keys (see HelperState.lastUnmanagedKey). */
+    readonly unmanagedKeys: string[] = [];
     /** The bundle installed right now (after any update this run made). */
     bundle: ModBundle | null = null;
 
@@ -322,6 +374,13 @@ export async function runHelperOnce(ports: HelperPorts, options: HelperRunOption
     const run = new Run(ports, options);
     const at = ports.now();
     run.state = ports.readState();
+    // A memory that exists and cannot be read is not "Subline was never here".
+    const unreadable = ports.stateUnreadable?.() ?? null;
+    if (unreadable !== null) {
+        run.decide("scan", "state-unreadable", "the helper's memory file exists but could not be read, so this run starts without it", {
+            bytes: unreadable
+        });
+    }
 
     const bundle = readInstalledBundle(run);
     run.bundle = bundle;
@@ -335,11 +394,15 @@ export async function runHelperOnce(ports: HelperPorts, options: HelperRunOption
     }
 
     if (!run.uninstalled) await maybeUpdate(run, managed, bundle);
+    if (!run.uninstalled && run.bundle === null) await handleMissingBundle(run, managed);
     if (!run.uninstalled) await checkHealth(run, managed);
 
     const deferralKey = run.deferralKeys.length === 0 ? null : [...run.deferralKeys].sort().join(";");
     const repeatDeferral = deferralKey !== null && deferralKey === run.state.lastDeferralKey;
     run.state.lastDeferralKey = deferralKey;
+    const unmanagedKey = run.unmanagedKeys.length === 0 ? null : [...run.unmanagedKeys].sort().join(";");
+    const repeatUnmanaged = unmanagedKey === null ? undefined : unmanagedKey === run.state.lastUnmanagedKey;
+    run.state.lastUnmanagedKey = unmanagedKey;
 
     // An uninstalled helper writes NOTHING: helper-state.json would recreate
     // Subline's folder and remember the install as ours, which is what let a
@@ -368,6 +431,7 @@ export async function runHelperOnce(ports: HelperPorts, options: HelperRunOption
         decisions: run.decisions,
         summary: summarize(run, managed.length),
         repeatDeferral,
+        ...(repeatUnmanaged === undefined ? {} : { repeatUnmanaged }),
         uninstalled: run.uninstalled
     };
 }
@@ -409,6 +473,7 @@ function readInstalledBundle(run: Run): ModBundle | null {
         run.decide("scan", "bundle-unusable", inspected.error.message, { code: inspected.error.code, path: dir });
         return null;
     }
+    run.clear("bundle-missing");
     run.decide("scan", "bundle-ok", "the installed mod bundle is usable", {
         buildId: inspected.value.buildId,
         pluginVersion: inspected.value.pluginVersion,
@@ -438,6 +503,17 @@ function collectManaged(run: Run): ManagedInstall[] {
     run.found = located.value.length;
 
     const managed: ManagedInstall[] = [];
+    let recorded: ReadonlySet<string> | null = null;
+    const installerRecord = (): ReadonlySet<string> => {
+        if (recorded === null) {
+            try {
+                recorded = run.ports.rememberedStableIds?.() ?? new Set();
+            } catch {
+                recorded = new Set();
+            }
+        }
+        return recorded;
+    };
     for (const install of located.value) {
         const inspected = run.ports.inspect(install);
         if (!inspected.ok) {
@@ -453,13 +529,32 @@ function collectManaged(run: Run): ManagedInstall[] {
         // written when we patched the previous version. (This IS the self-heal.)
         const remembered = run.state.installs[install.stableId];
         const oursNow = state.kind === "patched-by-us";
-        const oursOnce = remembered !== undefined;
+        // WHO SAYS IT IS OURS (audit #34, #49). The helper's memory first;
+        // then the installer's own record, and on Windows a sibling app folder
+        // still carrying our stub or marker. Without them a lost memory, or a
+        // Discord update before the helper's first run, was "never patched"
+        // and the install was abandoned. Uninstall's release outranks them:
+        // a Discord the user removed Subline from is never put back.
+        const released = run.state.released.includes(install.stableId);
+        let witness: "memory" | "installer-record" | "residue" | null = remembered !== undefined ? "memory" : null;
+        if (witness === null && !released && !oursNow) {
+            if (installerRecord().has(install.stableId)) witness = "installer-record";
+            else if (run.ports.siblingCarriesOurMark?.(install) === true) witness = "residue";
+        }
+        const oursOnce = witness !== null;
+        const evidence = evidenceOf(state, oursOnce);
+        const skip = (outcome: string, reason: string): void => {
+            run.unmanagedKeys.push(`${install.stableId}|${outcome}|${state.kind}|${state.loaderPath ?? ""}`);
+            run.decide("scan", outcome, reason, { path: install.rootPath, ...evidence });
+        };
+
+        if (!oursNow && released) {
+            skip("released", "Subline was removed from this Discord by Uninstall, so it is not put back");
+            continue;
+        }
 
         if (!oursNow && !oursOnce) {
-            run.decide("scan", "not-ours", "Subline has never patched this install", {
-                path: install.rootPath,
-                kind: state.kind
-            });
+            skip("not-ours", "Subline has never patched this install");
             continue;
         }
 
@@ -468,9 +563,7 @@ function collectManaged(run: Run): ManagedInstall[] {
             // Another account on this computer set this Discord up. Its loader
             // is in that account's home; patching it to ours breaks Discord for
             // them, and their helper patches it back. Never touched, never alerted.
-            run.decide("scan", "other-account", "another account on this computer set up Subline for this Discord, so this account leaves it alone", {
-                path: install.rootPath
-            });
+            skip("other-account", "another account on this computer set up Subline for this Discord, so this account leaves it alone");
             continue;
         }
 
@@ -478,13 +571,16 @@ function collectManaged(run: Run): ManagedInstall[] {
             // Someone installed another client mod over us. A background process
             // cannot ask, and spec §3 step 4 forbids deciding for them. The loader
             // and marker go in the log, so a misjudged one can be told apart.
-            run.decide("scan", "foreign-mod", "another client mod now owns this install, so Subline will not touch it", {
-                path: install.rootPath,
-                mod: state.modName ?? "unknown",
-                loader: state.loaderPath ?? null,
-                marker: state.marker === null ? "missing" : "present"
-            });
+            skip("foreign-mod", "another client mod now owns this install, so Subline will not touch it");
             continue;
+        }
+
+        if (witness === "installer-record" || witness === "residue") {
+            run.decide("scan", "adopted-from-memory", "the helper had no memory of this Discord, but Subline's own records show it patched it", {
+                path: install.rootPath,
+                source: witness === "installer-record" ? "patched-installs" : "residue",
+                kind: state.kind
+            });
         }
 
         if (state.warnings.includes("marker-missing") || state.warnings.includes("marker-mismatch")) {
@@ -492,8 +588,8 @@ function collectManaged(run: Run): ManagedInstall[] {
             // repatch copied the stub into a new app folder and left the marker
             // behind. Never abandoned: it is ours, and the marker is rewritten.
             run.decide("scan", "re-adopt", "the stub loads Subline's loader but its marker is missing or wrong, so Subline takes it back", {
+                ...evidence,
                 path: install.rootPath,
-                loader: state.loaderPath ?? null,
                 marker: state.marker === null ? "missing" : "mismatch"
             });
         }
@@ -511,6 +607,25 @@ function collectManaged(run: Run): ManagedInstall[] {
     return managed;
 }
 
+/**
+ * What decided "ours or not", for the log (audit #43): the next marker loss
+ * must be diagnosable from the log alone, not from reading Vencord's source.
+ */
+function evidenceOf(state: InstallState, remembered: boolean): Record<string, string | number | boolean | null> {
+    return {
+        kind: state.kind,
+        mod: state.mod,
+        loader: state.loaderPath,
+        marker: state.marker === null ? "missing" : "present",
+        markerPresent: state.marker !== null,
+        markerLoader: state.marker?.loaderPath ?? null,
+        backup: state.hasBackup,
+        stub: state.asarIsStub,
+        warnings: state.warnings.join(","),
+        remembered
+    };
+}
+
 /* ------------------------------------------------------------------------ *
  * Trigger A — re-patch
  * ------------------------------------------------------------------------ */
@@ -518,6 +633,12 @@ function collectManaged(run: Run): ManagedInstall[] {
 type RepatchReason =
     | "none"
     | "marker-missing"
+    /** Only the marker is out of date: another folder's, or another build of the same loader. */
+    | "marker-stale"
+    /** Verified, but an older stub form: rewritten when Discord is closed, never nagged about. */
+    | "stub-outdated"
+    /** Our stub, with another mod's resources/app in front of it. */
+    | "shadowed"
     | "injection-wiped"
     | "build-changed"
     | "patch-damaged"
@@ -538,18 +659,44 @@ function decideRepatch(run: Run, entry: ManagedInstall, bundle: ModBundle): { re
         case "patched-by-other":
             return { reason: "none", detail: "another mod owns this install" };
         case "patched-by-us": {
+            if (entry.state.warnings.includes("shadowed-by-unpacked-app")) {
+                return {
+                    reason: "shadowed",
+                    detail: `${entry.state.shadowedBy ?? "another"} mod's resources/app folder loads in front of Subline's stub`
+                };
+            }
             if (entry.state.warnings.includes("marker-missing") || entry.state.warnings.includes("marker-mismatch")) {
                 return {
                     reason: "marker-missing",
                     detail: "the stub loads Subline's loader but its marker is missing or wrong"
                 };
             }
+            if (entry.state.warnings.includes("marker-stale")) {
+                return { reason: "marker-stale", detail: "the marker describes another folder or Discord version" };
+            }
             const verified = run.ports.verifyPatch(entry.install, {
                 loaderPath: bundle.loaderPath,
                 buildId: bundle.buildId
             });
-            if (verified.ok) return { reason: "none", detail: "the patch is present and matches the installed bundle" };
+            if (verified.ok) {
+                return entry.state.stubForm === undefined || entry.state.stubForm === null || entry.state.stubForm === "current"
+                    ? { reason: "none", detail: "the patch is present and matches the installed bundle" }
+                    : { reason: "stub-outdated", detail: `the stub is the ${entry.state.stubForm} form, rewritten once Discord is closed` };
+            }
             if (entry.marker?.pluginBuildId !== bundle.buildId) {
+                // A Subline update behind the same loader (audit #31): when
+                // everything but the marker's build id is right, only the
+                // marker changes, and Discord does not have to be quit for it.
+                const rest = run.ports.verifyPatch(entry.install, {
+                    loaderPath: bundle.loaderPath,
+                    buildId: entry.marker?.pluginBuildId ?? ""
+                });
+                if (rest.ok && entry.state.loaderPath !== null && sameLoaderPath(entry.state.loaderPath, bundle.loaderPath)) {
+                    return {
+                        reason: "marker-stale",
+                        detail: `only the marker's build id is out of date (${entry.marker?.pluginBuildId ?? "none"}, the bundle is ${bundle.buildId})`
+                    };
+                }
                 return {
                     reason: "build-changed",
                     detail: `the install records build ${entry.marker?.pluginBuildId ?? "none"} and the bundle is ${bundle.buildId}`
@@ -578,9 +725,12 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
     // RE-ADOPT first: the marker alone, never app.asar, so a running Discord
     // does not block it. Only when the stub already loads this very bundle;
     // anything else (or a failed adoption) takes the full repair path below.
-    if (reason === "marker-missing" && run.ports.adopt !== undefined) {
+    if ((reason === "marker-missing" || reason === "marker-stale") && run.ports.adopt !== undefined) {
+        const previousBuild = entry.marker?.pluginBuildId ?? null;
         const adopted = run.ports.adopt(install, { modBundleDir: bundle.dir });
         if (adopted.ok) {
+            // A write, so the run is reported and logged as one.
+            run.repatched.push(install.rootPath);
             run.decide("repatch", "re-adopted", "Subline's own stub was taken back: its marker was rewritten", {
                 path: install.rootPath,
                 trigger,
@@ -592,6 +742,18 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
             const marker = run.ports.readMarker(install.resourcesPath);
             if (after.ok) entry = { ...entry, state: after.value, marker: marker.ok ? marker.value : entry.marker };
             ({ reason, detail } = decideRepatch(run, entry, bundle));
+            // A new Subline build reached a running Discord only as a marker
+            // write: the running Discord keeps the old build until it is
+            // reopened. Said once per build (same key as a full repatch).
+            if (previousBuild !== null && previousBuild !== adopted.value.pluginBuildId && await run.ports.discordRunning(install)) {
+                const discordVersion = adopted.value.discordVersion ?? entry.version ?? null;
+                await run.alert(
+                    "restart-required",
+                    "Subline updated. Quit and reopen Discord to use the new version.",
+                    { discord: discordVersion, buildId: adopted.value.pluginBuildId },
+                    `${discordVersion ?? "unknown"}|${adopted.value.pluginBuildId}`
+                );
+            }
         } else {
             run.decide("repatch", "adopt-refused", adopted.error.message, {
                 path: install.rootPath,
@@ -600,10 +762,26 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
         }
     }
 
-    if (reason === "none") {
-        // Still record what we saw: next run's "changed?" comparison is only as
-        // good as the last observation.
+    if (reason === "shadowed") {
+        // Never "not needed" (Discord ignores Subline) and never "foreign"
+        // (the stub is ours and uninstall still restores it). Nothing to write:
+        // a patch under that folder would verify and do nothing.
         rememberInstall(run, entry, bundle.buildId, false);
+        run.decide("repatch", "shadowed", detail, { path: install.rootPath, mod: entry.state.shadowedBy ?? "unknown" });
+        const mod = entry.state.shadowedBy === "betterdiscord" ? "BetterDiscord" : "Another client mod";
+        await run.alert(
+            "shadowed",
+            `${mod} was installed over Subline, so Discord now ignores Subline. Remove ${mod === "BetterDiscord" ? "BetterDiscord" : "that mod"}, or uninstall Subline.`,
+            { path: install.rootPath, mod: entry.state.shadowedBy ?? "unknown" }
+        );
+        return;
+    }
+
+    if (reason === "none" || reason === "stub-outdated") {
+        // Still record what we saw: next run's "changed?" comparison is only as
+        // good as the last observation. A verified patch also ends any
+        // failure streak (audit #29).
+        rememberInstall(run, entry, bundle.buildId, false, true);
         run.decide("repatch", "not-needed", detail, {
             path: install.rootPath,
             discord: entry.version,
@@ -620,9 +798,19 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
         // beacon only speaks once a channel is open and a message arrives, so a
         // reader who restarts Discord and then reads nothing for an hour would
         // keep being told to restart a Discord they already restarted.
-        if (!await run.ports.discordRunning(install)) run.clear("restart-required");
+        const running = await run.ports.discordRunning(install);
+        if (!running) run.clear("restart-required");
         // Nothing waits on a running Discord any more: the patch is in place.
         run.clear("quit-required");
+        // A verified patch is proof these ended, however it got there (the
+        // app's own install, a reinstall of Discord). They used to stand in
+        // alerts.json forever (audit #29).
+        run.clear("repatch-failed");
+        run.clear("rollback-failed");
+        run.clear("backup-missing");
+        run.clear("discord-unstartable");
+        run.clear("shadowed");
+        if (reason === "stub-outdated") await upgradeStub(run, entry, bundle, trigger, running);
         return;
     }
 
@@ -640,6 +828,7 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
         // macOS allows it, and waiting there meant self-repair never ran at
         // all for anyone who actually uses Discord — see requireDiscordClosed.
         requireDiscordClosed: run.ports.platform === "win32",
+        ...quitWatch(run),
         ...(run.options.settle ?? {})
     });
 
@@ -653,7 +842,7 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
             settle: settled.status,
             waitedMs: settled.waitedMs
         });
-        await noteBlockedByRunningDiscord(run, entry, settled.status === "discord-running");
+        await noteBlockedByRunningDiscord(run, entry, settled.status === "discord-running", reason);
         return;
     }
     setBlockedSince(run, entry, null);
@@ -677,6 +866,7 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
         run.clear("repatch-failed");
         run.clear("rollback-failed");
         run.clear("backup-missing");
+        run.clear("discord-unstartable");
         // The user quit Discord as asked: the repair is in, and it starts with
         // the Discord they open next. No second notice for the same event.
         const quitAnswered = run.state.alerts["quit-required"] !== undefined;
@@ -714,13 +904,13 @@ async function reconcile(run: Run, entry: ManagedInstall, bundle: ModBundle, tri
     await handlePatchFailure(run, entry, patched.error, reason, trigger);
 }
 
-function rememberInstall(run: Run, entry: ManagedInstall, buildId: string, patchedNow: boolean): void {
+function rememberInstall(run: Run, entry: ManagedInstall, buildId: string, patchedNow: boolean, verified = false): void {
     const previous = run.state.installs[entry.install.stableId];
     run.state.installs[entry.install.stableId] = {
         discordVersion: entry.version ?? previous?.discordVersion ?? null,
         buildId: patchedNow ? buildId : (entry.marker?.pluginBuildId ?? previous?.buildId ?? null),
         patchedAt: patchedNow ? run.ports.now() : (previous?.patchedAt ?? null),
-        failures: patchedNow ? 0 : (previous?.failures ?? 0),
+        failures: patchedNow || verified ? 0 : (previous?.failures ?? 0),
         // Patched, or nothing to patch: nothing is waiting on Discord.
         blockedByRunningSince: null
     };
@@ -745,7 +935,7 @@ function setBlockedSince(run: Run, entry: ManagedInstall, since: number | null):
  * Discord closed to the tray is never quit, and the repair would otherwise
  * wait silently until the next reboot, or forever.
  */
-async function noteBlockedByRunningDiscord(run: Run, entry: ManagedInstall, blockedByRunning: boolean): Promise<void> {
+async function noteBlockedByRunningDiscord(run: Run, entry: ManagedInstall, blockedByRunning: boolean, need: RepatchReason): Promise<void> {
     if (!blockedByRunning) {
         setBlockedSince(run, entry, null);
         return;
@@ -754,11 +944,102 @@ async function noteBlockedByRunningDiscord(run: Run, entry: ManagedInstall, bloc
     const since = run.state.installs[entry.install.stableId]?.blockedByRunningSince ?? now;
     setBlockedSince(run, entry, since);
     if (now - since < QUIT_REQUIRED_AFTER_MS) return;
+    // The sentence names the real cause (audit #31): "Discord updated" only
+    // when Discord did. A marker-only change never gets here (it is written
+    // while Discord runs).
     await run.alert(
         "quit-required",
-        "Discord updated. To turn Subline back on, right-click the Discord icon near the clock, choose Quit Discord, then open Discord again.",
-        { blockedForMs: now - since, path: entry.install.rootPath }
+        need === "injection-wiped" ? QUIT_COPY.discordUpdated : QUIT_COPY.repairNeeded,
+        { blockedForMs: now - since, path: entry.install.rootPath, need }
     );
+}
+
+/** Settle options for the runs right after the user was asked to quit Discord (Windows). */
+function quitWatch(run: Run): { waitForCloseMs?: number; closePollMs?: number } {
+    if (run.ports.platform !== "win32") return {};
+    const asked = run.state.alerts["quit-required"]?.lastNotifiedAt;
+    if (asked === undefined || run.ports.now() - asked > QUIT_WATCH_WINDOW_MS) return {};
+    return { waitForCloseMs: QUIT_WATCH_WAIT_MS, closePollMs: QUIT_WATCH_POLL_MS };
+}
+
+/**
+ * Rewrite an older stub form (audit #4). Only while Discord is CLOSED, on
+ * both systems, and never a deferral, a nag or a failure count: the install
+ * works as it is, and this is housekeeping.
+ */
+async function upgradeStub(run: Run, entry: ManagedInstall, bundle: ModBundle, trigger: string, running: boolean): Promise<void> {
+    const { install } = entry;
+    if (running) {
+        run.decide("repatch", "stub-outdated-waiting", "the older stub form is rewritten once Discord is closed", { path: install.rootPath });
+        return;
+    }
+    const settled = await awaitDiscordSettled(install, {
+        now: () => run.ports.now(),
+        sleep: ms => run.ports.sleep(ms),
+        discordRunning: target => run.ports.discordRunning(target),
+        mtimeOf: path => run.ports.mtimeOf(path),
+        readDiscordVersion: target => run.ports.readDiscordVersion(target)
+    }, { ...(run.options.settle ?? {}), requireDiscordClosed: true });
+    if (!settled.settled) {
+        run.decide("repatch", "stub-outdated-waiting", settled.reason, { path: install.rootPath, settle: settled.status });
+        return;
+    }
+    if (!await run.stillRegistered("stub-upgrade")) return;
+    const patched = run.ports.patch(install, { modBundleDir: bundle.dir });
+    if (patched.ok) {
+        run.repatched.push(install.rootPath);
+        rememberInstall(run, { ...entry, version: patched.value.discordVersion ?? entry.version }, bundle.buildId, true);
+        run.decide("repatch", "stub-upgraded", "the older stub form was rewritten while Discord was closed", { path: install.rootPath, trigger });
+    } else {
+        run.decide("repatch", "stub-upgrade-skipped", patched.error.message, { path: install.rootPath, code: patched.error.code });
+    }
+}
+
+/**
+ * The mod bundle is gone or unusable, and no update replaced it (audit #4).
+ * The stub fails open, so Discord starts without Subline: say so at once,
+ * naming where the files belong. An OLDER stub form does not fail open (a
+ * missing or broken loader stops Discord starting), so while Discord is
+ * closed it is restored to Discord's own code. The memory is kept, so the
+ * next good bundle patches it again.
+ */
+async function handleMissingBundle(run: Run, managed: ManagedInstall[]): Promise<void> {
+    const ours = managed.filter(entry => entry.state.kind === "patched-by-us" || entry.state.kind === "broken");
+    if (ours.length === 0) return;
+    const dir = run.ports.modBundleDir ?? "Subline's folder";
+    await run.alert(
+        "bundle-missing",
+        `Subline's files are missing from ${dir}. Open Subline to reinstall them.`,
+        { path: dir, installs: ours.length }
+    );
+    for (const entry of ours) {
+        const form = entry.state.stubForm ?? null;
+        if (entry.state.kind !== "patched-by-us" || form === null || form === "current") continue;
+        const { install } = entry;
+        const settled = await awaitDiscordSettled(install, {
+            now: () => run.ports.now(),
+            sleep: ms => run.ports.sleep(ms),
+            discordRunning: target => run.ports.discordRunning(target),
+            mtimeOf: path => run.ports.mtimeOf(path),
+            readDiscordVersion: target => run.ports.readDiscordVersion(target)
+        }, { ...(run.options.settle ?? {}), requireDiscordClosed: true });
+        if (!settled.settled) {
+            run.decide("repatch", "unsafe-stub-waiting", settled.reason, { path: install.rootPath, form, settle: settled.status });
+            continue;
+        }
+        if (run.ports.unpatch === undefined || !await run.stillRegistered("unsafe-stub")) continue;
+        const restored = run.ports.unpatch(install);
+        if (restored.ok) {
+            // Remembered, so the next good bundle puts Subline back.
+            if (run.state.installs[install.stableId] === undefined) rememberInstall(run, entry, entry.marker?.pluginBuildId ?? "", false);
+            run.decide("repatch", "unsafe-stub-restored", "Subline's files are gone and this older stub would stop Discord starting, so Discord's own code was put back", {
+                path: install.rootPath,
+                form
+            });
+        } else {
+            run.decide("repatch", "unsafe-stub-restore-failed", restored.error.message, { path: install.rootPath, code: restored.error.code });
+        }
+    }
 }
 
 /**
@@ -793,7 +1074,17 @@ async function handlePatchFailure(
     // OBSERVED, not assumed. `patchInstall` rolls back on every failure path, but
     // "Discord still starts" is the one claim worth checking rather than trusting,
     // and it is the thing anyone reading this log afterwards most needs to know.
-    const after = run.ports.inspect(install);
+    let after = run.ports.inspect(install);
+    // "Discord cannot start" outranks "put the patch back" (audit #44): an
+    // interrupted patch the repair could not finish gets Discord's own code
+    // back first.
+    if (after.ok && after.value.kind === "broken" && after.value.reason === "asar-missing-backup-present" && run.ports.unpatch !== undefined) {
+        const restored = run.ports.unpatch(install);
+        run.decide("repatch", restored.ok ? "original-restored" : "original-restore-failed",
+            restored.ok ? "Discord's own app.asar was put back so it can start" : restored.error.message,
+            { path: install.rootPath, ...(restored.ok ? {} : { code: restored.error.code }) });
+        after = run.ports.inspect(install);
+    }
     const startable = after.ok && after.value.kind !== "broken";
     const brokenReason = after.ok && after.value.kind === "broken" ? (after.value.reason ?? null) : null;
     run.decide("repatch", "failed", error.message, {
@@ -820,6 +1111,15 @@ async function handlePatchFailure(
             "backup-missing",
             "Subline cannot repair Discord because the copy of Discord's original files is gone. "
             + "Open Subline for the fix.",
+            { code: error.code, broken: brokenReason, path: install.rootPath }
+        );
+        return;
+    }
+    if (!startable) {
+        // Never "Discord itself is fine" about a Discord that cannot start.
+        await run.alert(
+            "discord-unstartable",
+            "Discord cannot start until Subline repairs it. Open Subline to repair it.",
             { code: error.code, broken: brokenReason, path: install.rootPath }
         );
         return;
@@ -1026,11 +1326,16 @@ async function failUpdate(run: Run, error: { code: PatcherErrorCode; message: st
     // A checksum that does not match is never a flaky network: those bytes are
     // not the published bytes. Everything else gets several attempts, because a
     // laptop that was asleep is not a broken product.
-    const immediate = error.code === "RELEASE_UNVERIFIED";
+    // A feed in a format this build cannot read never recovers on its own
+    // either, and opening this Subline does not help: only a newer one does.
+    const tooOld = error.code === "RELEASE_FORMAT_UNSUPPORTED";
+    const immediate = error.code === "RELEASE_UNVERIFIED" || tooOld;
     if (immediate || failures >= UPDATE_FAILURES_BEFORE_ALERT) {
         await run.alert(
             "update-failed",
-            immediate
+            tooOld
+                ? "This Subline can no longer read its update feed. Get the new Subline from surfer05.github.io/subline."
+                : error.code === "RELEASE_UNVERIFIED"
                 ? "Subline downloaded an update that did not match its published checksum, so it was not installed."
                 : "Subline has not been able to check for updates. If translation stops working after a Discord "
                   + "update, open Subline.",

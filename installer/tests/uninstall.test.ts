@@ -870,3 +870,49 @@ describe("uninstall — no Discord with Subline in it (audit #40)", () => {
         expect(report.clean).toBe(false);
     });
 });
+
+// Part 1 related gap: a partial uninstall brings the helper back, and its
+// memory still named the Discords just restored; the helper patched them
+// again. They are released BEFORE the helper comes back.
+describe("uninstall — Discords put back are released before the helper returns", () => {
+    function partial(): { forgot: string[][]; order: string[]; ports: UninstallPorts & UninstallSystemPorts } {
+        const forgot: string[][] = [];
+        const order: string[] = [];
+        const base = ports({
+            unpatch: (install, options) =>
+                options.dryRun === true || install.branch === "stable"
+                    ? unpatchOk(install)
+                    : unpatchFail("FILE_IN_USE", "PTB is using app.asar.")
+        });
+        return {
+            forgot,
+            order,
+            ports: {
+                ...base,
+                forgetInstalls: ids => { forgot.push([...ids]); order.push("forget"); return { ok: true, value: true }; },
+                restoreHelper: async () => { order.push("restoreHelper"); return { ok: true, value: null }; }
+            }
+        };
+    }
+
+    it("releases only the Discord restored, never the one that failed, and before the helper is registered again", async () => {
+        const p = partial();
+        const report = await uninstall(p.ports, { installs: [INSTALL, PTB] });
+        expect(report.helperStopped).toBe(false);
+        expect(p.forgot).toEqual([[INSTALL.stableId]]);
+        expect(p.order).toEqual(["forget", "restoreHelper"]);
+    });
+
+    it("a branch with any failed folder stays managed (Windows app-x siblings share the stable id)", async () => {
+        const p = partial();
+        const sibling = { ...PTB, rootPath: `${PTB.rootPath}-older`, branch: "stable" as const, stableId: PTB.stableId };
+        await uninstall({ ...p.ports, unpatch: (install, options) => options.dryRun === true || install !== PTB ? unpatchOk(install) : unpatchFail("FILE_IN_USE", "x") }, { installs: [INSTALL, sibling, PTB] });
+        expect(p.forgot).toEqual([[INSTALL.stableId]]);
+    });
+
+    it("nothing is released when nothing was restored", async () => {
+        const p = partial();
+        await uninstall({ ...p.ports, unpatch: failsOnWrite("FILE_IN_USE") }, { installs: [INSTALL] });
+        expect(p.forgot).toEqual([]);
+    });
+});

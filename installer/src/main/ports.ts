@@ -39,6 +39,7 @@ import { parsePsOutput, processNameFor } from "../app/discordProcess.js";
 import type { RunningProcess } from "../app/discordProcess.js";
 import { installModBundle, shippedModDirFor } from "../app/modInstall.js";
 import { rememberPatchedInstall } from "../app/patchedInstalls.js";
+import { seedHelperMemory } from "../helper/state.js";
 import { hiddenExec } from "../patcher/exec.js";
 import type { Exec } from "../patcher/exec.js";
 import { isOtherAccountLoader } from "../patcher/ownership.js";
@@ -745,14 +746,26 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
                 productVersion: options.productVersion,
                 overwriteForeignMod: patchOptions.overwriteForeignMod
             }),
-        rememberPatchedInstall: install => {
-            const remembered = rememberPatchedInstall(productDirFor(platform, env, home), install);
+        rememberPatchedInstall: (install, patched) => {
+            const productDir = productDirFor(platform, env, home);
+            const remembered = rememberPatchedInstall(productDir, install);
             if (!remembered.ok) {
                 options.log.warn("patch.remember-failed", {
                     code: remembered.error.code,
                     path: remembered.error.path ?? null,
                     cause: remembered.error.cause ?? null
                 });
+            }
+            // The helper's own memory too (audit #49), merged, never overwritten.
+            if (productDir !== null && patched !== undefined) {
+                const seeded = seedHelperMemory(productDir, install.stableId, {
+                    discordVersion: patched.discordVersion,
+                    buildId: patched.buildId,
+                    patchedAt: Date.now()
+                });
+                if (!seeded.ok) {
+                    options.log.warn("patch.helper-memory-failed", { code: seeded.error.code, path: seeded.error.path ?? null });
+                }
             }
         },
         ...(platform === "darwin"

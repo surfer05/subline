@@ -117,6 +117,13 @@ export interface UninstallSystemPorts {
      * was stopped, so no Discord that still loads Subline is left without it.
      */
     restoreHelper(): Promise<Result<unknown>>;
+    /**
+     * Stop managing these Discords (stable ids): Uninstall put them back to
+     * normal. Removes them from the helper's memory and the installer's
+     * record, and marks them released, so a helper brought back for another
+     * Discord never puts Subline back into them.
+     */
+    forgetInstalls?(stableIds: readonly string[]): Result<unknown>;
 }
 
 export interface UninstallOptions {
@@ -415,6 +422,27 @@ export async function uninstall(
     // to be kept forever, "for safety", with no Discord to keep them for).
     const nothingLoadsSubline = restores.every(entry => entry.ok) && stillMarked.length === 0;
     const discordRestored = nothingLoadsSubline;
+
+    // 5a. THE DISCORDS PUT BACK ARE RELEASED. A partial uninstall brings the
+    //     helper back for the Discord that kept Subline, and its memory still
+    //     named the ones just restored: an unpatched Discord it remembers is
+    //     "an update wiped the injection", and it patched Subline straight
+    //     back in. A branch with any failed restore stays managed (on Windows
+    //     the stable id is the branch folder, shared by its app-x folders).
+    const failedIds = new Set(restores.filter(entry => !entry.ok).map(entry => entry.install.stableId));
+    const releasedIds = [...new Set(restores
+        .filter(entry => entry.ok && entry.leftAlone === null)
+        .map(entry => entry.install.stableId))]
+        .filter(id => !failedIds.has(id));
+    if (releasedIds.length > 0 && ports.forgetInstalls !== undefined) {
+        try {
+            const forgot = ports.forgetInstalls(releasedIds);
+            if (forgot.ok) ports.log.info("uninstall.released", { installs: releasedIds.length });
+            else ports.log.error("uninstall.release-failed", { code: forgot.error.code, message: forgot.error.message });
+        } catch (cause) {
+            ports.log.error("uninstall.release-failed", { cause: String(cause) });
+        }
+    }
 
     // 5. A DISCORD STILL LOADS SUBLINE: the helper comes back. Without it the
     //    next Discord update ends translation silently and nothing repairs it.

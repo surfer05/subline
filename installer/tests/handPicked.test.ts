@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { installModBundle } from "../src/app/modInstall.js";
-import { readPatchedInstalls, rememberPatchedInstall } from "../src/app/patchedInstalls.js";
+import { forgetPatchedInstalls, readPatchedInstalls, rememberPatchedInstall } from "../src/app/patchedInstalls.js";
 import { uninstall } from "../src/app/uninstall.js";
 import { locateDiscordInstalls, rememberedResourcesPath, uninstallTargets } from "../src/patcher/locate.js";
 import { MARKER_FILENAME } from "../src/patcher/marker.js";
@@ -223,5 +223,22 @@ describe("uninstall next to another client mod (real files)", () => {
         expect(existsSync(modDir)).toBe(false);
         expect(sys.calls).toEqual(["removeHelper"]);
         expect(done.summary).toContain("No Discord with Subline in it was found.");
+    });
+});
+
+describe("forgetting Discords Uninstall put back", () => {
+    it("drops only the named stable ids from the record and keeps the rest", () => {
+        const a = makeDiscordFixture({ appName: "Discord PTB.app" });
+        const b = makeDiscordFixture({ appName: "Discord Canary.app" });
+        try {
+            rememberPatchedInstall(productDir, a.install);
+            rememberPatchedInstall(productDir, b.install);
+            expect(forgetPatchedInstalls(productDir, [a.install.stableId]).ok).toBe(true);
+            expect(readPatchedInstalls(productDir).map(entry => entry.stableId)).toEqual([b.install.stableId]);
+            expect(forgetPatchedInstalls(productDir, ["nothing-like-it"])).toEqual({ ok: true, value: false });
+        } finally {
+            a.cleanup();
+            b.cleanup();
+        }
     });
 });

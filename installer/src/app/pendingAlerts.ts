@@ -23,7 +23,10 @@ export const PENDING_ALERT_COPY = {
     "repatch-failed": "Discord updated and Subline could not turn itself back on. Press Continue to repair it.",
     "rollback-failed": "Subline could not repair Discord after an update. Reinstall Discord, then run Subline again.",
     "backup-missing": "Discord's original files are gone, so Subline cannot repair it. Reinstall Discord, then run Subline again.",
-    "mod-stale": "Subline is translating but nothing reaches Discord's screen. Discord has probably changed, and a Subline update is not out yet."
+    "mod-stale": "Subline is translating but nothing reaches Discord's screen. Discord has probably changed, and a Subline update is not out yet.",
+    "bundle-missing": "Subline's files are missing. Press Continue to put them back.",
+    "discord-unstartable": "Discord cannot start until Subline repairs it. Press Continue to repair it.",
+    "shadowed": "Another client mod was installed after Subline and loads in front of it, so Discord ignores Subline."
 } as const;
 
 type ShownCode = keyof typeof PENDING_ALERT_COPY;
@@ -34,7 +37,7 @@ type ShownCode = keyof typeof PENDING_ALERT_COPY;
  * date on that screen (the helper's next run clears them). Saying "repair it"
  * beside "there is nothing left to do" would contradict the screen.
  */
-const PATCH_CODES: readonly ShownCode[] = ["repatch-failed", "rollback-failed", "backup-missing"];
+const PATCH_CODES: readonly ShownCode[] = ["repatch-failed", "rollback-failed", "backup-missing", "bundle-missing", "discord-unstartable"];
 
 /** The sentences to show on `screen`, in the order the alerts were raised, each once. */
 export function pendingAlertLines(

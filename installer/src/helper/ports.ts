@@ -21,11 +21,11 @@ import { inspectModBundle } from "../bundle/bundle.js";
 import { modBundleDirFor, productDirFor } from "../bundle/layout.js";
 import { loaderPathFor, manifestPathFor } from "../bundle/spec.js";
 import { listProcesses } from "../main/ports.js";
-import { locateDiscordInstalls, locateRemembered } from "../patcher/locate.js";
+import { locateDiscordInstalls, locateRemembered, siblingAppInstalls } from "../patcher/locate.js";
 import type { DiscordInstall } from "../patcher/locate.js";
 import { isOtherAccountLoader } from "../patcher/ownership.js";
 import { readMarker } from "../patcher/marker.js";
-import { adoptPatch, patchInstall, verifyPatch } from "../patcher/patch.js";
+import { adoptPatch, patchInstall, unpatchInstall, verifyPatch } from "../patcher/patch.js";
 import type { Exec } from "../patcher/exec.js";
 import { hiddenExec } from "../patcher/exec.js";
 import { err, fsError, ok } from "../patcher/result.js";
@@ -38,7 +38,7 @@ import type { HelperPorts } from "./helper.js";
 import type { LaunchctlPort } from "./launchAgent.js";
 import type { SchtasksPort } from "./scheduledTask.js";
 import { HELPER_TASK_NAME, taskCommandFromXml, taskIntervalFromXml } from "./scheduledTask.js";
-import { helperStatePathFor, readHelperState, writeHelperState } from "./state.js";
+import { helperStatePathFor, helperStateUnreadable, readHelperState, writeHelperState } from "./state.js";
 import type { HelperState } from "./state.js";
 
 /** Every console program goes through hiddenExec: no window flashes on Windows (see patcher/exec.ts). */
@@ -451,6 +451,23 @@ export function createHelperPorts(options: RealHelperPortsOptions): HelperPorts 
             ? { stillRegistered: () => createSchtasks(exec).exists(HELPER_TASK_NAME) }
             : {}),
         recoverBundle: dir => recoverModBundle(dir, platform),
+        unpatch: install => unpatchInstall(install, {
+            ownLoaderPaths: modDir === null ? [] : [loaderPathFor(modDir)],
+            ...(platform === "darwin" ? { isOtherAccountLoader: (loaderPath: string) => isOtherAccountLoader(loaderPath, home, platform) } : {})
+        }),
+        rememberedStableIds: () => new Set(readPatchedInstalls(productDir).map(entry => entry.stableId)),
+        stateUnreadable: () => (statePath === null ? null : helperStateUnreadable(statePath)),
+        ...(platform === "win32"
+            ? {
+                // Our stub in another app folder of the same branch: the
+                // Discord this user ran before it updated was Subline's.
+                siblingCarriesOurMark: (install: DiscordInstall) => siblingAppInstalls(install, platform).some(sibling => {
+                    const state = inspectInstall(sibling, { ownLoaderPaths: modDir === null ? [] : [loaderPathFor(modDir)] });
+                    return state.ok && state.value.mod === "subline"
+                        && (state.value.kind === "patched-by-us" || state.value.reason === "our-patch-without-backup");
+                })
+            }
+            : {}),
         ...(platform === "darwin"
             ? { isOtherAccountLoader: (loaderPath: string) => isOtherAccountLoader(loaderPath, home, platform) }
             : {})
