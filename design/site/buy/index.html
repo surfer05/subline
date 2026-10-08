@@ -1,0 +1,52 @@
+<!-- @dsCard group="Site" title="Buy" viewport="980x620" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Buy Subline</title>
+<link rel="stylesheet" href="../../tokens.css">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-sans);-webkit-font-smoothing:antialiased;line-height:1.6}
+.wrap{max-width:880px;margin:0 auto;padding:60px 30px}
+h2.sec{font-family:var(--font-serif);font-size:32px;line-height:1.14;letter-spacing:-.015em;font-weight:400;margin:0;max-width:22ch}
+.kicker{font-family:var(--font-mono);font-size:10px;letter-spacing:.19em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+p.lead{font-size:16px;color:var(--muted);max-width:60ch;margin:16px 0 0;text-wrap:pretty}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius)}
+.btn{font-family:inherit;font-size:15px;font-weight:500;padding:12px 22px;border-radius:var(--radius);
+  border:1px solid transparent;background:none;color:var(--fg);cursor:pointer;text-decoration:none;display:inline-block}
+.btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.btn-primary{background:var(--accent);color:var(--accent-fg)}
+.btn-primary:hover{filter:brightness(1.12)}
+.btn-secondary{background:var(--panel);border-color:var(--line-strong)}
+.btn-secondary:hover{border-color:var(--muted)}
+a{color:var(--accent)}
+a:hover{color:var(--fg)}
+.mono{font-family:var(--font-mono);font-size:12.5px}
+.fine{font-size:12.5px;color:var(--muted)}
+.wm-sm{font-family:var(--font-serif);font-size:17px;font-weight:400;letter-spacing:-.01em;display:inline-block;
+  padding-bottom:3px;border-bottom:1.5px solid var(--accent);line-height:1}
+@media (max-width:640px){.wrap{padding:44px 20px}h2.sec{font-size:25px}}
+
+.buy-cta{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:22px}
+.buy-steps{margin:22px 0 0;padding-left:20px;max-width:60ch;color:var(--muted);font-size:15px}
+.buy-steps li{margin-top:6px}
+</style>
+</head>
+<body>
+<p class="kicker">Buy</p>
+<h2 class="sec">Buy Automatic</h2>
+<p class="lead">$4.99, once. You can pay on any device, like your phone.</p>
+<div class="buy-cta">
+  <a class="btn btn-primary" data-buy="automatic" href="https://checkout.dodopayments.com/buy/pdt_0NofMhZ4QRA71V9lJw6K7?quantity=1&amp;redirect_url=https%3A%2F%2Fsubline.page%2F%3Ffrom%3Dbuy">Buy for $4.99</a>
+</div>
+<ol class="buy-steps">
+  <li>Pay. Your code shows on the next page. It also comes by email from <b>Dodo Payments</b>.</li>
+  <li>Enter it in Subline under <b>I have a code</b>.</li>
+</ol>
+<p class="fine" style="margin-top:22px">Using a VPN on your computer? Pay on your phone instead. Your VPN can stay on.</p>
+<p class="fine">Questions? Email <a href="mailto:support@subline.page">support@subline.page</a>. <a href="../">Back to Subline</a></p>
+</body>
+</html>
