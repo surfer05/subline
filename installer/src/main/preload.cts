@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld("subline", {
     /** Stop waiting for App Management during an uninstall. */
     cancelUninstall: () => ipcRenderer.invoke("uninstall:cancel"),
     openUrl: (url: string) => ipcRenderer.invoke("shell:open", url),
+    /** What the helper raised while the app was closed (alerts.json): codes only, never text. */
+    pendingAlerts: () => ipcRenderer.invoke("helper:alerts"),
     onState: (handler: (state: unknown) => void) => {
         const listener = (_event: unknown, state: unknown): void => handler(state);
         ipcRenderer.on("flow:state", listener);

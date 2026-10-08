@@ -26,6 +26,7 @@ import {
     requestQuit,
     uninstallPaths
 } from "../src/main/ports.js";
+import { createHelperPorts, scratchRootOf, unpackArchive } from "../src/helper/ports.js";
 import { readMarker } from "../src/patcher/marker.js";
 import { readStub } from "../src/patcher/stub.js";
 import { makeDiscordFixture, makeFakeLaunchctl, makeModBundleFixture } from "./fixture.js";
@@ -448,5 +449,71 @@ describe("worst cases in the real ports", () => {
         const seen: string[][] = [];
         await listProcesses("darwin", async (_file, args) => { seen.push(args); return { stdout: "" }; }, undefined, 501);
         expect(seen[0]).toEqual(["-x", "-U", "501", "-o", "pid=,comm="]);
+    });
+});
+
+describe("discarding an unpacked update (audit 2026-10-06 #25)", () => {
+    const fakeUnpack = (root: boolean) => async (_file: string, args: string[]): Promise<{ stdout: string }> => {
+        // ditto -x -k <archive> <target>, or tar -xf <archive> -C <target>
+        const target = args[args.length - 1]!;
+        const dir = root ? target : join(target, "mod");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "subline-mod.json"), "{}");
+        writeFileSync(join(dir, "patcher.js"), "");
+        return { stdout: "" };
+    };
+    const helperPorts = (exec: (file: string, args: string[]) => Promise<{ stdout: string }>) => createHelperPorts({
+        productVersion: "0.1.0",
+        log: { info: () => {}, warn: () => {}, error: () => {} },
+        platform: "darwin",
+        home: mkdtempSync(join(tmpdir(), "subline-ports-home-")),
+        exec
+    });
+
+    it("a release zip with the bundle at its root removes only the scratch folder, never the temp folder", async () => {
+        const sentinel = join(tmpdir(), `subline-sentinel-${process.pid}-${Date.now()}`);
+        writeFileSync(sentinel, "keep me");
+        try {
+            const p = helperPorts(fakeUnpack(true));
+            const unpacked = await unpackArchive(new Uint8Array([1]), "mod.zip", fakeUnpack(true), "darwin");
+            expect(unpacked.ok).toBe(true);
+            if (!unpacked.ok) return;
+            const scratch = scratchRootOf(unpacked.value);
+            expect(scratch).not.toBeNull();
+            p.discardUnpacked(unpacked.value);
+            expect(existsSync(scratch!)).toBe(false);
+            expect(existsSync(sentinel)).toBe(true);
+            expect(existsSync(tmpdir())).toBe(true);
+        } finally {
+            rmSync(sentinel, { force: true });
+        }
+    });
+
+    it("a wrapped release zip removes the whole scratch folder", async () => {
+        const p = helperPorts(fakeUnpack(false));
+        const unpacked = await unpackArchive(new Uint8Array([1]), "mod.zip", fakeUnpack(false), "darwin");
+        expect(unpacked.ok).toBe(true);
+        if (!unpacked.ok) return;
+        const scratch = scratchRootOf(unpacked.value);
+        expect(scratch).not.toBeNull();
+        expect(unpacked.value.startsWith(scratch!)).toBe(true);
+        p.discardUnpacked(unpacked.value);
+        expect(existsSync(scratch!)).toBe(false);
+    });
+
+    it("finds no scratch root for a path outside a subline-update folder in the temp folder", () => {
+        expect(scratchRootOf(tmpdir())).toBeNull();
+        expect(scratchRootOf(join(tmpdir(), "unpacked"))).toBeNull();
+        expect(scratchRootOf("/Users/x/Documents/subline-update-abc/unpacked")).toBeNull();
+        expect(scratchRootOf(join(tmpdir(), "subline-update-abc", "unpacked", "mod"))).toBe(join(tmpdir(), "subline-update-abc"));
+    });
+
+    it("discardUnpacked removes nothing when the path is not inside a scratch folder", () => {
+        const outside = mkdtempSync(join(tmpdir(), "subline-not-scratch-"));
+        const inner = join(outside, "a", "b");
+        mkdirSync(inner, { recursive: true });
+        helperPorts(fakeUnpack(true)).discardUnpacked(inner);
+        expect(existsSync(inner)).toBe(true);
+        rmSync(outside, { recursive: true, force: true });
     });
 });

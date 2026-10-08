@@ -160,8 +160,11 @@ export function parseReleaseManifest(text: string, source: string): Result<Relea
         return err<ReleaseManifest>("RELEASE_MALFORMED", "The release manifest is not one of ours.", { path: source });
     }
     if (parsed.format !== RELEASE_MANIFEST_FORMAT) {
+        // A number we do not know is a real manifest from a newer release: only
+        // a newer Subline can read it, and the user must be told so. Anything
+        // else (no format at all, a string) is just a malformed feed.
         return err<ReleaseManifest>(
-            "RELEASE_MALFORMED",
+            typeof parsed.format === "number" ? "RELEASE_FORMAT_UNSUPPORTED" : "RELEASE_MALFORMED",
             `The release manifest is format ${String(parsed.format)}, and this helper understands ${RELEASE_MANIFEST_FORMAT}. Update Subline itself.`,
             { path: source }
         );

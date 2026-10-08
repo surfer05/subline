@@ -12,6 +12,14 @@
  * format breaks the writer instead of quietly shipping a document nothing
  * accepts.
  *
+ * ## The format is a compatibility contract
+ *
+ * Every helper ever shipped reads this document, and helpers never update
+ * themselves. Never bump `format` (or the bundle manifest's) without keeping
+ * the old format served at the same feed URL. A helper that meets a newer
+ * format reports RELEASE_FORMAT_UNSUPPORTED and can only tell its user to
+ * download the new Subline. See docs/RELEASING.md section 4.
+ *
  * ## Where it lives (spec §10: GitHub Releases)
  *
  * Two URLs, both on `github.com`, which is why `ALLOWED_RELEASE_HOSTS` starts

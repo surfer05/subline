@@ -11,7 +11,7 @@
 
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import type { FlowLogger } from "../app/flow.js";
 import { installModBundle, recoverModBundle } from "../app/modInstall.js";
@@ -137,6 +137,26 @@ export async function unpackArchive(
         });
     }
     return ok(found);
+}
+
+/**
+ * The scratch folder unpackArchive made, found from the bundle directory it
+ * returned: the nearest ancestor (or the directory itself) named
+ * `subline-update-*` whose parent is the temp folder. Null for anything else.
+ *
+ * Never "..", ".." arithmetic (audit 2026-10-06 #25): a release zip with the
+ * bundle at its root returns `<scratch>/unpacked`, and two levels up from
+ * that is the user's whole temp folder, which used to be deleted.
+ */
+export function scratchRootOf(bundleDir: string, tmp: string = tmpdir()): string | null {
+    const root = resolve(tmp);
+    let current = resolve(bundleDir);
+    for (;;) {
+        const parent = dirname(current);
+        if (parent === current) return null;
+        if (parent === root) return basename(current).startsWith("subline-update-") ? current : null;
+        current = parent;
+    }
 }
 
 /** The directory holding `subline-mod.json`, at the root or one level down. */
@@ -412,9 +432,12 @@ export function createHelperPorts(options: RealHelperPortsOptions): HelperPorts 
         unpack: (bytes, artifactName) => unpackArchive(bytes, artifactName, exec, platform),
         discardUnpacked: dir => {
             // The bundle sits inside the scratch root `unpackArchive` made; remove
-            // the whole thing rather than leaving the archive behind.
+            // the whole thing rather than leaving the archive behind. Only that
+            // root: anything that is not one is left alone.
+            const scratch = scratchRootOf(dir);
+            if (scratch === null) return;
             try {
-                rmSync(join(dir, "..", ".."), { recursive: true, force: true });
+                rmSync(scratch, { recursive: true, force: true });
             } catch {
                 // A stranded temp directory is cosmetic and must never mask a real
                 // failure in the run that produced it.

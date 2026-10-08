@@ -7,6 +7,8 @@
  */
 
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -79,6 +81,16 @@ describe("the release manifest", () => {
         const result = parseReleaseManifest(manifestDocument({ format: RELEASE_MANIFEST_FORMAT + 1 }), FEED);
         expect(result.ok).toBe(false);
         if (!result.ok) expect(result.error.message).toContain("Update Subline itself");
+        // Its own code: only a newer Subline reads it (audit 2026-10-06 #33).
+        if (!result.ok) expect(result.error.code).toBe("RELEASE_FORMAT_UNSUPPORTED");
+    });
+
+    it("keeps a missing or non-numeric format a malformed feed, not a too-old Subline", () => {
+        for (const format of [undefined, "2", null]) {
+            const result = parseReleaseManifest(manifestDocument({ format }), FEED);
+            expect(result.ok).toBe(false);
+            if (!result.ok) expect(result.error.code).toBe("RELEASE_MALFORMED");
+        }
     });
 
     it("refuses a build id that could never match a bundle's", () => {
@@ -231,5 +243,19 @@ describe("deciding whether a release is worth installing", () => {
     });
     it("an installed bundle with no readable version is treated as older", () => {
         expect(isNewerBuild(parsed(), { buildId: "0011223344556677", pluginVersion: null })).toBe(true);
+    });
+});
+
+describe("the release archive layout (audit 2026-10-06 #25)", () => {
+    it("archives the mod bundle with --keepParent, so the zip holds one mod/ folder", () => {
+        // The helper copes with either layout now (scratchRootOf), but the
+        // published layout is a contract with every shipped helper: keep it.
+        const script = readFileSync(join(import.meta.dirname, "..", "scripts", "release.mjs"), "utf8");
+        const call = /sh\("\/usr\/bin\/ditto", \[([^\]]*)\], ?modArchive\]\)|sh\("\/usr\/bin\/ditto", \[([^\]]*MOD_DIR[^\]]*)\]\)/.exec(script);
+        expect(call).not.toBeNull();
+        const args = call![1] ?? call![2] ?? "";
+        expect(args).toContain("\"-c\"");
+        expect(args).toContain("\"--keepParent\"");
+        expect(args).toContain("MOD_DIR");
     });
 });

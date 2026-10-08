@@ -22,7 +22,7 @@
  * So:
  *
  *  - an alert is raised at most once per `repeatMsFor(code)` (24h, 12h for
- *    `repatch-failed`), however many times
+ *    `repatch-failed`, 7 days for `update-failed`), however many times
  *    its condition is observed;
  *  - `resolve()` clears an alert the moment its condition goes away, so a
  *    transient failure leaves nothing behind for the app to show;
@@ -109,7 +109,14 @@ export const DEFAULT_REPEAT_MS = 24 * 60 * 60 * 1000;
  * successful repatch clears it (see `resolveAlert`), so it goes quiet.
  */
 export const REPEAT_MS_BY_CODE: Partial<Record<AlertCode, number>> = {
-    "repatch-failed": 12 * 60 * 60 * 1000
+    "repatch-failed": 12 * 60 * 60 * 1000,
+    // A feed that is gone for good (a corporate proxy, a blocked host) was a
+    // daily notification for the life of the install, with nothing the user
+    // could do about it (audit 2026-10-06 #33). Once a week, and every failure
+    // is still logged. NOT keyed on the error code: a captive portal that
+    // flips between a refused connection and an HTML page would then count as
+    // a new event every run and notify every six hours.
+    "update-failed": 7 * 24 * 60 * 60 * 1000
 };
 
 /** How long `code` waits before notifying again. */
