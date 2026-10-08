@@ -4431,10 +4431,10 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
                         : fallbackKind === "blocked"
                         ? `Subline could not reach ${LLM_ENGINES[configured].label} from this network. A VPN, `
                           + "region or ISP is refusing the connection. "
-                          + `Your ${configured === "relay" ? "Subline code" : "API key"} is not the problem. `
+                          + "Your API key is not the problem. "
                           + "Google is being used meanwhile."
                         : `${rejectedCredentialText(configured)}, so Subline is using Google. `
-                          + `Correct the ${configured === "relay" ? "code" : "key"} in settings and the `
+                          + "Correct the key in settings and the "
                           + "better translations resume. No restart needed."
                 }
             >
