@@ -12,9 +12,9 @@ import {
 } from "@webpack/common";
 import type { Message } from "@vencord/discord-types";
 
-import { createBatcher, type Batcher } from "./batcher";
+import { CONTEXT_RING_SIZE, createBatcher, type Batcher } from "./batcher";
 import { forgetNotices, putNotice, takeNotice } from "./sublineNotice";
-import { fitLlmRequest, LLM_TEXT_MAX, shrinkAfterRefusal } from "./fitRequest";
+import { clipParentText, fitLlmRequest, LLM_TEXT_MAX, shrinkAfterRefusal } from "./fitRequest";
 import { cleanTranslation, dropCustomEmoji } from "./customEmoji";
 import { renderDiscordMarkup, type MarkupResolvers } from "./discordMarkup";
 import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel, toggleChannelOptOut } from "./channels";
@@ -114,11 +114,30 @@ let fallbackPinnedFor: string | null = null;
  * unchanged would poison the map with non-translations.
  *
  * Keyed on the EXACT string, so it can only ever fire on a genuine repeat.
- * That is deliberately conservative: the same words in a different
- * conversation could warrant a different reading, and this trades that
- * possibility away for consistency the reader can see.
+ *
+ * P7 (field test 2026-10-08): ONLY for lines that carry their own meaning.
+ * The same short words in a different conversation often need a different
+ * reading ("ok" as agreement, as surprise, as sarcasm; a reply that answers a
+ * different message), and reusing the old answer there is a wrong
+ * translation shown as ✦. So a line is reused only when it has at least
+ * PHRASE_REUSE_MIN_WORDS words AND is not a reply (see phraseReusable). A
+ * short line simply goes to the model with its own context, like any other
+ * message: that costs a request, never a wrong line. A language written
+ * without spaces counts as one word, so it is never reused: the safe side.
  */
 const qualityPhrases = new Map<string, StoredTranslation>();
+
+/** P7: a line shorter than this many words is read in context every time. */
+export const PHRASE_REUSE_MIN_WORDS = 6;
+
+function wordCount(text: string): number {
+    return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+/** May this message take a cached quality phrase? See qualityPhrases (P7). */
+function phraseReusable(pending: { text: string; replyToId?: string }): boolean {
+    return pending.replyToId === undefined && wordCount(pending.text) >= PHRASE_REUSE_MIN_WORDS;
+}
 
 /** Bounded: a long session in a busy server must not grow this without limit. */
 const MAX_CACHED_PHRASES = 500;
@@ -130,6 +149,8 @@ function phraseKey(text: string, targetLang: string): string {
 function rememberPhrase(text: string, targetLang: string, value: StoredTranslation): void {
     if (!isRealTranslation(value)) return;
     if (ENGINE_RANK[value.via] < 1) return;   // quality tier only
+    // P7: a short line is never reused, so it is not worth keeping either.
+    if (wordCount(text) < PHRASE_REUSE_MIN_WORDS) return;
     if (qualityPhrases.size >= MAX_CACHED_PHRASES) {
         // Oldest first — Map preserves insertion order, and a chat's repeats
         // cluster in time, so the recent end is the useful end.
@@ -2172,6 +2193,17 @@ async function runTier(
                 return;
             }
             req = parts[0]!;
+            // P8: so an "out of context" report can be checked against what
+            // the model was actually given. Counts only, never message text.
+            if (debug) {
+                const replies = req.messages.filter(m => m.replyToId !== undefined);
+                const inBatch = replies.filter(m => req.messages.some(x => x.id === m.replyToId)).length;
+                const quoted = replies.filter(m => m.replyTo !== undefined && !req.messages.some(x => x.id === m.replyToId)).length;
+                logger.debug(
+                    `[flush] ${engine}: context=${req.context.length} lines, replies=${replies.length} `
+                    + `(parent in batch ${inBatch}, parent quoted ${quoted}, parent missing ${replies.length - inBatch - quoted})`
+                );
+            }
         }
 
         // Only the LLM engines are rate-gated — Google is per-message with its
@@ -2634,7 +2666,8 @@ async function forceQualityTranslate(message: Message): Promise<void> {
             // Readable, like every other path: mentions as names, custom
             // emoji dropped. Never the raw tokens.
             text: readableContent(message.content ?? "", message.channel_id),
-            replyToId: replyParentId(message)
+            replyToId: replyParentId(message),
+            ...withReplyCopy(message)
         }],
         // The messages immediately BEFORE this one, read from the store.
         //
@@ -2776,7 +2809,8 @@ async function sendPreview(message: Message): Promise<boolean> {
             id: message.id,
             author: message.author?.username ?? "unknown",
             text: readableContent(content, message.channel_id),
-            replyToId: replyParentId(message)
+            replyToId: replyParentId(message),
+            ...withReplyCopy(message)
         }],
         context: contextBefore(message, FORCED_CONTEXT_SIZE),
         targetLang: settings.store.targetLang,
@@ -2994,6 +3028,22 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true, r
     const readable = readableContent(pending.text, pending.channelId);
     if (readable !== pending.text) pending = { ...pending, text: readable };
 
+    // P6 (field test 2026-10-08): EVERY message the reader sees is
+    // conversation, whatever happens to it next: locally skipped, queued, a
+    // cache hit, already in flight, or answered from qualityPhrases. Only
+    // recording the skipped and the newly queued ones (as before) left holes
+    // exactly where an earlier line had already been translated, so a reply
+    // reached the model without the message it answered. The ring keeps them
+    // in message order and de-duplicates by id (batcher.ts).
+    //
+    // Both rings: fastBatcher's is never actually read (it does not support
+    // context) but recording into it is harmless, and qualityBatcher may be
+    // null (Google-only). Not into the quality ring for scroll-back
+    // (recordContext false) or a call that keeps the quality tier out
+    // (allowQuality false); see this function's doc comment.
+    fastBatcher?.recordContext(pending);
+    if (allowQuality && recordContext) qualityBatcher?.recordContext(pending);
+
     if (skipReason !== null) {
         // Guarded, not just quiet: with the setting off this must cost
         // nothing beyond the one boolean read below — no template string is
@@ -3005,12 +3055,7 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true, r
                 + `— text=${JSON.stringify(pending.text)}`
             );
         }
-        // Both rings: fastBatcher's is never actually read (it does not
-        // support context) but recording into it is harmless, and
-        // qualityBatcher may be null (Google-only). Whichever tier(s) end up
-        // consuming context see a coherent conversation either way.
-        fastBatcher?.recordContext(pending);
-        if (allowQuality && recordContext) qualityBatcher?.recordContext(pending);
+        // Already recorded as context above.
         return;
     }
 
@@ -3035,7 +3080,10 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true, r
         // session: reuse the answer rather than buying a second, possibly
         // different one. Still routed through writeResult, so it cannot
         // replace anything better and the beacon counts it like any other.
-        const seen = qualityPhrases.get(phraseKey(pending.text, settings.store.targetLang));
+        // P7: only a line that carries its own meaning; see qualityPhrases.
+        const seen = phraseReusable(pending)
+            ? qualityPhrases.get(phraseKey(pending.text, settings.store.targetLang))
+            : undefined;
         if (seen !== undefined) {
             writeResult(key, seen);
             if (settings.store.debugLogging) {
@@ -3047,12 +3095,6 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true, r
             wentQuality = true;
         }
     }
-    // No `else`. Two ways to reach one: qualityBatcher is null (no LLM
-    // configured), in which case there is no second ring to feed at all —
-    // fastBatcher never reads its own context (it does not support it), so
-    // there is nothing useful to record; or allowQuality is false, i.e.
-    // scroll-back, which must NOT be recorded as context for the reasons in
-    // this function's doc comment.
 
     if (settings.store.debugLogging) {
         const tiers = [wentFast && "fast", wentQuality && "quality"].filter(Boolean).join("+");
@@ -3171,6 +3213,49 @@ function replyParentId(message: any): string | undefined {
     return typeof hydrated === "string" ? hydrated : undefined;
 }
 
+/**
+ * R3: a short clipped copy of the message a reply answers, when Discord has
+ * it: the hydrated `referenced_message`, else the message store. Undefined
+ * for a normal message, and for a reply whose parent is deleted or was never
+ * loaded (the relay then says only that it is a reply). Readable like every
+ * other text the model sees (mentions as names, custom emoji dropped).
+ */
+function replyParentCopy(message: any, channelId: string): { author: string; text: string } | undefined {
+    const parentId = replyParentId(message);
+    if (parentId === undefined) return undefined;
+    try {
+        let parent: any = message?.referenced_message;
+        if (!parent || parent.id !== parentId || typeof parent.content !== "string") {
+            parent = MessageStore.getMessage(channelId, parentId);
+        }
+        if (!parent || typeof parent.content !== "string" || parent.content.trim() === "") return undefined;
+        const text = readableContent(parent.content, channelId);
+        if (text.trim() === "") return undefined;
+        return { author: parent.author?.username ?? "unknown", text: clipParentText(text) };
+    } catch {
+        return undefined;
+    }
+}
+
+/** `{ replyTo }` for a reply whose parent Discord has, else `{}`. */
+function withReplyCopy(message: any): { replyTo?: { author: string; text: string } } {
+    const replyTo = typeof message?.channel_id === "string" ? replyParentCopy(message, message.channel_id) : undefined;
+    return replyTo !== undefined ? { replyTo } : {};
+}
+
+/** The PendingMessage for a Discord message: the one shape every path builds. */
+function pendingFrom(message: any, channelId: string, text: string = message.content ?? ""): PendingMessage {
+    const replyTo = replyParentCopy(message, channelId);
+    return {
+        id: message.id,
+        author: message.author?.username ?? "unknown",
+        text,
+        channelId,
+        replyToId: replyParentId(message),
+        ...(replyTo !== undefined ? { replyTo } : {})
+    };
+}
+
 /** How many preceding messages a forced translation gets as context. */
 const FORCED_CONTEXT_SIZE = 6;
 
@@ -3225,13 +3310,7 @@ function onMessageCreate({ message, optimistic }: { message: Message; optimistic
     if (!isFocusedChannel(message.channel_id)) return;
 
     enqueue(
-        {
-            id: message.id,
-            author: message.author?.username ?? "unknown",
-            text: message.content ?? "",
-            channelId: message.channel_id,
-            replyToId: replyParentId(message)
-        },
+        pendingFrom(message, message.channel_id),
         message.author?.id === UserStore.getCurrentUser()?.id
     );
 }
@@ -3268,13 +3347,7 @@ function onMessageUpdate({ message }: { message: Message; }) {
         return;
     }
 
-    const pending: PendingMessage = {
-        id: message.id,
-        author: message.author?.username ?? "unknown",
-        text,
-        channelId: message.channel_id,
-        replyToId: replyParentId(message)
-    };
+    const pending: PendingMessage = pendingFrom(message, message.channel_id, text);
     const isOwn = message.author?.id === UserStore.getCurrentUser()?.id;
     rememberEdit(pending, isOwn);
 
@@ -3443,6 +3516,28 @@ function catchUp(channelId: string, opts: CatchUpOptions = {}) {
         );
     }
 
+    // P6: the backlog the reader is looking at is conversation even where it
+    // needs no work (already translated, a cache hit from an earlier session).
+    // Only candidates used to reach the context ring, so on a channel open the
+    // newest lines before a live message were whatever happened to still need
+    // translating, not the conversation. Recorded before the candidates are
+    // enqueued and flushed below; the ring orders by message id and drops
+    // duplicates, so the two catch-ups of one open record each line once.
+    // Not for scroll-back: see enqueue()'s doc comment.
+    if (!scrollBack && allowQuality && qualityBatcher !== null) {
+        const queued = new Set(candidates.map(m => m.id));
+        for (const message of all.slice(-CONTEXT_RING_SIZE)) {
+            if (queued.has(message?.id) || typeof message?.id !== "string") continue;
+            if (typeof message.content !== "string" || message.content.trim() === "") continue;
+            qualityBatcher.recordContext({
+                id: message.id,
+                author: message.author?.username ?? "unknown",
+                text: readableContent(message.content, channelId),
+                channelId
+            });
+        }
+    }
+
     for (const message of candidates) {
 
         // Skipped messages still shape the conversation, so enqueue() turns
@@ -3452,13 +3547,7 @@ function catchUp(channelId: string, opts: CatchUpOptions = {}) {
         // so without that the same backlog would be pushed into the 8-slot
         // ring twice, evicting genuine context with copies of itself.
         enqueue(
-            {
-                id: message.id,
-                author: message.author?.username ?? "unknown",
-                text: message.content ?? "",
-                channelId,
-                replyToId: replyParentId(message)
-            },
+            pendingFrom(message, channelId),
             message.author?.id === me,
             allowQuality,
             // Scrolled-past history is translated but not remembered.

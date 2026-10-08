@@ -120,6 +120,10 @@ export function buildPrompt(req: BatchRequest): string {
         + "are ordinary chat, not errors. Translate them as confidently as the standard form.",
         "- Leave usernames, game terms, and custom emote names untranslated.",
         "- Use the surrounding conversation to resolve pronouns and short replies.",
+        // R5 and R3 (field test 2026-10-08), word for word the relay's
+        // REPLY_READING_RULE and REPLY_LINK_RULE (relay/src/translate.ts).
+        REPLY_READING_RULE,
+        REPLY_LINK_RULE,
         "- Translate a repeated phrase the same way every time it appears.",
         "- Set lang to the BCP-47 code of the message's original language.",
         "- Return exactly one entry per message id given, and no other ids.",
@@ -143,10 +147,30 @@ export function buildPrompt(req: BatchRequest): string {
 
     parts.push("Messages to translate:");
     for (const m of req.messages) {
-        parts.push(`[id=${enc(m.id)}] ${enc(m.author)}: ${enc(m.text)}`);
+        parts.push(`[id=${enc(m.id)}] ${enc(m.author)}: ${enc(m.text)}${replyNote(m, req.messages)}`);
     }
 
     return parts.join("\n");
+}
+
+/** R5: mirrors the relay's REPLY_READING_RULE word for word. General: no word lists, no examples. */
+export const REPLY_READING_RULE =
+    "- When a word or phrase has more than one reading, choose the reading that makes sense as a reply to the earlier messages. "
+    + "Casual and romanized text often uses small words that turn a sentence into a question, a joke or a \"not really\".";
+/** R3: mirrors the relay's REPLY_LINK_RULE. */
+export const REPLY_LINK_RULE =
+    "- A message marked \"replying to\" answers that earlier message. Translate it as an answer to it.";
+
+/**
+ * R3: the reply link after a message's line, mirroring the relay's replyNote.
+ * By id when the parent is in this request, else the parent's clipped copy
+ * (enc()'d like every other untrusted field), else only "it is a reply".
+ */
+function replyNote(m: BatchRequest["messages"][number], messages: BatchRequest["messages"]): string {
+    if (m.replyToId === undefined) return "";
+    if (m.replyToId !== m.id && messages.some(x => x.id === m.replyToId)) return ` (replying to [id=${enc(m.replyToId)}])`;
+    if (m.replyTo !== undefined) return ` (replying to ${enc(m.replyTo.author)}: ${enc(m.replyTo.text)})`;
+    return " (replying to an earlier message that is not shown)";
 }
 
 /**

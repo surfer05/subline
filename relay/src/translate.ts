@@ -13,7 +13,21 @@
  * the system rules, or the key. That is what makes a keyless relay safe.
  */
 
-export interface Message { id: string; author?: string; text: string }
+/**
+ * One message to translate. `replyToId` is the message it answers (Discord's
+ * reply link), validated in index.ts normalizeBatch. `replyTo` is a short
+ * clipped copy of that parent, sent only when the parent is not itself in the
+ * batch (it sits in the context, or further back, or in another chunk), so the
+ * model can see what the reply answers. Both optional: an older client sends
+ * neither, and gets the prompt it always got.
+ */
+export interface Message {
+    id: string;
+    author?: string;
+    text: string;
+    replyToId?: string;
+    replyTo?: { author: string; text: string };
+}
 export interface BatchRequest {
     messages: Message[];
     context: { author: string; text: string }[];
@@ -129,6 +143,11 @@ export function buildPrompt(req: BatchRequest): string {
         + "are ordinary chat, not errors. Translate them as confidently as the standard form.",
         "- Leave usernames, game terms, and custom emote names untranslated.",
         "- Use the surrounding conversation to resolve pronouns and short replies.",
+        // R5 (field test 2026-10-08). One general principle, no word lists and
+        // no examples: those belong in the eval set, never in the prompt.
+        REPLY_READING_RULE,
+        // R3: the reply links written after each message below.
+        REPLY_LINK_RULE,
         "- Translate a repeated phrase the same way every time it appears.",
         "- Set lang to the BCP-47 code of the message's original language.",
         "- Return exactly one entry per message id given, and no other ids.",
@@ -150,11 +169,41 @@ export function buildPrompt(req: BatchRequest): string {
     }
     parts.push(
         "Messages to translate:",
-        ...req.messages.map(m => `[id=${enc(m.id)}] ${enc(m.author ?? "")}: ${enc(m.text)}`),
+        ...req.messages.map(m => `[id=${enc(m.id)}] ${enc(m.author ?? "")}: ${enc(m.text)}${replyNote(m, req.messages)}`),
         "",
         'Reply with JSON only: {"translations":[{"id":"<id>","lang":"<bcp47>","text":"<translation>","skip":false}]}'
     );
     return parts.join("\n");
+}
+
+/** R5: the one general rule for words with more than one reading. */
+export const REPLY_READING_RULE =
+    "- When a word or phrase has more than one reading, choose the reading that makes sense as a reply to the earlier messages. "
+    + "Casual and romanized text often uses small words that turn a sentence into a question, a joke or a \"not really\".";
+/** R3: what the "(replying to …)" note after a message means. */
+export const REPLY_LINK_RULE =
+    "- A message marked \"replying to\" answers that earlier message. Translate it as an answer to it.";
+
+/**
+ * The reply link written after a message's line, or "". Every untrusted part
+ * goes through enc(), like every other field, so a parent text that says
+ * "ignore previous instructions" stays a quoted string.
+ *   - the parent is in this request: named by its id;
+ *   - else a clipped copy of the parent was sent: quoted;
+ *   - else (deleted, never loaded): the model is told only that it is a reply.
+ */
+function replyNote(m: Message, messages: Message[]): string {
+    if (m.replyToId === undefined) return "";
+    if (m.replyToId !== m.id && messages.some(x => x.id === m.replyToId)) return ` (replying to [id=${enc(m.replyToId)}])`;
+    if (m.replyTo !== undefined) return ` (replying to ${enc(m.replyTo.author)}: ${enc(m.replyTo.text)})`;
+    return " (replying to an earlier message that is not shown)";
+}
+
+/** A reply parent's copy is cut to this many code points ("…" when cut). */
+export const REPLY_PARENT_CHARS = 200;
+export function clipParent(text: string): string {
+    const cps = Array.from(text);
+    return cps.length <= REPLY_PARENT_CHARS ? text : cps.slice(0, REPLY_PARENT_CHARS).join("") + "…";
 }
 
 /** Unwrap a whole-string ```json fence, if present. */
@@ -611,7 +660,19 @@ export function chunkBatch(req: BatchRequest): BatchRequest[] {
         chars += m.text.length;
     }
     groups.push(cur);
-    return groups.map(messages => ({ ...req, messages }));
+    // A reply whose parent landed in ANOTHER chunk would lose its link: that
+    // chunk's prompt cannot name an id it does not contain. It gets a clipped
+    // copy of the parent instead (unless the client already sent one).
+    const byId = new Map(req.messages.map(m => [m.id, m] as const));
+    return groups.map(messages => ({
+        ...req,
+        messages: messages.map(m => {
+            if (m.replyToId === undefined || m.replyTo !== undefined) return m;
+            if (messages.some(x => x.id === m.replyToId)) return m;
+            const parent = byId.get(m.replyToId);
+            return parent === undefined ? m : { ...m, replyTo: { author: parent.author ?? "", text: clipParent(parent.text) } };
+        })
+    }));
 }
 
 /**

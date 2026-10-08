@@ -23,7 +23,7 @@ import {
     isTasteBearer, isNewClient, resolveFreePlan, startTrial, tasteRecord, freezeAtFor,
     type Env, type CodeRecord, type FreePlan
 } from "./codes";
-import { translateBatch, toPreview, type BatchRequest, type FallbackError, type Provider, type Result } from "./translate";
+import { translateBatch, toPreview, clipParent, type BatchRequest, type FallbackError, type Provider, type Result } from "./translate";
 import { record, type Outcome } from "./metrics";
 import { installOf, isApiV2, legacyFreeAllowed, PREVIEW_DAILY_CAP, resolveEntitlement } from "./entitle";
 import { adminReissue, adminResetInstalls, createPromo, handleRedeem, handleStatusV2, promoStats } from "./v2";
@@ -51,6 +51,10 @@ const MAX_AUTHOR_CHARS = 100;
 /** Context characters in all; the oldest lines go first past this. */
 const MAX_CONTEXT_CHARS = 6_000;
 const MAX_TARGET_CHARS = 40; // a language name; anything longer is an injection payload
+/** A reply link's id: a Discord snowflake, or any short plain id a test uses. */
+const REPLY_ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
+/** Characters of reply-parent copies (text + author) in one batch. */
+export const MAX_REPLY_PARENT_TOTAL = 2_000;
 /** The whole upstream budget of one request. A long batch is split into
  *  chunks that run at once (translate.ts translateBatch); each chunk's primary
  *  gets primaryTimeoutFor(chunk) of this (9 to 20 s), its fallback the rest (6
@@ -172,11 +176,27 @@ export function normalizeBatch(v: unknown): NormalizedBatch | null {
     if (b.messages.length === 0 || b.messages.length > MAX_MESSAGES) return null;
     const messages: BatchRequest["messages"] = [];
     const tooLong: string[] = [];
+    // R3: reply links. Never a reason to refuse: a malformed link is dropped
+    // and the message is translated without it. The id must look like an id
+    // and not point at the message itself; the parent copy is clipped, and
+    // past MAX_REPLY_PARENT_TOTAL characters in all, later copies are dropped
+    // (the link by id, when the parent is in the batch, still stands).
+    let parentChars = 0;
     for (const m of b.messages) {
         if (!m || typeof m.id !== "string" || typeof m.text !== "string") return null;
         if (m.author !== undefined && typeof m.author !== "string") return null;
         if (m.text.length > MAX_TEXT_CHARS) { tooLong.push(m.id); continue; }
-        messages.push({ id: m.id, text: m.text, ...(m.author !== undefined ? { author: clip(m.author, MAX_AUTHOR_CHARS) } : {}) });
+        const out: BatchRequest["messages"][number] = { id: m.id, text: m.text, ...(m.author !== undefined ? { author: clip(m.author, MAX_AUTHOR_CHARS) } : {}) };
+        messages.push(out);
+        if (typeof m.replyToId !== "string" || !REPLY_ID_RE.test(m.replyToId) || m.replyToId === m.id) continue;
+        out.replyToId = m.replyToId;
+        const p = m.replyTo;
+        if (!p || typeof p !== "object" || typeof p.text !== "string" || p.text.trim() === "") continue;
+        const text = clipParent(p.text);
+        const author = typeof p.author === "string" ? clip(p.author, MAX_AUTHOR_CHARS) : "";
+        if (parentChars + text.length + author.length > MAX_REPLY_PARENT_TOTAL) continue;
+        parentChars += text.length + author.length;
+        out.replyTo = { author, text };
     }
     for (const c of b.context) {
         if (!c || typeof c.text !== "string" || typeof c.author !== "string") return null;
@@ -281,7 +301,8 @@ async function serveBatch(
     }
     const promptChars =
         batch.context.reduce((n, c) => n + c.text.length + c.author.length, 0) +
-        batch.messages.reduce((n, m) => n + m.text.length + (m.author?.length ?? 0), 0) +
+        batch.messages.reduce((n, m) => n + m.text.length + (m.author?.length ?? 0)
+            + (m.replyTo ? m.replyTo.text.length + m.replyTo.author.length : 0), 0) +
         batch.targetLang.length;
     // Two units: `cost` is the per-bearer daily count the client sees
     // (messages only for taste/trial, one per ordinary message for a code),

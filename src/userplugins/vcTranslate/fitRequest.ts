@@ -13,6 +13,31 @@ import type { BatchRequest } from "./types";
 /** A context text is only there to disambiguate. Its first part does that. */
 export const CONTEXT_TEXT_MAX = 600;
 
+/**
+ * A reply's parent copy (R3) is cut to this many code points, "…" when cut.
+ * Same as the relay's REPLY_PARENT_CHARS, which clips again on its side.
+ */
+export const REPLY_PARENT_MAX = 200;
+
+export function clipParentText(text: string): string {
+    const points = Array.from(text);
+    return points.length <= REPLY_PARENT_MAX ? text : points.slice(0, REPLY_PARENT_MAX).join("") + "…";
+}
+
+/**
+ * After a split: a reply whose parent went to ANOTHER part would lose its
+ * link (the batcher dropped the parent's copy because the parent was in the
+ * batch). Give it a clipped copy of the parent instead.
+ */
+function withParentCopies(part: BatchRequest["messages"], all: BatchRequest["messages"]): BatchRequest["messages"] {
+    return part.map(m => {
+        if (m.replyToId === undefined || m.replyTo !== undefined) return m;
+        if (part.some(x => x.id === m.replyToId)) return m;
+        const parent = all.find(x => x.id === m.replyToId);
+        return parent === undefined ? m : { ...m, replyTo: { author: parent.author, text: clipParentText(parent.text) } };
+    });
+}
+
 /** Under the relay's 32,768-byte limit, with room for headers and the wrapper. */
 export const MAX_REQUEST_BYTES = 30_000;
 
@@ -63,7 +88,7 @@ export function fitLlmRequest(req: BatchRequest, budget: number = MAX_REQUEST_BY
         }
     }
     if (current.length > 0) parts.push(current);
-    return parts.map(messages => dropContextToFit({ ...capped, messages }, budget));
+    return parts.map(messages => dropContextToFit({ ...capped, messages: withParentCopies(messages, capped.messages) }, budget));
 }
 
 /**
@@ -76,8 +101,8 @@ export function shrinkAfterRefusal(req: BatchRequest): BatchRequest[] {
     if (req.messages.length > 1) {
         const mid = Math.ceil(req.messages.length / 2);
         return [
-            { ...req, messages: req.messages.slice(0, mid) },
-            { ...req, messages: req.messages.slice(mid) }
+            { ...req, messages: withParentCopies(req.messages.slice(0, mid), req.messages) },
+            { ...req, messages: withParentCopies(req.messages.slice(mid), req.messages) }
         ];
     }
     if (req.context.length > 0) return [{ ...req, context: [] }];

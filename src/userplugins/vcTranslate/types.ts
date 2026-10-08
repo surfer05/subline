@@ -101,6 +101,13 @@ export interface PendingMessage {
      * language for texts too short to detect on their own — see `sourceLang`.
      */
     replyToId?: string;
+    /**
+     * A short clipped copy of the parent (see REPLY_PARENT_MAX in index.tsx),
+     * when Discord has it. Sent to the ✦ tier so the model can read a reply
+     * against what it answers even when the parent is outside the context
+     * ring. The batcher drops it when the parent is in the same batch.
+     */
+    replyTo?: { author: string; text: string };
 }
 
 export interface BatchRequest {
@@ -124,6 +131,8 @@ export interface BatchRequest {
         author: string;
         text: string;
         replyToId?: string;
+        /** The parent's clipped copy; see PendingMessage.replyTo. Google ignores it. */
+        replyTo?: { author: string; text: string };
         /**
          * Pins Google's `sl` instead of letting it auto-detect. Set only for
          * short texts whose reply-parent was itself detected confidently. The

@@ -35,7 +35,9 @@ const MODELS: Model[] = [
 // `expect` is the intended reading, for the human grader — the model never sees
 // it. `context` (optional) is prior lines the model may use but must not
 // translate. Target is the READER's language.
-interface Case { text: string; target: string; note: string; expect: string; author?: string; context?: { author: string; text: string }[] }
+// `replyTo` (optional) is the message this line replies to, sent the way the
+// plugin sends a reply whose parent is not in the batch.
+interface Case { text: string; target: string; note: string; expect: string; author?: string; context?: { author: string; text: string }[]; replyTo?: { author: string; text: string } }
 const DEFAULT_CASES: Case[] = [
     { text: "arey uske room se tomar ke PG aa gaya shaam ko", target: "English", author: "rahul",
       note: "Romanised Hindi. 'arey' = filler 'dude', not a name; 'PG' = a paying-guest lodging.",
@@ -80,6 +82,36 @@ const DEFAULT_CASES: Case[] = [
     { text: "the meeting got pushed to tomorrow, kinda annoying ngl", target: "Hindi", author: "boss",
       note: "Reverse direction: English INTO Hindi. Should read like natural Hinglish chat, not stiff formal Hindi.",
       expect: "(natural Hindi, e.g.) yaar meeting kal pe shift ho gayi, thoda annoying hai ngl" },
+
+    // ---- Reading a short reply against the conversation (R5, field test 2026-10-08) ----
+    // The prompt carries ONE general rule for these; the words below must never
+    // be copied into it. Each line only makes sense against the line before it.
+    { text: "daaru thodi pi rha 😛", target: "English", author: "rahul",
+      note: "Field report. Replies to advice about coffee on an empty stomach; 'thodi' here turns it into 'not really' (it's not like I'm drinking alcohol). Literal 'having a little drink' is the bug.",
+      expect: "It's not like I'm drinking booze 😛",
+      context: [{ author: "sara", text: "coffee w no meals is prolly not a good idea" }],
+      replyTo: { author: "sara", text: "coffee w no meals is prolly not a good idea" } },
+    { text: "accha?? kab hua", target: "English", author: "neha",
+      note: "'accha' as surprise after big news, not agreement.",
+      expect: "Really?? When did that happen?",
+      context: [{ author: "rohan", text: "bro I finally got the offer letter" }] },
+    { text: "accha theek hai", target: "English", author: "neha",
+      note: "'accha' as 'I see / got it' after information, not surprise.",
+      expect: "Oh okay, got it.",
+      context: [{ author: "kabir", text: "class is cancelled today, the prof is sick" }] },
+    { text: "accha done", target: "English", author: "arjun",
+      note: "'accha' as agreement to a plan.",
+      expect: "Okay, deal.",
+      context: [{ author: "isha", text: "chal 8 baje cafe pe milte hain" }] },
+    { text: "haan haan bilkul 🙄", target: "English", author: "meera",
+      note: "Sarcastic 'haan' after an unlikely promise; the eye-roll confirms it. Not sincere agreement.",
+      expect: "Yeah right, sure you will 🙄",
+      context: [{ author: "dev", text: "I'll finish the whole project tonight, easy" }] },
+    { text: "main thodi na", target: "English", author: "aman",
+      note: "A denial in reply to an accusation ('it's not like it was me'), not 'me a little'.",
+      expect: "Wasn't me!",
+      context: [{ author: "priya", text: "kisne mera maggi khaya 😤" }],
+      replyTo: { author: "priya", text: "kisne mera maggi khaya 😤" } },
 ];
 
 // ---- Provider callers (mirror src/translate.ts) ---------------------------
@@ -176,7 +208,10 @@ async function main() {
         console.log(`  → target: ${c.target}${c.context ? `   (context: “${c.context.map(x => x.text).join(" / ")}”)` : ""}`);
         console.log(`  ⓘ ${c.note}`);
         console.log(`  ✓ expected: ${c.expect}`);
-        const req: BatchRequest = { messages: [{ id: "1", author: c.author ?? "user", text: c.text }], context: c.context ?? [], targetLang: c.target };
+        const req: BatchRequest = {
+            messages: [{ id: "1", author: c.author ?? "user", text: c.text, ...(c.replyTo ? { replyToId: "0", replyTo: c.replyTo } : {}) }],
+            context: c.context ?? [], targetLang: c.target
+        };
         const prompt = buildPrompt(req);
         for (const m of active) {
             const key = process.env[m.keyEnv]!;

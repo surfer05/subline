@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { normalizeBatch } from "../src/index";
-import { buildPrompt, forcedRule, type BatchRequest } from "../src/translate";
+import { buildPrompt, forcedRule, REPLY_LINK_RULE, REPLY_READING_RULE, type BatchRequest } from "../src/translate";
 
 /**
  * ⚡ for AI subscribers: a forced request translates every message, never
@@ -21,7 +21,11 @@ async function sha(s: string): Promise<string> {
 describe("the forced (⚡) prompt", () => {
     it("without force the prompt is byte-identical to the one before the flag existed", async () => {
         // Hash of buildPrompt(base) taken from the relay before this change.
-        expect(await sha(buildPrompt(base))).toBe("da915e64bd12bd633df76b8d8f261f75462c0caad6f63ffdcf52cd39de783075");
+        // R3/R5 (2026-10-08) added exactly two rule lines on purpose; with
+        // those two taken out, every other byte is still the old prompt.
+        const without = buildPrompt(base).split("\n").filter(l => l !== REPLY_READING_RULE && l !== REPLY_LINK_RULE).join("\n");
+        expect(buildPrompt(base).split("\n").length - without.split("\n").length).toBe(2);
+        expect(await sha(without)).toBe("da915e64bd12bd633df76b8d8f261f75462c0caad6f63ffdcf52cd39de783075");
         expect(buildPrompt(base)).toContain("Set skip to true");
     });
 
