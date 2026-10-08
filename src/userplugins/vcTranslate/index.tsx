@@ -1011,7 +1011,9 @@ function startCheckout(plan: Plan): void {
         } else if (result === "unavailable") {
             Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message: UPGRADE_COPY.checkoutUnavailable });
         } else if (result === "already_owned") {
-            Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message: UPGRADE_COPY.alreadyAutomatic });
+            // Nothing opened. AI owned means a second subscription was refused.
+            const message = plan === "automatic" ? UPGRADE_COPY.alreadyAutomatic : UPGRADE_COPY.alreadyAi;
+            Toasts.show({ id: Toasts.genId(), type: Toasts.Type.MESSAGE, message });
             void refreshEntitlement();
         } else if (result === "purchase_pending") {
             // Nothing opened: buying again would charge twice. The flow keeps

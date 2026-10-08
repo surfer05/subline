@@ -80,6 +80,8 @@ export const UPGRADE_COPY = {
     annualButton: `Yearly $19.99 · ${ANNUAL_NOTE}`,
     aiNeedsAutomatic: "AI needs Automatic first.",
     alreadyAutomatic: "You already have Automatic.",
+    /** Monthly or Yearly on an install that already has AI (relay 409 already_owned). */
+    alreadyAi: "You already have AI.",
     /** Buy or Add AI while a payment from this install is still being confirmed. */
     purchasePending: "Your payment is still being confirmed. It switches on by itself.",
     /** The relay answered that it cannot sell this right now (no product set up, or the shop is down). */

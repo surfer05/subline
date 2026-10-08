@@ -60,9 +60,38 @@ export const AUTOMATIC_PRODUCT_PLACEHOLDER = ["pdt", "AUTOMATIC", "PENDING"].joi
 export const CHECKOUT_TTL_S = 2 * 86_400;
 /** Same lifetime as the webhook pending rows: bridges out-of-order delivery. */
 export const INST_TTL_S = 3 * 86_400;
-/** A repeat click reopens the same checkout for this long (well under the
- *  session's own 24 h lifetime). */
+/**
+ * CHECKOUT-OPEN MARKER (no double pay before the first webhook).
+ *
+ * `cko:<hash>:<kind>` → JSON list of the newest CKO_MAX sessions this install
+ * opened for that kind ({s: session id, u: url, p: product, f: from, at: ms}).
+ * Written once per NEW session. It replaces the old `open:` row, so a
+ * checkout costs the same number of KV writes as before. Before any new
+ * session is made for that install and kind, the relay asks Dodo
+ * (GET /checkouts/{id}, docs.dodopayments.com/api-reference/checkout-sessions/
+ * get-checkouts: {id, created_at, payment_id?, payment_status?: IntentStatus})
+ * how each listed session stands:
+ *   • money moving or moved (succeeded, processing, 3DS, capture...) →
+ *     409 purchase_pending. Never sold twice, however old the session.
+ *   • no payment yet, or one that failed or was cancelled → no block. An
+ *     abandoned checkout therefore blocks NOTHING while Dodo answers.
+ *   • Dodo cannot be asked (network, 5xx, unknown status) → time-boxed:
+ *     refuse only while the session is younger than CKO_WINDOW_MS (30 min),
+ *     then let the buyer through (fail open after the window, so an outage
+ *     never locks a buyer out for long).
+ * The marker lives as long as a Dodo session can still be paid (24 h by
+ * default; kept 48 h like the checkout: rows). A payment.failed / cancelled
+ * webhook deletes it (linkFromLifecycle).
+ *
+ * WINDOW = 30 min: it covers a buyer still on the payment page, 3DS and a slow
+ * first webhook when Dodo's status call is down, and it caps how long a Dodo
+ * outage can block a later purchase. The same 30 min is how long a repeat
+ * click reopens the SAME unpaid session.
+ */
 export const OPEN_SESSION_TTL_S = 30 * 60;
+export const CKO_WINDOW_MS = OPEN_SESSION_TTL_S * 1000;
+export const CKO_TTL_S = 2 * 86_400;
+export const CKO_MAX = 3;
 /** Long enough for an install that was offline when the purchase landed. */
 export const PAID_TTL_S = 30 * 86_400;
 
@@ -171,6 +200,9 @@ async function handleCheckoutV2(req: Request, env: Env, now: number): Promise<Re
     const r = await resolveEntitlement(env, install, credential, now);
     if (!r.ok) return fail(r.error, r.status);
     if (plan === "automatic" && r.automatic) return fail("already_owned", 409);
+    // AI is per install (entitle.ts): this install already has it, so a
+    // second monthly or annual checkout would start a second subscription.
+    if (plan !== "automatic" && r.ai) return fail("already_owned", 409);
     if (plan !== "automatic" && !r.automatic) return fail("automatic_required", 403);
     // A purchase of this kind is already on its way for this install (a
     // payment or subscription event named it, see linkFromLifecycle) but has
@@ -185,7 +217,7 @@ async function handleCheckoutV2(req: Request, env: Env, now: number): Promise<Re
     }
     // The installer asks to come back to a "go back to the installer" page.
     const from = body?.return === "installer" ? "installer" : "discord";
-    return createSession(env, r.hash, productId, now, req.headers.get("cf-connecting-ip"), from);
+    return createSession(env, r.hash, productId, now, req.headers.get("cf-connecting-ip"), from, kind);
 }
 
 /**
@@ -193,17 +225,31 @@ async function handleCheckoutV2(req: Request, env: Env, now: number): Promise<Re
  * Shared by the legacy and the v2 checkout.
  */
 async function createSession(
-    env: Env, hash: string, productId: string, now: number, ip: string | null, from: "discord" | "installer" = "discord"
+    env: Env, hash: string, productId: string, now: number, ip: string | null,
+    from: "discord" | "installer" = "discord", kind: PurchaseKind = "ai"
 ): Promise<Response> {
-    // A second click within OPEN_SESSION_TTL_S reopens the SAME checkout, so a
-    // buyer who clicks again while the first one is still loading, or comes
-    // back to it, cannot end up holding two payable sessions.
-    const openKey = `open:${hash}:${productId}:${from}`;
+    // The sessions this install already opened for this kind (see CKO_WINDOW_MS).
+    // FAIL CLOSED on a KV read error: without the list, a paid but unconfirmed
+    // session could be sold again, and the rate counter below needs KV anyway.
+    const ckoKey = checkoutOpenKey(hash, kind);
+    let open: OpenSession[];
     try {
-        const open = await env.CODES.get(openKey);
-        if (open && /^https:\/\//.test(open)) return json({ ok: true, url: open });
+        open = parseOpen(await env.CODES.get(ckoKey));
     } catch (e) {
-        console.warn("checkout: open session lookup failed, continuing", { error: cause(e) });
+        console.warn("checkout: open session lookup failed, refusing", { error: cause(e) });
+        return fail("checkout unavailable", 503);
+    }
+    for (const o of open) {
+        const st = await sessionState(env, o.s);
+        const young = now - o.at < CKO_WINDOW_MS;
+        if (st === "paying") return fail("purchase_pending", 409);
+        if (st === "unknown" && young) {
+            console.warn("checkout: session status unknown inside the window, refusing", { session: o.s });
+            return fail("purchase_pending", 409);
+        }
+        // A second click while the same unpaid checkout is fresh reopens it,
+        // so the buyer never holds two payable sessions for the same thing.
+        if (st === "open" && young && o.p === productId && o.f === from) return json({ ok: true, url: o.u });
     }
     const hour = Math.floor(now / HOUR_MS);
     try {
@@ -257,12 +303,86 @@ async function createSession(
             console.warn("checkout: session row write failed", { error: cause(e) });
         }
     }
-    try {
-        await env.CODES.put(openKey, url, { expirationTtl: OPEN_SESSION_TTL_S });
-    } catch (e) {
-        console.warn("checkout: open session row write failed", { error: cause(e) });
+    if (sessionId) {
+        // FAIL OPEN on this write: the buyer already holds a valid session,
+        // and the buying: row from the first webhook still guards a repeat.
+        const next = [{ s: sessionId, u: url, p: productId, f: from, at: now }, ...open].slice(0, CKO_MAX);
+        try {
+            await env.CODES.put(ckoKey, JSON.stringify(next), { expirationTtl: CKO_TTL_S });
+        } catch (e) {
+            console.warn("checkout: open session row write failed", { error: cause(e) });
+        }
     }
     return json({ ok: true, url });
+}
+
+/** `cko:<hash>:<kind>`: the checkout sessions recently opened (see CKO_WINDOW_MS). */
+export function checkoutOpenKey(hash: string, kind: PurchaseKind): string {
+    return `cko:${hash}:${kind}`;
+}
+
+interface OpenSession { s: string; u: string; p: string; f: string; at: number }
+
+function parseOpen(raw: string | null): OpenSession[] {
+    if (!raw) return [];
+    let v: unknown;
+    try { v = JSON.parse(raw); } catch { return []; }
+    if (!Array.isArray(v)) return [];
+    return v.filter((o: any): o is OpenSession =>
+        !!o && typeof o.s === "string" && o.s !== "" && typeof o.u === "string" && /^https:\/\//.test(o.u)
+        && typeof o.p === "string" && typeof o.f === "string" && typeof o.at === "number"
+    ).slice(0, CKO_MAX);
+}
+
+/** IntentStatus values that mean money is moving or has moved: never sell again. */
+const PAYING = new Set([
+    "succeeded", "processing", "requires_customer_action", "requires_merchant_action",
+    "requires_capture", "partially_captured", "partially_captured_and_capturable"
+]);
+/** A payment not yet made: the session is still open and does not block. */
+const NOT_PAYING = new Set(["requires_payment_method", "requires_confirmation"]);
+/** A payment that is over without money: does not block. */
+const ENDED = new Set(["failed", "cancelled"]);
+
+/**
+ * How a checkout session stands, from Dodo's GET /checkouts/{id}:
+ * "paying" (block), "open" (no payment yet: reusable), "ended" (failed,
+ * cancelled, or 404: the session is gone and cannot be paid), or "unknown"
+ * (Dodo unreachable, refused, or a status this code does not know; the caller
+ * time-boxes it). Never throws; never logs the API key.
+ */
+async function sessionState(env: Env, sessionId: string): Promise<"paying" | "open" | "ended" | "unknown"> {
+    let res: Response;
+    try {
+        res = await fetch(`${apiBase(env)}/checkouts/${encodeURIComponent(sessionId)}`, {
+            method: "GET",
+            headers: { authorization: `Bearer ${env.DODO_API_KEY}` }
+        });
+    } catch (e) {
+        console.warn("checkout: dodo session status request failed", { error: cause(e) });
+        return "unknown";
+    }
+    if (res.status === 404) return "ended";
+    const text = await res.text().catch(() => "");
+    if (!res.ok) {
+        console.warn("checkout: dodo session status refused", { status: res.status, body: text.slice(0, 200) });
+        return "unknown";
+    }
+    let out: any;
+    try { out = JSON.parse(text); } catch { out = undefined; }
+    if (!out || typeof out !== "object") {
+        console.warn("checkout: dodo session status unreadable", { status: res.status });
+        return "unknown";
+    }
+    const st = out.payment_status;
+    if (st === null || st === undefined) return "open";
+    if (typeof st === "string") {
+        if (PAYING.has(st)) return "paying";
+        if (NOT_PAYING.has(st)) return "open";
+        if (ENDED.has(st)) return "ended";
+    }
+    console.warn("checkout: dodo session status not known", { status: String(st).slice(0, 40) });
+    return "unknown";
 }
 
 /* --------------------------------------------------------------- linking -- */
@@ -326,8 +446,11 @@ export async function linkFromLifecycle(env: Env, name: string, data: any): Prom
         const { kind, plan } = purchaseKind(env, name, data);
         const subId = typeof data?.subscription_id === "string" ? data.subscription_id : "";
         const lapsed = SUB_DUNNING_EVENTS.has(name) && subId !== "" && (await env.CODES.get(`order:${subId}`)) !== null;
-        if (PURCHASE_ENDED.has(name) || lapsed) await env.CODES.delete(buyingKey(hash, kind));
-        else await env.CODES.put(buyingKey(hash, kind), JSON.stringify({ plan, at: Date.now() }), { expirationTtl: INST_TTL_S });
+        if (PURCHASE_ENDED.has(name) || lapsed) {
+            await env.CODES.delete(buyingKey(hash, kind));
+            // The attempt is over: its checkout-open row must not hold a retry.
+            if (PURCHASE_ENDED.has(name)) await env.CODES.delete(checkoutOpenKey(hash, kind));
+        } else await env.CODES.put(buyingKey(hash, kind), JSON.stringify({ plan, at: Date.now() }), { expirationTtl: INST_TTL_S });
         const ids = [data?.payment_id, data?.subscription_id]
             .filter((x: unknown): x is string => typeof x === "string" && x !== "");
         for (const id of ids) await env.CODES.put(`inst:${id}`, hash, { expirationTtl: INST_TTL_S });

@@ -622,6 +622,20 @@ describe("an Automatic owner", () => {
         expect(shownToasts.map(t => t.message)).toContain("AI needs Automatic first.");
     });
 
+    it("Add AI when the relay says AI is already owned (409 already_owned): opens nothing, says so, asks again", async () => {
+        await startAutomatic({ automatic: true, code: "slp_auto" });
+        native.relayCheckout.mockResolvedValue({ ok: false, error: "relay checkout: HTTP 409", errorCode: "already_owned", status: 409 });
+        const asked = native.relayStatus.mock.calls.length;
+        const { openUpgrade } = await import("../upgradeBridge");
+        openUpgrade();
+        lastModal().el.props.actions[0].onClick();
+        await vi.waitFor(() => expect(native.relayStatus.mock.calls.length).toBe(asked + 1));
+        expect(native.relayCheckout.mock.calls[0]![1]).toBe("monthly");
+        expect(native.openExternal).not.toHaveBeenCalled();
+        expect(shownToasts.map(t => t.message)).toContain("You already have AI.");
+        expect(shownToasts.map(t => t.message)).not.toContain("You already have Automatic.");
+    });
+
     it("says under the AI plans that a coupon goes on the Monthly payment page", async () => {
         const { UpgradePanelBody } = await import("../upgradePanel");
         const text = (n: any): string => typeof n === "string" ? n

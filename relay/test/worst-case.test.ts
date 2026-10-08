@@ -715,3 +715,208 @@ describe("18. a lapsed subscriber is not told their payment is still being confi
         expect(res.status).toBe(200);
     });
 });
+
+// ---------------------------------------------------------------------------
+describe("19. AI is never sold twice, and no checkout is paid twice before the first webhook", () => {
+    const checkout = (e: Env, plan: string, bearer = "KEY-AUTO") => worker.fetch(new Request("https://relay/v1/checkout", {
+        method: "POST", headers: v2Headers(A, bearer), body: JSON.stringify({ plan })
+    }), e, ctx);
+    /** Dodo: POST /checkouts makes cks_<n>; GET /checkouts/<id> answers from `state`
+     *  (a payment_status, "404", or "down" to throw). */
+    const dodo = (state: Record<string, string | null> = {}) => {
+        let n = 0;
+        const posts: string[] = [], gets: string[] = [];
+        vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+            const u = String(url);
+            if (init?.method === "GET") {
+                const id = u.split("/").pop()!;
+                gets.push(id);
+                const st = id in state ? state[id] : null;
+                if (st === "down") throw new Error("network down");
+                if (st === "404") return new Response(JSON.stringify({ code: "NOT_FOUND" }), { status: 404 });
+                return new Response(JSON.stringify({ id, created_at: new Date().toISOString(), payment_status: st }), { status: 200 });
+            }
+            n++;
+            posts.push(u);
+            return new Response(JSON.stringify({ session_id: "cks_" + n, checkout_url: "https://checkout.dodopayments.com/session/cks_" + n }), { status: 200 });
+        }));
+        return { posts, gets, state };
+    };
+    const owner = async (withAi: boolean) => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(T0);
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const kv = fakeKV() as any;
+        const e = env(kv);
+        await buy(e, A, "KEY-AUTO", "pdt_auto", "pay_a", undefined, T0);
+        await status(e, A, "KEY-AUTO");
+        if (withAi) await buy(e, A, "KEY-AI", "pdt_month", "pay_m", "sub_m", T0);
+        expect((await status(e, A, "KEY-AUTO")).body).toMatchObject({ automatic: true, ai: withAi });
+        return { kv, e };
+    };
+
+    it("AI active + monthly → 409 already_owned, Dodo never asked", async () => {
+        const { e } = await owner(true);
+        const d = dodo();
+        const res = await checkout(e, "monthly");
+        expect(res.status).toBe(409);
+        expect(await res.json()).toEqual({ ok: false, error: "already_owned" });
+        expect(d.posts).toHaveLength(0);
+    });
+
+    it("AI active + annual → 409 already_owned, with either saved code", async () => {
+        const { e } = await owner(true);
+        const d = dodo();
+        for (const bearer of ["KEY-AUTO", "KEY-AI"]) {
+            const res = await checkout(e, "annual", bearer);
+            expect(res.status).toBe(409);
+            expect((await res.json() as any).error).toBe("already_owned");
+        }
+        expect(d.posts).toHaveLength(0);
+    });
+
+    it("Automatic owned + Automatic → 409 already_owned", async () => {
+        const { e } = await owner(false);
+        const d = dodo();
+        const res = await checkout(e, "automatic");
+        expect(res.status).toBe(409);
+        expect((await res.json() as any).error).toBe("already_owned");
+        expect(d.posts).toHaveLength(0);
+    });
+
+    it("two checkouts 1 s apart, the first already paid (no webhook yet) → the second is 409 purchase_pending", async () => {
+        const { e } = await owner(false);
+        const d = dodo();
+        expect((await checkout(e, "monthly")).status).toBe(200);
+        d.state.cks_1 = "succeeded";
+        vi.setSystemTime(T0 + 1000);
+        for (const plan of ["monthly", "annual"]) {
+            const res = await checkout(e, plan);
+            expect(res.status).toBe(409);
+            expect((await res.json() as any).error).toBe("purchase_pending");
+        }
+        expect(d.posts).toHaveLength(1);
+    });
+
+    it("money still moving (processing, 3DS) blocks even after the window", async () => {
+        const { e } = await owner(false);
+        const d = dodo();
+        expect((await checkout(e, "automatic", A)).status).toBe(409); // owned: control
+        expect((await checkout(e, "annual")).status).toBe(200);
+        for (const st of ["processing", "requires_customer_action", "requires_capture"]) {
+            d.state.cks_1 = st;
+            vi.setSystemTime(T0 + 5 * 3_600_000);
+            const res = await checkout(e, "monthly");
+            expect(res.status).toBe(409);
+            expect((await res.json() as any).error).toBe("purchase_pending");
+        }
+        expect(d.posts).toHaveLength(1);
+    });
+
+    it("two clicks 1 s apart on an unpaid checkout reopen the same session; another plan is allowed", async () => {
+        const { e } = await owner(false);
+        const d = dodo();
+        const a = await (await checkout(e, "monthly")).json() as any;
+        vi.setSystemTime(T0 + 1000);
+        const b = await (await checkout(e, "monthly")).json() as any;
+        expect(b.url).toBe(a.url);
+        expect(d.posts).toHaveLength(1);
+        const c = await checkout(e, "annual");
+        expect(c.status).toBe(200);
+        expect(d.posts).toHaveLength(2);
+    });
+
+    it("abandoned checkout, retried after the window → a new checkout opens", async () => {
+        const { e } = await owner(false);
+        const d = dodo();
+        const a = await (await checkout(e, "monthly")).json() as any;
+        vi.setSystemTime(T0 + 31 * 60_000);
+        const res = await checkout(e, "monthly");
+        expect(res.status).toBe(200);
+        expect((await res.json() as any).url).not.toBe(a.url);
+        expect(d.posts).toHaveLength(2);
+    });
+
+    it("Dodo cannot be asked: refused inside the 30-min window, allowed after it", async () => {
+        const { e } = await owner(false);
+        const d = dodo();
+        expect((await checkout(e, "monthly")).status).toBe(200);
+        d.state.cks_1 = "down";
+        vi.setSystemTime(T0 + 10 * 60_000);
+        const inside = await checkout(e, "annual");
+        expect(inside.status).toBe(409);
+        expect((await inside.json() as any).error).toBe("purchase_pending");
+        vi.setSystemTime(T0 + 30 * 60_000 + 1);
+        expect((await checkout(e, "annual")).status).toBe(200);
+        expect(d.posts).toHaveLength(2);
+    });
+
+    it("a session Dodo no longer knows (404) or a failed payment does not block", async () => {
+        const { e } = await owner(false);
+        const d = dodo();
+        expect((await checkout(e, "monthly")).status).toBe(200);
+        d.state.cks_1 = "failed";
+        vi.setSystemTime(T0 + 1000);
+        expect((await checkout(e, "monthly")).status).toBe(200);
+        d.state.cks_1 = "404"; d.state.cks_2 = "cancelled";
+        expect((await checkout(e, "monthly")).status).toBe(200);
+        expect(d.posts).toHaveLength(3);
+    });
+
+    it("webhook arrives after the marker → purchase_pending, then already_owned once it is live", async () => {
+        const { e } = await owner(false);
+        const d = dodo();
+        expect((await checkout(e, "monthly")).status).toBe(200);
+        const hash = await installHash(A);
+        await applyMorEvent(e, { type: "payment.succeeded", data: { payment_id: "pay_n", subscription_id: "sub_n", checkout_session_id: "cks_1", product_id: "pdt_month", metadata: { install: hash } } }, T0);
+        const res = await checkout(e, "annual");
+        expect(res.status).toBe(409);
+        expect((await res.json() as any).error).toBe("purchase_pending");
+        await applyMorEvent(e, { type: "license_key.created", data: { key: "KEY-AI-2", product_id: "pdt_month", payment_id: "pay_n", subscription_id: "sub_n" } }, T0);
+        await applyMorEvent(e, { type: "subscription.active", data: { subscription_id: "sub_n", next_billing_date: new Date(T0 + 30 * DAY).toISOString() } }, T0);
+        expect((await status(e, A, "KEY-AUTO")).body).toMatchObject({ ai: true });
+        const again = await checkout(e, "monthly");
+        expect(again.status).toBe(409);
+        expect((await again.json() as any).error).toBe("already_owned");
+        expect(d.posts).toHaveLength(1);
+    });
+
+    it("marker present but the payment failed: payment.failed clears it, so a retry opens even with Dodo down", async () => {
+        const { kv, e } = await owner(false);
+        const d = dodo();
+        expect((await checkout(e, "monthly")).status).toBe(200);
+        const hash = await installHash(A);
+        expect(kv._dump()[`cko:${hash}:ai`]).toBeDefined();
+        await applyMorEvent(e, { type: "payment.failed", data: { payment_id: "pay_f", subscription_id: "sub_f", checkout_session_id: "cks_1", product_id: "pdt_month", metadata: { install: hash } } }, T0);
+        expect(kv._dump()[`cko:${hash}:ai`]).toBeUndefined();
+        d.state.cks_1 = "down";
+        vi.setSystemTime(T0 + 60_000);
+        expect((await checkout(e, "monthly")).status).toBe(200);
+        expect(d.posts).toHaveLength(2);
+    });
+
+    it("KV read failure on the marker → 503, no checkout made (fail closed)", async () => {
+        const { kv, e } = await owner(false);
+        const d = dodo();
+        const get = kv.get;
+        kv.get = async (k: string, ...rest: any[]) => { if (k.startsWith("cko:")) throw new Error("KV get failed"); return get(k, ...rest); };
+        const res = await checkout(e, "monthly");
+        expect(res.status).toBe(503);
+        expect((await res.json() as any).error).toBe("checkout unavailable");
+        expect(d.posts).toHaveLength(0);
+    });
+
+    it("one KV write per new checkout for the marker, none on a reopen", async () => {
+        const { kv, e } = await owner(false);
+        dodo();
+        const put = kv.put;
+        const keys: string[] = [];
+        kv.put = async (k: string, v: string, o?: any) => { keys.push(k); return put(k, v, o); };
+        await checkout(e, "monthly");
+        expect(keys.filter(k => k.startsWith("cko:"))).toHaveLength(1);
+        expect(keys.some(k => k.startsWith("open:"))).toBe(false);
+        keys.length = 0;
+        await checkout(e, "monthly");
+        expect(keys.filter(k => k.startsWith("cko:") || k.startsWith("checkout:"))).toHaveLength(0);
+    });
+});

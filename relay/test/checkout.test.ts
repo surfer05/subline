@@ -154,8 +154,8 @@ describe("POST /v1/checkout", () => {
         const a: any = await (await worker.fetch(checkoutReq("monthly", FREE), env(kv), ctx)).json();
         const b: any = await (await worker.fetch(checkoutReq("monthly", FREE), env(kv), ctx)).json();
         expect(b.url).toBe(a.url);
-        expect(calls).toHaveLength(1);
-        expect(kv._opts(Object.keys(kv._dump()).find(k => k.startsWith("open:"))!)).toEqual({ expirationTtl: 30 * 60 });
+        expect(calls.filter(c => c.init?.method === "POST")).toHaveLength(1);
+        expect(kv._opts(Object.keys(kv._dump()).find(k => k.startsWith("cko:"))!)).toEqual({ expirationTtl: 2 * 86_400 });
         // Another plan is its own checkout.
         const c: any = await (await worker.fetch(checkoutReq("annual", FREE), env(kv), ctx)).json();
         expect(c.url).not.toBe(a.url);
@@ -163,8 +163,8 @@ describe("POST /v1/checkout", () => {
 
     it("limits one install to 6 new sessions an hour", async () => {
         const kv = fakeKV();
-        // Each open checkout expires (as after 30 minutes), so every click asks Dodo.
-        const expire = () => { for (const k of Object.keys(kv._dump())) if (k.startsWith("open:")) void kv.delete(k); };
+        // Each open checkout is gone (as after a failed payment), so every click asks Dodo.
+        const expire = () => { for (const k of Object.keys(kv._dump())) if (k.startsWith("cko:")) void kv.delete(k); };
         for (let i = 0; i < 6; i++) { expect((await worker.fetch(checkoutReq("monthly", FREE), env(kv), ctx)).status).toBe(200); expire(); }
         const res = await worker.fetch(checkoutReq("monthly", FREE), env(kv), ctx);
         expect(res.status).toBe(429);
