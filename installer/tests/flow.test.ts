@@ -2665,3 +2665,20 @@ describe("audit: repairable states are repaired, not reported", () => {
         expect(h.patchCalls.length).toBeGreaterThan(0);
     });
 });
+
+// Audit #49: the helper's first run must already know the Discord is ours.
+describe("the helper's memory is seeded before the helper is registered", () => {
+    it("rememberPatchedInstall gets the patch's Discord version and build, before installHelper", async () => {
+        const h = harness();
+        const order: string[] = [];
+        let seen: { discordVersion: string | null; buildId: string } | undefined;
+        h.ports.rememberPatchedInstall = (_install, patched) => { order.push("remember"); seen = patched; };
+        const realInstall = h.ports.installHelper;
+        h.ports.installHelper = async () => { order.push("installHelper"); return realInstall(); };
+        await toDetection(h);
+        await setLanguage(h.flow, "tr");
+        expect(order.indexOf("remember")).toBeGreaterThanOrEqual(0);
+        expect(order.indexOf("remember")).toBeLessThan(order.indexOf("installHelper"));
+        expect(seen?.buildId).toBe(BUILD_ID);
+    });
+});

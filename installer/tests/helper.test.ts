@@ -12,7 +12,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -1645,6 +1645,10 @@ describe("audit: the helper never abandons, never nags for nothing, and never un
             await harness.run();
             harness.discordOpen = true;
             const asar = readFileSync(harness.fixture.install.asarPath);
+            // The same file, not a rewrite with equal bytes: a full patch renames
+            // a new file over app.asar (a new inode), which Windows refuses
+            // while Discord runs.
+            const inode = statSync(harness.fixture.install.asarPath).ino;
             harness.shipped.rebuild({ buildId: "77aa77aa77aa77aa" });
             expect(installModBundle({ sourceDir: harness.shipped.dir, destDir: harness.runtimeDir }).ok).toBe(true);
 
@@ -1657,6 +1661,7 @@ describe("audit: the helper never abandons, never nags for nothing, and never un
                 harness.advance(5 * 60_000);
             }
             expect(readFileSync(harness.fixture.install.asarPath).equals(asar)).toBe(true);
+            expect(statSync(harness.fixture.install.asarPath).ino).toBe(inode);
             expect(harness.notifications.filter(n => n.code === "quit-required")).toEqual([]);
             const restart = harness.notifications.filter(n => n.code === "restart-required");
             expect(restart).toHaveLength(1);

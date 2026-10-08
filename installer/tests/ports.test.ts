@@ -445,6 +445,20 @@ describe("worst cases in the real ports", () => {
         expect(p.isOtherAccountLoader?.(join(home, "Library", "Application Support", "Subline", "mod", "patcher.js"))).toBe(false);
     });
 
+    // Audit #49: the helper's memory is seeded with the install, merged.
+    it("seeds the helper's memory beside the record, keeping what is already there, and lifts a release", () => {
+        const p = ports();
+        const productDir = join(home, "Library", "Application Support", "Subline");
+        mkdirSync(productDir, { recursive: true });
+        writeFileSync(join(productDir, "helper-state.json"), JSON.stringify({ format: 1, lastRunAt: 42, installs: { other: { discordVersion: "1", buildId: "b", patchedAt: 1, failures: 3 } }, released: [discord.install.stableId] }), "utf8");
+        p.rememberPatchedInstall?.(discord.install, { discordVersion: "0.0.406", buildId: "abcdabcdabcdabcd" });
+        const state = JSON.parse(readFileSync(join(productDir, "helper-state.json"), "utf8")) as { lastRunAt: number; installs: Record<string, { buildId: string; failures: number }>; released: string[] };
+        expect(state.lastRunAt).toBe(42);
+        expect(state.installs.other?.failures).toBe(3);
+        expect(state.installs[discord.install.stableId]?.buildId).toBe("abcdabcdabcdabcd");
+        expect(state.released).toEqual([]);
+    });
+
     it("macOS process list for the helper is this user's only", async () => {
         const seen: string[][] = [];
         await listProcesses("darwin", async (_file, args) => { seen.push(args); return { stdout: "" }; }, undefined, 501);
