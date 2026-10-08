@@ -40,13 +40,14 @@ import type { RunningProcess } from "../app/discordProcess.js";
 import { installModBundle, shippedModDirFor } from "../app/modInstall.js";
 import { rememberPatchedInstall } from "../app/patchedInstalls.js";
 import { hiddenExec } from "../patcher/exec.js";
+import type { Exec } from "../patcher/exec.js";
 import { isOtherAccountLoader } from "../patcher/ownership.js";
 import { inspectModBundle } from "../bundle/bundle.js";
 import {
-    HELPER_LABEL, helperLaunchAgentSpec, installLaunchAgent, launchAgentPlistPath, readLaunchAgentPlist,
-    removeLaunchAgent, renderLaunchAgentPlist
+    HELPER_LABEL, helperLaunchAgentSpec, installLaunchAgent, launchAgentPlistPath, parseHdiutilMountPoints,
+    readLaunchAgentPlist, removeLaunchAgent, renderLaunchAgentPlist, temporaryAppLocation
 } from "../helper/launchAgent.js";
-import type { LaunchctlPort } from "../helper/launchAgent.js";
+import type { AppLocationVerdict, DiskImageMounts, LaunchctlPort } from "../helper/launchAgent.js";
 import {
     HELPER_TASK_NAME, helperScheduledTaskSpec, installScheduledTask, isoDuration, removeScheduledTask,
     WINDOWS_INTERVAL_SECONDS
@@ -83,6 +84,11 @@ export interface RealPortsOptions {
     exec?: (file: string, args: string[]) => Promise<{ stdout: string }>;
     /** Injected by tests so no request reaches the real relay. Defaults to the live relay over fetch. */
     relay?: ActivationRelay;
+    /**
+     * macOS: Electron's app.moveToApplicationsFolder(). True when the move
+     * worked (Electron then relaunches from Applications). Absent: no move.
+     */
+    moveToApplications?: () => boolean;
     /**
      * Opens an https URL in the default browser. The app passes Electron's
      * shell.openExternal; without it the platform opener is used, which is fine
@@ -145,7 +151,34 @@ export interface HelperWiring {
      * WatchPaths, the hourly run still applies.
      */
     managedResources?: () => readonly string[];
+    /**
+     * macOS: the mount points of attached disk images, so an app on a /Volumes
+     * path is refused only when it really runs off a disk image (see
+     * temporaryAppLocation). Absent: every /Volumes path is refused.
+     */
+    diskImageMounts?: DiskImageMounts;
 }
+
+/** `hdiutil info -plist`, read only. Never attaches or detaches anything. */
+export function createDiskImageMounts(exec: Exec = run): DiskImageMounts {
+    return async () => {
+        try {
+            const { stdout } = await exec("/usr/bin/hdiutil", ["info", "-plist"]);
+            return ok(parseHdiutilMountPoints(stdout));
+        } catch (cause) {
+            return err<readonly string[]>("IO_ERROR", "Subline could not list the attached disk images.", { cause });
+        }
+    };
+}
+
+/** Where the running app is, judged the way the helper registration judges it. */
+export function appLocationFor(wiring: Pick<HelperWiring, "appPath" | "diskImageMounts">): Promise<AppLocationVerdict> {
+    return temporaryAppLocation(wiring.appPath, wiring.diskImageMounts);
+}
+
+/** The words for a refused registration from a temporary place. */
+export const HELPER_APP_LOCATION_TEMPORARY_MESSAGE =
+    "Subline is running from the disk image or a temporary copy. Move Subline to your Applications folder and open it from there.";
 
 /** The LaunchAgent definition for this wiring, with the current WatchPaths. */
 function launchAgentSpecFor(wiring: HelperWiring) {
@@ -177,6 +210,15 @@ export async function installHelperFor(
     if (platform === "win32") return installWindowsHelper(wiring);
     if (platform !== "darwin") {
         return ok({ applicable: false, installed: false, label: null, path: null });
+    }
+    // Audit 2026-10-06 #24: a LaunchAgent naming the .dmg or a translocated
+    // copy runs once and then never again. Refuse, and say where to move it.
+    const location = await appLocationFor(wiring);
+    if (location.temporary) {
+        return err<HelperInstallOutcome>("HELPER_APP_LOCATION_TEMPORARY", HELPER_APP_LOCATION_TEMPORARY_MESSAGE, {
+            path: wiring.appPath,
+            cause: location.reason
+        });
     }
     const registered = await installLaunchAgent({
         plistPath: launchAgentPlistPath(home),
@@ -295,7 +337,7 @@ export async function ensureHelperFor(
 
     // Never re-point the helper at a copy that is about to vanish: the app run
     // straight off the mounted .dmg, or a Gatekeeper-translocated copy.
-    if (wiring.appPath.startsWith("/Volumes/") || wiring.appPath.includes("/AppTranslocation/")) {
+    if ((await appLocationFor(wiring)).temporary) {
         return ok({ action: "skipped", reason: "running-from-temporary-location", registered: null, expected: wiring.appPath });
     }
 
@@ -377,7 +419,7 @@ export async function ensureHelperFromHelper(
             };
         }
         if (platform !== "darwin") return { action: "skipped", reason: "no-helper-on-platform" };
-        if (wiring.appPath.startsWith("/Volumes/") || wiring.appPath.includes("/AppTranslocation/")) {
+        if ((await appLocationFor(wiring)).temporary) {
             return { action: "skipped", reason: "running-from-temporary-location" };
         }
         const plistPath = launchAgentPlistPath(home);
@@ -717,6 +759,24 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
             ? { isOtherAccountLoader: (loaderPath: string) => isOtherAccountLoader(loaderPath, home, platform) }
             : {}),
         installHelper: () => installHelperFor(options.helper, platform, home),
+        // macOS: off the .dmg or a translocated copy, the helper would die
+        // when the image goes (audit 2026-10-06 #24). The same check as the
+        // registration itself. A development run is never "temporary".
+        ...(platform === "darwin" && options.repairHelper !== false
+            ? {
+                appLocation: async () => {
+                    const verdict = await appLocationFor(options.helper);
+                    return ok({ stable: !verdict.temporary, path: options.helper.appPath, reason: verdict.reason });
+                },
+                moveToApplications: async () => {
+                    try {
+                        return ok(options.moveToApplications?.() ?? false);
+                    } catch (cause) {
+                        return err<boolean>("IO_ERROR", "Subline could not move itself to the Applications folder.", { cause });
+                    }
+                }
+            }
+            : {}),
         ensureHelper: () => options.repairHelper === false
             ? Promise.resolve(ok({ action: "skipped" as const, reason: "development-build", registered: null, expected: null }))
             : ensureHelperFor(options.helper, platform, home),

@@ -40,6 +40,7 @@ import { shippedModDirFor } from "../app/modInstall.js";
 import { shouldRelaunchForNewerBundle } from "../app/relaunch.js";
 import { findDiscordProcesses, quitDiscord } from "../app/discordProcess.js";
 import { rememberedResourcesPath, uninstallTargets } from "../patcher/locate.js";
+import { isOtherAccountLoader } from "../patcher/ownership.js";
 import type { DiscordInstall } from "../patcher/locate.js";
 import { hiddenExec } from "../patcher/exec.js";
 import { readPatchedInstalls } from "../app/patchedInstalls.js";
@@ -47,7 +48,7 @@ import { unpatchInstall } from "../patcher/patch.js";
 import { loaderPathFor } from "../bundle/spec.js";
 import { usingOriginalFs } from "../patcher/realFs.js";
 import {
-    createFlowPorts, ensureHelperFromHelper, forceQuit, installHelperFor, listProcesses, logDirFor, removeHelperFor,
+    createDiskImageMounts, createFlowPorts, ensureHelperFromHelper, forceQuit, installHelperFor, listProcesses, logDirFor, removeHelperFor,
     requestQuit, uninstallPaths
 } from "./ports.js";
 import type { HelperWiring } from "./ports.js";
@@ -184,10 +185,7 @@ if (isHelperRun) {
             // when this build defines it differently from what is registered.
             const registration = await ensureHelperFromHelper(helperWiring(), process.platform, app.getPath("home"));
             const forceFull = registration.action === "rewritten" || registration.action === "failed";
-            if (concludeHelperLog(report, held, log, writeHeader, forceFull)) {
-                app.exit(0);
-                return;
-            }
+            if (concludeHelperLog(report, held, log, writeHeader, forceFull)) return;
             if (registration.action === "rewritten" || registration.action === "failed") {
                 log.info("helper.registration", { action: registration.action, reason: registration.reason });
             }
@@ -206,11 +204,19 @@ if (isHelperRun) {
         } catch (cause) {
             // A helper that throws is one nobody hears from again. The log is the
             // only record there is of a run nobody watched.
-            writeHeader();
-            held.flush();
-            log.error("helper.crashed", { cause: String(cause) });
+            try {
+                writeHeader();
+                held.flush();
+                log.error("helper.crashed", { cause: String(cause) });
+            } catch {
+                // Even the crash record failed. Exiting still matters more.
+            }
+        } finally {
+            // ALWAYS. A helper that never exits keeps the next scheduled run
+            // from starting (Windows IgnoreNew; launchd will not start a second
+            // copy), so one throwing log write would end self-repair for good.
+            app.exit(0);
         }
-        app.exit(0);
     })();
 }
 
@@ -269,6 +275,7 @@ function createFlow(): InstallFlow {
         helper: helperWiring(),
         // An unpackaged dev run's "app" is the Electron binary in node_modules.
         repairHelper: app.isPackaged,
+        moveToApplications: () => app.moveToApplicationsFolder(),
         // The checkout opens in the default browser through Electron, never
         // through a shell: a checkout URL carries "&", which cmd.exe would read
         // as a command separator.
@@ -431,6 +438,9 @@ function helperWiring(): HelperWiring {
         // undefined and makes the Windows branch report a named failure rather
         // than writing the file somewhere arbitrary.
         workDir: productDirFor() ?? undefined,
+        // macOS: an app on /Volumes is "temporary" only when a disk image holds
+        // it (audit 2026-10-06 #24). Read only; never attaches anything.
+        ...(process.platform === "darwin" ? { diskImageMounts: createDiskImageMounts() } : {}),
         // Read fresh every time a registration is rendered (install, repair,
         // the already-set-up check, and the helper's own check), so WatchPaths
         // always names the Discords Subline manages right now.
@@ -646,7 +656,16 @@ ipcMain.handle("uninstall:run", async (
  */
 function unpatchOurs(install: DiscordInstall, opts: { removeForeignMod?: boolean; dryRun?: boolean }) {
     const modDir = uninstallPaths().modBundleDir;
-    return unpatchInstall(install, { ...opts, ownLoaderPaths: modDir === null ? [] : [loaderPathFor(modDir)] });
+    // macOS shares /Applications/Discord.app between accounts: a Discord
+    // another account set up is never restored from this one (audit #5).
+    const home = app.getPath("home");
+    return unpatchInstall(install, {
+        ...opts,
+        ownLoaderPaths: modDir === null ? [] : [loaderPathFor(modDir)],
+        ...(process.platform === "darwin"
+            ? { isOtherAccountLoader: (loaderPath: string) => isOtherAccountLoader(loaderPath, home, "darwin") }
+            : {})
+    });
 }
 
 /** Discord processes of the given branches, right now. */

@@ -16,6 +16,7 @@ import { ACTION_LABELS, IS_PRIMARY } from "../app/actions.js";
 import { CODE_SCREEN_COPY, codeScreenView } from "../app/codeScreen.js";
 import type { FlowAction, FlowActionType, FlowState } from "../app/flow.js";
 import type { LanguageOption } from "../app/language.js";
+import { pendingAlertLines } from "../app/pendingAlerts.js";
 import type { UninstallReport } from "../app/uninstall.js";
 import { UNINSTALL_COPY, uninstallReportTitle, uninstallStartView } from "../app/uninstallScreen.js";
 import { emphasisParts } from "./emphasis.js";
@@ -31,6 +32,7 @@ interface SublineApi {
     cancelUninstall(): Promise<void>;
     checkUninstall(): Promise<{ discordRunning: boolean; platform: NodeJS.Platform }>;
     openUrl(url: string): Promise<boolean>;
+    pendingAlerts(): Promise<{ code: string; firstAt: number; count: number }[]>;
     onState(handler: (state: FlowState) => void): () => void;
     onUninstallPhase(handler: (phase: UninstallPhase) => void): () => void;
 }
@@ -83,6 +85,7 @@ const STEP_TITLES: Record<FlowState["step"], string> = {
     "permission-explain": "macOS needs your permission",
     "permission-waiting": "Turn on Subline",
     "permission-failed": "Could not check permission",
+    "move-to-applications": "Move Subline to Applications first",
     patching: "Installing",
     "patch-failed": "Could not install",
     "installing-helper": "Setting up background updates",
@@ -187,7 +190,28 @@ function render(state: FlowState | null): void {
     renderActions(state);
 }
 
+/**
+ * What the helper raised while the app was closed (alerts.json), read once at
+ * start. A missed notification is gone; this is the record that survives it.
+ */
+let pendingAlerts: readonly { code: string }[] = [];
+
+function renderPendingAlerts(state: FlowState): void {
+    if (state.step !== "welcome" && state.step !== "already-installed") return;
+    const lines = pendingAlertLines(pendingAlerts, state.step);
+    if (lines.length === 0) return;
+    const list = document.createElement("ul");
+    list.className = "rows panel";
+    for (const line of lines) {
+        const item = document.createElement("li");
+        item.textContent = line;
+        list.append(item);
+    }
+    extra.append(list);
+}
+
 function renderExtra(state: FlowState): void {
+    renderPendingAlerts(state);
     if (state.step === "choose-install" && state.installs) {
         const list = document.createElement("ul");
         list.className = "rows panel pick";
@@ -810,3 +834,8 @@ api.onState(state => {
     else lastState = state;
 });
 void api.start().then(render);
+// Never in the way of the flow: a missing or unreadable file shows nothing.
+void api.pendingAlerts?.().then(alerts => {
+    pendingAlerts = Array.isArray(alerts) ? alerts : [];
+    if (pendingAlerts.length > 0 && lastState !== null && !uninstalling) render(lastState);
+}).catch(() => undefined);

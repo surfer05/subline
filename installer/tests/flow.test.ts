@@ -2516,3 +2516,92 @@ describe("worst cases", () => {
         expect(remembered).toEqual([INSTALL.rootPath]);
     });
 });
+
+/* ------------------------------------------------------------------------ *
+ * Audit 2026-10-06 #24: Subline opened straight off the .dmg (or a
+ * translocated copy) registers a helper that dies when the image is ejected.
+ * The flow asks for a move to Applications BEFORE anything is written.
+ * ------------------------------------------------------------------------ */
+describe("running from the disk image", () => {
+    const TEMPORARY = { ok: true as const, value: { stable: false, path: "/Volumes/Subline/Subline.app", reason: "disk-image" } };
+    const STABLE = { ok: true as const, value: { stable: true, path: "/Applications/Subline.app", reason: null } };
+
+    it("stops on the move screen before anything is patched, and Try again re-checks", async () => {
+        const h = harness();
+        let answer: Result<{ stable: boolean; path: string; reason: string | null }> = TEMPORARY;
+        let checks = 0;
+        h.ports.appLocation = async () => { checks++; return answer; };
+        await toDetection(h);
+        const state = await setLanguage(h.flow, "tr");
+        expect(state.step).toBe("move-to-applications");
+        expect(state.actions).toEqual(["move-to-applications", "retry", "cancel"]);
+        expect(state.detail).toBe(
+            "Subline is running from the disk image. It can only keep Discord repaired from your Applications folder. "
+            + "Move it there, then open it again."
+        );
+        expect(state.detail).not.toContain("—");
+        expect(h.patchCalls).toHaveLength(0);
+        expect(h.helperInstalls).toBe(0);
+
+        // Still on the disk image: the same screen, nothing written, no loop.
+        const again = await h.flow.send({ type: "retry" });
+        expect(again.step).toBe("move-to-applications");
+        expect(h.patchCalls).toHaveLength(0);
+        expect(checks).toBe(2);
+
+        answer = STABLE;
+        const done = await h.flow.send({ type: "retry" });
+        expect(done.step).not.toBe("move-to-applications");
+        expect(h.patchCalls).toHaveLength(1);
+    });
+
+    it("the move button asks to move the app; a refused move says so and stays", async () => {
+        const h = harness();
+        h.ports.appLocation = async () => TEMPORARY;
+        let moves = 0;
+        let moved: Result<boolean> = { ok: true, value: false };
+        h.ports.moveToApplications = async () => { moves++; return moved; };
+        await toDetection(h);
+        await setLanguage(h.flow, "tr");
+        const refused = await h.flow.send({ type: "move-to-applications" });
+        expect(moves).toBe(1);
+        expect(refused.step).toBe("move-to-applications");
+        expect(refused.detail).toBe(
+            "Subline could not move itself. Drag Subline from the disk image into your Applications folder, then open it from there."
+        );
+        expect(h.patchCalls).toHaveLength(0);
+
+        moved = { ok: true, value: true };
+        const moving = await h.flow.send({ type: "move-to-applications" });
+        expect(moves).toBe(2);
+        expect(moving.step).toBe("move-to-applications");
+        expect(moving.busy).toBe(true);
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("is a macOS question only", async () => {
+        const h = harness({ platform: "win32" });
+        let checks = 0;
+        h.ports.appLocation = async () => { checks++; return TEMPORARY; };
+        await toDetection(h);
+        await setLanguage(h.flow, "tr");
+        expect(checks).toBe(0);
+        expect(h.patchCalls).toHaveLength(1);
+    });
+
+    it("already set up, but run from the disk image: says background repair is off", async () => {
+        const h = harness({
+            inspect: { ok: true, value: installState("patched-by-us", "subline") },
+            ensureHelper: {
+                ok: true,
+                value: { action: "skipped", reason: "running-from-temporary-location", registered: null, expected: "/Volumes/Subline/Subline.app" }
+            }
+        });
+        const state = await h.flow.start();
+        expect(state.step).toBe("already-installed");
+        expect(state.detail).not.toContain("Updates are handled in the background.");
+        expect(state.detail).toContain(
+            "Background repair is off because Subline is running from the disk image. Move Subline to your Applications folder and open it from there."
+        );
+    });
+});

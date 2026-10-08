@@ -308,6 +308,16 @@ detached signature lands in, and `REQUIRE_SIGNATURE` in `release.ts` is the
 one-line switch that makes an unsigned release refuse to install once there is a
 key to check against.
 
+**Both formats are a contract with every Subline already installed.** The
+manifest `format` and the bundle manifest (`subline-mod.json`) are read by
+every helper ever shipped, and those helpers never update themselves. Never
+bump either format without keeping the old one served at the same feed URL. A
+helper that meets a format it cannot read raises `RELEASE_FORMAT_UNSUPPORTED`
+and tells the user, once a week at most: "This Subline can no longer read its
+update feed. Get the new Subline from surfer05.github.io/subline." That is the
+only remedy those users get, so a format bump strands everyone who has not
+downloaded the new app.
+
 ---
 
 ## 5. macOS: the two permission walls

@@ -153,6 +153,8 @@ export type FlowStep =
      * us", which is just waiting). The only error the permission step has.
      */
     | "permission-failed"
+    /** macOS: Subline runs off the .dmg or a translocated copy; asked to move first (audit #24). */
+    | "move-to-applications"
     /* §3 step 8. */
     | "patching"
     | "patch-failed"
@@ -182,6 +184,7 @@ export type FlowActionType =
     | "use-code"
     | "back"
     | "open-permission-settings"
+    | "move-to-applications"
     | "retry"
     | "skip-helper"
     | "skip-launch"
@@ -202,6 +205,7 @@ export type FlowAction =
     | { type: "use-code" }
     | { type: "back" }
     | { type: "open-permission-settings" }
+    | { type: "move-to-applications" }
     | { type: "retry" }
     | { type: "skip-helper" }
     | { type: "skip-launch" }
@@ -284,6 +288,18 @@ export interface FlowLogger {
     warn(event: string, fields?: Record<string, string | number | boolean | null | undefined>): void;
     error(event: string, fields?: Record<string, string | number | boolean | null | undefined>): void;
 }
+
+/** The move-to-Applications screen (audit 2026-10-06 #24). Plain sentences, no dashes. */
+export const MOVE_COPY = {
+    title: "Move Subline to Applications first",
+    body: "Subline is running from the disk image. It can only keep Discord repaired from your Applications folder. "
+        + "Move it there, then open it again.",
+    moving: "Moving Subline to your Applications folder. It opens again from there.",
+    moveFailed: "Subline could not move itself. Drag Subline from the disk image into your Applications folder, "
+        + "then open it from there.",
+    helperOff: "Background repair is off because Subline is running from the disk image. Move Subline to your "
+        + "Applications folder and open it from there."
+} as const;
 
 export interface FlowPorts {
     platform: NodeJS.Platform;
@@ -374,6 +390,15 @@ export interface FlowPorts {
      * helper could never run. Called on every launch that reaches that screen.
      */
     ensureHelper(): Promise<Result<HelperEnsureReport>>;
+    /**
+     * macOS: is Subline running from somewhere the helper can keep using?
+     * Not from the mounted .dmg or a Gatekeeper-translocated copy: a helper
+     * registered there runs once and then never again (audit 2026-10-06 #24).
+     * Absent: always stable (Windows, tests that do not care).
+     */
+    appLocation?(): Promise<Result<{ stable: boolean; path: string; reason: string | null }>>;
+    /** Electron's app.moveToApplicationsFolder(). True: the move worked and the app is relaunching. */
+    moveToApplications?(): Promise<Result<boolean>>;
     launchDiscord(install: DiscordInstall): Promise<Result<true>>;
     verify(options: AwaitVerifyOptions): Promise<VerificationReport>;
 
@@ -675,6 +700,11 @@ export class InstallFlow {
                 if (this.current.permissionStatus === "not-writable") return this.permissionStep();
                 return this.waitForPermission();
 
+            case "move-to-applications":
+                if (action.type === "move-to-applications") return this.moveToApplications();
+                // Try again: the same check, so it cannot loop past a disk image.
+                return this.permissionStep();
+
             case "permission-waiting":
                 if (action.type === "open-permission-settings") {
                     await this.ports.openPermissionSettings();
@@ -963,27 +993,34 @@ export class InstallFlow {
         // "Already set up" must include the thing that KEEPS it set up. Field
         // evidence: the LaunchAgent named an app path that no longer existed,
         // this screen said all was well, and the helper could never run.
-        return this.ensureHelper().then(helperOk => this.set(state({
+        return this.ensureHelper().then(helper => this.set(state({
             step: "already-installed",
             detail:
                 "Subline is installed and Discord is set up to use it. There is nothing left to do. Open Discord "
                 + "and messages in other languages will have a translation underneath them. "
-                + (helperOk
+                + (helper === "ok"
                     ? "Updates are handled in the background."
-                    : "Background updates could not be turned on. Open Subline again later to retry."),
+                    : helper === "temporary-location"
+                        ? MOVE_COPY.helperOff
+                        : "Background updates could not be turned on. Open Subline again later to retry."),
             install,
             installState,
             actions: ["finish"]
         })));
     }
 
-    /** Re-point the helper at this app if it points anywhere else. True when it is in place. */
-    private async ensureHelper(): Promise<boolean> {
+    /**
+     * Re-point the helper at this app if it points anywhere else. "ok" when it
+     * is in place. A copy run off the .dmg is "temporary-location": the helper
+     * was not re-pointed at it, so background repair is not working from here
+     * (audit 2026-10-06 #24), and the screen must not say it is.
+     */
+    private async ensureHelper(): Promise<"ok" | "failed" | "temporary-location"> {
         try {
             const result = await this.ports.ensureHelper();
             if (!result.ok) {
                 this.ports.log.error("helper.ensure-failed", errorFields(result.error));
-                return false;
+                return "failed";
             }
             this.ports.log.info("helper.ensure", {
                 action: result.value.action,
@@ -991,10 +1028,13 @@ export class InstallFlow {
                 registered: result.value.registered,
                 expected: result.value.expected
             });
-            return true;
+            if (result.value.action === "skipped" && result.value.reason === "running-from-temporary-location") {
+                return "temporary-location";
+            }
+            return "ok";
         } catch (cause) {
             this.ports.log.error("helper.ensure-failed", { cause: String(cause) });
-            return false;
+            return "failed";
         }
     }
 
@@ -1571,6 +1611,12 @@ export class InstallFlow {
         const install = this.chosenInstall;
         if (install === null) return this.detect();
 
+        // BEFORE ANYTHING IS WRITTEN (audit 2026-10-06 #24): Subline run off the
+        // .dmg or a translocated copy would register a helper that dies when
+        // the disk image is ejected. Discord stays untouched until it moves.
+        const moved = await this.checkAppLocation();
+        if (moved !== null) return moved;
+
         const status = this.ports.probePermission(install);
         this.ports.log.info("permission.probe", { status });
         if (status === "granted" || status === "not-required") return this.patchStep();
@@ -1602,6 +1648,53 @@ export class InstallFlow {
             },
             install,
             actions: ["retry", "cancel"]
+        }));
+    }
+
+    /** macOS only. The move screen, or null when Subline runs from a place the helper can keep using. */
+    private async checkAppLocation(): Promise<FlowState | null> {
+        if (this.ports.platform !== "darwin" || this.ports.appLocation === undefined) return null;
+        let location: Result<{ stable: boolean; path: string; reason: string | null }>;
+        try {
+            location = await this.ports.appLocation();
+        } catch (cause) {
+            this.ports.log.warn("flow.app-location-unknown", { cause: String(cause) });
+            return null;
+        }
+        if (!location.ok) {
+            // The check itself failed. The helper registration runs the same
+            // check and refuses on its own, so the install is not blocked here.
+            this.ports.log.warn("flow.app-location-unknown", errorFields(location.error));
+            return null;
+        }
+        if (location.value.stable) return null;
+        this.ports.log.warn("flow.app-location-temporary", { path: location.value.path, reason: location.value.reason });
+        return this.set(state({
+            step: "move-to-applications",
+            detail: MOVE_COPY.body,
+            actions: ["move-to-applications", "retry", "cancel"]
+        }));
+    }
+
+    private async moveToApplications(): Promise<FlowState> {
+        let moved: Result<boolean>;
+        try {
+            moved = this.ports.moveToApplications === undefined
+                ? { ok: true, value: false }
+                : await this.ports.moveToApplications();
+        } catch (cause) {
+            moved = { ok: false, error: { code: "IO_ERROR", message: String(cause) } };
+        }
+        if (moved.ok && moved.value) {
+            // Electron quits this copy and opens the one in Applications.
+            this.ports.log.info("flow.moved-to-applications");
+            return this.set(state({ step: "move-to-applications", detail: MOVE_COPY.moving, busy: true, actions: [] }));
+        }
+        this.ports.log.warn("flow.move-to-applications-failed", moved.ok ? { moved: false } : errorFields(moved.error));
+        return this.set(state({
+            step: "move-to-applications",
+            detail: MOVE_COPY.moveFailed,
+            actions: ["move-to-applications", "retry", "cancel"]
         }));
     }
 
