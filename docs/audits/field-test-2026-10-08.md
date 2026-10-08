@@ -9,6 +9,7 @@ Owner decisions are final. Copy rules: short plain sentences, no em dashes, neve
 - I4. Code screen copy is too heavy. Use: heading "Activate Subline"; line "$4.99, once."; field label "Code"; hint "Bought it? The code is in the email from Dodo Payments. Check spam."; link "Lost your code?" (Dodo customer portal, as now).
 - I5. A wrong code shows the generic "What went wrong · IO_ERROR" box (flow.ts activationError always uses IO_ERROR). For wrong-code / claimed / rate-limit answers show only the message line, no diagnostics box.
 - I6. After a restart mid-checkout the installer starts again at Welcome. If a reading language is already chosen and no code is saved, resume at "Activate Subline".
+- I8. Links in the installer → https://subline.page and support@subline.page.
 - I7. The "Finish paying in your browser" screen: add "Using a VPN? Turn it off only while you pay. Discord can stay on." and a way back (Back / Try again).
 
 ## Plugin (src/userplugins/vcTranslate/)
@@ -21,6 +22,8 @@ Owner decisions are final. Copy rules: short plain sentences, no em dashes, neve
 - P7. qualityPhrases reuse ignores context: do not reuse for short context-dependent lines (decide a safe rule, e.g. only reuse when the context is identical or the text is long).
 - P8. Debug log: log the number of context lines per ✦ batch (no text), so "out of context" reports can be checked.
 - P9 (MUST TEST). Relay down while Discord works: timeout, DNS failure, 5xx, 429, malformed JSON, very slow reply. ≈ keeps working on every surface; ✦ fails quietly (no toasts or error spam); no preview spent and nothing charged; recovers by itself.
+
+- P10. Links in the plugin → https://subline.page; support contact support@subline.page.
 
 ## Relay (relay/)
 - R1 (HIGH). An AI subscriber can start a second subscription: handleCheckoutV2 refuses already_owned only for "automatic". Refuse monthly/annual when AI is already active.
@@ -39,6 +42,24 @@ Owner decisions are final. Copy rules: short plain sentences, no em dashes, neve
 - S4. Failed/cancelled page: add "Using a VPN? Turn it off only while you pay. Discord can stay on."
 - S5. Page /buy: buy Automatic on any device (for people whose VPN must stay on); after checkout the thanks page shows the code to enter under "I have a code".
 - S6. Canonical/og URLs → https://subline.page.
+
+- S7. Show support@subline.page as the contact on the site.
+
+## Owner actions (not code)
+- Run the promo commands for the 5 friend testers (codes = usernames, cap 2).
+- Check Dodo: payment methods (PayPal?) and blocked countries.
+- Check whether AI products need Dodo license keys; if the relay does not use them, turn license keys off for AI so buyers do not get a confusing second key email (verify in code first).
+- Report the Dodo rounding bug (SGD 6.66 subtotal, 6.65 total) to Dodo.
+- Later: "send as" support@subline.page from Gmail needs an SMTP sender.
+
+## Still to test by hand
+- Windows: foreign bio, topic, thread names, embeds (none found during the test).
+- After v0.2.3: re-test on Windows every item above that failed.
+
+## Notes
+- Early refunds can be denied while the Dodo balance is small (refunds are paid from the balance).
+- Indian e-mandates can take hours; copy says "a few minutes" (India is not a target; leave).
+- Stash entries on fix-foreign-marker hold aborted partial work; safe to drop.
 
 ## Not now
 - Feedback box in Settings (ask the owner for details first).
