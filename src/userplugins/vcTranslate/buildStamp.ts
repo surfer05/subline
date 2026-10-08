@@ -17,4 +17,4 @@
 
 export const PLUGIN_VERSION = "0.2.2";
 
-export const BUILD_ID = "a277b6ee6c215dfd";
+export const BUILD_ID = "d447028c04d0bbbc";

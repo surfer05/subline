@@ -523,19 +523,96 @@ describe("one ✦ preview per message", () => {
         expect(shown).not.toContain("…");
     });
 
-    it("an edit after the preview drops the stale ✦ line and never charges again", async () => {
-        await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
-        rough();
-        answer({ relay: m => ({ id: m.id, lang: "ar", text: "I don't want to go", skip: false }), relayQuota: { used: 1, cap: 5 } });
-        popover()!.onClick!();
-        await flush();
+    // Owner decision 2026-10-08: an EDITED message gets a new ✦ preview offer.
+    // The old ✦ line describes text that is gone, so it is dropped; the edited
+    // text costs exactly one preview (the relay counts the same id with
+    // different text as a new one), and never a second.
+    describe("an edited message", () => {
         const edited = ROMANIZED + " ghda";
-        rough("1", "I want to walk tomorrow");
-        expect(text(render(msg("1", edited)))).toContain("I want to walk tomorrow");
-        expect(text(render(msg("1", edited)))).not.toContain("I don't want to go");
-        expect(popover("1", edited)).toBeNull();
-        expect(link("1", edited)).toBeUndefined();
-        expect(calls("relay")).toHaveLength(1);
+        const translated = (m: { id: string; text?: string }) =>
+            ({ id: m.id, lang: "ar", text: String(m.text).includes("ghda") ? "I don't want to go tomorrow" : "I don't want to go", skip: false });
+
+        async function previewThenEdit() {
+            await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
+            rough();
+            answer({ relay: translated, relayQuota: { used: 1, cap: 5 } });
+            popover()!.onClick!();
+            await flush();
+            expect(text(render(msg("1", ROMANIZED)))).toBe("✦ ar · I don't want to go · Add AI");
+            rough("1", "I want to walk tomorrow");
+        }
+
+        it("drops the old ✦ line and offers a preview again (link and ⚡)", async () => {
+            await previewThenEdit();
+            const shown = text(render(msg("1", edited)));
+            expect(shown).toContain("I want to walk tomorrow");
+            expect(shown).not.toContain("I don't want to go");
+            expect(link("1", edited)).toBeDefined();
+            expect(popover("1", edited)!.label).toBe("Preview ✦ (4 left today)");
+            // The original text, were it shown again, is still the one preview.
+            expect(popover("1", ROMANIZED)).toBeNull();
+            expect(calls("relay")).toHaveLength(1);
+        });
+
+        it("a preview of the edited text costs exactly one, and shows the edited text's ✦", async () => {
+            await previewThenEdit();
+            answer({ relay: translated, relayQuota: { used: 2, cap: 5 } });
+            popover("1", edited)!.onClick!();
+            await flush();
+            expect(calls("relay")).toHaveLength(2);
+            const sent = payloadOf(calls("relay")[1]!) as any;
+            expect(sent).toMatchObject({ mode: "preview", force: true });
+            expect(sent.messages.map((m: any) => m.id)).toEqual(["1"]);
+            expect(sent.messages[0].text).toContain("ghda");
+            expect(text(render(msg("1", edited)))).toBe("✦ ar · I don't want to go tomorrow · Add AI");
+            rough("2");
+            expect(popover("2")!.label).toBe("Preview ✦ (3 left today)");
+        });
+
+        it("a repeat press on the same edited text never sends or charges again, also after a restart", async () => {
+            await previewThenEdit();
+            answer({ relay: translated, relayQuota: { used: 2, cap: 5 } });
+            const ask = link("1", edited)!;
+            const bolt = popover("1", edited)!;
+            bolt.onClick!();
+            ask.onClick({ preventDefault() { } });
+            bolt.onClick!();
+            await flush();
+            ask.onClick({ preventDefault() { } });
+            bolt.onClick!();
+            await flush();
+            expect(calls("relay")).toHaveLength(2);
+            expect(popover("1", edited)).toBeNull();
+            expect(link("1", edited)).toBeUndefined();
+            await restart(() => {
+                DataStore.setEntitlementForTest({ automatic: true, ai: false, tokenExpiresAt: Date.now() + 7 * 24 * HOUR, checkedAt: Date.now() });
+                native.relayStatus.mockResolvedValue(v2({ automatic: true, previews: { used: 2, cap: 5 } }));
+            });
+            rough("1", "I want to walk tomorrow");
+            expect(text(render(msg("1", edited)))).toBe("✦ ar · I don't want to go tomorrow · Add AI");
+            expect(popover("1", edited)).toBeNull();
+            expect(link("1", edited)).toBeUndefined();
+            expect(calls("relay")).toHaveLength(2);
+        });
+
+        it("an edit while the preview is out never shows the old text's ✦ for the new text", async () => {
+            await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
+            rough();
+            const release = heldRelay();
+            popover()!.onClick!();
+            // Edited before the relay answered.
+            rough("1", "I want to walk tomorrow");
+            expect(popover("1", edited)).toBeNull();
+            release();
+            await flush();
+            const shown = text(render(msg("1", edited)));
+            expect(shown).toContain("I want to walk tomorrow");
+            expect(shown).not.toContain("I don't want to go");
+            // That answer was for the old text: the new text is offered.
+            expect(popover("1", edited)).not.toBeNull();
+            expect(link("1", edited)).toBeDefined();
+            expect(calls("relay")).toHaveLength(1);
+        });
     });
 
     it("with none left, a stale Preview ✦ link opens Add AI and sends nothing", async () => {

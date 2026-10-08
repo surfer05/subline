@@ -6,8 +6,9 @@ import * as DataStore from "@api/DataStore";
  * There is no free plan any more (see entitlement.ts): an install is not
  * activated, Automatic, or AI. Automatic owners get five ✦ previews a day: the
  * FULL ✦ translation of one message, shown in place of its ≈ line with an
- * "Add AI" link. One message never costs more than one preview, so every
- * preview shown is remembered here, across restarts.
+ * "Add AI" link. One message text never costs more than one preview, so every
+ * preview shown is remembered here, across restarts. An edit is new text:
+ * it is offered again and costs one more.
  */
 
 /** Where every Upgrade link points when the in-Discord panel cannot open. */

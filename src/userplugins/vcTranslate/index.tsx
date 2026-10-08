@@ -2906,9 +2906,18 @@ const previews = new Map<string, PreviewResult>();
  */
 const previewPending = new Set<string>();
 
-/** Has this message had (or is it having) its one preview? Then it is never offered again. */
-function previewTaken(messageId: string): boolean {
-    return previews.has(messageId) || previewPending.has(messageId);
+/**
+ * Has this message, AS IT READS NOW, had (or is it having) its one preview?
+ * Then it is never offered again. An edit changes the content hash: the old
+ * preview no longer describes the text (previewFor drops its line), so the
+ * edited text is offered again and costs one more preview (the relay counts
+ * the same id with different text as a new preview). A request already out
+ * blocks a second one whatever the text.
+ */
+function previewTaken(message: Message): boolean {
+    if (previewPending.has(message.id)) return true;
+    const p = previews.get(message.id);
+    return p !== undefined && p.src === contentHash(message.content ?? "");
 }
 
 /**
@@ -2952,7 +2961,7 @@ function googleUnsure(entry: { via: EngineId; lang: string; conf?: number }, con
  */
 async function previewPress(message: Message): Promise<void> {
     const id = message.id;
-    if (previewTaken(id) || forcedInFlight.has(id)) return;
+    if (previewTaken(message) || forcedInFlight.has(id)) return;
     if (rolloverTasteIfNewUtcDay()) void refreshEntitlement();
     if (tasteExhausted()) {
         // Today's five are used, so a press would send nothing. Offer the
@@ -4179,8 +4188,8 @@ function translationLines(message: Message) {
     // than it is. A paid install keeps the "?" it always had.
     const rough = unsure && isAutomaticOnly();
     // An Automatic owner can ask what ✦ reads a rough line as, five times a
-    // day. Offered once per message, and not once today's five are used.
-    const offerPreview = rough && !forcing && !previewTaken(message.id) && !tasteExhausted();
+    // day. Offered once per message text (an edit is offered again), and not once today's five are used.
+    const offerPreview = rough && !forcing && !previewTaken(message) && !tasteExhausted();
     // No label at all for "und", "zxx" or anything that names no language.
     const label = languageLabel(entry.lang);
     const langName = label === null ? null : languageName(label);
@@ -4340,9 +4349,10 @@ function forceQualityPopoverRender(message: Message) {
                 onClick: () => openUpgrade()
             };
         }
-        // Nothing to offer once one has been asked for this message: asking
-        // again would spend another of the five for the same answer.
-        if (previewTaken(message.id)) return null;
+        // Nothing to offer once one has been asked for this text of the
+        // message: asking again would spend another of the five for the same
+        // answer. An edit is new text, so it is offered again.
+        if (previewTaken(message)) return null;
         return {
             label: UPGRADE_COPY.popoverPreview.replace("{n}", String(tasteRemaining())),
             icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
