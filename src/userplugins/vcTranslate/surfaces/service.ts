@@ -20,6 +20,7 @@
  * caller builds the request.
  */
 
+import { fitTextToLimit } from "../fitRequest";
 import { normalizeSurfaceText, type SurfaceCache, type SurfaceEntry, surfaceKey } from "./cache";
 
 export type SurfaceTier = "fast" | "quality";
@@ -44,6 +45,13 @@ export interface SurfaceDeps {
      * costs nothing, and nothing goes to the relay. Absent means true.
      */
     qualityAllowed?(): boolean;
+    /**
+     * ✦ is allowed but cannot be had right now (the relay is cooling down
+     * after a 429). Tight marks then take ≈ like an Automatic owner's, so a
+     * relay outage never takes the translation off a status or a title (P9).
+     * Absent means never paused.
+     */
+    qualityPaused?(): boolean;
     targetLang(): string;
     /** The plugin's own local rules: nothing translatable, or already the target language. */
     locallySkipped(text: string): boolean;
@@ -95,41 +103,13 @@ export const SURFACE_MAX_TEXT_CHARS = 2_000;
  */
 export const SURFACE_MAX_LONG_TEXT_CHARS = 4_000;
 
-/** Spans a long-text cut may not land inside. */
-const UNCUTTABLE = /```[\s\S]*?```|`[^`\n]+`|<a?:\w+:\d+>|<#\d+>|<@&\d+>|<@!?\d+>|<t:-?\d+(?::[a-zA-Z])?>|https?:\/\/\S+/g;
-
 /**
- * A long text cut to fit SURFACE_MAX_LONG_TEXT_CHARS: at the last paragraph
- * break, else the last sentence end, else the last space, at or under the
- * limit. `partial` says the line covers only the first part.
+ * A long text cut to fit SURFACE_MAX_LONG_TEXT_CHARS, at a paragraph break,
+ * a sentence end or a space, never inside a Discord token (fitRequest.ts
+ * fitTextToLimit). `partial` says the line covers only the first part.
  */
 export function fitLongText(text: string): { text: string; partial: boolean; } {
-    const max = SURFACE_MAX_LONG_TEXT_CHARS;
-    if (text.length <= max) return { text, partial: false };
-    const head = text.slice(0, max);
-    const breaks = [head.lastIndexOf("\n\n"), head.lastIndexOf("\n")];
-    const sentence = Math.max(...[". ", "! ", "? ", "。", "！", "？"].map(m => {
-        const at = head.lastIndexOf(m);
-        return at < 0 ? -1 : at + m.trimEnd().length;
-    }));
-    const floor = max / 2;
-    let cut = breaks.find(at => at >= floor) ?? -1;
-    if (cut < 0 && sentence >= floor) cut = sentence;
-    if (cut < 0) cut = head.lastIndexOf(" ");
-    if (cut < floor) cut = max;
-    // Never inside a Discord token (a code block, inline code, a link, a
-    // mention, an emoji, a timestamp): half of one would reach the
-    // translator as text. Cut before it instead.
-    for (const m of text.matchAll(UNCUTTABLE)) {
-        const start = m.index!, end = start + m[0].length;
-        if (cut > start && cut < end) { cut = start; break; }
-        if (start >= cut) break;
-    }
-    if (cut <= 0) cut = max;
-    // Never end on half of a surrogate pair.
-    const code = text.charCodeAt(cut - 1);
-    if (code >= 0xd800 && code <= 0xdbff) cut--;
-    return { text: text.slice(0, cut).trimEnd(), partial: true };
+    return fitTextToLimit(text, SURFACE_MAX_LONG_TEXT_CHARS);
 }
 
 /** What one text costs against the daily budget: 1 + one per started 1,000 characters. */
@@ -200,6 +180,11 @@ export class SurfaceService {
      * ones while the first is still waiting on Google.
      */
     private readonly busy: Record<SurfaceTier, boolean> = { fast: false, quality: false };
+    /**
+     * The last ✦ request that went out got no answer (unreachable, timed out,
+     * a 5xx, malformed). Until one is answered again tight marks take ≈ (P9).
+     */
+    private qualityFailing = false;
 
     constructor(private readonly deps: SurfaceDeps) { }
 
@@ -230,9 +215,17 @@ export class SurfaceService {
         return this.deps.qualityAllowed ? this.deps.qualityAllowed() : true;
     }
 
-    /** True while a tight mark waits for ✦ alone: ✦ is allowed and today's budget is not spent. */
+    /**
+     * True while a tight mark waits for ✦ alone: ✦ is allowed, today's budget
+     * is not spent, and ✦ is not down (P9: failing, or paused by a cooldown).
+     */
     tightQualityOnly(): boolean {
-        return this.qualityAllowed() && this.budgetLeft() > 0;
+        return this.qualityAllowed() && this.budgetLeft() > 0 && !this.qualityDown();
+    }
+
+    /** ✦ cannot be had right now: its last request failed, or it is paused. */
+    qualityDown(): boolean {
+        return this.qualityFailing || (this.deps.qualityPaused?.() ?? false);
     }
 
     private budgetLeft(): number {
@@ -251,6 +244,7 @@ export class SurfaceService {
             if (this.timers[tier] !== null) this.deps.cancel(this.timers[tier]);
             this.timers[tier] = null;
             this.pending[tier].clear();
+            this.qualityFailing = false;
             this.inFlight[tier].clear();
             this.retryAt[tier].clear();
             this.sends[tier] = [];
@@ -439,6 +433,8 @@ export class SurfaceService {
         // request, armed only now that this one is back.
         if (this.pending[tier].size > 0) this.arm(tier);
         if (tier === "quality" && outcome !== null) this.deps.budget?.spend(units);
+        // P9: ✦ answered (or did not). Tight marks follow: ≈ while it is down.
+        if (tier === "quality") this.qualityFailing = outcome === null;
 
         let earliestRetry = Number.POSITIVE_INFINITY;
         batch.forEach(([key], i) => {

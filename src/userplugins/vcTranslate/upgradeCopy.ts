@@ -44,9 +44,11 @@ export const UPGRADE_COPY = {
     codeRateLimited: "Too many codes tried from this network today. Try again after midnight UTC.",
     /** A promo code allows only a few claims from one network. */
     codeNetLimited: "This code has reached its limit on your network.",
-    deviceLimit: "This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub.",
-    /** The button next to the device-limit sentence: opens RESET_HELP_URL. */
-    deviceLimitButton: "GitHub",
+    deviceLimit: "This code is on 3 computers already. It frees up after 30 days unused, or email support@subline.page for a reset.",
+    /** The button next to the device-limit sentence: copies SUPPORT_EMAIL (Vencord opens no mailto: links). */
+    deviceLimitButton: "Copy email",
+    /** The toast after deviceLimitButton copied the address. */
+    emailCopied: "Email copied.",
     /** A typed license key or Subline code checked OK, before it is linked to this computer. */
     codeConfirmTitle: "Use this code?",
     codeConfirm: "It works on up to 3 computers.",
@@ -65,29 +67,30 @@ export const UPGRADE_COPY = {
     /* ---- Automatic owners: add AI ---- */
     panelTitle: "Add AI",
     panelSubtitle: "✦ reads the whole conversation, so slang and replies come out right.",
-    monthlyName: "Monthly",
-    monthlyPrice: "$1.99 a month",
-    annualName: "Annual",
-    annualPrice: "$19.99 a year",
-    annualNote: ANNUAL_NOTE,
     /**
-     * Under the AI plans in the Add AI panel: a Dodo coupon goes on the checkout
-     * page, not in Subline. Coupons are made for the Monthly plan only (relay
-     * createCoupon: restricted_to [monthly]), so Yearly's page refuses them.
+     * The only line under the AI plans in the Add AI panel (P3): a Dodo coupon
+     * goes on the checkout page, not in Subline.
      */
-    couponHint: "Have a coupon? Pick Monthly and enter it on the payment page.",
-    monthlyButton: "Monthly $1.99",
-    annualButton: `Yearly $19.99 · ${ANNUAL_NOTE}`,
+    couponHint: "Coupon? Enter it on the payment page.",
+    monthlyButton: "$1.99 a month",
+    annualButton: `$19.99 a year · ${ANNUAL_NOTE}`,
     aiNeedsAutomatic: "AI needs Automatic first.",
     alreadyAutomatic: "You already have Automatic.",
     /** Monthly or Yearly on an install that already has AI (relay 409 already_owned). */
     alreadyAi: "You already have AI.",
     /** Buy or Add AI while a payment from this install is still being confirmed. */
     purchasePending: "Your payment is still being confirmed. It switches on by itself.",
+    /**
+     * In place of "Add AI" (and "Activate") on the plan card, the ⚡ popover,
+     * the ✦ preview line and as the panel title, while a payment is on its way
+     * (P4): a checkout was opened, or the relay said purchase_pending.
+     */
+    paymentPending: "Payment being confirmed",
     /** The relay answered that it cannot sell this right now (no product set up, or the shop is down). */
     checkoutUnavailable: "Buying isn't available yet. Use a code, or try again later.",
 
     /* ---- shared ---- */
+    /** Under the Activate panel only. */
     panelFootnote: "Pay in your browser. Subline switches on here by itself.",
     checkoutOpenedToast: "Finish checkout in your browser.",
     /** A notice that stays until dismissed: the buyer is often still in the browser when it lands. */
@@ -113,7 +116,7 @@ export const UPGRADE_COPY = {
 } as const;
 
 /** Where the device-limit sentence sends the reader to ask for a reset. */
-export const RESET_HELP_URL = "https://github.com/surfer05/subline/issues";
+export const SUPPORT_EMAIL = "support@subline.page";
 
 /**
  * The small toggle at the end of a status or bio that is shown translated in

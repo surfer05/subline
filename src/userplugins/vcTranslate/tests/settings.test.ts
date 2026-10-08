@@ -1,4 +1,4 @@
-import { __resetSettings } from "@api/Settings";
+import { __resetSettings } from "./stubs/api-settings";
 import { OptionType } from "@utils/types";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -29,8 +29,10 @@ describe("no bring-your-own-key loophole in the settings UI", () => {
     });
 
     it("keeps every API-key field permanently hidden, whatever the engine", () => {
-        for (const field of ["anthropicApiKey", "geminiApiKey", "geminiModel", "groqApiKey", "groqModel"]) {
-            const hidden = settings.def[field].hidden;
+        for (const field of ["anthropicApiKey", "geminiApiKey", "geminiModel", "groqApiKey", "groqModel"] as const) {
+            // definePluginSettings merges the checks (second argument) into the
+            // definition at runtime; its types do not show the merge.
+            const hidden = (settings.def[field] as { hidden?: (this: unknown) => boolean; }).hidden!;
             expect(typeof hidden).toBe("function");
             // Hidden regardless of the (legacy) engine value — no context makes it appear.
             expect(hidden.call({ store: { engine: "claude" } })).toBe(true);

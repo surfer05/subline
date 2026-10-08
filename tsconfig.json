@@ -2,10 +2,23 @@
   "compilerOptions": {
     "target": "ES2020",
     "module": "ESNext",
-    "lib": ["ES2020"],
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "moduleResolution": "bundler",
     "skipLibCheck": true,
     "strict": true,
+    "noEmit": true,
+
+    // TYPE CHECK ONLY (`tsc -p .` from the repo root). esbuild ignores these,
+    // so none of them changes the build:
+    //  - "jsx": "preserve" is what Vencord's own tsconfig says. The build's
+    //    jsx: "transform" wins over a tsconfig "preserve", but a tsconfig
+    //    jsxFactory WOULD override Vencord's VencordCreateElement (measured
+    //    with esbuild 0.28.1), so no factory is named here.
+    //  - The plugin runs inside Vencord, so it is checked against Vencord's
+    //    ambient types: its globals (VencordNative, IS_DEV...), its "electron"
+    //    module, and @types/node and @types/react from the sibling checkout.
+    "jsx": "preserve",
+    "typeRoots": ["../Vencord/node_modules/@types"],
 
     // src/userplugins/vcTranslate is symlinked into the Vencord checkout
     // (a sibling directory) for building. esbuild's tsconfig auto-discovery
@@ -29,7 +42,19 @@
       "@webpack": ["../Vencord/src/webpack/webpack"],
       "@webpack/patcher": ["../Vencord/src/webpack/patchWebpack"],
       "@webpack/wreq.d": ["../Vencord/src/webpack/wreq.d"],
-      "@webpack/types": ["../Vencord/src/webpack/types"]
+      "@webpack/types": ["../Vencord/src/webpack/types"],
+      // Imported with `import type` only, so esbuild never resolves it.
+      "@vencord/discord-types": ["../Vencord/node_modules/@vencord/discord-types"]
     }
-  }
+  },
+  // Only the plugin. Without this, tsc swept every .ts under the repo root:
+  // the relay and the installer (each has its own tsconfig) and the pinned
+  // Vencord copy in installer/build, none of which this config describes.
+  // Vencord's ambient declarations are listed so its globals resolve.
+  "include": [
+    "src/**/*",
+    "../Vencord/src/globals.d.ts",
+    "../Vencord/src/modules.d.ts",
+    "../Vencord/src/nativeModules.d.ts"
+  ]
 }

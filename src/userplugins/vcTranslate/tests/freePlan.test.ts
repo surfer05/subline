@@ -11,7 +11,7 @@ const T0 = Date.UTC(2026, 8, 25, 12, 0, 0);
 
 describe("the copy", () => {
     it("points upgrade links at the site, and uses no em dash", () => {
-        expect(PRICING_URL).toBe("https://surfer05.github.io/subline/#pricing");
+        expect(PRICING_URL).toBe("https://subline.page/#pricing");
         expect(weeklyNoteText(12, 3)).not.toContain("—");
     });
 });

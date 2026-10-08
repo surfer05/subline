@@ -5,8 +5,8 @@ import { LocaleStore, React, Toasts } from "@webpack/common";
 import { copyToClipboard } from "@utils/clipboard";
 
 import { entitlementLevel, type Level, subscribeEntitlement } from "./entitlement";
-import { targetLanguageOptions } from "./languages";
-import { openCodeEntryFromSettings, openUpgrade } from "./upgradeBridge";
+import { type LanguageSelectOption, targetLanguageOptions } from "./languages";
+import { isPaymentPending, openCodeEntryFromSettings, openUpgrade, subscribePaymentPending } from "./upgradeBridge";
 import { notifySettingsChanged } from "./settingsBridge";
 import { SETTINGS_COPY } from "./settingsCopy";
 import { DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_MODEL } from "./types";
@@ -86,6 +86,7 @@ function link(text: string, onClick: () => void) {
 export function PlanCard() {
     const [, redraw] = React.useReducer((n: number) => n + 1, 0);
     React.useEffect(() => subscribeEntitlement(redraw), []);
+    React.useEffect(() => subscribePaymentPending(redraw), []);
     const level = entitlementLevel();
     const raw = settings.store.sublineCode;
     const code = typeof raw === "string" ? raw.trim() : "";
@@ -107,8 +108,12 @@ export function PlanCard() {
         ));
     }
     const actions: any[] = [];
-    if (level === "none") actions.push(link(SETTINGS_COPY.plan.activate, openUpgrade), " · ", link(SETTINGS_COPY.plan.enterCode, openCodeEntryFromSettings));
-    else if (level === "automatic") actions.push(link(SETTINGS_COPY.plan.addAi, openUpgrade));
+    // P4: while a payment is on its way, plain words in place of the buy link.
+    const buy = (text: string) => isPaymentPending()
+        ? React.createElement("span", { "data-subline-payment-pending": "" }, SETTINGS_COPY.plan.paymentPending)
+        : link(text, openUpgrade);
+    if (level === "none") actions.push(buy(SETTINGS_COPY.plan.activate), " · ", link(SETTINGS_COPY.plan.enterCode, openCodeEntryFromSettings));
+    else if (level === "automatic") actions.push(buy(SETTINGS_COPY.plan.addAi));
     if (actions.length > 0) rows.push(React.createElement("div", { key: "actions", style: { ...muted, marginTop: 4 } }, ...actions));
     return React.createElement("div", { style: { marginBottom: 8 } }, ...rows);
 }
@@ -252,7 +257,7 @@ export const settings = definePluginSettings({
         // not be normalised (see index.tsx's normaliseTargetLangSetting). Vencord
         // reads `options` when it renders the dropdown (SelectSetting.tsx at the
         // pinned commit), never at definition time.
-        get options() { return targetLanguageOptions(settings.store.targetLang); },
+        get options(): LanguageSelectOption[] { return targetLanguageOptions(settings.store.targetLang); },
         // A getter, not a literal. Vencord resolves a setting's `default`
         // LAZILY — getDefaultValue() in src/api/Settings.ts reads
         // `setting.default` the first time the value is actually needed, and

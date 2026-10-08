@@ -10,7 +10,7 @@
  * Activate is pressed, so the modal needs no React state of its own, and a
  * refusal is said in a toast while the modal stays open for another try.
  */
-import { Modal, openModal, React, Toasts } from "@webpack/common";
+import { closeModal, Modal, openModal, React, Toasts } from "@webpack/common";
 
 import type { Plan } from "./checkout";
 import { PRICING_URL } from "./freePlan";
@@ -23,21 +23,45 @@ function openPricingInstead(): void {
     (globalThis as any).VencordNative?.native?.openExternal?.(PRICING_URL);
 }
 
+/* ------------------------------------------------------ open panels -- */
+
+/** The panels that sell something, and the payment-pending panel shown in their place. */
+export type PanelKind = "addAi" | "activate" | "pending";
+
+/** Modal key -> kind, for each panel opened and not yet closed by its own buttons. */
+const openPanels = new Map<string, PanelKind>();
+
+/** Track a panel by the key openModal returned. Its own buttons call `forget`. */
+function track(kind: PanelKind, open: (forget: () => void) => unknown): void {
+    let key: unknown;
+    const forget = () => { if (typeof key === "string") openPanels.delete(key); };
+    key = open(forget);
+    if (typeof key === "string") openPanels.set(key, kind);
+}
+
+/**
+ * Close an open panel (P5: AI switched on under an open Add AI panel; P4: a
+ * payment started under a buy panel). Returns whether one was open. A panel
+ * the reader already closed by hand is a no-op for Discord's closeModal.
+ */
+export function closePanel(kind: PanelKind): boolean {
+    let closed = false;
+    for (const [key, k] of [...openPanels]) {
+        if (k !== kind) continue;
+        openPanels.delete(key);
+        try { closeModal(key); } catch { /* already gone */ }
+        closed = true;
+    }
+    return closed;
+}
+
 /* ------------------------------------------------------------ Add AI -- */
 
+/** P3: the prices are on the buttons; the body is the coupon line alone. */
 export function UpgradePanelBody() {
     return (
         <div>
-            <div style={ROW}>
-                <strong>{UPGRADE_COPY.monthlyName}</strong>
-                <span>{UPGRADE_COPY.monthlyPrice}</span>
-            </div>
-            <div style={ROW}>
-                <strong>{UPGRADE_COPY.annualName}</strong>
-                <span>{UPGRADE_COPY.annualPrice} <span style={MUTED}>({UPGRADE_COPY.annualNote})</span></span>
-            </div>
-            <div style={{ ...MUTED, paddingTop: 8 }}>{UPGRADE_COPY.couponHint}</div>
-            <div style={{ ...MUTED, paddingTop: 8 }}>{UPGRADE_COPY.panelFootnote}</div>
+            <div style={MUTED}>{UPGRADE_COPY.couponHint}</div>
         </div>
     );
 }
@@ -45,19 +69,40 @@ export function UpgradePanelBody() {
 /** The Add AI panel, for an Automatic owner. `choose` runs after the panel closes. */
 export function openUpgradePanel(choose: (plan: Plan) => void): void {
     try {
-        openModal((props: any) => (
+        track("addAi", forget => openModal((props: any) => (
             <Modal
                 {...props}
                 title={UPGRADE_COPY.panelTitle}
                 subtitle={UPGRADE_COPY.panelSubtitle}
                 actions={[
-                    { text: UPGRADE_COPY.monthlyButton, variant: "secondary", onClick: () => { props.onClose(); choose("monthly"); } },
-                    { text: UPGRADE_COPY.annualButton, variant: "primary", onClick: () => { props.onClose(); choose("annual"); } }
+                    { text: UPGRADE_COPY.monthlyButton, variant: "secondary", onClick: () => { forget(); props.onClose(); choose("monthly"); } },
+                    { text: UPGRADE_COPY.annualButton, variant: "primary", onClick: () => { forget(); props.onClose(); choose("annual"); } }
                 ]}
             >
                 <UpgradePanelBody />
             </Modal>
-        ));
+        )));
+    } catch {
+        openPricingInstead();
+    }
+}
+
+/**
+ * In place of the Add AI or Activate panel while a payment is on its way (P4):
+ * "Payment being confirmed", what happens next, and OK. Nothing to buy.
+ */
+export function openPaymentPendingPanel(): void {
+    try {
+        track("pending", forget => openModal((props: any) => (
+            <Modal
+                {...props}
+                title={UPGRADE_COPY.paymentPending}
+                subtitle={UPGRADE_COPY.purchasePending}
+                actions={[
+                    { text: UPGRADE_COPY.purchasedNoticeButton, variant: "primary", onClick: () => { forget(); props.onClose(); } }
+                ]}
+            />
+        )));
     } catch {
         openPricingInstead();
     }
@@ -81,19 +126,19 @@ export function ActivatePanelBody() {
 /** The Activate panel, for an install with nothing: buy Automatic, or enter a code. */
 export function openActivatePanel(actions: { buy: () => void; enterCode: () => void; }): void {
     try {
-        openModal((props: any) => (
+        track("activate", forget => openModal((props: any) => (
             <Modal
                 {...props}
                 title={UPGRADE_COPY.activateTitle}
                 subtitle={UPGRADE_COPY.activateSubtitle}
                 actions={[
-                    { text: UPGRADE_COPY.enterCodeButton, variant: "secondary", onClick: () => { props.onClose(); actions.enterCode(); } },
-                    { text: UPGRADE_COPY.automaticButton, variant: "primary", onClick: () => { props.onClose(); actions.buy(); } }
+                    { text: UPGRADE_COPY.enterCodeButton, variant: "secondary", onClick: () => { forget(); props.onClose(); actions.enterCode(); } },
+                    { text: UPGRADE_COPY.automaticButton, variant: "primary", onClick: () => { forget(); props.onClose(); actions.buy(); } }
                 ]}
             >
                 <ActivatePanelBody />
             </Modal>
-        ));
+        )));
     } catch {
         openPricingInstead();
     }

@@ -23,6 +23,8 @@ export const SETTINGS_COPY = {
         copied: "Code copied.",
         activate: "Activate",
         addAi: "Add AI",
+        /** In place of Activate / Add AI while a payment is on its way (same words as UPGRADE_COPY.paymentPending). */
+        paymentPending: "Payment being confirmed",
         enterCode: "Enter a code"
     },
     targetLang: {

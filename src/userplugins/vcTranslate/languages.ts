@@ -66,6 +66,13 @@ export function normalizeTargetLang(value: unknown): string | null {
 export interface LanguageSelectOption {
     label: string;
     value: string;
+    /**
+     * Never set: the setting has its own `default` (Discord's locale). Declared
+     * because Vencord's settings types only treat a SELECT as always holding
+     * a value when its options may carry this flag; without it
+     * `settings.store.targetLang` would be typed `string | undefined`.
+     */
+    default?: boolean;
 }
 
 /**

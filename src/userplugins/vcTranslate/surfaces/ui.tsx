@@ -167,8 +167,11 @@ export function tightTranslation(text: string): { lang: string; text: string; gl
     const q = entry?.quality;
     const qText = q ? cleanTranslation(q.text.trim(), text) : "";
     if (q && qText.trim() !== "") return { lang: q.lang, text: qText, glyph: "✦" };
-    if (service.tightQualityOnly()) return null;
+    // While ✦ is the only source, nothing until it lands, EXCEPT a ≈ already
+    // cached: it was fetched while ✦ was down (P9), and blanking it the moment
+    // ✦ is back would take a readable line away until ✦ answers.
     const f = entry?.fast;
+    if (service.tightQualityOnly() && !f) return null;
     if (!f || f.text.trim() === "") return null;
     if (fastUnsure(f, text)) return null;
     const fText = cleanTranslation(f.text.trim(), text);

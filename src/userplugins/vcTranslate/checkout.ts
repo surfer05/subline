@@ -60,13 +60,23 @@ export const CHECKOUT_REFUSALS = new Set(["automatic_required", "already_owned",
  * started from Discord, so the thanks view says "go back to Discord" rather
  * than showing a code to paste.
  */
-export const CHECKOUT_RETURN_URL = "https://surfer05.github.io/subline/?from=discord";
+export const CHECKOUT_RETURN_URL = "https://subline.page/?from=discord";
 
 export const POLL_EVERY_MS = 5_000;
 export const POLL_FOR_MS = 30 * 60_000;
 /** After the first 30 minutes, a slower check for a purchase still pending. */
 export const SLOW_POLL_EVERY_MS = 5 * 60_000;
 export const SLOW_POLL_FOR_MS = 48 * 60 * 60_000;
+/**
+ * How long "Payment being confirmed" replaces the buy links (P4) after a
+ * checkout opens, or after the relay last answered purchase_pending. The
+ * fast poll's 30 minutes, which is also the relay's own window for a
+ * checkout it cannot ask Dodo about (relay CKO_WINDOW_MS). Not the whole 48
+ * hours of slow polling: an abandoned checkout must not hide Add AI for two
+ * days. After it, a buy press asks the relay, which still answers
+ * purchase_pending while money is really moving (and that shows it again).
+ */
+export const PENDING_SHOWN_FOR_MS = POLL_FOR_MS;
 
 /**
  * The install hash the relay files a purchase under: the first 16 hex of
@@ -116,6 +126,8 @@ export interface CheckoutDeps {
     onPurchase: (purchase: Purchase) => boolean;
     log?: (message: string) => void;
     now?: () => number;
+    /** P4: a payment started (true) or is no longer being waited for (false). Called on changes only. */
+    onPendingChange?: (pending: boolean) => void;
 }
 
 export interface CheckoutFlow {
@@ -128,6 +140,8 @@ export interface CheckoutFlow {
     start: (plan: Plan) => Promise<true | false | string>;
     stop: () => void;
     isPolling: () => boolean;
+    /** P4: a payment from this install is on its way (see PENDING_SHOWN_FOR_MS). */
+    isPending: () => boolean;
 }
 
 export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
@@ -137,11 +151,31 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
     let deadline = 0;
     let slowDeadline = 0;
     let generation = 0;
+    let pending = false;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const stop = () => {
+    const setPending = (next: boolean) => {
+        if (!next && pendingTimer !== null) { clearTimeout(pendingTimer); pendingTimer = null; }
+        if (next === pending) return;
+        pending = next;
+        deps.onPendingChange?.(next);
+    };
+    /** A payment is on its way: say so for PENDING_SHOWN_FOR_MS from now. */
+    const markPending = () => {
+        if (pendingTimer !== null) clearTimeout(pendingTimer);
+        pendingTimer = setTimeout(() => { pendingTimer = null; setPending(false); }, PENDING_SHOWN_FOR_MS);
+        setPending(true);
+    };
+
+    /** Stop polling. "Payment being confirmed" is the caller's to settle. */
+    const halt = () => {
         generation++;
         if (timer !== null) clearTimeout(timer);
         timer = null;
+    };
+    const stop = () => {
+        halt();
+        setPending(false);
     };
 
     const schedule = (gen: number, bearer: string) => {
@@ -149,6 +183,7 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
         if (now() >= slowDeadline) {
             log("checkout: stopped waiting after 48 hours");
             timer = null;
+            setPending(false);
             return;
         }
         const every = now() < deadline ? POLL_EVERY_MS : SLOW_POLL_EVERY_MS;
@@ -174,7 +209,7 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
 
     const start = async (plan: Plan) => {
         const wasPolling = timer !== null;
-        stop();
+        halt();
         const gen = generation;
         const bearer = await deps.bearer();
         let url: string | null = null;
@@ -190,7 +225,11 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
                         deadline = now() + POLL_FOR_MS;
                         slowDeadline = now() + SLOW_POLL_FOR_MS;
                     }
+                    markPending();
                     schedule(gen, bearer);
+                } else if (gen === generation) {
+                    // Nothing is on its way: the poll was halted above.
+                    setPending(false);
                 }
                 return res.errorCode;
             }
@@ -198,6 +237,7 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
             else if (res.ok || res.status !== undefined) {
                 // The relay answered and cannot sell this now: nothing opens.
                 log(`checkout: not available (${res.ok ? "not a Dodo URL" : res.error})`);
+                if (gen === generation) setPending(false);
                 return "unavailable";
             } else log(`checkout: relay unreachable (${res.error}), trying the static link`);
         } catch (e) {
@@ -206,6 +246,7 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
         if (url === null) {
             if (!isConfiguredProduct(PLAN_PRODUCTS[plan])) {
                 log("checkout: no product set up for this plan, not opening a static link");
+                if (gen === generation) setPending(false);
                 return "unavailable";
             }
             let hash: string | null = null;
@@ -216,9 +257,10 @@ export function createCheckoutFlow(deps: CheckoutDeps): CheckoutFlow {
         deps.openExternal(url);
         deadline = now() + POLL_FOR_MS;
         slowDeadline = now() + SLOW_POLL_FOR_MS;
+        markPending();
         schedule(gen, bearer);
         return true;
     };
 
-    return { start, stop, isPolling: () => timer !== null };
+    return { start, stop, isPolling: () => timer !== null, isPending: () => pending };
 }

@@ -118,7 +118,7 @@ describe("custom emoji never reach a translator", () => {
     it("⚡ sends readable text too, never the raw tokens", async () => {
         settings.store.sublineCode = "SUBLINE-TEST-CODE";
         const m = discordMessage("2", FIELD);
-        const button = __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(m as any);
+        const button = __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(m as any)!;
         button.onClick?.();
         await settle();
         expect(sent("relay")).toContain(SENT);

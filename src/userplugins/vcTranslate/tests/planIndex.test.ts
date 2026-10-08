@@ -28,6 +28,7 @@ import { OptionType } from "./stubs/utils-types";
 import { __resetSettings } from "./stubs/api-settings";
 import { __resetNotices, shownNotices } from "./stubs/api-notices";
 import * as DataStore from "./stubs/api-datastore";
+import { __resetClipboard, copied } from "./stubs/utils-clipboard";
 import { __getPopoverButton, __reset as __resetMessagePopover } from "./stubs/api-messagepopover";
 import {
     __resetWebpackCommon, __stubSetSelectedChannel, FluxDispatcher, openedModals, shownToasts, stubMessages
@@ -164,6 +165,7 @@ beforeEach(async () => {
     __resetWebpackCommon();
     __resetNotices();
     __resetMessagePopover();
+    __resetClipboard();
     DataStore.__reset();
     settings.store.globalAuto = true;
     settings.store.targetLang = "en";
@@ -366,21 +368,24 @@ describe("what the install owns, from the relay", () => {
         await plugin.start!();
         await flush();
         expect(shownNotices.map(n => n.message))
-            .toContain("This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub.");
+            .toContain("This code is on 3 computers already. It frees up after 30 days unused, or email support@subline.page for a reset.");
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("1", "hola que tal") });
         await settle();
         expect(calls()).toHaveLength(0);
     });
 
-    it("at the 3-computer limit the notice links to GitHub, and Activate never opens the buy panel", async () => {
+    it("at the 3-computer limit the notice copies the support email, and Activate never opens the buy panel", async () => {
         DataStore.clearEntitlementForTest();
         native.relayStatus.mockResolvedValue({ ok: false, error: "relay: HTTP 403 device_limit", errorCode: "device_limit" });
         await plugin.start!();
         await flush();
         const limit = shownNotices.find(n => n.message === UPGRADE_COPY.deviceLimit)!;
-        expect(limit.buttonText).toBe("GitHub");
+        expect(limit.buttonText).toBe("Copy email");
         limit.onOkClick();
-        expect(native.openExternal).toHaveBeenCalledWith("https://github.com/surfer05/subline/issues");
+        await flush();
+        expect(copied).toEqual(["support@subline.page"]);
+        expect(shownToasts.map(t => t.message)).toContain("Email copied.");
+        expect(native.openExternal).not.toHaveBeenCalled();
         expect(activationNotices()).toHaveLength(0);
         // Any Activate link now repeats the limit instead of selling Automatic.
         const modals = openedModals.length;
@@ -523,7 +528,7 @@ describe("entering a code", () => {
         await flush();
         expect(failures()).toEqual([
             "That code doesn't exist.",
-            "This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub."
+            "This code is on 3 computers already. It frees up after 30 days unused, or email support@subline.page for a reset."
         ]);
         expect(settings.store.sublineCode).toBe("");
     });
@@ -607,7 +612,7 @@ describe("an Automatic owner", () => {
         const used = __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("1", ROMANIZED))!;
         expect(used.label).toBe("Add AI ✦");
         expect(clickables(render(msg("1", ROMANIZED))).some(c => c.label === "Preview ✦")).toBe(false);
-        used.onClick();
+        used.onClick!();
         expect(lastModal().el.props.title).toBe("Add AI");
     });
 
@@ -617,7 +622,7 @@ describe("an Automatic owner", () => {
         const { openUpgrade } = await import("../upgradeBridge");
         openUpgrade();
         const { el } = lastModal();
-        expect(el.props.actions.map((a: any) => a.text)).toEqual(["Monthly $1.99", "Yearly $19.99 · Save 16%"]);
+        expect(el.props.actions.map((a: any) => a.text)).toEqual(["$1.99 a month", "$19.99 a year · Save 16%"]);
         el.props.actions[1].onClick();
         await flush();
         expect(native.relayCheckout.mock.calls[0]![1]).toBe("annual");
@@ -639,15 +644,20 @@ describe("an Automatic owner", () => {
         expect(shownToasts.map(t => t.message)).not.toContain("You already have Automatic.");
     });
 
-    it("says under the AI plans that a coupon goes on the Monthly payment page", async () => {
-        const { UpgradePanelBody } = await import("../upgradePanel");
-        const text = (n: any): string => typeof n === "string" ? n
-            : Array.isArray(n) ? n.map(text).join(" ")
-            : n && typeof n === "object" && "children" in n ? text(n.children) : "";
-        const body = text(UpgradePanelBody());
-        expect(body).toContain("Have a coupon? Pick Monthly and enter it on the payment page.");
-        // After the plans, not before them.
-        expect(body.indexOf("Have a coupon?")).toBeGreaterThan(body.indexOf("$19.99 a year"));
+    it("P3: the Add AI panel is the title, one line, the two priced buttons and the coupon line, nothing else", async () => {
+        await startAutomatic({ automatic: true, code: "slp_auto" });
+        const { openUpgrade } = await import("../upgradeBridge");
+        openUpgrade();
+        const { el } = lastModal();
+        expect(el.props.title).toBe("Add AI");
+        expect(el.props.subtitle).toBe("✦ reads the whole conversation, so slang and replies come out right.");
+        expect(el.props.actions.map((a: any) => a.text)).toEqual(["$1.99 a month", "$19.99 a year · Save 16%"]);
+        // The body is a component: render it.
+        const body = text(el.children.map((c: any) => typeof c?.type === "function" ? c.type(c.props ?? {}) : c));
+        expect(body).toBe("Coupon? Enter it on the payment page.");
+        // No price table and no "Pay in your browser" footnote any more.
+        expect(body).not.toContain("Monthly");
+        expect(body).not.toContain("Pay in your browser");
     });
 
     it("stops polling an AI checkout once the relay says AI, and says so once", async () => {

@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 
 import {
     AUTOMATIC_PRODUCT_ID, CHECKOUT_RETURN_URL, createCheckoutFlow, installHash, isConfiguredProduct, isDodoCheckoutUrl, PLAN_PRODUCTS, POLL_EVERY_MS,
-    POLL_FOR_MS, SLOW_POLL_EVERY_MS, SLOW_POLL_FOR_MS, staticCheckoutUrl, type CheckoutDeps
+    PENDING_SHOWN_FOR_MS, POLL_FOR_MS, SLOW_POLL_EVERY_MS, SLOW_POLL_FOR_MS, staticCheckoutUrl, type CheckoutDeps
 } from "../checkout";
 
 const BEARER = "free_" + "0".repeat(32);
@@ -14,16 +14,19 @@ async function flush() {
     for (let i = 0; i < 20; i++) await Promise.resolve();
 }
 
-function deps(over: Partial<CheckoutDeps> = {}) {
-    const d = {
-        bearer: vi.fn(async () => BEARER),
-        createCheckout: vi.fn(async () => ({ ok: true as const, url: SESSION_URL })),
-        status: vi.fn(async () => ({ ok: true })),
-        openExternal: vi.fn(),
-        onPurchase: vi.fn(() => true),
+type Fns = Pick<CheckoutDeps, "bearer" | "createCheckout" | "status" | "openExternal" | "onPurchase">;
+/** The flow's dependencies as mocks, so a test can read their calls. */
+type MockDeps = { [K in keyof Fns]: Mock<Fns[K]> } & Pick<CheckoutDeps, "onPendingChange">;
+
+function deps(over: Partial<MockDeps> = {}): MockDeps {
+    return {
+        bearer: vi.fn<Fns["bearer"]>(async () => BEARER),
+        createCheckout: vi.fn<Fns["createCheckout"]>(async () => ({ ok: true, url: SESSION_URL })),
+        status: vi.fn<Fns["status"]>(async () => ({ ok: true })),
+        openExternal: vi.fn<Fns["openExternal"]>(),
+        onPurchase: vi.fn<Fns["onPurchase"]>(() => true),
         ...over
     };
-    return d;
 }
 
 describe("the install hash", () => {
@@ -40,8 +43,8 @@ describe("the static checkout link", () => {
         expect(url.searchParams.get("metadata_install")).toBe(HASH);
         expect(url.searchParams.get("redirect_url")).toBe(CHECKOUT_RETURN_URL);
         // Marked as started from Discord, so the site says "go back to Discord".
-        expect(CHECKOUT_RETURN_URL).toBe("https://surfer05.github.io/subline/?from=discord");
-        expect(staticCheckoutUrl("monthly", HASH)).toContain(`redirect_url=${encodeURIComponent("https://surfer05.github.io/subline/?from=discord")}`);
+        expect(CHECKOUT_RETURN_URL).toBe("https://subline.page/?from=discord");
+        expect(staticCheckoutUrl("monthly", HASH)).toContain(`redirect_url=${encodeURIComponent("https://subline.page/?from=discord")}`);
     });
 
     it("uses the live product ids, and one constant for Automatic", () => {
@@ -269,5 +272,89 @@ describe("the checkout flow", () => {
         await vi.advanceTimersByTimeAsync(POLL_EVERY_MS);
         expect(d.status).toHaveBeenCalledTimes(1);
         flow.stop();
+    });
+});
+
+/**
+ * P4. "Payment being confirmed" replaces the buy links while a payment is on
+ * its way: from the moment a checkout opens, and whenever the relay answers
+ * purchase_pending, for PENDING_SHOWN_FOR_MS. Never for 48 hours: an
+ * abandoned checkout must not hide Add AI for two days.
+ */
+describe("the checkout flow says when a payment is on its way (P4)", () => {
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    const pendingDeps = (over: Partial<MockDeps> = {}) => {
+        const seen: boolean[] = [];
+        const d = deps({ ...over, onPendingChange: v => { seen.push(v); } });
+        return { d, seen };
+    };
+
+    it("is pending from the moment a checkout opens, until the purchase lands", async () => {
+        let linked = false;
+        const { d, seen } = pendingDeps({
+            status: vi.fn<Fns["status"]>(async () => linked ? { ok: true, purchase: { code: "LK-1", plan: "monthly" } } : { ok: true })
+        });
+        const flow = createCheckoutFlow(d);
+        expect(flow.isPending()).toBe(false);
+        await flow.start("monthly");
+        expect(flow.isPending()).toBe(true);
+        expect(seen).toEqual([true]);
+        await vi.advanceTimersByTimeAsync(3 * POLL_EVERY_MS);
+        expect(flow.isPending()).toBe(true);
+        linked = true;
+        await vi.advanceTimersByTimeAsync(POLL_EVERY_MS);
+        expect(flow.isPending()).toBe(false);
+        expect(seen).toEqual([true, false]);
+    });
+
+    it("stops saying so after PENDING_SHOWN_FOR_MS, while the slow poll goes on", async () => {
+        const { d, seen } = pendingDeps();
+        const flow = createCheckoutFlow(d);
+        await flow.start("monthly");
+        await vi.advanceTimersByTimeAsync(PENDING_SHOWN_FOR_MS - 1);
+        expect(flow.isPending()).toBe(true);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(flow.isPending()).toBe(false);
+        expect(seen).toEqual([true, false]);
+        expect(flow.isPolling()).toBe(true);
+        flow.stop();
+    });
+
+    it("the relay's purchase_pending says so again, even late in the slow poll", async () => {
+        let refuse = false;
+        const { d } = pendingDeps({
+            createCheckout: vi.fn<Fns["createCheckout"]>(async () => refuse
+                ? { ok: false, error: "relay checkout: HTTP 409 purchase_pending", errorCode: "purchase_pending", status: 409 }
+                : { ok: true, url: SESSION_URL })
+        });
+        const flow = createCheckoutFlow(d);
+        await flow.start("monthly");
+        await vi.advanceTimersByTimeAsync(2 * PENDING_SHOWN_FOR_MS);
+        expect(flow.isPending()).toBe(false);
+        refuse = true;
+        expect(await flow.start("monthly")).toBe("purchase_pending");
+        expect(flow.isPending()).toBe(true);
+        expect(d.openExternal).toHaveBeenCalledTimes(1);
+        flow.stop();
+        expect(flow.isPending()).toBe(false);
+    });
+
+    it("a refusal that opens nothing and waits for nothing is never pending", async () => {
+        for (const errorCode of ["automatic_required", "already_owned"]) {
+            const { d, seen } = pendingDeps({
+                createCheckout: vi.fn<Fns["createCheckout"]>(async () => ({ ok: false, error: `relay checkout: HTTP 409 ${errorCode}`, errorCode, status: 409 }))
+            });
+            const flow = createCheckoutFlow(d);
+            expect(await flow.start("annual")).toBe(errorCode);
+            expect(flow.isPending()).toBe(false);
+            expect(seen).toEqual([]);
+        }
+        const { d, seen } = pendingDeps({
+            createCheckout: vi.fn<Fns["createCheckout"]>(async () => ({ ok: false, error: "relay checkout: HTTP 503", status: 503 }))
+        });
+        expect(await createCheckoutFlow(d).start("monthly")).toBe("unavailable");
+        expect(seen).toEqual([]);
     });
 });

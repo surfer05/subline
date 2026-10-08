@@ -29,3 +29,32 @@ export function openCodeEntryFromSettings(): void {
     if (codeOpener !== null) codeOpener();
     else pricing();
 }
+
+/* ------------------------------------------------- payment on its way -- */
+
+/**
+ * P4. True while a payment from this install is on its way: a checkout page
+ * was opened and the plugin is waiting for it, or the relay answered
+ * purchase_pending. Meanwhile every place that sells (the plan card, the ⚡
+ * popover, the ✦ preview line, the panel) says "Payment being confirmed"
+ * and offers no second purchase. Set by the checkout flow (index.tsx).
+ */
+let paymentPending = false;
+const pendingListeners = new Set<() => void>();
+
+export function setPaymentPending(next: boolean): void {
+    if (next === paymentPending) return;
+    paymentPending = next;
+    for (const fn of [...pendingListeners]) {
+        try { fn(); } catch { /* a listener's failure is its own */ }
+    }
+}
+
+export function isPaymentPending(): boolean {
+    return paymentPending;
+}
+
+export function subscribePaymentPending(fn: () => void): () => void {
+    pendingListeners.add(fn);
+    return () => { pendingListeners.delete(fn); };
+}

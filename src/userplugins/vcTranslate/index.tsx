@@ -6,6 +6,7 @@ import { popNotice, showNotice } from "@api/Notices";
 import { Logger } from "@utils/Logger";
 import definePlugin, { PluginNative } from "@utils/types";
 import { relaunch } from "@utils/native";
+import { copyToClipboard } from "@utils/clipboard";
 import {
     ChannelStore, FluxDispatcher, GuildMemberStore, GuildRoleStore, LocaleStore, MessageStore,
     Parser, React, SelectedChannelStore, Toasts, UserStore
@@ -14,7 +15,7 @@ import type { Message } from "@vencord/discord-types";
 
 import { CONTEXT_RING_SIZE, createBatcher, type Batcher } from "./batcher";
 import { forgetNotices, putNotice, takeNotice } from "./sublineNotice";
-import { clipParentText, fitLlmRequest, LLM_TEXT_MAX, shrinkAfterRefusal } from "./fitRequest";
+import { clipParentText, fitLlmRequest, fitMessageText, LLM_TEXT_MAX, shrinkAfterRefusal } from "./fitRequest";
 import { cleanTranslation, dropCustomEmoji } from "./customEmoji";
 import { renderDiscordMarkup, type MarkupResolvers } from "./discordMarkup";
 import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel, toggleChannelOptOut } from "./channels";
@@ -23,7 +24,7 @@ import { DECODED_TITLE, decodedPrefix, decodeMessage, translatableText } from ".
 import { isConfidentlyTargetLanguage } from "./detectLang";
 import {
     entitlementLevel, ENTITLEMENT_REFRESH_MS, getEntitlement, holderFor, type Level, loadEntitlement, setCurrentHolder,
-    setEntitlement
+    setEntitlement, subscribeEntitlement
 } from "./entitlement";
 import { contentHash, loadPreviewLedger, PRICING_URL, rememberPreview, type PreviewResult } from "./freePlan";
 import {
@@ -55,9 +56,11 @@ import {
 import { ENGINE_RANK, isRealTranslation, mayReplace } from "./upgrade";
 import { createCheckoutFlow, type CheckoutFlow, type Plan } from "./checkout";
 import { isRtlLang, normalizeTargetLang } from "./languages";
-import { openUpgrade, registerUpgradeOpener } from "./upgradeBridge";
-import { RESET_HELP_URL, UPGRADE_COPY } from "./upgradeCopy";
-import { type CodeSubmitResult, openActivatePanel, openCodeEntry, openUpgradePanel } from "./upgradePanel";
+import { isPaymentPending, openUpgrade, registerUpgradeOpener, setPaymentPending } from "./upgradeBridge";
+import { SUPPORT_EMAIL, UPGRADE_COPY } from "./upgradeCopy";
+import {
+    closePanel, type CodeSubmitResult, openActivatePanel, openCodeEntry, openPaymentPendingPanel, openUpgradePanel
+} from "./upgradePanel";
 import { createUpdateWatch, UPDATE_CHECK_INTERVAL_MS, type UpdateWatch } from "./updateNotice";
 import { SurfaceBudget } from "./surfaces/budget";
 import { SurfaceCache } from "./surfaces/cache";
@@ -673,9 +676,14 @@ function showActivationNotice(message: string = UPGRADE_COPY.activateNotice): vo
     putNotice("activation", message, UPGRADE_COPY.activateButton, openUpgradeForLevel);
 }
 
-/** Open the page where a reader asks for a computer reset. */
+/**
+ * Copy the support address a reader writes to for a computer reset. Copied,
+ * not opened: Vencord's openExternal refuses mailto: links.
+ */
 function openResetHelp(): void {
-    (globalThis as any).VencordNative?.native?.openExternal?.(RESET_HELP_URL);
+    void copyToClipboard(SUPPORT_EMAIL)
+        .then(() => Toasts.show({ id: Toasts.genId(), type: Toasts.Type.SUCCESS, message: UPGRADE_COPY.emailCopied }))
+        .catch(() => { });
 }
 
 /**
@@ -809,10 +817,40 @@ function getCheckoutFlow(): CheckoutFlow {
         },
         openExternal: url => (globalThis as any).VencordNative?.native?.openExternal?.(url),
         onPurchase: () => true,
-        log: tasteLog
+        log: tasteLog,
+        onPendingChange: onPaymentPendingChange
     });
     return checkoutFlow;
 }
+
+/**
+ * P4. A payment started (or stopped being waited for). While it is on its
+ * way nothing offers a second purchase: an open buy panel closes, and every
+ * "Add AI" / "Activate" reads "Payment being confirmed". When it ends, the
+ * "Payment being confirmed" panel closes. The ✦ preview lines are redrawn.
+ */
+function onPaymentPendingChange(pending: boolean): void {
+    setPaymentPending(pending);
+    if (pending) {
+        closePanel("addAi");
+        closePanel("activate");
+    } else {
+        closePanel("pending");
+    }
+    notifyForcedInFlight();
+}
+
+/**
+ * P5. What the install owns changed: a panel selling what it now has closes
+ * (Add AI once AI is on; Activate once it is activated). The plan card, ⚡
+ * and the ✦ preview line already read the level on every draw.
+ */
+function closePanelsForLevel(): void {
+    const level = entitlementLevel();
+    if (level === "ai") closePanel("addAi");
+    if (level !== "none") closePanel("activate");
+}
+let unsubscribePanels: (() => void) | null = null;
 
 /**
  * Save a code the relay linked to this install (a purchase, a promo or an
@@ -1013,6 +1051,11 @@ function openUpgradeForLevel(): void {
         Toasts.show({ id: Toasts.genId(), type: Toasts.Type.FAILURE, message: UPGRADE_COPY.deviceLimit });
         // Back on screen if the reader closed it; never a second copy.
         showDeviceLimitNotice(true);
+        return;
+    }
+    // P4: a payment is on its way. Say so, and sell nothing twice.
+    if (level !== "ai" && isPaymentPending()) {
+        openPaymentPendingPanel();
         return;
     }
     if (level === "none") {
@@ -1732,6 +1775,10 @@ function announceCooldownOnce(
         // Say nothing, and stay unannounced: this is the common case, and it is
         // over before a toast would have finished fading in.
         return;
+    } else if (engine === "relay") {
+        // P9: Subline's own relay busy or down is not the reader's to act on.
+        // ≈ is on screen, ✦ resumes by itself, and the chat bar counts down.
+        return;
     } else {
         message = `✦ is catching up. Back in about ${formatDuration(cooldownMs)}. ≈ keeps working.`;
     }
@@ -1794,7 +1841,8 @@ function channelActive(channelId: string): boolean {
 /** Identifies the credential a pin applies to. Never logged, never displayed. */
 function credentialFingerprint(): string {
     const configured = settings.store.engine as EngineId;
-    return `${configured}:${apiKeyFor(configured).trim()}`;
+    // Google has no credential (and no LLM_ENGINES row to read one from).
+    return `${configured}:${isLlmEngine(configured) ? apiKeyFor(configured).trim() : ""}`;
 }
 
 /**
@@ -1839,11 +1887,17 @@ function fallBackToGoogle(reason: string, kind: FallbackKind = "key") {
     fallbackKind = kind;
     fallbackExpiresAt = kind === "blocked" ? Date.now() + BLOCKED_RETRY_AFTER_MS : null;
     fallbackPinnedFor = credentialFingerprint();
-    Toasts.show({
-        id: Toasts.genId(),
-        type: Toasts.Type.FAILURE,
-        message: `VcTranslate: ${reason}. Using Google for this session.`
-    });
+    // P9: the relay blocked on this network is quiet. ≈ keeps working, the
+    // chat bar says "✦ blocked", and the pin lifts by itself (BLOCKED_RETRY_AFTER_MS).
+    if (kind === "blocked" && settings.store.engine === "relay") {
+        logger.info(`${reason}; ✦ paused for ${Math.round(BLOCKED_RETRY_AFTER_MS / 60_000)} minutes`);
+    } else {
+        Toasts.show({
+            id: Toasts.genId(),
+            type: Toasts.Type.FAILURE,
+            message: `VcTranslate: ${reason}. Using Google for this session.`
+        });
+    }
     rebuildBatcher();
 }
 
@@ -2336,6 +2390,9 @@ async function runTier(
             // error string into the DOM.
             report?.({ kind: "failed", code: errorCode });
 
+            // P9: the relay went unanswered (anything but a refusal about
+            // what this install owns). Statuses and titles take ≈ meanwhile.
+            if (engine === "relay" && !(res !== null && isEntitlementRefusal(res.errorCode))) relayFailing = true;
             if (res !== null && engine === "relay" && isEntitlementRefusal(res.errorCode)) {
                 // The relay refused on what this install owns (AI lapsed, a
                 // 4th computer), not on the network or the code's validity:
@@ -2430,6 +2487,7 @@ async function runTier(
         // an exception in the write loop, and only for the quality tier: the
         // fast tier is Google, which is not gated, not keyed and reports none
         // of this.
+        if (engine === "relay") relayFailing = false;
         if (isQuality && isLlmEngine(engine)) {
             // The CEILING the provider states for this credential (the relay's
             // rpmLimit). A real number beats the untaught guess, and learning
@@ -2573,33 +2631,27 @@ function isOversizeRefusal(engine: EngineId, error: string): boolean {
  * Keep every ✦ text inside the relay's per-text limit. Mention expansion can
  * push a near-4,000-character message past it (`<#id>` becomes a channel name
  * of up to 100 characters), and one such text made the relay refuse the whole
- * batch. Such a message is sent as Discord stored it instead; if even that is
- * too long it is left to ≈, because no ✦ request could carry it.
+ * batch. Such a message is sent as Discord stored it when that fits; anything
+ * longer is sent as its first part (fitMessageText), so it still gets ✦ (G2).
  */
 function withinTextLimit(req: BatchRequest, channelId: string | undefined): BatchRequest {
     if (!req.messages.some(m => m.text.length > LLM_TEXT_MAX)) return req;
-    const messages: BatchRequest["messages"] = [];
-    for (const m of req.messages) {
-        if (m.text.length <= LLM_TEXT_MAX) {
-            messages.push(m);
-            continue;
-        }
-        let raw: unknown;
-        try {
-            raw = channelId ? (MessageStore.getMessage(channelId, m.id) as any)?.content : undefined;
-        } catch {
-            raw = undefined;
-        }
-        if (typeof raw === "string" && raw.trim() !== "" && raw.length <= LLM_TEXT_MAX) {
-            messages.push({ ...m, text: raw });
-        } else {
-            // Charged so catch-up does not pick it again on every open: no ✦
-            // request can ever carry it.
-            markQualityAttempted(makeKey(m.id, req.targetLang));
-            logger.info(`[flush] ${m.id}: ${m.text.length} characters, too long for a ✦ request; left to ≈`);
-        }
+    return { ...req, messages: req.messages.map(m => fitOneText(m, channelId)) };
+}
+
+/** One message of a ✦ request, inside the per-text limit (see withinTextLimit). */
+function fitOneText<M extends { id: string; text: string; }>(m: M, channelId: string | undefined): M {
+    if (m.text.length <= LLM_TEXT_MAX) return m;
+    let raw: unknown;
+    try {
+        raw = channelId ? (MessageStore.getMessage(channelId, m.id) as { content?: unknown; } | undefined)?.content : undefined;
+    } catch {
+        raw = undefined;
     }
-    return { ...req, messages };
+    if (typeof raw === "string" && raw.trim() !== "" && raw.length <= LLM_TEXT_MAX) return { ...m, text: raw };
+    const text = fitMessageText(m.text);
+    logger.info(`[flush] ${m.id}: ${m.text.length} characters, over the ✦ limit; sending the first ${text.length}`);
+    return { ...m, text };
 }
 
 /**
@@ -2805,13 +2857,14 @@ async function sendPreview(message: Message): Promise<boolean> {
     const { credential, install } = await relayCredentials();
     const content = message.content ?? "";
     const req: BatchRequest = {
-        messages: [{
+        // Over the relay's per-text limit, the first part is previewed (G2).
+        messages: [fitOneText({
             id: message.id,
             author: message.author?.username ?? "unknown",
             text: readableContent(content, message.channel_id),
             replyToId: replyParentId(message),
             ...withReplyCopy(message)
-        }],
+        }, message.channel_id)],
         context: contextBefore(message, FORCED_CONTEXT_SIZE),
         targetLang: settings.store.targetLang,
         // The reader asked for this one: translate it, never skip.
@@ -3719,7 +3772,12 @@ function forcedHintDisplay(hint: ForcedHint): { text: string; title: string } {
  * See previewPress.
  */
 function previewLine(preview: PreviewResult) {
-    const addAi = (
+    // P4: while a payment is on its way the link is plain words, not a buy link.
+    const addAi = isPaymentPending() ? (
+        <span style={{ color: "var(--text-muted)" }} data-subline-payment-pending="">
+            {" · "}{UPGRADE_COPY.paymentPending}
+        </span>
+    ) : (
         <span style={{ color: "var(--text-muted)" }}>
             {" · "}
             <a
@@ -4080,6 +4138,12 @@ function translationLines(message: Message) {
  */
 export const FORCE_QUALITY_POPOVER_ID = "VcTranslate-forceQuality";
 
+/** The 🌐 popover button: on is the globe, off the same globe dimmed (P2). */
+const CHANNEL_ICON_ON = { fontSize: "1rem" } as const;
+const CHANNEL_ICON_OFF = { fontSize: "1rem", opacity: 0.4, filter: "grayscale(1)" } as const;
+/** The toast when the 🌐 switch could not be saved. */
+const CHANNEL_TOGGLE_FAILED = "Couldn't save that. Try again.";
+
 /**
  * The ⚡ popover action: "spend one of the LLM's requests on THIS message,
  * right now." Distinct from the 🌐 channel toggle above (which is a per-CHANNEL
@@ -4123,7 +4187,17 @@ function forceQualityPopoverRender(message: Message) {
         if (rolloverTasteIfNewUtcDay()) void refreshEntitlement();
         if (tasteExhausted()) {
             // Today's five are used, so a press would send nothing. Offer the
-            // one thing that does help: the Add AI panel.
+            // one thing that does help: the Add AI panel. While a payment is
+            // on its way, say that instead (P4); a press says what happens next.
+            if (isPaymentPending()) {
+                return {
+                    label: UPGRADE_COPY.paymentPending,
+                    icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
+                    message,
+                    channel,
+                    onClick: () => openUpgrade()
+                };
+            }
             return {
                 label: UPGRADE_COPY.popoverUpgrade,
                 icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
@@ -4393,12 +4467,14 @@ function surfaceDebug(message: string): void {
  */
 async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promise<SurfaceOutcome> {
     const engine: EngineId = tier === "fast" ? "google" : "relay";
-    // Surfaces pause entirely while EITHER engine is cooling down: whatever
-    // capacity is left then belongs to the conversation.
+    // A Google cooldown pauses every surface: whatever capacity is left then
+    // belongs to the conversation. A relay cooldown pauses ✦ only. ≈ goes on
+    // (P9: a relay that is down or rate-limited never takes ≈ off profiles
+    // and embeds; it costs the relay nothing).
     // "busy" for every refusal BEFORE anything is sent: it costs the
     // surfaces no per-minute slot and is asked again in seconds (see
     // SurfaceOutcome). `null` is kept for a request that went out.
-    if (!isPaidSurfaceUser() || isCoolingDown("google") || isCoolingDown("relay")) return "busy";
+    if (!isPaidSurfaceUser() || isCoolingDown("google") || (engine === "relay" && isCoolingDown("relay"))) return "busy";
     // Surfaces' OWN Google cooldown: a 429 on a burst of statuses must never
     // park the ≈ line under messages (see the 429 branch below).
     if (engine === "google" && Date.now() < surfaceGoogleCooldownUntil) return "busy";
@@ -4449,6 +4525,7 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
         }
         return null;
     }
+    if (engine === "relay") relayFailing = false;
     const byId = new Map(res.results.map(r => [r.id, r]));
     return texts.map((_, i) => {
         const r = byId.get(`s${i}`);
@@ -4464,6 +4541,14 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
         return r.conf === undefined ? { lang: r.lang, text: r.text } : { lang: r.lang, text: r.text, conf: r.conf };
     });
 }
+
+/**
+ * P9: the last relay request for messages got no answer (down, timed out, a
+ * 5xx, malformed). Surfaces read it through `qualityPaused`, so a status or
+ * a title shows ≈ instead of nothing while the relay is down. Cleared by the
+ * next relay answer, from messages or surfaces.
+ */
+let relayFailing = false;
 
 /** Until when surfaces may not ask Google (their own 429). Messages' ≈ has its own cooldown. */
 let surfaceGoogleCooldownUntil = 0;
@@ -4482,6 +4567,7 @@ function startSurfaces(): SurfaceService {
     surfaceService = new SurfaceService({
         isPaid: isPaidSurfaceUser,
         qualityAllowed: surfaceQualityAllowed,
+        qualityPaused: () => relayFailing || isCoolingDown("relay"),
         targetLang: () => settings.store.targetLang,
         locallySkipped: text => shouldSkip(text, false) || isConfidentlyTargetLanguage(text, settings.store.targetLang),
         translate: translateSurfaceBatch,
@@ -4937,7 +5023,9 @@ export default definePlugin({
             const on = channelActive(message.channel_id);
             return {
                 label: on ? "Disable auto-translate here" : "Enable auto-translate here",
-                icon: () => <span style={{ fontSize: "1rem" }}>{on ? "🌐" : "🌫"}</span>,
+                // P2: off is the same globe, dimmed and grey. The fog emoji used
+                // before rendered on Windows as a struck-through ≈.
+                icon: () => <span style={on ? CHANNEL_ICON_ON : CHANNEL_ICON_OFF} data-subline-channel-icon={on ? "on" : "off"}>🌐</span>,
                 message,
                 channel,
                 onClick: async () => {
@@ -4965,7 +5053,7 @@ export default definePlugin({
                         Toasts.show({
                             id: Toasts.genId(),
                             type: Toasts.Type.FAILURE,
-                            message: "VcTranslate: couldn't save that toggle, try again."
+                            message: CHANNEL_TOGGLE_FAILED
                         });
                     }
                 }
@@ -4976,6 +5064,8 @@ export default definePlugin({
     async start() {
         // Every Activate / Add AI link opens the right panel while the plugin runs.
         registerUpgradeOpener(openUpgradeForLevel, openCodeEntryPanel);
+        unsubscribePanels?.();
+        unsubscribePanels = subscribeEntitlement(closePanelsForLevel);
         // The installer's install id (settings.json) wins over the plugin's own.
         connectInstallIdSetting({
             read: () => settings.store.installId,
@@ -5160,6 +5250,10 @@ export default definePlugin({
         connectInstallIdSetting(null);
         checkoutFlow?.stop();
         checkoutFlow = null;
+        setPaymentPending(false);
+        unsubscribePanels?.();
+        unsubscribePanels = null;
+        relayFailing = false;
         // The entitlement clock (see startEntitlementClock), and everything
         // it keeps.
         if (entitlementTimer !== null) clearInterval(entitlementTimer);

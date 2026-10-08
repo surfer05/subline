@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // `VencordNative.pluginHelpers.VcTranslate` at import time, exactly as
 // index.tsx does. vi.hoisted is the only hook that fires before the imports.
 const native = vi.hoisted(() => {
-    const reportStatus = vi.fn(async () => true);
+    const reportStatus = vi.fn(async (_json: string) => true);
     (globalThis as any).VencordNative = { pluginHelpers: { VcTranslate: { reportStatus } } };
     return { reportStatus };
 });
@@ -19,7 +19,7 @@ import { calls as loggedCalls, __resetLogCalls } from "./stubs/utils-logger";
 
 /** The beacon as the main process would receive it, for the nth write. */
 function written(n: number): StatusBeacon {
-    return JSON.parse(native.reportStatus.mock.calls[n][0] as string);
+    return JSON.parse(native.reportStatus.mock.calls[n]![0]);
 }
 
 function lastWritten(): StatusBeacon {

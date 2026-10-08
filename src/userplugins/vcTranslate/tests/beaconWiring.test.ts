@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // `reportStatus` half, which is the whole subject of this file.
 const native = vi.hoisted(() => {
     const translateBatch = vi.fn();
-    const reportStatus = vi.fn(async () => true);
+    const reportStatus = vi.fn(async (_json: string) => true);
     (globalThis as any).VencordNative = {
         pluginHelpers: { VcTranslate: { translateBatch, reportStatus } }
     };

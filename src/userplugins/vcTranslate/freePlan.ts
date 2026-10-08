@@ -11,7 +11,7 @@ import * as DataStore from "@api/DataStore";
  */
 
 /** Where every Upgrade link points when the in-Discord panel cannot open. */
-export const PRICING_URL = "https://surfer05.github.io/subline/#pricing";
+export const PRICING_URL = "https://subline.page/#pricing";
 
 /* ------------------------------------------------------------ preview -- */
 

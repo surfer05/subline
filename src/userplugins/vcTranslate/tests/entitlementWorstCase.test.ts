@@ -355,7 +355,7 @@ describe("a ✦ preview that fails", () => {
             fail();
             const btn = __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("1", ROMANIZED))!;
             expect(btn.label).toBe("Preview ✦ (5 left today)");
-            btn.onClick();
+            btn.onClick!();
             await flush();
             expect(text(render(msg("1", ROMANIZED)))).toContain("Preview didn't load. Try again.");
             const again = __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("1", ROMANIZED));
@@ -367,7 +367,7 @@ describe("a ✦ preview that fails", () => {
         await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
         setTranslation(key("1"), { lang: "ar", text: "I want to walk", via: "google", conf: 1 });
         answer({ relay: m => ({ id: m.id, skip: true }) });
-        __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("1", ROMANIZED))!.onClick();
+        __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("1", ROMANIZED))!.onClick!();
         await flush();
         expect(__getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg("1", ROMANIZED))).toBeNull();
     });
@@ -417,7 +417,7 @@ describe("one ✦ preview per message", () => {
         ask.onClick({ preventDefault() { } });
         // Synchronously, before anything was awaited: the pending state shows.
         expect(text(render(msg("1", ROMANIZED)))).toContain("translating…");
-        bolt.onClick();
+        bolt.onClick!();
         ask.onClick({ preventDefault() { } });
         await flush();
         expect(popover()).toBeNull();
@@ -434,7 +434,7 @@ describe("one ✦ preview per message", () => {
         await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
         rough();
         const release = heldRelay();
-        popover()!.onClick();
+        popover()!.onClick!();
         __stubSetSelectedChannel("c2");
         FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: "c2" });
         await flush();
@@ -453,7 +453,7 @@ describe("one ✦ preview per message", () => {
         await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
         rough();
         answer({ relay: m => ({ id: m.id, lang: "ar", text: "I don't want to go", skip: false }), relayQuota: { used: 1, cap: 5 } });
-        popover()!.onClick();
+        popover()!.onClick!();
         await flush();
         await restart(() => {
             DataStore.setEntitlementForTest({ automatic: true, ai: false, tokenExpiresAt: Date.now() + 7 * 24 * HOUR, checkedAt: Date.now() });
@@ -472,7 +472,7 @@ describe("one ✦ preview per message", () => {
     it("pressed while the ≈ line is still pending: the ✦ line wins once ≈ lands", async () => {
         await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
         const release = heldRelay();
-        popover()!.onClick();
+        popover()!.onClick!();
         expect(text(render(msg("1", ROMANIZED)))).toContain("translating…");
         release();
         await flush();
@@ -489,12 +489,12 @@ describe("one ✦ preview per message", () => {
             await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
             rough();
             fail();
-            popover()!.onClick();
+            popover()!.onClick!();
             await flush();
             expect(text(render(msg("1", ROMANIZED)))).toContain("Preview didn't load. Try again.");
             expect(popover()!.label).toBe("Preview ✦ (5 left today)");
             answer({ relay: m => ({ id: m.id, lang: "ar", text: "I don't want to go", skip: false }), relayQuota: { used: 1, cap: 5 } });
-            popover()!.onClick();
+            popover()!.onClick!();
             await flush();
             expect(text(render(msg("1", ROMANIZED)))).toBe("✦ ar · I don't want to go · Add AI");
         });
@@ -504,7 +504,7 @@ describe("one ✦ preview per message", () => {
         await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
         rough("1", "I want to walk");
         answer({ relay: m => ({ id: m.id, lang: "ar", text: "I want to walk", skip: false }), relayQuota: { used: 1, cap: 5 } });
-        popover()!.onClick();
+        popover()!.onClick!();
         await flush();
         const shown = text(render(msg("1", ROMANIZED)));
         expect(shown).toBe("✦ ar · I want to walk · Add AI");
@@ -516,7 +516,7 @@ describe("one ✦ preview per message", () => {
         rough("1", "x");
         const long = Array.from({ length: 300 }, (_, i) => "word" + i).join(" ");
         answer({ relay: m => ({ id: m.id, lang: "ar", text: long, skip: false }), relayQuota: { used: 1, cap: 5 } });
-        popover("1", LONG_SRC)!.onClick();
+        popover("1", LONG_SRC)!.onClick!();
         await flush();
         const shown = text(render(msg("1", LONG_SRC)));
         expect(shown).toBe(`✦ ar · ${long} · Add AI`);
@@ -527,7 +527,7 @@ describe("one ✦ preview per message", () => {
         await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
         rough();
         answer({ relay: m => ({ id: m.id, lang: "ar", text: "I don't want to go", skip: false }), relayQuota: { used: 1, cap: 5 } });
-        popover()!.onClick();
+        popover()!.onClick!();
         await flush();
         const edited = ROMANIZED + " ghda";
         rough("1", "I want to walk tomorrow");
@@ -543,7 +543,7 @@ describe("one ✦ preview per message", () => {
         rough("1"); rough("2");
         const stale = link("2")!;
         answer({ relay: m => ({ id: m.id, lang: "ar", text: "I don't want to go", skip: false }), relayQuota: { used: 5, cap: 5 } });
-        popover("1")!.onClick();
+        popover("1")!.onClick!();
         await flush();
         expect(popover("2")!.label).toBe("Add AI ✦");
         const before = openedModals.length;
@@ -558,7 +558,7 @@ describe("one ✦ preview per message", () => {
         await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
         rough();
         answer({ relay: m => ({ id: m.id, lang: "ar", text: "I don't want to go", skip: false }), relayQuota: { used: 1, cap: 5 } });
-        popover()!.onClick();
+        popover()!.onClick!();
         await flush();
         await restart(() => {
             DataStore.setEntitlementForTest({ automatic: true, ai: true, tokenExpiresAt: Date.now() + 7 * 24 * HOUR, checkedAt: Date.now() });

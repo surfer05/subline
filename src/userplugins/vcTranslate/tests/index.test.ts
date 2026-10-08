@@ -2142,7 +2142,7 @@ describe("the per-channel 🌐 toggle", () => {
         plugin.messagePopoverButton!.render({ ...discordMessage("t", "hola"), channel_id: channelId } as any)!;
 
     async function click(channelId = CHANNEL) {
-        await toggle(channelId).onClick!(undefined as any);
+        await toggle(channelId).onClick!();
         for (let i = 0; i < 20; i++) await Promise.resolve();
     }
 
@@ -2249,7 +2249,24 @@ describe("the per-channel 🌐 toggle", () => {
             spy.mockRestore();
         }
         expect(toggle().label).toBe("Disable auto-translate here");
-        expect(shownToasts.some(t => /couldn't save that toggle/.test(t.message))).toBe(true);
+        expect(shownToasts.some(t => t.message === "Couldn't save that. Try again.")).toBe(true);
+    });
+
+    // P2: the off state was the fog emoji, which Windows draws like a struck ≈.
+    it("shows the globe for on, and the same globe dimmed for off, never another glyph", async () => {
+        settings.store.globalAuto = true;
+        const icon = () => {
+            const el: any = toggle().icon();
+            return { glyph: el.children.join(""), style: el.props.style, state: el.props["data-subline-channel-icon"] };
+        };
+        const on = icon();
+        expect(on).toMatchObject({ glyph: "🌐", state: "on" });
+        expect(on.style.opacity).toBeUndefined();
+        await click();
+        const off = icon();
+        expect(off).toMatchObject({ glyph: "🌐", state: "off" });
+        expect(off.style.opacity).toBeLessThan(1);
+        expect(off.style.filter).toBe("grayscale(1)");
     });
 });
 describe("a fresh install works without touching any setting", () => {
@@ -3128,7 +3145,7 @@ describe("the force-quality popover action (⚡)", () => {
             target
         ]);
 
-        forceButton(target)!.onClick();
+        forceButton(target)!.onClick!();
         await flush();
 
         const req = requestAt(native.translateBatch.mock.calls.length - 1);
@@ -3151,7 +3168,7 @@ describe("the force-quality popover action (⚡)", () => {
             discordMessage("4", "and later still")
         ]);
 
-        forceButton(target)!.onClick();
+        forceButton(target)!.onClick!();
         await flush();
 
         const texts = requestAt(native.translateBatch.mock.calls.length - 1).context.map((c: any) => c.text);
@@ -3164,7 +3181,7 @@ describe("the force-quality popover action (⚡)", () => {
         stubMessages.set(CHANNEL, []);
         const orphan = discordMessage("99", "ki nebdew nektbou");
 
-        forceButton(orphan)!.onClick();
+        forceButton(orphan)!.onClick!();
         await flush();
 
         // Imperfect context beats an error the user cannot act on.

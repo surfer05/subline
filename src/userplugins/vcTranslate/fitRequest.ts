@@ -44,6 +44,51 @@ export const MAX_REQUEST_BYTES = 30_000;
 /** The relay's per-text limit (relay/src/index.ts MAX_TEXT_CHARS). Older relays stay at this. */
 export const LLM_TEXT_MAX = 4_000;
 
+/** Spans a cut may not land inside: half of one would reach the translator as text. */
+const UNCUTTABLE = /```[\s\S]*?```|`[^`\n]+`|<a?:\w+:\d+>|<#\d+>|<@&\d+>|<@!?\d+>|<t:-?\d+(?::[a-zA-Z])?>|https?:\/\/\S+/g;
+
+/**
+ * `text` cut to at most `max` UTF-16 units (what the relay counts), at the
+ * last paragraph break, else the last sentence end, else the last space in
+ * the second half, never inside a Discord token (a code block, inline code,
+ * a link, a mention, an emoji, a timestamp) and never on half a surrogate
+ * pair. No ellipsis is added: what is sent is real text the translator
+ * reads as written. `partial` says it is only the first part.
+ */
+export function fitTextToLimit(text: string, max: number): { text: string; partial: boolean; } {
+    if (text.length <= max) return { text, partial: false };
+    const head = text.slice(0, max);
+    const breaks = [head.lastIndexOf("\n\n"), head.lastIndexOf("\n")];
+    const sentence = Math.max(...[". ", "! ", "? ", "。", "！", "？"].map(m => {
+        const at = head.lastIndexOf(m);
+        return at < 0 ? -1 : at + m.trimEnd().length;
+    }));
+    const floor = max / 2;
+    let cut = breaks.find(at => at >= floor) ?? -1;
+    if (cut < 0 && sentence >= floor) cut = sentence;
+    if (cut < 0) cut = head.lastIndexOf(" ");
+    if (cut < floor) cut = max;
+    for (const m of text.matchAll(UNCUTTABLE)) {
+        const start = m.index!, end = start + m[0].length;
+        if (cut > start && cut < end) { cut = start; break; }
+        if (start >= cut) break;
+    }
+    if (cut <= 0) cut = max;
+    const code = text.charCodeAt(cut - 1);
+    if (code >= 0xd800 && code <= 0xdbff) cut--;
+    return { text: text.slice(0, cut).trimEnd(), partial: true };
+}
+
+/**
+ * A message text that fits the relay's per-text limit (G2). Over the limit
+ * the relay answers that message with a failed row, so it could never get ✦
+ * or a preview. The first part is sent instead, cut where fitTextToLimit
+ * cuts. The ✦ line then translates that part, shown as it came back.
+ */
+export function fitMessageText(text: string): string {
+    return fitTextToLimit(text, LLM_TEXT_MAX).text;
+}
+
 const encoder = new TextEncoder();
 
 export function requestBytes(req: BatchRequest): number {

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import settings from "../settings";
 import { SETTINGS_COPY } from "../settingsCopy";
 import { TASTE_CAP } from "../taste";
-import { AI_ANNUAL_CENTS, AI_MONTHLY_CENTS, annualSavingPercent, RESET_HELP_URL, UPGRADE_COPY } from "../upgradeCopy";
+import { AI_ANNUAL_CENTS, AI_MONTHLY_CENTS, annualSavingPercent, SUPPORT_EMAIL, UPGRADE_COPY } from "../upgradeCopy";
 
 /** Every string in a (nested) copy object. */
 function strings(v: unknown): string[] {
@@ -44,7 +44,7 @@ describe("the copy after the free tier", () => {
         expect(UPGRADE_COPY.codeNotFound).toBe("That code doesn't exist.");
         expect(UPGRADE_COPY.codeAlready).toBe("Already yours.");
         expect(UPGRADE_COPY.codeUnreachable).toBe("Can't reach Subline right now. Try again in a minute.");
-        expect(UPGRADE_COPY.deviceLimit).toBe("This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub.");
+        expect(UPGRADE_COPY.deviceLimit).toBe("This code is on 3 computers already. It frees up after 30 days unused, or email support@subline.page for a reset.");
         expect(UPGRADE_COPY.automaticButton).toBe("Buy for $4.99");
         expect(UPGRADE_COPY.enterCodeButton).toBe("Enter a code");
         expect(UPGRADE_COPY.activateButton).toBe("Activate");
@@ -62,8 +62,12 @@ describe("the Windows test round's wording", () => {
         expect(UPGRADE_COPY.enterCodeButton).toBe("Enter a code");
         expect(UPGRADE_COPY.codeSubtitle).toBe("A server code, or the code from your purchase email.");
         expect(UPGRADE_COPY.panelSubtitle).toBe("✦ reads the whole conversation, so slang and replies come out right.");
-        expect(UPGRADE_COPY.monthlyButton).toBe("Monthly $1.99");
-        expect(UPGRADE_COPY.annualButton).toBe("Yearly $19.99 · Save 16%");
+        // P3: the prices are the buttons.
+        expect(UPGRADE_COPY.panelTitle).toBe("Add AI");
+        expect(UPGRADE_COPY.monthlyButton).toBe("$1.99 a month");
+        expect(UPGRADE_COPY.annualButton).toBe("$19.99 a year · Save 16%");
+        expect(UPGRADE_COPY.couponHint).toBe("Coupon? Enter it on the payment page.");
+        expect(UPGRADE_COPY.paymentPending).toBe("Payment being confirmed");
         expect(UPGRADE_COPY.popoverPreview.replace("{n}", "4")).toBe("Preview ✦ (4 left today)");
         expect(UPGRADE_COPY.popoverUpgrade).toBe("Add AI ✦");
         expect(UPGRADE_COPY.googleBusy).toBe("Google is busy. Subline retries by itself.");
@@ -81,13 +85,13 @@ describe("the Windows test round's wording", () => {
     it("never claims a bigger yearly saving than the prices give", () => {
         const yearOfMonths = 12 * AI_MONTHLY_CENTS;
         const saved = yearOfMonths - AI_ANNUAL_CENTS;
-        expect(UPGRADE_COPY.monthlyPrice).toBe(`$${(AI_MONTHLY_CENTS / 100).toFixed(2)} a month`);
-        expect(UPGRADE_COPY.annualPrice).toBe(`$${(AI_ANNUAL_CENTS / 100).toFixed(2)} a year`);
-        const pct = Number(/^Save (\d+)%$/.exec(UPGRADE_COPY.annualNote)?.[1]);
+        expect(UPGRADE_COPY.monthlyButton).toBe(`$${(AI_MONTHLY_CENTS / 100).toFixed(2)} a month`);
+        const m = /^\$(\d+\.\d\d) a year · Save (\d+)%$/.exec(UPGRADE_COPY.annualButton);
+        expect(Number(m?.[1])).toBe(AI_ANNUAL_CENTS / 100);
+        const pct = Number(m?.[2]);
         expect(pct).toBeGreaterThan(0);
         expect(pct * yearOfMonths).toBeLessThanOrEqual(saved * 100);
         expect(annualSavingPercent(199, 1999)).toBe(16);
-        expect(UPGRADE_COPY.annualButton).toBe(`Yearly $19.99 · ${UPGRADE_COPY.annualNote}`);
     });
 
     it("gives Automatic five ✦ previews a day", () => {
@@ -99,9 +103,11 @@ describe("the Windows test round's wording", () => {
         expect(UPGRADE_COPY.codeConfirm).toBe("It works on up to 3 computers.");
         expect(UPGRADE_COPY.codeConfirmButton).toBe("Use it");
         expect(UPGRADE_COPY.codeEmpty).toBe("Type or paste a code first.");
-        expect(UPGRADE_COPY.deviceLimit).toBe("This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub.");
-        expect(UPGRADE_COPY.deviceLimitButton).toBe("GitHub");
-        expect(RESET_HELP_URL).toBe("https://github.com/surfer05/subline/issues");
+        expect(UPGRADE_COPY.deviceLimit).toBe("This code is on 3 computers already. It frees up after 30 days unused, or email support@subline.page for a reset.");
+        // P10: Vencord opens no mailto: links, so the button copies the address.
+        expect(UPGRADE_COPY.deviceLimitButton).toBe("Copy email");
+        expect(UPGRADE_COPY.emailCopied).toBe("Email copied.");
+        expect(SUPPORT_EMAIL).toBe("support@subline.page");
         expect(UPGRADE_COPY.earlyCheckingNotice).toBe("Checking your early-user access. This can take a minute.");
     });
 
@@ -110,8 +116,7 @@ describe("the Windows test round's wording", () => {
         const installer = readFileSync(new URL("../../../../installer/src/app/codeScreen.ts", import.meta.url), "utf8");
         expect(UPGRADE_COPY.codeRateLimited).toBe("Too many codes tried from this network today. Try again after midnight UTC.");
         expect(installer).toContain(`errRateLimited: "${UPGRADE_COPY.codeRateLimited}"`);
-        // Coupons only work on Monthly (relay createCoupon restricted_to [monthly]).
-        expect(UPGRADE_COPY.couponHint).toBe("Have a coupon? Pick Monthly and enter it on the payment page.");
-        expect(UPGRADE_COPY.couponHint).toContain("Monthly");
+        // P3: the owner's line, which replaced "Have a coupon? Pick Monthly...".
+        expect(UPGRADE_COPY.couponHint).toBe("Coupon? Enter it on the payment page.");
     });
 });

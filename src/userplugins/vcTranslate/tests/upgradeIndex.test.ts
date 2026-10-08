@@ -140,19 +140,18 @@ describe("the Add AI panel", () => {
         openUpgrade();
         const el = openedModals[0]!({ transitionState: 1, onClose: () => { } });
         expect(el.props.title).toBe("Add AI");
-        expect(el.props.actions.map((a: any) => a.text)).toEqual(["Monthly $1.99", "Yearly $19.99 · Save 16%"]);
-        const body = el.children[0].type({});
-        const flat = JSON.stringify(body);
-        expect(flat).toContain("$1.99 a month");
-        expect(flat).toContain("$19.99 a year");
-        expect(flat).toContain("Save 16%");
+        expect(el.props.actions.map((a: any) => a.text)).toEqual(["$1.99 a month", "$19.99 a year · Save 16%"]);
+        // P3: no price table under the buttons, only the coupon line.
+        const flat = JSON.stringify(el.children[0].type({}));
+        expect(flat).toContain("Coupon? Enter it on the payment page.");
+        expect(flat).not.toContain("$1.99");
     });
 
     it("falls back to the pricing page once the plugin is stopped", () => {
         plugin.stop!();
         openUpgrade();
         expect(openedModals).toHaveLength(0);
-        expect(native.openExternal).toHaveBeenCalledWith("https://surfer05.github.io/subline/#pricing");
+        expect(native.openExternal).toHaveBeenCalledWith("https://subline.page/#pricing");
     });
 });
 

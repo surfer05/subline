@@ -267,15 +267,27 @@ function countFrom(value: unknown): number | undefined {
  * "count unknown" — never as "nothing left" — because a status endpoint that
  * is briefly unreachable must not take a paid install's plan away.
  */
+/**
+ * How long one /v1/status call may take (P9). Without it a relay that
+ * accepted the connection and never answered held the call for Node's 300s
+ * headers timeout, and the entitlement retry (which waits for the call to
+ * end) with it.
+ */
+export const STATUS_TIMEOUT_MS = 15_000;
+
 export async function fetchRelayStatus(
     code: string,
     fetchImpl: typeof fetch = fetch,
     install?: string,
-    options: StatusOptions = {}
+    options: StatusOptions = {},
+    timeoutMs: number = STATUS_TIMEOUT_MS
 ): Promise<RelayStatus> {
     const res = await fetchImpl(RELAY_STATUS_URL, {
         method: "GET",
-        headers: relayHeaders(code, install, false, options)
+        headers: relayHeaders(code, install, false, options),
+        ...(typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+            ? { signal: AbortSignal.timeout(timeoutMs) }
+            : {})
     });
 
     let body: any = null;

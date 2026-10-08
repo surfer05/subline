@@ -57,6 +57,11 @@ export function openModal(render: (props: { transitionState: number; onClose: ()
     openedModals.push(render);
     return `modal-${openedModals.length}`;
 }
+/** Keys passed to closeModal, in order (Discord's closeModal(key)). */
+export const closedModals: string[] = [];
+export function closeModal(key: string): void {
+    closedModals.push(key);
+}
 
 /* ------------------------------------------------------------- UserStore -- */
 
@@ -237,6 +242,7 @@ export function __resetWebpackCommon(): void {
     selectedChannelId = null;
     shownToasts.length = 0;
     openedModals.length = 0;
+    closedModals.length = 0;
     stubMessages.clear();
     handlers.clear();
     LocaleStore.locale = "en-US";
