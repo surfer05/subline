@@ -116,6 +116,14 @@ describe("DiagnosticsLog", () => {
         expect(log.read()).toContain("originalFs=false");
     });
 
+    it("records why original-fs did not load, and only when there is a reason", () => {
+        const log = new DiagnosticsLog({ dir, clock: () => clockValue, home: "/Users/testperson" });
+        log.writeHeader({ productVersion: "0.1.0", os: "win32", originalFs: false, originalFsCause: "Electron 33 is running but original-fs did not load (MODULE_NOT_FOUND)" });
+        expect(log.read()).toContain("MODULE_NOT_FOUND");
+        log.writeHeader({ productVersion: "0.1.0", os: "darwin", originalFs: true, originalFsCause: null });
+        expect(log.read().trim().split("\n").pop()).not.toContain("originalFsCause");
+    });
+
     it("appends entries in order", () => {
         const log = makeLog();
         log.info("flow.step", { step: "detect-discord" });

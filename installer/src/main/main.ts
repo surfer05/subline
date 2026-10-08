@@ -53,7 +53,7 @@ import { readPatchedInstalls, releaseRestoredInstalls } from "../app/patchedInst
 import { readMarker } from "../patcher/marker.js";
 import { unpatchInstall } from "../patcher/patch.js";
 import { loaderPathFor } from "../bundle/spec.js";
-import { usingOriginalFs } from "../patcher/realFs.js";
+import { asarHookProblem, usingOriginalFs } from "../patcher/realFs.js";
 import {
     createDiskImageMounts, createFlowPorts, ensureHelperFromHelper, forceQuit, installHelperFor, listProcesses, logDirFor, removeHelperFor,
     requestQuit, uninstallPaths
@@ -199,12 +199,17 @@ if (isHelperRun) {
         // keeps the runs that mattered. Anything else, and any crash, writes
         // everything, header first.
         const held = bufferedLogger(log);
+        // Never expected, so never quiet: one line on every run it is true,
+        // outside the idle buffer, with the cause (audit 2026-10-06 #19).
+        const asarHook = asarHookProblem();
+        if (asarHook !== null) log.warn("helper.asar-hook", { cause: asarHook });
         const writeHeader = (): void => log.writeHeader({
             productVersion: app.getVersion(),
             os: process.platform,
             osVersion: process.getSystemVersion(),
             arch: process.arch,
-            originalFs: usingOriginalFs
+            originalFs: usingOriginalFs,
+            originalFsCause: asarHookProblem()
         });
         try {
             const report = await runHelperOnce(
@@ -365,7 +370,8 @@ if (isUninstallRun) {
                 os: process.platform,
                 osVersion: process.getSystemVersion(),
                 arch: process.arch,
-                originalFs: usingOriginalFs
+                originalFs: usingOriginalFs,
+                originalFsCause: asarHookProblem()
             });
             code = await runHeadlessUninstall({ argv: process.argv, run: options => runUninstall(options, false), log });
         } finally {
@@ -381,7 +387,8 @@ if (!isHelperRun && !isUninstallRun) app.whenReady().then(() => {
         os: process.platform,
         osVersion: process.getSystemVersion(),
         arch: process.arch,
-            originalFs: usingOriginalFs
+            originalFs: usingOriginalFs,
+            originalFsCause: asarHookProblem()
     });
 
     recordAppVersion("app");

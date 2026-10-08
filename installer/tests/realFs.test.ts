@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { usingOriginalFs } from "../src/patcher/realFs.js";
+import { asarHookProblem, usingOriginalFs } from "../src/patcher/realFs.js";
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 
@@ -133,5 +133,25 @@ describe("asar-touching modules use the unpatched filesystem", () => {
         // silent rather than an import-time throw — the test suite and any CLI
         // use run here.
         expect(usingOriginalFs).toBe(false);
+    });
+
+    // Audit 2026-10-06 #19: the cause, not just originalFs=false.
+    it("names why original-fs did not load when Electron is running", () => {
+        const problem = asarHookProblem("33.4.11", false, "MODULE_NOT_FOUND: Cannot find module 'original-fs'");
+        expect(problem).toContain("Electron 33.4.11");
+        expect(problem).toContain("MODULE_NOT_FOUND: Cannot find module 'original-fs'");
+    });
+
+    it("says nothing when original-fs loaded, or outside Electron", () => {
+        expect(asarHookProblem("33.4.11", true, null)).toBeNull();
+        expect(asarHookProblem(undefined, false, "x")).toBeNull();
+        // This very process: plain Node, so no problem to report.
+        expect(asarHookProblem()).toBeNull();
+    });
+
+    it("the helper and the installer write that cause to the log", () => {
+        const main = readFileSync(join(SRC, "main", "main.ts"), "utf8");
+        expect(main).toContain('log.warn("helper.asar-hook", { cause: asarHook })');
+        expect(main.match(/originalFsCause: asarHookProblem\(\)/g)?.length).toBe(3);
     });
 });

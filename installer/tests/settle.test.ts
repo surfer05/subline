@@ -295,3 +295,41 @@ describe("waiting for Discord to close (bounded)", () => {
         expect(looks).toBe(1);
     });
 });
+
+// Audit 2026-10-06 #19. Under Electron, node:fs's stat of an .asar path goes
+// through the archive hook and returns a FAKE mtime (the archive's open time,
+// about when the helper started), not the file's. helper/ports.ts now stats
+// with realFs; these pin what the settle rule does with such a time, so the
+// reason for that fix stays written down.
+describe("Electron's fake asar mtimes (audit #19)", () => {
+    /** The archives read as "written when the helper started"; everything else is old and real. */
+    function fakeAsarPorts(): SettlePorts & { clock: () => number } {
+        let clock = START;
+        return {
+            now: () => clock,
+            sleep: async (ms: number) => { clock += ms; },
+            discordRunning: async () => false,
+            mtimeOf: (path: string) =>
+                path === INSTALL.asarPath || path === INSTALL.backupPath ? START : START - 3_600_000,
+            readDiscordVersion: () => ok({ version: "0.0.406", releaseChannel: "stable", raw: {} }),
+            clock: () => clock
+        };
+    }
+
+    it("a constant fake time for the archives is never read as quiet sooner than the full quiet window", async () => {
+        const ports = fakeAsarPorts();
+        const report = await awaitDiscordSettled(INSTALL, ports, OPTIONS);
+        // The real files are an hour old, yet the run waited out quietMs of
+        // "quiet" it measured from its own start: every run pays that delay.
+        expect(report.settled).toBe(true);
+        expect(report.waitedMs).toBeGreaterThanOrEqual(OPTIONS.quietMs);
+        expect(report.quietForMs).toBeGreaterThanOrEqual(OPTIONS.quietMs);
+    });
+
+    it("with no budget it defers rather than settling on a time it cannot trust", async () => {
+        const report = await awaitDiscordSettled(INSTALL, fakeAsarPorts(), { ...OPTIONS, maxWaitMs: 0 });
+        expect(report.settled).toBe(false);
+        expect(report.status).toBe("files-changing");
+        expect(report.quietForMs).toBe(0);
+    });
+});

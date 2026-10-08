@@ -50,16 +50,36 @@ import * as nodeFs from "node:fs";
 const require = createRequire(import.meta.url);
 
 let impl: typeof nodeFs;
+let loadError: string | null = null;
 try {
     // Electron only. Not in package.json, and must never be — resolving it is
     // the runtime test for "are we inside Electron".
     impl = require("original-fs") as typeof nodeFs;
-} catch {
+} catch (cause) {
     impl = nodeFs;
+    loadError = cause instanceof Error ? `${(cause as NodeJS.ErrnoException).code ?? cause.name}: ${cause.message}` : String(cause);
 }
 
 /** True when the unpatched module was available, i.e. we are inside Electron. */
 export const usingOriginalFs = impl !== nodeFs;
+
+/**
+ * Why Electron's asar hook is in play, or null when it is not (audit
+ * 2026-10-06 #19). Inside Electron (process.versions.electron set) original-fs
+ * must load; when it does not, every stat of app.asar reads a fake mtime and
+ * every rename of it can fail on Windows with the archive held open. The
+ * header's originalFs=false said that much; this says WHY, from the require
+ * error itself, so the cause is in the log rather than guessed. Outside
+ * Electron (vitest, plain Node) node:fs is unpatched and this is null.
+ */
+export function asarHookProblem(
+    electronVersion: string | undefined = process.versions.electron,
+    loaded: boolean = usingOriginalFs,
+    cause: string | null = loadError
+): string | null {
+    if (electronVersion === undefined || loaded) return null;
+    return `Electron ${electronVersion} is running but original-fs did not load (${cause ?? "no error recorded"}), so app.asar paths go through Electron's archive hook`;
+}
 
 export const {
     closeSync,

@@ -85,6 +85,8 @@ export interface DiagnosticsHeader {
      * apart from an ordinary one without another round trip to the user.
      */
     originalFs?: boolean;
+    /** realFs.asarHookProblem(): why original-fs did not load inside Electron. Written only when there is one. */
+    originalFsCause?: string | null;
 }
 
 export interface DiagnosticsLogOptions {
@@ -216,7 +218,8 @@ export class DiagnosticsLog {
             os: header.os,
             osVersion: header.osVersion ?? null,
             arch: header.arch ?? null,
-            originalFs: header.originalFs ?? null
+            originalFs: header.originalFs ?? null,
+            ...(typeof header.originalFsCause === "string" ? { originalFsCause: header.originalFsCause } : {})
         };
         return formatEntry(this.clock(), "info", "subline.session", fields);
     }
