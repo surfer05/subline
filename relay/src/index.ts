@@ -31,8 +31,10 @@ import { bumpStat, markActive, safely, clampDays, readStats } from "./stats";
 import { createCoupon, handleCheckout, handlePurchaseStatus, purchaseFor } from "./checkout";
 import { readCapped } from "./body";
 import { dayRowKey, type ReserveReq } from "./budget";
+import { adminPatchHealth, handlePatchHealth } from "./patchHealth";
 export { Budget } from "./budget";
 export { Promo } from "./promo";
+export { PatchHealth } from "./patchHealth";
 
 const MAX_MESSAGES = 40;     // client's QUALITY_MAX_BATCH is 25; headroom, not unbounded
 const MAX_CONTEXT = 12;      // client's context ring is 8; a big context is a cost-inflation vector
@@ -737,6 +739,25 @@ export default {
             return json(free
                 ? { ...base, trialEndsAt: free.trialEndsAt, ...(free.provisional ? { trialProvisional: true } : {}), now }
                 : newClient ? { ...base, now } : base);
+        }
+
+        // ---- POST /v1/patch-health — Subline patches that stopped applying --
+        // Counts only (patchHealth.ts); emails the owner once per patch per day
+        // when enough installs agree.
+        if (url.pathname === "/v1/patch-health") {
+            try {
+                return await handlePatchHealth(req, env, Date.now());
+            } catch (e) {
+                console.warn("patch health failed unexpectedly", { error: String((e as any)?.message ?? e).slice(0, 200) });
+                return fail("temporarily unavailable", 503);
+            }
+        }
+
+        // ---- GET /admin/patch-health — recent patch reports (ADMIN_TOKEN) ---
+        if (url.pathname === "/admin/patch-health") {
+            const refused = await adminRefusal(req, env, "GET");
+            if (refused) return refused;
+            return adminPatchHealth(env, url, Date.now());
         }
 
         // ---- POST /v1/checkout — buy without handling a key (checkout.ts) --

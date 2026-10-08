@@ -78,6 +78,19 @@ export interface Env {
      *  allowance (the daily cap and the global budget still apply). A pricing
      *  call for the owner: see wrangler.jsonc. */
     AI_MONTHLY_CAP?: string;
+    /** One PatchHealth Durable Object per UTC day (patchHealth.ts). Without it
+     *  POST /v1/patch-health and GET /admin/patch-health answer 503. */
+    PATCH_HEALTH?: DurableObjectNamespace;
+    /** The send_email binding for the owner's patch alert (patchHealth.ts).
+     *  Absent: reports are still counted, no email goes out (logged). */
+    ALERT_EMAIL?: SendEmail;
+    /** Distinct installs that must report one patch on one day before the
+     *  owner is emailed. Default 3. */
+    PATCH_ALERT_MIN_INSTALLS?: string;
+    /** Sender and recipient of the patch alert. Defaults: alerts@subline.page
+     *  and rahul05alok@gmail.com (a verified Email Routing destination). */
+    PATCH_ALERT_FROM?: string;
+    PATCH_ALERT_TO?: string;
 }
 
 export interface CodeRecord {

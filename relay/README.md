@@ -29,6 +29,8 @@ translation** to Subline clients presenting an opaque per-user **code**.
 | `POST /v1/redeem` (v2) | code or install + `x-subline-install` | `{code}` → `{ok,code}`: a promo code grants Automatic |
 | `POST /admin/promo` | `Bearer <ADMIN_TOKEN>` | `{code, cap}` → a server promo code, Automatic for the first `cap` installs |
 | `POST /admin/reset-installs` | `Bearer <ADMIN_TOKEN>` | `{code}` → frees the computers on the account that owns `code` |
+| `POST /v1/patch-health` (v2) | install + `x-subline-install` | `{v,plugin,build,channel,discordBuild,failed}` → counts a report of Subline patches that did not apply (see Patch health) |
+| `GET /admin/patch-health?days=3` | `Bearer <ADMIN_TOKEN>` | recent patch reports per day, newest first |
 | `POST /admin/reissue` | `Bearer <ADMIN_TOKEN>` | `{code}` → for a leaked key: revokes `code`, mints a new `slp_` code on the same account with the same record, points the purchase's `order:` index at it, and clears every computer; returns `{ok, code}` (`scripts/reissue.mjs <code>`) |
 
 Responses use the plugin's exact `NativeResponse` shape, so the client `relay`
@@ -282,6 +284,57 @@ fail a translation or a webhook. The spend counters (`use:`, `rl:`, per-IP)
 are written after the budget guard has cleared the request; if KV refuses one
 of those writes the relay logs the counter name and KV's error (never the code,
 id, or IP) and still serves the request.
+
+## Patch health (the owner's same-day alert)
+
+Discord can change its web code at any time. When a Subline patch stops
+matching, Vencord only logs a warning on the user's machine and the feature
+is gone. Two checks catch it:
+
+- **Daily CI** (`.github/workflows/patch-check.yml`): runs
+  `scripts/checkPatches.mjs` against Discord's public bundle for Stable, PTB
+  and Canary. A failure fails the job (GitHub emails you) and opens or updates
+  the issue "Discord patch check failing".
+- **The field** (`POST /v1/patch-health`, `src/patchHealth.ts`): once per
+  Discord build per day, a client whose patches did not apply sends
+  `{plugin version, Subline build id, Discord channel and build number, failed
+  patches}`. No user id beyond the hashed install header, no text, no code.
+  One Durable Object per UTC day counts DISTINCT installs per patch (one
+  storage write per report, deleted after 8 days). When
+  `PATCH_ALERT_MIN_INSTALLS` (default 3) installs report the same patch on one
+  day, ONE email per patch per day goes to `PATCH_ALERT_TO`. Limits: an
+  install counts once per Discord build and for at most 3 builds a day; an
+  address adds at most 20 reports a day; at most 10 emails a day.
+
+`GET /admin/patch-health?days=N` (1..8, default 3) lists each day's patches,
+their install counts, the Discord builds and states, and whether the email
+went out.
+
+### Before deploying this (one time)
+
+1. Cloudflare dashboard → **subline.page** → **Email** → **Email Routing**: it
+   must be **enabled** (it is), and under **Destination addresses**
+   `rahul05alok@gmail.com` must show **Verified** (it does).
+2. Nothing else to create: the `send_email` binding `ALERT_EMAIL` in
+   `wrangler.jsonc` is locked to that one destination, and the sender
+   `alerts@subline.page` only has to be on the Email Routing zone. No MX or DNS
+   change and no new secret.
+3. `npx wrangler deploy`. The new Durable Object class `PatchHealth` is
+   created by migration `v3` on this deploy. It uses the same kind of
+   object as Budget and Promo, so no plan change.
+4. Test the email path once: set `"PATCH_ALERT_MIN_INSTALLS": "1"`, deploy,
+   send one report (below), check the inbox (and spam), then set it back to
+   `"3"` and deploy again.
+
+```sh
+curl -s -X POST https://subline-relay.<you>.workers.dev/v1/patch-health \
+  -H 'content-type: application/json' -H 'x-subline-api: 2' \
+  -H "x-subline-install: free_$(openssl rand -hex 16)" \
+  -d '{"v":1,"plugin":"0.2.3","build":"0000000000000000","channel":"stable","discordBuild":1,"failed":[{"plugin":"VcTranslate","find":"email test","state":"nomatch"}]}'
+```
+
+If no email arrives, `npx wrangler tail` shows `patch health: alert email
+failed` with Cloudflare's reason (most often an unverified destination).
 
 ## Deploy runbook
 

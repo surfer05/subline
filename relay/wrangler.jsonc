@@ -104,7 +104,17 @@
     //     always count);
     //   • the legacy cut-off: after this moment an older (0.1.x) client with an
     //     id the relay never trialled gets the taste allowance, not a new trial.
-    "LAUNCH_AT": "2026-09-29T11:56:40Z"
+    "LAUNCH_AT": "2026-09-29T11:56:40Z",
+    // PATCH HEALTH (src/patchHealth.ts, POST /v1/patch-health). When at least
+    // this many distinct installs report the same Subline patch failing on one
+    // UTC day, ONE email per patch per day goes to PATCH_ALERT_TO through the
+    // ALERT_EMAIL binding below. Raise it if a single noisy install ever pages
+    // you; lower it to 1 to test the email path.
+    "PATCH_ALERT_MIN_INSTALLS": "3",
+    // Sender must be an address on a zone with Email Routing on (subline.page).
+    // The recipient must be a VERIFIED Email Routing destination address.
+    "PATCH_ALERT_FROM": "alerts@subline.page",
+    "PATCH_ALERT_TO": "rahul05alok@gmail.com"
     // ENTITLEMENT_SECRET (optional secret, `wrangler secret put
     // ENTITLEMENT_SECRET`) signs the v2 entitlement token. It protects nothing
     // on the client (the client cannot verify it; Automatic runs client-side);
@@ -118,11 +128,22 @@
   // new object NAMES only, no new class, so no new migration.
   "durable_objects": { "bindings": [
     { "name": "BUDGET", "class_name": "Budget" },
-    { "name": "PROMO", "class_name": "Promo" }
+    { "name": "PROMO", "class_name": "Promo" },
+    // PATCH HEALTH: one object per UTC day (ph:<YYYY-MM-DD>), distinct-install
+    // counts per patch, deleted after 8 days. Migration v3 creates the class.
+    { "name": "PATCH_HEALTH", "class_name": "PatchHealth" }
   ] },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Budget"] },
-    { "tag": "v2", "new_sqlite_classes": ["Promo"] }
+    { "tag": "v2", "new_sqlite_classes": ["Promo"] },
+    { "tag": "v3", "new_sqlite_classes": ["PatchHealth"] }
+  ],
+  // The owner's patch alert (src/patchHealth.ts). Cloudflare "Send emails from
+  // Workers": needs Email Routing ON for subline.page and the destination below
+  // VERIFIED under Email Routing > Destination addresses. destination_address
+  // locks this binding to that one inbox; nothing else can be emailed.
+  "send_email": [
+    { "name": "ALERT_EMAIL", "destination_address": "rahul05alok@gmail.com" }
   ],
   "kv_namespaces": [
     // Create with `wrangler kv namespace create CODES`, paste the id here.
