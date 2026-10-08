@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import worker from "../src/index";
+import worker, { partOf, PREVIEW_FREE_REPEATS, PREVIEW_MAX_PARTS } from "../src/index";
 import { applyMorEvent, type Env } from "../src/codes";
 import { CKO_LOCK_WAIT_MS, DEFAULT_CHECKOUT_RETURN_URL, discordReturnUrl, installHash, PURCHASE_STATUS_PER_MINUTE } from "../src/checkout";
 import { CKO_LOCK_STALE_MS, Promo } from "../src/promo";
@@ -556,5 +556,184 @@ describe("G1. one checkout per install and kind, across Cloudflare locations", (
         const res = await checkout(e, "monthly");
         expect(res.status).toBe(503);
         expect(d.posts).toHaveLength(0);
+    });
+});
+
+// ---------------------------------------------------------------------------
+describe("long messages sent in parts: one preview per message (plugin 1d52243, <id>~p<n>)", () => {
+    /** A model that answers every id the prompt names, except `failIds` (left
+     *  out, so the relay marks them failed). Counts upstream calls. */
+    function model(failIds: string[] = []) {
+        const mock = vi.fn(async (_url?: unknown, init?: any) => ({
+            ok: true, status: 200, headers: new Headers(),
+            json: async () => {
+                const ids = [...String(init?.body ?? "").matchAll(/\[id=\\"([^\\]*)\\"\]/g)].map(m => m[1]!);
+                const translations = ids.filter(id => !failIds.includes(id))
+                    .map(id => ({ id, lang: "es", text: "a long translated part of the message", skip: false }));
+                return { choices: [{ message: { content: JSON.stringify({ translations }) } }] };
+            },
+            clone() { return this; }, text: async () => ""
+        }));
+        vi.stubGlobal("fetch", mock);
+        return mock;
+    }
+    async function owner() {
+        const kv = fakeKV();
+        const e = env(kv, { PROMO: fakePromo().ns });
+        const hash = await installHash(A);
+        await applyMorEvent(e, { type: "payment.succeeded", data: { payment_id: PAY, metadata: { install: hash } } }, Date.now());
+        await applyMorEvent(e, { type: "license_key.created", data: { key: KEY_AUTO, product_id: "pdt_auto", payment_id: PAY } }, Date.now());
+        expect((await status(e, A, KEY_AUTO)).body).toMatchObject({ automatic: true, ai: false });
+        return e;
+    }
+    const PART_TEXT = ["primera parte del mensaje largo que sigue", "segunda parte del mensaje largo, el final"];
+    const send = async (e: Env, rows: { id: string; text: string }[], mode: string | undefined = "preview") => {
+        const res = await worker.fetch(new Request("https://relay/v1/translate", {
+            method: "POST", headers: v2Headers(A, KEY_AUTO),
+            body: JSON.stringify({ messages: rows.map(r => ({ ...r, author: "a" })), context: [], targetLang: "en", ...(mode ? { mode } : {}) })
+        }), e, ctx);
+        return { status: res.status, body: await res.json() as any };
+    };
+    const parts = (id: string, ns: number[] = [0, 1]) => ns.map(n => ({ id: `${id}~p${n}`, text: PART_TEXT[n] ?? `parte ${n}` }));
+    const used = async (e: Env) => (await status(e, A, KEY_AUTO)).body.previews.used as number;
+
+    it("2 parts in one request = 1 preview", async () => {
+        const e = await owner();
+        model();
+        const r = await send(e, parts("m1"));
+        expect(r.status).toBe(200);
+        expect(r.body.results.map((x: any) => x.id)).toEqual(["m1~p0", "m1~p1"]);
+        expect(r.body.results.every((x: any) => !("failed" in x))).toBe(true);
+        expect(r.body.used).toBe(1);
+        expect(await used(e)).toBe(1);
+    });
+
+    it("the parts in 2 consecutive requests = 1 preview", async () => {
+        const e = await owner();
+        model();
+        expect((await send(e, parts("m1", [0]))).body.used).toBe(1);
+        expect((await send(e, parts("m1", [1]))).body.used).toBe(1);
+        expect(await used(e)).toBe(1);
+        // A different message is a new preview.
+        expect((await send(e, parts("m2"))).body.used).toBe(2);
+    });
+
+    it("one part fails → that message costs nothing (same request)", async () => {
+        const e = await owner();
+        model(["m1~p1"]);
+        const r = await send(e, parts("m1"));
+        expect(r.status).toBe(200);
+        expect("failed" in r.body.results[1]).toBe(true);
+        expect(r.body.used).toBe(0);
+        expect(await used(e)).toBe(0);
+    });
+
+    it("one part fails in the second request → the first request's charge is given back too", async () => {
+        const e = await owner();
+        model(["m1~p1"]);
+        expect((await send(e, parts("m1", [0]))).body.used).toBe(1);
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        // A batch whose only row comes back empty is an upstream failure (503).
+        expect((await send(e, parts("m1", [1]))).status).toBe(503);
+        await new Promise(res => setTimeout(res, 0));
+        expect(await used(e)).toBe(0);
+        // The retry counts as the first try: one preview, not zero, not two.
+        model();
+        expect((await send(e, parts("m1"))).body.used).toBe(1);
+        expect(await used(e)).toBe(1);
+    });
+
+    it("a part row fails in a later request (others answered) → the earlier charge comes back", async () => {
+        const e = await owner();
+        model(["m1~p2"]);
+        expect((await send(e, parts("m1", [0]))).body.used).toBe(1);
+        const r = await send(e, parts("m1", [1, 2]));
+        expect(r.status).toBe(200);
+        expect("failed" in r.body.results[1]).toBe(true);
+        expect(r.body.used).toBe(0);
+        expect(await used(e)).toBe(0);
+    });
+
+    it("an upstream outage on a part request gives the whole message back", async () => {
+        const e = await owner();
+        model();
+        expect((await send(e, parts("m1", [0]))).body.used).toBe(1);
+        vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 500, headers: new Headers(), json: async () => ({}), text: async () => "", clone() { return this; } })));
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const r = await send(e, parts("m1", [1]));
+        expect(r.status).toBe(503);
+        await new Promise(res => setTimeout(res, 0));
+        expect(await used(e)).toBe(0);
+    });
+
+    it("a repeat the same day is free per the repeat rule, then counts again (no free loop)", async () => {
+        const e = await owner();
+        model();
+        const seen: number[] = [];
+        for (let i = 0; i < 1 + PREVIEW_FREE_REPEATS + 1; i++) seen.push((await send(e, parts("m1"))).body.used);
+        expect(seen).toEqual([...Array(1 + PREVIEW_FREE_REPEATS).fill(1), 2]);
+        // Repeating one part alone follows the same rule.
+        const e2 = await owner();
+        expect((await send(e2, parts("m1"))).body.used).toBe(1);
+        const one: number[] = [];
+        for (let i = 0; i < PREVIEW_FREE_REPEATS + 1; i++) one.push((await send(e2, parts("m1", [0]))).body.used);
+        expect(one).toEqual([...Array(PREVIEW_FREE_REPEATS).fill(1), 2]);
+    });
+
+    it("new text under the same part id is a new part; past 32 distinct parts a part counts again", async () => {
+        const e = await owner();
+        model();
+        expect((await send(e, [{ id: "m1~p0", text: "texto 0" }])).body.used).toBe(1);
+        const counts: number[] = [];
+        for (let i = 1; i <= PREVIEW_MAX_PARTS; i++) counts.push((await send(e, [{ id: "m1~p0", text: `texto ${i}` }])).body.used);
+        expect(counts.slice(0, PREVIEW_MAX_PARTS - 1).every(n => n === 1)).toBe(true);
+        expect(counts.at(-1)).toBe(2);
+    });
+
+    it("a part refused as too long does not refund the other parts (no free translation by a junk part)", async () => {
+        const e = await owner();
+        model();
+        const r = await send(e, [{ id: "m1~p0", text: PART_TEXT[0]! }, { id: "m1~p1", text: "x".repeat(4_001) }]);
+        expect("failed" in r.body.results[1]).toBe(true);
+        expect(r.body.used).toBe(1);
+        expect(await used(e)).toBe(1);
+    });
+
+    it("strict suffix: only ~p0..~p31 written plainly are parts; anything else is its own message", async () => {
+        expect(partOf("123~p0")).toEqual({ base: "123", n: 0 });
+        expect(partOf("123~p31")).toEqual({ base: "123", n: 31 });
+        for (const id of ["123~p32", "123~p01", "123~p-1", "123~P1", "~p1", "123~p", "123~p1x", "123p1", "123~p1~", "123~p 1"]) {
+            expect(partOf(id), id).toBeNull();
+        }
+        const e = await owner();
+        model();
+        // Malformed suffixes are two different messages: two previews.
+        expect((await send(e, [{ id: "m1~p32", text: "uno" }, { id: "m1~p01", text: "dos" }])).body.used).toBe(2);
+    });
+
+    it("two different messages in parts in one request = 2 previews; a failed part refunds only its message", async () => {
+        const e = await owner();
+        model(["b~p1"]);
+        const r = await send(e, [...parts("a"), ...parts("b")]);
+        expect(r.body.used).toBe(1);
+        expect(await used(e)).toBe(1);
+    });
+
+    it("AI (non-preview) requests are unchanged: counted on the AI code per message", async () => {
+        const kv = fakeKV();
+        const e = env(kv, { PROMO: fakePromo().ns });
+        const hash = await installHash(A);
+        await applyMorEvent(e, { type: "payment.succeeded", data: { payment_id: PAY_AI, subscription_id: SUB, metadata: { install: hash } } }, Date.now());
+        await applyMorEvent(e, { type: "license_key.created", data: { key: KEY_AI, product_id: "pdt_month", payment_id: PAY_AI, subscription_id: SUB } }, Date.now());
+        await applyMorEvent(e, { type: "subscription.active", data: { subscription_id: SUB, next_billing_date: new Date(Date.now() + 30 * DAY).toISOString() } }, Date.now());
+        model(["m1~p1"]);
+        const res = await worker.fetch(new Request("https://relay/v1/translate", {
+            method: "POST", headers: v2Headers(A, KEY_AI),
+            body: JSON.stringify({ messages: parts("m1").map(r => ({ ...r, author: "a" })), context: [], targetLang: "en" })
+        }), e, ctx);
+        const body = await res.json() as any;
+        expect(res.status).toBe(200);
+        // Two rows, two units, and a failed row is not refunded (as before).
+        expect(body.used).toBe(2);
     });
 });

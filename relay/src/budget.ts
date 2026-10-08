@@ -68,6 +68,18 @@ export interface ReserveReq {
      * upstream spend. The global `cost` is always charged: the model still runs.
      */
     once?: { key: string; maxFree: number };
+    /**
+     * ONE COUNT PER MESSAGE SENT IN PARTS (a long ✦ preview the plugin split
+     * into rows "<id>~p<n>", in one request or several). `group` is the
+     * message's row for the day (how many distinct parts it has had); `keys`
+     * holds one marker per part in this request. The day is charged only when
+     * the message is new today (group 0). A later part, or a repeat, is free
+     * while every part here has been seen at most `maxFree` times and the
+     * message has had at most `maxNew` distinct parts; past either, the
+     * request counts again (no free loops). `charge` sums what the message was
+     * charged today, so a failed part can give all of it back (/refund-group).
+     */
+    parts?: { group: string; charge: string; keys: string[]; maxFree: number; maxNew: number };
 }
 
 export type ReserveReason = "capacity" | "cap_exceeded" | "month_cap_exceeded" | "rate_limited";
@@ -82,6 +94,8 @@ export interface ReserveRes {
     monthUsed?: number;
     /** What this call added to the day counter (0 for a free repeat, see `once`). */
     charged?: number;
+    /** Parts seen for the first time today in this call (see `parts`). */
+    partsAdded?: number;
 }
 
 export interface CounterState {
@@ -100,7 +114,15 @@ export function applyReserve(st: CounterState, r: ReserveReq): ReserveRes {
     const monthUsed = r.month ? st.counters.get(r.month.key) ?? 0 : undefined;
     const seen = r.once ? st.counters.get(r.once.key) ?? 0 : 0;
     // A repeat of a message already counted today is free (see ReserveReq.once).
-    const dayAdd = r.day ? (r.once && seen >= 1 && seen <= r.once.maxFree ? 0 : r.day.add) : 0;
+    const onceFree = !!r.once && seen >= 1 && seen <= r.once.maxFree;
+    // A message sent in parts (see ReserveReq.parts).
+    const p = r.parts;
+    const partKeys = p ? [...new Set(p.keys)] : [];
+    const group = p ? st.counters.get(p.group) ?? 0 : 0;
+    const partSeen = partKeys.map(k => st.counters.get(k) ?? 0);
+    const partsNew = partSeen.filter(n => n === 0).length;
+    const partsFree = !!p && group >= 1 && partSeen.every(n => n <= p.maxFree) && group + partsNew <= p.maxNew;
+    const dayAdd = r.day ? (onceFree || partsFree ? 0 : r.day.add) : 0;
     const refuse = (reason: ReserveReason): ReserveRes => ({
         allowed: false, reason, total: st.total, frozen: st.total >= r.freezeAt,
         ...(dayUsed !== undefined ? { used: dayUsed } : {}),
@@ -114,11 +136,17 @@ export function applyReserve(st: CounterState, r: ReserveReq): ReserveRes {
     st.total = b.total;
     if (r.day) st.counters.set(r.day.key, dayUsed! + dayAdd);
     if (r.once) st.counters.set(r.once.key, seen + 1);
+    if (p) {
+        partKeys.forEach((k, i) => st.counters.set(k, partSeen[i]! + 1));
+        st.counters.set(p.group, group + partsNew);
+        st.counters.set(p.charge, (st.counters.get(p.charge) ?? 0) + dayAdd);
+    }
     if (r.month) st.counters.set(r.month.key, monthUsed! + r.month.add);
     if (r.rpm) st.rpm.set(r.rpm.key, (st.rpm.get(r.rpm.key) ?? 0) + 1);
     return {
         allowed: true, total: b.total, frozen: b.frozen,
         ...(r.day ? { used: dayUsed! + dayAdd, charged: dayAdd } : {}),
+        ...(p ? { partsAdded: partsNew } : {}),
         ...(r.month ? { monthUsed: monthUsed! + r.month.add } : {})
     };
 }
@@ -197,7 +225,8 @@ export class Budget {
         if (path === "/reserve") {
             const r = await req.json() as ReserveReq;
             const now = typeof r.now === "number" ? r.now : Date.now();
-            await this.load([r.day?.key, r.month?.key, r.once?.key].filter((k): k is string => !!k), now);
+            await this.load([r.day?.key, r.month?.key, r.once?.key, r.parts?.group, r.parts?.charge, ...(r.parts?.keys ?? [])]
+                .filter((k): k is string => typeof k === "string" && k !== ""), now);
             const minute = Math.floor(now / 60_000);
             if (minute !== this.rpmMinute) { this.st.rpm.clear(); this.rpmMinute = minute; }
             const wasFrozen = this.st.total >= r.freezeAt;
@@ -208,6 +237,9 @@ export class Budget {
                 if (r.day) rows[r.day.key] = this.st.counters.get(r.day.key)!;
                 if (r.month) rows[r.month.key] = this.st.counters.get(r.month.key)!;
                 if (r.once) rows[r.once.key] = this.st.counters.get(r.once.key)!;
+                if (r.parts) {
+                    for (const k of [r.parts.group, r.parts.charge, ...r.parts.keys]) rows[k] = this.st.counters.get(k)!;
+                }
                 await this.ctx.storage.put(rows);
                 if (r.day || r.month) await this.ensureAlarm(now);
             }
@@ -233,6 +265,28 @@ export class Budget {
             }
             if (rows.length) await this.ctx.storage.put(put);
             return Response.json({ ok: true });
+        }
+        if (path === "/refund-group") {
+            // A message sent in parts lost a part: give back EVERYTHING it was
+            // charged today (its `charge` row, from earlier requests too), reset
+            // its group so the next try counts as the first, and take back this
+            // call's part markers (`rows`).
+            const r = await req.json() as { day?: unknown; charge?: unknown; group?: unknown; rows?: { key: string; sub: number }[] };
+            if (typeof r.day !== "string" || typeof r.charge !== "string" || typeof r.group !== "string") {
+                return Response.json({ ok: false }, { status: 400 });
+            }
+            const day = r.day, charge = r.charge, group = r.group;
+            const rows = Array.isArray(r.rows) ? r.rows.filter(x => x && typeof x.key === "string" && Number.isFinite(x.sub)) : [];
+            await this.load([day, charge, group, ...rows.map(x => x.key)], Date.now());
+            const c = this.st.counters.get(charge) ?? 0;
+            const put: Record<string, number> = {};
+            const set = (k: string, n: number) => { this.st.counters.set(k, n); put[k] = n; };
+            set(day, Math.max(0, (this.st.counters.get(day) ?? 0) - c));
+            set(charge, 0);
+            set(group, 0);
+            for (const x of rows) set(x.key, Math.max(0, (this.st.counters.get(x.key) ?? 0) - x.sub));
+            await this.ctx.storage.put(put);
+            return Response.json({ ok: true, refunded: c });
         }
         if (path === "/peek") {
             const r = await req.json() as { keys?: string[] };

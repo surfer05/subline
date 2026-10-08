@@ -563,7 +563,7 @@ function redacted(e: unknown, redact: string[]): string {
  *  are rolled back first, so the account never loses a preview to an outage. */
 export async function reserve(
     env: Env, code: string, rec: CodeRecord, cost: number, now: number, ip?: string | null, budgetCost: number = cost,
-    once?: ReserveReq["once"]
+    once?: ReserveReq["once"], parts?: ReserveReq["parts"]
 ): Promise<ReserveOutcome> {
     const rpmLimit = rpmLimitFor(rec);
     // SKIPPED when the daily cap makes it unreachable: every successful
@@ -582,6 +582,7 @@ export async function reserve(
             ...(monthCap !== null ? { month: { key: monthRowKey(code, now), add: budgetCost, cap: monthCap } } : {}),
             ...(rpmTracked ? { rpm: { key: code, limit: rpmLimit } } : {}),
             ...(once ? { once } : {}),
+            ...(parts ? { parts } : {}),
             now
         };
         let d: ReserveRes;
@@ -740,6 +741,28 @@ export async function refund(
     for (const g of ipGuards(plan, ip, now)) {
         await giveBack(g.key, g.unit === "cost" ? budgetCost : cost, g.unit === "cost" ? "ip_cost" : "ip");
     }
+}
+
+/** A preview sent in parts lost a part: give back all the message was charged
+ *  today, reset its group and take back this call's part markers (budget.ts
+ *  /refund-group). Never throws: a failure only leaves the count high. Returns what was given back. */
+export async function refundGroup(
+    env: Env, code: string, now: number, parts: NonNullable<ReserveReq["parts"]>
+): Promise<number> {
+    try {
+        const res = await budgetStub(env).fetch("https://budget.internal/refund-group", {
+            method: "POST",
+            body: JSON.stringify({
+                day: dayRowKey(code, now), charge: parts.charge, group: parts.group,
+                rows: [...new Set(parts.keys)].map(key => ({ key, sub: 1 }))
+            })
+        });
+        const out = await res.json() as { refunded?: unknown };
+        return typeof out.refunded === "number" ? out.refunded : 0;
+    } catch (e) {
+        console.warn("refund: budget group refund failed, counter stays charged", { error: redacted(e, [code]) });
+    }
+    return 0;
 }
 
 /** A DO-counted bearer's count for today (see countsInKv). Throws on failure. */

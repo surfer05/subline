@@ -19,7 +19,7 @@
  * expose. A valid code is not a general Groq proxy.
  */
 import {
-    authCode, reserve, refund, usage, mintCode, applyMorEvent, rpmLimitFor, costFor, budgetCostFor,
+    authCode, reserve, refund, refundGroup, usage, mintCode, applyMorEvent, rpmLimitFor, costFor, budgetCostFor,
     isTasteBearer, isNewClient, resolveFreePlan, startTrial, tasteRecord, freezeAtFor,
     type Env, type CodeRecord, type FreePlan
 } from "./codes";
@@ -30,7 +30,7 @@ import { adminReissue, adminResetInstalls, createPromo, handleRedeem, handleStat
 import { bumpStat, markActive, safely, clampDays, readStats } from "./stats";
 import { createCoupon, handleCheckout, handlePurchaseStatus, purchaseFor } from "./checkout";
 import { readCapped } from "./body";
-import { dayRowKey } from "./budget";
+import { dayRowKey, type ReserveReq } from "./budget";
 export { Budget } from "./budget";
 export { Promo } from "./promo";
 
@@ -290,8 +290,9 @@ function withRefused(order: string[], results: Result[], tooLong: string[]): Res
 async function serveBatch(
     env: Env, ctx: ExecutionContext, done: Done, req: Request, code: string | null, rec: CodeRecord,
     norm: NormalizedBatch, order: string[], preview: boolean, free: FreePlan | null, newClient: boolean, now: number,
-    v2: boolean = false, once?: { key: string; maxFree: number }
+    v2: boolean = false, pv?: PreviewPlan
 ): Promise<Response> {
+    const once = pv?.once;
     const plan = rec.plan ?? "free";
     const { batch, tooLong } = norm;
     // Every message was too long on its own: nothing to send, nothing charged.
@@ -308,7 +309,8 @@ async function serveBatch(
     // (messages only for taste/trial, one per ordinary message for a code),
     // `budgetCost` is the real spend the global guard, the monthly allowance
     // and the trial's per-IP cost cap are charged.
-    const cost = costFor(rec, batch.messages.length, promptChars);
+    // An account preview counts MESSAGES, a message sent in parts once (see previewPlan).
+    const cost = pv ? pv.cost : costFor(rec, batch.messages.length, promptChars);
     const budgetCost = budgetCostFor(batch.messages.length, promptChars);
     // The per-IP taste/trial ceiling needs the caller's address, and ONLY
     // for a keyless request: no other plan grows an ip counter, and a
@@ -318,7 +320,7 @@ async function serveBatch(
     // per address, so it skips the keyless per-IP ceilings.
     const tasteIp = !v2 && (plan === "taste" || plan === "trial") ? req.headers.get("cf-connecting-ip") : null;
 
-    const res = await reserve(env, code!, rec, cost, now, tasteIp, budgetCost, once);
+    const res = await reserve(env, code!, rec, cost, now, tasteIp, budgetCost, once, pv?.parts);
     if (!res.ok) {
         // Counters or the budget could not be reached: refused CLOSED,
         // before any spend (see reserve).
@@ -378,13 +380,32 @@ async function serveBatch(
         if (primaryFail !== null) ctx.waitUntil(record(env, "primary_fail", code, 0, plan, String(primaryFail)));
         // A LEGACY (v0.1.6 keyless) preview is cut on the server. A v2
         // preview, an Automatic owner's, is the FULL ✦ line: it is counted
-        // once per message (previewOnce) and the reader is shown all of it.
+        // once per message (previewPlan) and the reader is shown all of it.
         const results = withRefused(order, preview && !v2 ? toPreview(full) : full, tooLong);
         // A v2 preview with nothing to show (every row failed) is given back:
         // the reader saw nothing, and the client offers the press again.
-        if (preview && v2 && results.every(r => "failed" in r)) {
-            ctx.waitUntil(refund(env, code!, charged, now, tasteIp, plan, budgetCost, once?.key));
-            const failedOk = { ok: true, results, used: Math.max(0, res.used - charged), cap: res.cap, rpmLimit: rpmLimitFor(rec) };
+        // An ACCOUNT preview (pv) is also given back per MESSAGE when any part
+        // of it failed: the plugin shows nothing for a message with a missing
+        // part. A part refused as too long does not count here: the plugin
+        // never sends one (it splits under the limit), so it cannot be used to
+        // get the other parts translated for free.
+        const allFailed = results.every(r => "failed" in r);
+        if (preview && v2 && pv && !allFailed) {
+            const lost = failedMessages(results, tooLong, pv.baseOf);
+            if (lost > 0) {
+                const back = pv.parts
+                    ? await refundGroup(env, code!, now, pv.parts)
+                    : Math.min(charged, lost);
+                if (!pv.parts && back > 0) ctx.waitUntil(refund(env, code!, back, now, tasteIp, plan, budgetCost, once?.key));
+                const partOk = { ok: true, results, used: Math.max(0, res.used - back), cap: res.cap, rpmLimit: rpmLimitFor(rec) };
+                return done(json(newClient ? { ...partOk, now } : partOk), "ok", code, Math.max(0, charged - back), plan);
+            }
+        }
+        if (preview && v2 && allFailed) {
+            let back = charged;
+            if (pv?.parts) back = await refundGroup(env, code!, now, pv.parts);
+            else ctx.waitUntil(refund(env, code!, charged, now, tasteIp, plan, budgetCost, once?.key));
+            const failedOk = { ok: true, results, used: Math.max(0, res.used - back), cap: res.cap, rpmLimit: rpmLimitFor(rec) };
             return done(json(newClient ? { ...failedOk, now } : failedOk), "ok", code, 0, plan);
         }
         if (preview && charged > 0) ctx.waitUntil(safely(() => bumpStat(env, now, "previews")));
@@ -410,7 +431,8 @@ async function serveBatch(
         // one capped message and the global budget stays charged, so this
         // cannot be turned into free upstream spend beyond that.
         if ((preview && v2) || (!timedOut && !keyFault)) {
-            ctx.waitUntil(refund(env, code!, charged, now, tasteIp, plan, budgetCost, once?.key));
+            if (pv?.parts) ctx.waitUntil(refundGroup(env, code!, now, pv.parts));
+            else ctx.waitUntil(refund(env, code!, charged, now, tasteIp, plan, budgetCost, once?.key));
         }
         const label = upstreamLabel(err);
         // The relay's OWN key failing (401/403) or its credit running out
@@ -467,7 +489,7 @@ async function translateV2(env: Env, ctx: ExecutionContext, done: Done, req: Req
     // counter ("pv:<account>", counted in the Budget object, see reserve).
     const pvRec: CodeRecord = { status: "active", plan: "taste", dailyCap: PREVIEW_DAILY_CAP };
     return serveBatch(env, ctx, done, req, "pv:" + r.acctId, pvRec, norm, order, true, null, true, now, true,
-        await previewOnce(r.acctId, norm, now));
+        await previewPlan(r.acctId, norm, now));
 }
 
 /** /v1/translate for an older (0.1.x) client: a code or a free_ id. */
@@ -538,23 +560,89 @@ async function translateLegacy(env: Env, ctx: ExecutionContext, done: Done, req:
  *  counted again (a lost answer, a restart). Past this a repeat counts. */
 export const PREVIEW_FREE_REPEATS = 2;
 
+/** Most distinct parts one message may have in a day before a new part counts
+ *  again. The plugin numbers parts 0..31, so an honest message never gets here. */
+export const PREVIEW_MAX_PARTS = 32;
+
 /**
- * ONE PREVIEW PER MESSAGE, on the relay. The marker row (budget.ts
- * ReserveReq.once) is keyed by the account, the UTC day and a hash of the
- * message id, its text and the target language, so a retry of the same
- * message is free while a reused id with other text is a new preview. Only a
- * one-message preview gets a marker; anything else is counted as before.
+ * A row id the plugin made by splitting a long message (fitRequest.ts
+ * splitTextToLimit): "<message id>~p<n>", n = 0..31 written plainly (no
+ * leading zero). Anything else is an ordinary id, the whole of it.
  */
-export async function previewOnce(
-    acctId: string, norm: NormalizedBatch, now: number
-): Promise<{ key: string; maxFree: number } | undefined> {
+const PART_ID_RE = /^(.+)~p(0|[1-9]|[12][0-9]|3[01])$/;
+export function partOf(id: string): { base: string; n: number } | null {
+    const m = PART_ID_RE.exec(id);
+    return m ? { base: m[1]!, n: Number(m[2]) } : null;
+}
+
+/** How an account preview is counted (see previewPlan). */
+export interface PreviewPlan {
+    /** Previews this request counts as: one per message, parts of one message once. */
+    cost: number;
+    /** A single ordinary message: its marker (budget.ts ReserveReq.once). */
+    once?: { key: string; maxFree: number };
+    /** Every row is a part of ONE message: its group (budget.ts ReserveReq.parts). */
+    parts?: NonNullable<ReserveReq["parts"]>;
+    /** Row id → the message it belongs to. */
+    baseOf: Map<string, string>;
+}
+
+async function hex12(s: string): Promise<string> {
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
+    return Array.from(digest.slice(0, 12), b => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * ONE PREVIEW PER MESSAGE, on the relay.
+ *  - One ordinary message: a marker row (budget.ts ReserveReq.once) keyed by
+ *    the account, the UTC day and a hash of the message id, its text and the
+ *    target language, so a retry of the same message is free while a reused id
+ *    with other text is a new preview.
+ *  - Parts of ONE message ("<id>~p<n>"), in this request or in consecutive
+ *    ones the same UTC day: one group row per message (account, day, hash of
+ *    the base id and target) counts it once; each part has its own marker (base
+ *    id, n, target, text), so a repeat is free up to PREVIEW_FREE_REPEATS and a
+ *    part with other text is a new part (at most PREVIEW_MAX_PARTS free).
+ *  - Anything else (several messages): one preview per distinct message, no marker.
+ */
+export async function previewPlan(acctId: string, norm: NormalizedBatch, now: number): Promise<PreviewPlan> {
     const msgs = norm.batch.messages;
-    if (msgs.length !== 1) return undefined;
-    const m = msgs[0]!;
-    const data = new TextEncoder().encode(`${m.id}\n${norm.batch.targetLang}\n${m.text}`);
-    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", data));
-    const hex = Array.from(digest.slice(0, 12), b => b.toString(16).padStart(2, "0")).join("");
-    return { key: dayRowKey(`pvm:${acctId}:${hex}`, now), maxFree: PREVIEW_FREE_REPEATS };
+    const target = norm.batch.targetLang;
+    const baseOf = new Map<string, string>();
+    const parsed = msgs.map(m => ({ m, part: partOf(m.id) }));
+    for (const { m, part } of parsed) baseOf.set(m.id, part ? part.base : m.id);
+    const bases = new Set(baseOf.values());
+    if (bases.size === 1 && parsed.length > 0 && parsed.every(x => x.part !== null)) {
+        const base = parsed[0]!.part!.base;
+        const g = await hex12(`${base}\n${target}`);
+        const keys: string[] = [];
+        for (const { m, part } of parsed) {
+            keys.push(dayRowKey(`pvp:${acctId}:${await hex12(`${base}\n${part!.n}\n${target}\n${m.text}`)}`, now));
+        }
+        return {
+            cost: 1, baseOf,
+            parts: {
+                group: dayRowKey(`pvg:${acctId}:${g}`, now), charge: dayRowKey(`pvc:${acctId}:${g}`, now),
+                keys, maxFree: PREVIEW_FREE_REPEATS, maxNew: PREVIEW_MAX_PARTS
+            }
+        };
+    }
+    if (msgs.length === 1) {
+        const m = msgs[0]!;
+        const hex = await hex12(`${m.id}\n${target}\n${m.text}`);
+        return { cost: 1, baseOf, once: { key: dayRowKey(`pvm:${acctId}:${hex}`, now), maxFree: PREVIEW_FREE_REPEATS } };
+    }
+    return { cost: bases.size, baseOf };
+}
+
+/** Messages with a failed row (a too-long refusal aside, see serveBatch). */
+function failedMessages(results: Result[], tooLong: string[], baseOf: Map<string, string>): number {
+    const skip = new Set(tooLong);
+    const lost = new Set<string>();
+    for (const r of results) {
+        if ("failed" in r && !skip.has(r.id)) lost.add(baseOf.get(r.id) ?? r.id);
+    }
+    return lost.size;
 }
 
 /** Owner check for the /admin/* routes: null when allowed, else the refusal. */
