@@ -958,6 +958,50 @@ describe("uninstall — Discords put back are released before the helper returns
         expect(p.forgot).toEqual([[INSTALL.stableId]]);
     });
 
+    // Audit 2026-10-06 #46 (part C): the helper's memory of a Discord is the
+    // helper's, not the user's settings, so it goes whatever keepSettings
+    // says. A Discord the helper remembers that a Discord update already
+    // wiped is "not ours" to the dry run; left in memory, a helper brought
+    // back for another Discord read it as "an update wiped the injection"
+    // and put Subline straight back.
+    it("#46: a remembered Discord Subline is no longer in is released too, and a foreign one", async () => {
+        const p = partial();
+        const clean = (install: DiscordInstall): Result<UnpatchReport> => ({
+            ok: true,
+            value: { install, restored: false, alreadyClean: true, removedArtifacts: [], previousState: "unpatched", summary: "clean" }
+        });
+        await uninstall({
+            ...p.ports,
+            unpatch: (install, options) => install === CANARY
+                ? clean(install)
+                : install === INSTALL
+                    ? foreign(install)
+                    : options.dryRun === true ? unpatchOk(install) : unpatchFail("FILE_IN_USE", "x")
+        }, { installs: [INSTALL, CANARY, PTB], keepSettings: true });
+        expect(p.forgot).toEqual([[INSTALL.stableId, CANARY.stableId]]);
+        expect(p.order).toEqual(["forget", "restoreHelper"]);
+    });
+
+    it("#46: a clean uninstall with settings kept still clears the helper's memory of every Discord", async () => {
+        const p = partial();
+        const clean = (install: DiscordInstall): Result<UnpatchReport> => ({
+            ok: true,
+            value: { install, restored: false, alreadyClean: true, removedArtifacts: [], previousState: "unpatched", summary: "clean" }
+        });
+        const report = await uninstall({ ...p.ports, unpatch: install => install === CANARY ? clean(install) : unpatchOk(install) }, { installs: [INSTALL, CANARY], keepSettings: true });
+        expect(report.clean).toBe(true);
+        expect(p.forgot).toEqual([[INSTALL.stableId, CANARY.stableId]]);
+    });
+
+    it("another account's Discord is never released from here", async () => {
+        const p = partial();
+        await uninstall({
+            ...p.ports,
+            unpatch: install => install === CANARY ? unpatchFail("OTHER_ACCOUNT", "theirs") : unpatchOk(install)
+        }, { installs: [INSTALL, CANARY] });
+        expect(p.forgot).toEqual([[INSTALL.stableId]]);
+    });
+
     it("nothing is released when nothing was restored", async () => {
         const p = partial();
         await uninstall({ ...p.ports, unpatch: failsOnWrite("FILE_IN_USE") }, { installs: [INSTALL] });

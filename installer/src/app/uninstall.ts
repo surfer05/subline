@@ -128,7 +128,7 @@ export interface UninstallSystemPorts {
     restoreHelper(): Promise<Result<unknown>>;
     /**
      * Stop managing these Discords (stable ids): Uninstall put them back to
-     * normal. Removes them from the helper's memory and the installer's
+     * normal, or Subline was no longer in them (audit #46). Removes them from the helper's memory and the installer's
      * record, and marks them released, so a helper brought back for another
      * Discord never puts Subline back into them.
      */
@@ -510,9 +510,19 @@ export async function uninstall(
     //     "an update wiped the injection", and it patched Subline straight
     //     back in. A branch with any failed restore stays managed (on Windows
     //     the stable id is the branch folder, shared by its app-x folders).
+    //
+    //     EVERY DISCORD SUBLINE IS NO LONGER IN, not only the ones restored
+    //     now (audit 2026-10-06 #46, part C). The helper's memory is the
+    //     helper's, not the user's settings, so it goes whatever keepSettings
+    //     says. A Discord an update already wiped reads "not ours" to the dry
+    //     run; still remembered, a helper brought back (or a stray loaded one)
+    //     read it as "an update wiped the injection" and patched Subline back.
+    //     Another mod's Discord and an unreadable one are released too: Subline
+    //     must never be put back into either. Another ACCOUNT's Discord is not
+    //     this account's to release.
     const failedIds = new Set(restores.filter(entry => !entry.ok).map(entry => entry.install.stableId));
     const releasedIds = [...new Set(restores
-        .filter(entry => entry.ok && entry.leftAlone === null)
+        .filter(entry => entry.ok && entry.leftAlone?.kind !== "other-account")
         .map(entry => entry.install.stableId))]
         .filter(id => !failedIds.has(id));
     if (releasedIds.length > 0 && ports.forgetInstalls !== undefined) {
