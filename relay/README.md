@@ -121,9 +121,19 @@ Before `LAUNCH_AT` (or while it is the placeholder) nothing changes. Code: `src/
   `promo:<CODE>`), 404 `not_found`, 410 `claimed`, 409 `already`, 429
   `rate_limited`, 503 `unavailable`. The cap is counted by one `Promo` Durable
   Object per code, so 100 is exactly 100, one per install.
+- **One promo per install, ever.** A `Promo` object named `inst:<install
+  hash>` runs one redemption of an install at a time and stores (one write)
+  that the install claimed a promo. A second try of the same install while the
+  first runs is 503 `unavailable`; after a success every promo is 409
+  `already`. So one install cannot fire several codes at once to collect
+  several Automatic codes.
 - **Attempts per address.** A `Promo` object named for the address (IPv4, or
   the IPv6 /64) and the UTC day counts every redemption attempt before any
-  lookup: at most 3 successful claims and 20 failed attempts. Only a wrong
+  lookup: at most 30 successful claims and 20 failed attempts. 30, not fewer:
+  thousands of VPN users share one exit address, and a server drive must not
+  stop at its third member there. Guessing is the abuse, so failures stay at 20.
+  Per promo, one IPv6 /48 may take at most max(30, 5% of the cap) claims
+  (429 `rate_limited`, `reason: "net_limited"`). Only a wrong
   code (404) is a failed attempt; "already yours" (409) and "fully claimed"
   (410) are honest answers about a real code and count nothing, to spare
   shared networks. In-flight attempts count against both, so a

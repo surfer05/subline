@@ -452,16 +452,16 @@ describe("11. one network cannot drain a promo", () => {
     };
     const fresh = (n: number) => "free_" + n.toString(16).padStart(32, "0");
 
-    it("six /64s inside one /48: the sixth is refused (rate_limited, net_limited)", async () => {
+    it("31 /64s inside one /48: the 31st is refused (rate_limited, net_limited), as one IPv4 address would be", async () => {
         vi.spyOn(console, "warn").mockImplementation(() => {});
         const e = promoEnv();
         const out: number[] = [];
-        for (let n = 1; n <= 6; n++) out.push((await redeem(e, fresh(n), `2001:db8:1:${n}::1`)).status);
-        expect(out).toEqual([200, 200, 200, 200, 200, 429]);
-        const last = await redeem(e, fresh(7), "2001:db8:1:7::1");
+        for (let n = 1; n <= 31; n++) out.push((await redeem(e, fresh(n), `2001:db8:1:${n.toString(16)}::1`)).status);
+        expect(out).toEqual([...Array(30).fill(200), 429]);
+        const last = await redeem(e, fresh(32), "2001:db8:1:ff::1");
         expect(await last.json()).toEqual({ ok: false, error: "rate_limited", reason: "net_limited" });
         const count = await (await e.PROMO!.get(e.PROMO!.idFromName("LEAKCLUB")).fetch("https://promo.internal/count")).json() as any;
-        expect(count.claimed).toBe(5);
+        expect(count.claimed).toBe(30);
     });
 
     it("six claims from six different /48s all succeed (a real burst is not slowed)", async () => {

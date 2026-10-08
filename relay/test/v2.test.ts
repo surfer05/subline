@@ -3,7 +3,7 @@ import worker from "../src/index";
 import { applyMorEvent, type Env } from "../src/codes";
 import { installHash } from "../src/checkout";
 import { EARLY_CUTOFF_MS as CUTOFF, isAiPlan, launchAt, signToken, usedBeforeCutoff, verifyToken, MAX_INSTALLS } from "../src/entitle";
-import { applyClaim, applyIpBegin, applyIpEnd, Promo, REDEEM_IP_DAILY_FAILURES, REDEEM_IP_DAILY_SUCCESSES } from "../src/promo";
+import { applyClaim, applyInstallBegin, applyInstallEnd, applyIpBegin, applyIpEnd, INSTALL_INFLIGHT_STALE_MS, Promo, REDEEM_IP_DAILY_FAILURES, REDEEM_IP_DAILY_SUCCESSES } from "../src/promo";
 import { codeRec, fakeBudget, fakeKV } from "./kv-mock";
 import { dayRowKey } from "../src/budget";
 import { PREVIEW_FREE_REPEATS } from "../src/index";
@@ -581,15 +581,13 @@ describe("promo codes", () => {
         expect(applyClaim(s, "h2", 1)).toBe("claimed");
     });
 
-    it("3 redemptions per address a day", async () => {
+    it("30 redemptions per address a day", async () => {
         const e = await setup(100);
         const ip = "203.0.113.9";
-        expect((await redeem(e, A, "LEAKCLUB", ip)).status).toBe(200);
-        expect((await redeem(e, B, "LEAKCLUB", ip)).status).toBe(200);
-        expect((await redeem(e, C, "LEAKCLUB", ip)).status).toBe(200);
-        const fourth = await redeem(e, D, "LEAKCLUB", ip);
-        expect(fourth.status).toBe(429);
-        expect(fourth.body.error).toBe("rate_limited");
+        for (let n = 0; n < 30; n++) expect((await redeem(e, "free_" + (900 + n).toString(16).padStart(32, "0"), "LEAKCLUB", ip)).status).toBe(200);
+        const next = await redeem(e, D, "LEAKCLUB", ip);
+        expect(next.status).toBe(429);
+        expect(next.body.error).toBe("rate_limited");
     });
 
     it("gives the slot back when the grant cannot be written", async () => {
@@ -773,6 +771,160 @@ describe("legacy clients after launch (items 3 and re-audit 3)", () => {
     });
 });
 
+describe("promo drives behind a shared VPN address (R4)", () => {
+    // Many members of one server share one VPN exit. The loose per-address cap
+    // (30 a day) must let a drive through; one install still claims once.
+    const LOOSE = 30;
+    const setup = async (code = "LEAKCLUB", cap = 100, e: Env = env(fakeKV())) => {
+        expect((await adminPromo(e, { code, cap })).status).toBe(200);
+        return e;
+    };
+    const installs = (n: number, from = 0) => Array.from({ length: n }, (_, i) => "free_" + (i + from).toString(16).padStart(32, "0"));
+    const claimed = async (e: Env, code = "LEAKCLUB") =>
+        ((await (await e.PROMO!.get(e.PROMO!.idFromName(code)).fetch("https://promo.internal/count")).json()) as any).claimed;
+
+    it("the loose cap is 30 successes and 20 failures per address a day", () => {
+        expect(REDEEM_IP_DAILY_SUCCESSES).toBe(LOOSE);
+        expect(REDEEM_IP_DAILY_FAILURES).toBe(20);
+    });
+
+    it("50 installs on one IPv4 VPN exit redeem a 100 server code: 30 succeed, the rest get the network message", async () => {
+        const e = await setup();
+        const out = [];
+        for (const i of installs(50, 1000)) out.push(await redeem(e, i, "LEAKCLUB", "185.65.134.10"));
+        expect(out.slice(0, LOOSE).every(r => r.status === 200)).toBe(true);
+        for (const r of out.slice(LOOSE)) expect(r).toEqual({ status: 429, body: { ok: false, error: "rate_limited" } });
+        expect(await claimed(e)).toBe(LOOSE);
+    });
+
+    it("the same 50 at once: at most 20 in flight (the guessing limit), then the rest up to 30 one by one", async () => {
+        const e = await setup();
+        const all = installs(50, 2000);
+        const out = await Promise.all(all.slice(0, 50).map(i => redeem(e, i, "LEAKCLUB", "185.65.134.11")));
+        expect(out.filter(r => r.status === 200)).toHaveLength(REDEEM_IP_DAILY_FAILURES);
+        expect(out.filter(r => r.status === 429)).toHaveLength(50 - REDEEM_IP_DAILY_FAILURES);
+        const refused = all.filter((_, n) => out[n]!.status === 429);
+        const later = [];
+        for (const i of refused) later.push((await redeem(e, i, "LEAKCLUB", "185.65.134.11")).status);
+        expect(later.filter(s => s === 200)).toHaveLength(LOOSE - REDEEM_IP_DAILY_FAILURES);
+        expect(await claimed(e)).toBe(LOOSE);
+    });
+
+    it("50 installs on one IPv6 VPN exit address: 30 succeed", async () => {
+        const e = await setup();
+        const out = [];
+        for (const i of installs(50, 3000)) out.push((await redeem(e, i, "LEAKCLUB", "2a03:1b20:3:f011::a01f")).status);
+        expect(out.filter(s => s === 200)).toHaveLength(LOOSE);
+        expect(out.slice(0, LOOSE).every(s => s === 200)).toBe(true);
+        expect(out.slice(LOOSE).every(s => s === 429)).toBe(true);
+    });
+
+    it("50 installs spread over one IPv6 /48: 30 succeed, then the network limit message", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const e = await setup();
+        const out = [];
+        for (const [n, i] of installs(50, 4000).entries()) out.push(await redeem(e, i, "LEAKCLUB", `2a03:1b20:3:${(n + 1).toString(16)}::1`));
+        expect(out.slice(0, LOOSE).every(r => r.status === 200)).toBe(true);
+        for (const r of out.slice(LOOSE)) expect(r).toEqual({ status: 429, body: { ok: false, error: "rate_limited", reason: "net_limited" } });
+        expect(await claimed(e)).toBe(LOOSE);
+        vi.restoreAllMocks();
+    });
+
+    it("one install tries 5 different valid codes one by one: only the first succeeds", async () => {
+        const e = env(fakeKV());
+        const codes = ["SERVA", "SERVB", "SERVC", "SERVD", "SERVE"];
+        for (const c of codes) await setup(c, 100, e);
+        const out = [];
+        for (const c of codes) out.push(await redeem(e, A, c, "185.65.134.12"));
+        expect(out[0]!.status).toBe(200);
+        for (const r of out.slice(1)) expect(r.body.error).toBe("already");
+        expect(await Promise.all(codes.map(c => claimed(e, c)))).toEqual([1, 0, 0, 0, 0]);
+    });
+
+    it("one install fires 5 different valid codes at once: exactly one Automatic code comes back", async () => {
+        const kv = fakeKV();
+        const e = env(kv);
+        const codes = ["BURSTA", "BURSTB", "BURSTC", "BURSTD", "BURSTE"];
+        for (const c of codes) await setup(c, 100, e);
+        const out = await Promise.all(codes.map(c => redeem(e, B, c, "185.65.134.13")));
+        expect(out.filter(r => r.status === 200)).toHaveLength(1);
+        const counts = await Promise.all(codes.map(c => claimed(e, c)));
+        expect(counts.reduce((a, b) => a + b, 0)).toBe(1);
+        const minted = Object.keys(kv._dump()).filter(k => k.startsWith("code:slp_"));
+        expect(minted).toHaveLength(1);
+        // And later, one by one, still nothing more.
+        for (const c of codes) expect((await redeem(e, B, c, "185.65.134.13")).status).toBe(409);
+    });
+
+    it("guessing: 21 wrong codes from one address, the 21st is blocked", async () => {
+        const e = await setup();
+        const ip = "185.65.134.14";
+        for (let i = 0; i < 20; i++) expect((await redeem(e, A, "GUESS" + i + "X", ip)).status).toBe(404);
+        expect(await redeem(e, A, "GUESS20X", ip)).toEqual({ status: 429, body: { ok: false, error: "rate_limited" } });
+        // A shared exit's real members are then blocked too, until the UTC day ends.
+        expect((await redeem(e, C, "LEAKCLUB", ip)).status).toBe(429);
+    });
+
+    it("past the code's cap: fully claimed, not the network message, even on one VPN exit", async () => {
+        const e = await setup("SMALLONE", 10);
+        const out = [];
+        for (const i of installs(15, 5000)) out.push(await redeem(e, i, "SMALLONE", "185.65.134.15"));
+        expect(out.slice(0, 10).every(r => r.status === 200)).toBe(true);
+        for (const r of out.slice(10)) expect(r).toEqual({ status: 410, body: { ok: false, error: "claimed" } });
+    });
+
+    it("a friend code (cap 2) on one VPN exit: two friends, then fully claimed", async () => {
+        const e = await setup("RAHULFRIEND", 2);
+        const ip = "185.65.134.16";
+        expect((await redeem(e, A, "rahulfriend", ip)).status).toBe(200);
+        expect((await redeem(e, B, "RAHULFRIEND", ip)).status).toBe(200);
+        expect((await redeem(e, C, "RAHULFRIEND", ip)).body.error).toBe("claimed");
+    });
+
+    it("retried after a lost answer: one claim, the retry is told already, status has the code", async () => {
+        const e = await setup();
+        const ip = "185.65.134.17";
+        const first = await redeem(e, A, "LEAKCLUB", ip); // its answer never reached the client
+        expect(first.status).toBe(200);
+        const retry = await redeem(e, A, "LEAKCLUB", ip);
+        expect(retry).toEqual({ status: 409, body: { ok: false, error: "already" } });
+        expect(await claimed(e)).toBe(1);
+        expect((await status(e, A)).body).toMatchObject({ automatic: true, code: first.body.code });
+    });
+
+    it("the same request sent twice at once: one claim", async () => {
+        const e = await setup();
+        const [x, y] = await Promise.all([redeem(e, D, "LEAKCLUB", "185.65.134.18"), redeem(e, D, "LEAKCLUB", "185.65.134.18")]);
+        expect([x.status, y.status].filter(s => s === 200)).toHaveLength(1);
+        expect(await claimed(e)).toBe(1);
+    });
+
+    it("retried after the grant failed (503): the install is not locked out, one claim", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const kv = fakeKV() as any;
+        const e = await setup("LEAKCLUB", 100, env(kv));
+        const put = kv.put;
+        kv.put = async (k: string, v: string, o?: any) => { if (k.startsWith("code:slp_")) throw new Error("kv down"); return put(k, v, o); };
+        expect((await redeem(e, A, "LEAKCLUB", "185.65.134.19")).status).toBe(503);
+        kv.put = put;
+        expect((await redeem(e, A, "LEAKCLUB", "185.65.134.19")).status).toBe(200);
+        expect(await claimed(e)).toBe(1);
+        vi.restoreAllMocks();
+    });
+
+    it("the install decision: one success ever, one at a time, a lost slot frees after a minute", () => {
+        const s = { done: false, inflightAt: null as number | null };
+        expect(applyInstallBegin(s, 0)).toBe("go");
+        expect(applyInstallBegin(s, 1_000)).toBe("busy");
+        expect(applyInstallBegin(s, INSTALL_INFLIGHT_STALE_MS)).toBe("go"); // the first never ended
+        expect(applyInstallEnd(s, false)).toBe(false);
+        expect(applyInstallBegin(s, INSTALL_INFLIGHT_STALE_MS + 1)).toBe("go");
+        expect(applyInstallEnd(s, true)).toBe(true);
+        expect(applyInstallBegin(s, INSTALL_INFLIGHT_STALE_MS + 2)).toBe("done");
+        expect(applyInstallEnd(s, true)).toBe(false); // already stored: no second write
+    });
+});
+
 describe("promo attempts per address, counted in the Durable Object (item 4)", () => {
     const setup = async (cap = 100) => {
         const e = env(fakeKV());
@@ -781,11 +933,12 @@ describe("promo attempts per address, counted in the Durable Object (item 4)", (
     };
     const installs = (n: number, from = 0) => Array.from({ length: n }, (_, i) => "free_" + (i + from).toString(16).padStart(32, "0"));
 
-    it("3 successful claims a day, then rate_limited", async () => {
+    it("30 successful claims a day, then rate_limited", async () => {
         const e = await setup();
         const ip = "203.0.113.9";
-        const [a, b, c, d] = installs(4);
-        for (const i of [a!, b!, c!]) expect((await redeem(e, i, "LEAKCLUB", ip)).status).toBe(200);
+        const all = installs(31);
+        for (const i of all.slice(0, 30)) expect((await redeem(e, i, "LEAKCLUB", ip)).status).toBe(200);
+        const d = all[30];
         expect((await redeem(e, d!, "LEAKCLUB", ip)).body.error).toBe("rate_limited");
         // Another address is unaffected.
         expect((await redeem(e, d!, "LEAKCLUB", "198.51.100.7")).status).toBe(200);
@@ -803,7 +956,7 @@ describe("promo attempts per address, counted in the Durable Object (item 4)", (
     it("only a wrong code (404) counts as a failed try: already yours (409) and fully claimed (410) do not", async () => {
         const e = await setup(1);
         const ip = "203.0.113.20";
-        // One real claim fills the cap of 1 (success 1 of 3).
+        // One real claim fills the cap of 1 (success 1 of 30).
         expect((await redeem(e, A, "LEAKCLUB", ip)).status).toBe(200);
         // "Already yours" and "fully claimed", many times over, count nothing.
         for (let i = 0; i < 25; i++) expect((await redeem(e, A, "LEAKCLUB", ip)).status).toBe(409);
@@ -816,18 +969,17 @@ describe("promo attempts per address, counted in the Durable Object (item 4)", (
 
     it("an IPv6 /64 is one address", async () => {
         const e = await setup();
-        const [a, b, c, d] = installs(4, 100);
-        await redeem(e, a!, "LEAKCLUB", "2001:db8:1:2::1");
-        await redeem(e, b!, "LEAKCLUB", "2001:db8:1:2::2");
-        await redeem(e, c!, "LEAKCLUB", "2001:db8:1:2:aaaa::3");
-        expect((await redeem(e, d!, "LEAKCLUB", "2001:db8:1:2:ffff::9")).status).toBe(429);
+        const all = installs(31, 100);
+        for (const [n, i] of all.slice(0, 30).entries()) expect((await redeem(e, i, "LEAKCLUB", `2001:db8:1:2:${(n + 1).toString(16)}::1`)).status).toBe(200);
+        const r = await redeem(e, all[30]!, "LEAKCLUB", "2001:db8:1:2:ffff::9");
+        expect(r).toEqual({ status: 429, body: { ok: false, error: "rate_limited" } });
     });
 
-    it("a concurrent burst of real claims gets exactly 3 through", async () => {
+    it("a concurrent burst of real claims gets exactly 20 through (in-flight tries count against the 20 failures)", async () => {
         const e = await setup();
-        const out = await Promise.all(installs(20, 200).map(i => redeem(e, i, "LEAKCLUB", "203.0.113.11")));
-        expect(out.filter(r => r.status === 200)).toHaveLength(3);
-        expect(out.filter(r => r.status === 429)).toHaveLength(17);
+        const out = await Promise.all(installs(40, 200).map(i => redeem(e, i, "LEAKCLUB", "203.0.113.11")));
+        expect(out.filter(r => r.status === 200)).toHaveLength(20);
+        expect(out.filter(r => r.status === 429)).toHaveLength(20);
     });
 
     it("a concurrent burst of bad codes counts at most 20 failures", async () => {
@@ -845,16 +997,17 @@ describe("promo attempts per address, counted in the Durable Object (item 4)", (
 
     it("the begin/end decision is exact", () => {
         const s = { ok: 0, fail: 0, inflight: 0 };
-        expect(applyIpBegin(s)).toBe(true);
-        expect(applyIpBegin(s)).toBe(true);
-        expect(applyIpBegin(s)).toBe(true);
-        expect(applyIpBegin(s)).toBe(false); // 3 in flight fill the success allowance
+        for (let i = 0; i < 20; i++) expect(applyIpBegin(s)).toBe(true);
+        expect(applyIpBegin(s)).toBe(false); // 20 in flight fill the failure allowance
         applyIpEnd(s, "none");
-        expect(s).toEqual({ ok: 0, fail: 0, inflight: 2 });
+        expect(s).toEqual({ ok: 0, fail: 0, inflight: 19 });
         applyIpEnd(s, "ok");
         applyIpEnd(s, "fail");
-        expect(s).toEqual({ ok: 1, fail: 1, inflight: 0 });
-        expect(REDEEM_IP_DAILY_SUCCESSES).toBe(3);
+        expect(s).toEqual({ ok: 1, fail: 1, inflight: 17 });
+        const t = { ok: 29, fail: 0, inflight: 0 };
+        expect(applyIpBegin(t)).toBe(true);
+        expect(applyIpBegin(t)).toBe(false); // 29 done + 1 in flight fill the success allowance
+        expect(REDEEM_IP_DAILY_SUCCESSES).toBe(30);
         expect(REDEEM_IP_DAILY_FAILURES).toBe(20);
     });
 });
