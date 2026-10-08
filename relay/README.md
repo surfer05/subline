@@ -24,6 +24,7 @@ translation** to Subline clients presenting an opaque per-user **code**.
 | `GET /admin/stats?days=14` | `Bearer <ADMIN_TOKEN>` | approximate daily owner counts (see below) |
 | `POST /webhook/mor` | Dodo Standard-Webhooks signature | issue/revoke on purchase/refund (inert until configured) |
 | `POST /v1/checkout` | `Bearer free_<id>` + `x-subline-client` | `{plan:"monthly"\|"annual"}` → `{ok,url}`: a Dodo checkout session tied to this install (503 without `DODO_API_KEY`) |
+| `GET /v1/purchase-status?payment_id=…` or `?subscription_id=…` | none (public, CORS for subline.page) | `{"state":"active"\|"pending"\|"failed"\|"unknown"}` for the site's thanks page (see below) |
 | `POST /admin/coupon` | `Bearer <ADMIN_TOKEN>` | `{name}` → a single-use 100%-off code for 3 monthly cycles |
 | `POST /v1/redeem` (v2) | code or install + `x-subline-install` | `{code}` → `{ok,code}`: a promo code grants Automatic |
 | `POST /admin/promo` | `Bearer <ADMIN_TOKEN>` | `{code, cap}` → a server promo code, Automatic for the first `cap` installs |
@@ -337,6 +338,80 @@ var (live or test, matching the key). Without the key `/v1/checkout` and
 The site does not use this endpoint: it sells through Dodo's static links, and
 the buyer sees the key on the thanks page (Dodo appends `license_key` to the
 return URL) and in the receipt email.
+
+### One checkout at a time per install (lock)
+
+Two checkouts for the same install and kind (`automatic` or `ai`) that arrive at
+the same moment through different Cloudflare locations would both read "no open
+session" from KV (eventually consistent, about 60 s) and both create one. So the
+check-and-create runs under a lock in a `Promo` Durable Object named
+`cko:<install hash>:<kind>` (src/promo.ts, `/cko/begin` and `/cko/end`). The
+object also keeps the sessions it opened (strongly consistent), next to the KV
+`cko:` row, which stays as before. A second request waits up to 8 s, then sees
+the first session and reopens it (same URL), or gets 409 `purchase_pending` if
+money is moving. Still busy after 8 s: 503 `checkout unavailable`. A worker
+that dies holding the lock loses it after 60 s. Lock object unreachable: 503,
+no session made. The 30-minute fallback when Dodo cannot be asked is unchanged.
+A `payment.failed` / `cancelled` webhook clears the object's list too. It reuses
+the existing `Promo` class, so there is **no new migration**.
+
+### Purchase status for the thanks page (`GET /v1/purchase-status`)
+
+`GET /v1/purchase-status?payment_id=pay_…` or `?subscription_id=sub_…` →
+`200 {"state":"active"|"pending"|"failed"|"unknown"}` and nothing else.
+
+- **active**: `license_key.created` has made the code and it is live.
+- **pending**: a payment or subscription webhook says paid or processing, and
+  the code is not made yet.
+- **failed**: `payment.failed`, `payment.cancelled` or `subscription.failed`.
+- **unknown**: no webhook yet, an unknown id, or a code that is dead
+  (refunded, revoked). A buyer is never told "failed" when no payment failed.
+
+Order of evidence, at most two KV reads: `order:<id>` (+ its `code:` row),
+else `pst:<id>`. The webhook writes `pst:<id>` (3 days) for
+`payment.succeeded|processing|failed|cancelled` and
+`subscription.active|failed`, never moving backwards (paid > failed > pending).
+Dodo is never called. KV caches a miss for up to about 60 s per location, so a
+state can lag its webhook by about a minute.
+
+- Ids: exactly one of the two, `pay_` / `sub_` plus 8 to 64 letters or digits.
+  Anything else: 400 `{"state":"unknown","error":"bad request"}`, no KV read.
+- Rate limit: 120 a minute per address (IPv4, or the IPv6 /64), counted in
+  memory in a `Promo` object named `ps:<address>:<minute>`. Over it: 429 with
+  `retryAfterMs` and `Retry-After`. Limiter unreachable: allowed, logged.
+- CORS: `Access-Control-Allow-Origin` is echoed only for `https://subline.page`
+  and `https://surfer05.github.io` (the old address, during the move);
+  `Vary: Origin`; `OPTIONS` answers 204.
+- Cache: `active` → `public, max-age=300`; everything else
+  `public, max-age=3` (errors `no-store`).
+
+### Refunds, disputes and how fast Discord notices
+
+Revoke (terminal, never undone): `refund.succeeded` with status `succeeded` (or
+none) and `is_partial` not true; `dispute.lost`; `dispute.accepted`. Kept, and
+logged where it is a refund: a refund with status `pending`, `review` or
+`failed`, `refund.failed`, a **partial** refund, a refund with no payment id,
+and every open or won dispute (`opened`, `challenged`, `won`, `cancelled`,
+`expired`). Revoke a partial refund by hand if it was meant to end the purchase.
+
+At once on the relay: `/v1/status` answers `automatic:false` (or `ai:false`)
+and `deadCode:<code>`, and ✦ stops on the next request.
+
+A running Discord (plugin `entitlement.ts` / `index.tsx`):
+
+1. It asks `/v1/status` at start, when Discord regains focus or goes back
+   online (at most every 10 min), and otherwise every 24 h
+   (`ENTITLEMENT_REFRESH_MS`, checked each minute).
+2. The first dead answer is not trusted (a KV lag must not downgrade a payer).
+   It re-asks 1 h later (`DEAD_CODE_CONFIRM_MS`). The second dead answer drops
+   the code, the plugin asks again with the install id, and it shows
+   **"Not activated"**.
+
+So: about **1 h after the next check**. Typical: about 1 h 10 min after the
+refund (the next focus after 10 min). Worst case while Discord stays focused
+and online: about 25 h. A restart of Discord counts as a check. A reader who
+blocks the relay keeps the last good answer until its `tokenExpiresAt`, at most
+7 days after the last check.
 
 ## Personal coupons
 

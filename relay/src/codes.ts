@@ -12,7 +12,7 @@
  */
 
 import { bumpStat } from "./stats";
-import { linkFromKey, linkFromLifecycle, clearBuying } from "./checkout";
+import { linkFromKey, linkFromLifecycle, clearBuying, recordPurchaseState } from "./checkout";
 import { dayRowKey, monthRowKey, type ReserveReq, type ReserveRes } from "./budget";
 
 export interface Env {
@@ -1163,6 +1163,7 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
     // machine and never changes the code record itself. A KV failure throws
     // (500, Dodo retries): this is the only event that names the install.
     if (name.startsWith("payment.") || name.startsWith("subscription.")) {
+        await recordPurchaseState(env, name, data);
         await linkFromLifecycle(env, name, data);
     }
 
@@ -1204,6 +1205,25 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
     // terminal:true closes the refund bypass — a replayed active subscription
     // event can never flip a refunded code back to active.
     if (name === "refund.succeeded" || DISPUTE_LOST.has(name)) {
+        // Only money that has actually gone back takes the code. A Refund object
+        // carries status (succeeded | failed | pending | review) and is_partial
+        // (dodopayments-node src/resources/refunds.ts). refund.succeeded should
+        // only ever carry "succeeded", but terminal is permanent, so any other
+        // status on it is not trusted to revoke. A PARTIAL refund (part of the
+        // price, e.g. a goodwill or rounding refund) keeps the purchase: the
+        // buyer still paid for it. Both are logged, so the owner can see a
+        // refund the relay chose not to act on (and revoke by hand if meant).
+        if (name === "refund.succeeded") {
+            const st = data.status;
+            if (st !== undefined && st !== null && st !== "succeeded") {
+                console.warn("refund event not succeeded: code kept", { status: asStr(st).slice(0, 20), payment: asStr(data.payment_id).slice(0, 40) });
+                return { action: "ignored_refund_not_succeeded" };
+            }
+            if (data.is_partial === true) {
+                console.warn("partial refund: code kept", { payment: asStr(data.payment_id).slice(0, 40) });
+                return { action: "ignored_partial_refund" };
+            }
+        }
         // The purchase is over: a new one may be bought from that install now.
         await clearBuying(env, asStr(data.payment_id));
         return { action: await applyLifecycle(env, asStr(data.payment_id), { revoked: true, terminal: true, expiresAt: now, revokedAt: now }) };

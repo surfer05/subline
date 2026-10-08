@@ -28,7 +28,7 @@ import { record, type Outcome } from "./metrics";
 import { installOf, isApiV2, legacyFreeAllowed, PREVIEW_DAILY_CAP, resolveEntitlement } from "./entitle";
 import { adminReissue, adminResetInstalls, createPromo, handleRedeem, handleStatusV2, promoStats } from "./v2";
 import { bumpStat, markActive, safely, clampDays, readStats } from "./stats";
-import { createCoupon, handleCheckout, purchaseFor } from "./checkout";
+import { createCoupon, handleCheckout, handlePurchaseStatus, purchaseFor } from "./checkout";
 import { readCapped } from "./body";
 import { dayRowKey } from "./budget";
 export { Budget } from "./budget";
@@ -693,6 +693,13 @@ export default {
 
         if (url.pathname === "/v1/checkout") {
             return handleCheckout(req, env);
+        }
+
+        // ---- GET /v1/purchase-status — public, for the site's thanks page --
+        // {"state":"active"|"pending"|"failed"|"unknown"} from webhook data only
+        // (checkout.ts handlePurchaseStatus): no auth, no personal data.
+        if (url.pathname === "/v1/purchase-status") {
+            return handlePurchaseStatus(req, env);
         }
 
         // ---- POST /admin/coupon — a personal 100%-off code (ADMIN_TOKEN) ---
