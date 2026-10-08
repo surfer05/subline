@@ -38,7 +38,7 @@ import {
 import { parsePsOutput, processNameFor } from "../app/discordProcess.js";
 import type { RunningProcess } from "../app/discordProcess.js";
 import { installModBundle, shippedModDirFor } from "../app/modInstall.js";
-import { rememberPatchedInstall } from "../app/patchedInstalls.js";
+import { readPatchedInstalls, rememberPatchedInstall } from "../app/patchedInstalls.js";
 import { seedHelperMemory } from "../helper/state.js";
 import { hiddenExec } from "../patcher/exec.js";
 import type { Exec } from "../patcher/exec.js";
@@ -55,7 +55,7 @@ import {
 } from "../helper/scheduledTask.js";
 import type { SchtasksPort } from "../helper/scheduledTask.js";
 import { modBundleDirFor, productDirFor } from "../bundle/layout.js";
-import { locateDiscordInstalls } from "../patcher/locate.js";
+import { locateDiscordInstalls, locateRemembered } from "../patcher/locate.js";
 import type { DiscordBranch, DiscordInstall } from "../patcher/locate.js";
 import { loaderPathFor } from "../bundle/spec.js";
 import { adoptPatch, patchInstall } from "../patcher/patch.js";
@@ -696,8 +696,8 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
                 ? err("MOD_BUNDLE_INVALID", "Subline does not know where to install the mod on this platform.")
                 : installModBundle({ sourceDir: shippedDir, destDir: runtimeDir }),
 
-        locate: explicitPaths =>
-            locateDiscordInstalls({
+        locate: explicitPaths => {
+            const live = locateDiscordInstalls({
                 platform,
                 ...(options.searchRoots === undefined ? {} : { searchRoots: options.searchRoots }),
                 ...(explicitPaths === undefined ? {} : { explicitPaths }),
@@ -705,7 +705,23 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
                 // is in" are the same screen. This is the only place that can
                 // tell them apart, and it costs one log line to do so.
                 onIgnoredError: detail => options.log.warn("locate.skipped", detail)
-            }),
+            });
+            // PLUS EVERY DISCORD THIS ACCOUNT PATCHED BY HAND (audit #15), as
+            // the helper does: a hand-picked PTB, Canary or unusual folder is
+            // found again on the next run instead of being picked by hand every
+            // time. Not when the user is picking one right now.
+            if (explicitPaths !== undefined && explicitPaths.length > 0) return live;
+            const remembered = locateRemembered(readPatchedInstalls(productDirFor(platform, env, home)), {
+                platform,
+                onSkipped: detail => options.log.warn("locate.remembered-skipped", detail)
+            });
+            if (remembered.length === 0) return live;
+            const merged: DiscordInstall[] = [...(live.ok ? live.value : [])];
+            for (const install of remembered) {
+                if (!merged.some(known => known.rootPath === install.rootPath || known.stableId === install.stableId)) merged.push(install);
+            }
+            return merged.length === 0 ? live : ok(merged);
+        },
         inspect: install => inspectInstall(install, { ownLoaderPaths: runtimeDir === null ? [] : [loaderPathFor(runtimeDir)] }),
 
         listProcesses: () => listProcesses(platform, exec, options.log),

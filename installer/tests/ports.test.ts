@@ -588,3 +588,32 @@ describe("Windows: Discord's own updater, by its path (audit 2026-10-06 #23)", (
         }
     });
 });
+
+describe("the installer finds a Discord it patched by hand again (audit 2026-10-06 #15)", () => {
+    it("locate() includes a remembered Discord outside the search, and leaves an explicit pick alone", async () => {
+        const home = mkdtempSync(join(tmpdir(), "subline-ports-home-"));
+        const discord = makeDiscordFixture({ appName: "Discord PTB.app" });
+        try {
+            const { rememberPatchedInstall } = await import("../src/app/patchedInstalls.js");
+            const productDir = join(home, "Library", "Application Support", "Subline");
+            expect(rememberPatchedInstall(productDir, { ...discord.install, branch: "ptb" }).ok).toBe(true);
+            const p = createFlowPorts({
+                appResourcesPath: home,
+                productVersion: "0.2.3",
+                log: { info: () => {}, warn: () => {}, error: () => {} },
+                platform: "darwin",
+                home,
+                searchRoots: [join(home, "nowhere")],
+                helper: { appPath: home, uid: 0, launchctl: makeFakeLaunchctl() },
+                exec: async () => ({ stdout: "" })
+            });
+            const found = p.locate();
+            expect(found.ok && found.value.map(install => install.rootPath)).toEqual([discord.install.rootPath]);
+            const picked = p.locate([join(home, "nowhere")]);
+            expect(picked.ok).toBe(false);
+        } finally {
+            discord.cleanup();
+            rmSync(home, { recursive: true, force: true });
+        }
+    });
+});
