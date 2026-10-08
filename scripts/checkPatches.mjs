@@ -49,6 +49,8 @@
  *   node scripts/checkPatches.mjs                  # fetch, check, clean up
  *   node scripts/checkPatches.mjs --bundle-dir DIR # reuse / keep a download
  *   node scripts/checkPatches.mjs --json           # machine-readable rows
+ *   node scripts/checkPatches.mjs --channel canary # ptb or canary instead of stable
+ *   node scripts/checkPatches.mjs --vencord DIR    # a built Vencord checkout elsewhere
  * Exit code 0 when every active patch is OK, 1 on any FAIL, 2 on an error
  * (network, missing Vencord checkout).
  */
@@ -64,6 +66,22 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const INSTALLER = join(ROOT, "installer");
 const DEFAULT_VENCORD = join(INSTALLER, "build", "vencord");
 const DISCORD = "https://discord.com";
+
+/**
+ * Discord's release channels and where each serves its web client. The same
+ * patches run on all three; Canary and PTB get Discord's changes first, so a
+ * failure there is the early warning for Stable.
+ */
+export const CHANNEL_ORIGINS = {
+    stable: "https://discord.com",
+    ptb: "https://ptb.discord.com",
+    canary: "https://canary.discord.com"
+};
+
+/** The origin for a channel name, or null for an unknown one. */
+export function originFor(channel) {
+    return Object.hasOwn(CHANNEL_ORIGINS, channel) ? CHANNEL_ORIGINS[channel] : null;
+}
 
 /* ================================================================ matcher == */
 
@@ -290,10 +308,10 @@ async function pool(items, size, fn) {
 }
 
 /** Download (or reuse) the whole public bundle into `dir`; returns { files, runtime }. */
-export async function fetchBundle(dir, log = () => { }) {
+export async function fetchBundle(dir, log = () => { }, origin = DISCORD) {
     mkdirSync(dir, { recursive: true });
     const htmlPath = join(dir, "app.html");
-    if (!existsSync(htmlPath)) await download(`${DISCORD}/app`, htmlPath);
+    if (!existsSync(htmlPath)) await download(`${origin}/app`, htmlPath);
     const html = readFileSync(htmlPath, "utf8");
     const initial = [...new Set([...html.matchAll(/(?:src|href)="\/assets\/([\w.-]+\.js)"/g)].map(m => m[1]))];
     const runtime = initial.find(f => /^web\.[0-9a-f]+\.js$/.test(f));
@@ -301,12 +319,12 @@ export async function fetchBundle(dir, log = () => { }) {
     const have = new Set(readdirSync(dir));
     const missing = initial.filter(f => !have.has(f));
     log(`  ${initial.length} initial scripts (${missing.length} to download)`);
-    await pool(missing, 24, f => download(`${DISCORD}/assets/${f}`, join(dir, f)));
+    await pool(missing, 24, f => download(`${origin}/assets/${f}`, join(dir, f)));
     const lazy = lazyChunkFiles(readFileSync(join(dir, runtime), "utf8")).filter(f => !initial.includes(f));
     const have2 = new Set(readdirSync(dir));
     const missingLazy = lazy.filter(f => !have2.has(f));
     log(`  ${lazy.length} lazily loaded chunks (${missingLazy.length} to download)`);
-    await pool(missingLazy, 24, f => download(`${DISCORD}/assets/${f}`, join(dir, f)));
+    await pool(missingLazy, 24, f => download(`${origin}/assets/${f}`, join(dir, f)));
     return { files: [...initial, ...lazy], runtime };
 }
 
@@ -470,6 +488,12 @@ async function main(argv) {
     const json = argv.includes("--json");
     const keep = argv.includes("--keep");
     const vencordDir = resolve(arg("--vencord") ?? DEFAULT_VENCORD);
+    const channel = arg("--channel") ?? "stable";
+    const origin = originFor(channel);
+    if (origin === null) {
+        console.error(`checkPatches: unknown --channel ${channel}. Use one of: ${Object.keys(CHANNEL_ORIGINS).join(", ")}.`);
+        return 2;
+    }
     const t0 = Date.now();
     const log = json ? () => { } : m => console.log(`${m}${m.startsWith(" ") ? "" : `  (${Math.round((Date.now() - t0) / 1000)}s)`}`);
 
@@ -498,12 +522,12 @@ async function main(argv) {
     const active = activePlugins(plugins);
     log(`     ${plugins.length} plugins, ${plugins.reduce((n, p) => n + (p.patches?.length ?? 0), 0)} patches, ${[...active].length} active`);
 
-    log("2/3  Fetching Discord's public web bundle");
+    log(`2/3  Fetching Discord's public web bundle (${channel}, ${origin})`);
     const bundleArg = arg("--bundle-dir");
     const dir = bundleArg ? resolve(bundleArg) : mkdtempSync(join(tmpdir(), "subline-discord-bundle-"));
     let modules;
     try {
-        const { files, runtime } = await fetchBundle(dir, log);
+        const { files, runtime } = await fetchBundle(dir, log, origin);
         modules = loadModules(dir, files, runtime, ts);
         log(`     ${modules.size} webpack modules`);
     } finally {
@@ -523,7 +547,7 @@ async function main(argv) {
         }
     }
     const failed = rows.filter(r => !r.ok && r.active);
-    if (json) console.log(JSON.stringify({ ok: failed.length === 0, modules: modules.size, rows }, null, 2));
+    if (json) console.log(JSON.stringify({ ok: failed.length === 0, channel, modules: modules.size, rows }, null, 2));
     else {
         console.log(table(rows));
         console.log(failed.length === 0

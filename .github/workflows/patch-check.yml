@@ -1,0 +1,121 @@
+# Daily: does every Vencord patch Subline ships still apply to Discord's
+# current web code, on Stable, PTB and Canary?
+#
+# Discord changes its web code at any time. When a patch stops matching,
+# Vencord only logs a warning on the user's machine and the feature vanishes
+# for everyone. This job runs scripts/checkPatches.mjs against Discord's public
+# web bundle (no login, no secrets) every day. PTB and Canary get Discord's
+# changes first, so a failure there is the early warning for Stable.
+#
+# On a failure the job fails (GitHub emails the owner) and one issue titled
+# "Discord patch check failing" is opened, or updated with today's report.
+# When every channel passes again, that issue is closed.
+#
+# Uses only GITHUB_TOKEN (issues: write). Actions are pinned to full commit
+# SHAs. Note: GitHub disables scheduled workflows in a public repository after
+# 60 days without repository activity; re-enable it from the Actions tab.
+
+name: Discord patch check
+
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: patch-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Patch check (stable, ptb, canary)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          # buildMod.mjs imports TypeScript directly (type stripping, Node 22.18+).
+          node-version: "22"
+
+      - name: Install TypeScript for the check
+        # checkPatches.mjs resolves `typescript` from installer/. Node's lookup
+        # walks up to the repo root, so this one package is all it needs from
+        # the installer (no Electron download). Same version as installer/pnpm-lock.yaml.
+        run: npm install --no-save --no-package-lock --ignore-scripts typescript@5.9.3
+
+      - name: Build the mod (pinned Vencord plus the Subline plugin)
+        # The same build that ships: fetches the pinned Vencord commit, copies
+        # the plugin in, prunes and rebrands, installs and builds. The check
+        # reads the patches from this tree, after those rewrites.
+        run: node installer/scripts/buildMod.mjs
+
+      - name: Check patches on each channel
+        run: |
+          mkdir -p patch-check
+          for ch in stable ptb canary; do
+            set +e
+            node --max-old-space-size=4096 scripts/checkPatches.mjs --channel "$ch" --json > "patch-check/$ch.json" 2> "patch-check/$ch.err"
+            echo $? > "patch-check/$ch.code"
+            set -e
+            echo "$ch: exit $(cat "patch-check/$ch.code")"
+          done
+
+      - name: Write the report
+        id: report
+        run: |
+          set +e
+          node scripts/patchCheckReport.mjs --dir patch-check --out patch-check/report.md
+          code=$?
+          set -e
+          cat patch-check/report.md >> "$GITHUB_STEP_SUMMARY"
+          if [ "$code" -eq 0 ]; then echo "failed=false" >> "$GITHUB_OUTPUT"; else echo "failed=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Open or update the issue
+        if: always() && (steps.report.outputs.failed == 'true' || failure())
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p patch-check
+          if [ ! -s patch-check/report.md ]; then
+            printf 'The patch check could not run today. See the run log: %s\n' "$RUN_URL" > patch-check/report.md
+          fi
+          title="Discord patch check failing"
+          number=$(gh issue list --state open --search "\"$title\" in:title" --json number,title --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --body-file patch-check/report.md
+            gh issue comment "$number" --body "Still failing on $(date -u +%F). The issue text is today's report. Run: $RUN_URL"
+          else
+            gh issue create --title "$title" --body-file patch-check/report.md
+          fi
+
+      - name: Close the issue when passing again
+        if: steps.report.outputs.failed == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          title="Discord patch check failing"
+          number=$(gh issue list --state open --search "\"$title\" in:title" --json number,title --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          if [ -n "$number" ]; then
+            gh issue close "$number" --comment "All channels pass again on $(date -u +%F)."
+          fi
+
+      - name: Fail the job when a patch no longer applies
+        if: steps.report.outputs.failed == 'true'
+        run: |
+          echo "Subline patches no longer apply. See the job summary and the issue."
+          exit 1

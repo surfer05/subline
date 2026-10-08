@@ -4,7 +4,7 @@ import { translateWithClaude, TRUNCATED_ERROR } from "./engines/claude";
 import { translateWithGemini } from "./engines/gemini";
 import { translateWithGoogle } from "./engines/google";
 import { translateWithGroq } from "./engines/groq";
-import { fetchRelayCheckout, fetchRelayRedeem, fetchRelayStatus, type StatusOptions, translateWithRelayDetailed } from "./engines/relay";
+import { fetchRelayCheckout, fetchRelayRedeem, fetchRelayStatus, postPatchHealth, type StatusOptions, translateWithRelayDetailed } from "./engines/relay";
 import { HttpError } from "./httpError";
 import type { ProviderRateLimit } from "./rateHint";
 import { withRetry } from "./retry";
@@ -439,4 +439,15 @@ export async function reportStatus(_: IpcMainInvokeEvent, json: string): Promise
  */
 export async function readStagedBuildId(_: IpcMainInvokeEvent): Promise<string | null> {
     return readStagedBuildIdSync();
+}
+
+/**
+ * Send a patch health report (see patchHealth.ts) for this install. Here for
+ * the reason relayStatus is: the renderer does no network for the relay.
+ * `json` is the renderer's report, which the relay validates strictly. Never
+ * throws: true when the relay took it, false on anything else.
+ */
+export async function relayPatchHealth(_: IpcMainInvokeEvent, install: string, json: string): Promise<boolean> {
+    if (typeof install !== "string" || typeof json !== "string" || json.length > 8_192) return false;
+    return postPatchHealth(install, json, fetch);
 }

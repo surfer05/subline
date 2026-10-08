@@ -30,7 +30,9 @@ export function checkPatch(
 export function lazyChunkFiles(runtimeSource: string): string[];
 export function modulesFromChunk(source: string): Map<string, string>;
 export function modulesFromRuntime(source: string, ts: unknown): Map<string, string>;
-export function fetchBundle(dir: string, log?: (message: string) => void): Promise<{ files: string[]; runtime: string; }>;
+export function fetchBundle(dir: string, log?: (message: string) => void, origin?: string): Promise<{ files: string[]; runtime: string; }>;
+export const CHANNEL_ORIGINS: { stable: string; ptb: string; canary: string; };
+export function originFor(channel: string): string | null;
 export function loadModules(dir: string, files: string[], runtime: string, ts: unknown): Map<string, string>;
 export function keptPluginEntries(vencordDir: string, keptDirs: string[]): string[];
 export function activePlugins(plugins: Array<Record<string, any> & { name: string; }>): Set<string>;

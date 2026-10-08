@@ -204,6 +204,39 @@ export async function fetchRelayRedeem(
     }
 }
 
+/** POST /v1/patch-health: which Subline patches did not apply (patchHealth.ts). A compiled constant, like RELAY_URL. */
+export const RELAY_PATCH_HEALTH_URL = "https://subline-relay.rahul05alok.workers.dev/v1/patch-health";
+
+/** A patch report is diagnostics: it never waits long. */
+export const PATCH_HEALTH_TIMEOUT_MS = 10_000;
+
+/**
+ * Send one patch health report for this install. Resolves true when the relay
+ * took it (200), false on anything else. Never throws, never rejects.
+ */
+export async function postPatchHealth(
+    install: string,
+    reportJson: string,
+    fetchImpl: typeof fetch = fetch,
+    timeoutMs: number = PATCH_HEALTH_TIMEOUT_MS
+): Promise<boolean> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetchImpl(RELAY_PATCH_HEALTH_URL, {
+            method: "POST",
+            headers: relayHeaders(install, install, true),
+            body: reportJson,
+            signal: controller.signal
+        });
+        return res.ok;
+    } catch {
+        return false;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 /**
  * Create a Dodo checkout session through the relay, tagged with this install
  * (see checkout.ts). A compiled constant for the same reason RELAY_URL is.

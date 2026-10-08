@@ -43,7 +43,7 @@ import {
 import {
     recordError, recordPluginLoaded, recordRendered, recordTranslation, resetStatusBeacon
 } from "./statusBeacon";
-import { BUILD_ID, type BeaconErrorCode } from "./statusShape";
+import { BUILD_ID, PLUGIN_VERSION, type BeaconErrorCode } from "./statusShape";
 import {
     clearLanguage, clearStore, getTranslation, invalidateMessage, loadPersistedTranslations, makeKey,
     setTranslation, subscribe, type StoredTranslation
@@ -62,6 +62,7 @@ import {
     closePanel, type CodeSubmitResult, openActivatePanel, openCodeEntry, openPaymentPendingPanel, openUpgradePanel
 } from "./upgradePanel";
 import { createUpdateWatch, UPDATE_CHECK_INTERVAL_MS, type UpdateWatch } from "./updateNotice";
+import { buildNumberFromVencord, createPatchHealthWatch, HEALTH_STORE_KEY, runPatchHealthCheck, scanFromVencord, type PatchHealthWatch } from "./patchHealth";
 import { SurfaceBudget } from "./surfaces/budget";
 import { SurfaceCache } from "./surfaces/cache";
 import {
@@ -86,6 +87,34 @@ let fastBatcher: Batcher | null = null;
 let qualityBatcher: Batcher | null = null;
 // Watches for a Subline update staged on disk but not yet loaded (updateNotice.ts).
 let updateWatch: UpdateWatch | null = null;
+/** Did Subline's patches apply in this Discord? Checked once per session (patchHealth.ts). */
+let patchHealthWatch: PatchHealthWatch | null = null;
+
+/**
+ * Wire the patch health check to the running Discord and Vencord. Everything
+ * it touches is read defensively: a missing global is "nothing to check",
+ * never an error. Sends through the native half, like every relay call.
+ */
+function startPatchHealth(): void {
+    patchHealthWatch?.stop();
+    patchHealthWatch = createPatchHealthWatch({
+        run: messagesSeen => runPatchHealthCheck({
+            now: () => Date.now(),
+            pluginVersion: PLUGIN_VERSION,
+            buildId: BUILD_ID,
+            channel: () => (globalThis as any).GLOBAL_ENV?.RELEASE_CHANNEL,
+            buildNumber: () => buildNumberFromVencord((globalThis as any).Vencord),
+            load: () => DataStore.get(HEALTH_STORE_KEY),
+            save: value => DataStore.set(HEALTH_STORE_KEY, value),
+            scan: seen => scanFromVencord((globalThis as any).Vencord, seen),
+            send: async report => Native.relayPatchHealth(tasteBearer(await installIdOnce()), JSON.stringify(report)),
+            log: (message, detail) => logger.warn(message, detail)
+        }, messagesSeen),
+        setTimeout: (fn, ms) => setTimeout(fn, ms),
+        clearTimeout: handle => clearTimeout(handle as ReturnType<typeof setTimeout>)
+    });
+    patchHealthWatch.start();
+}
 let sessionFallback = false;   // set when the configured LLM engine is unusable this session
 /**
  * Which engine+key `sessionFallback` was set against.
@@ -3738,6 +3767,7 @@ function onChannelSelect({ channelId }: { channelId: string; }) {
 // isLoadingMessages(channelId)) and CHANNEL_SELECT's confirmed shape, not
 // independently verified against a real dispatch.
 function onMessagesLoaded(payload: any) {
+    patchHealthWatch?.noteMessagesLoaded();
     // The payload shape for this event is not exercised anywhere in the
     // Vencord checkout, so the field name is unverified. Accept the two
     // plausible spellings and log loudly if neither is present, so a
@@ -5212,6 +5242,11 @@ export default definePlugin({
         });
         updateWatch.start();
 
+        // Did Subline's patches apply in this Discord? Nothing runs now: the
+        // check waits for messages (or ten minutes), then reports at most once
+        // per Discord build per day, and only when something failed.
+        startPatchHealth();
+
         // WHAT THIS INSTALL OWNS. The last answer is read from disk first
         // (awaited: it decides whether anything is translated at all), then
         // the relay is asked again, never awaited, and every 24 hours after.
@@ -5311,6 +5346,7 @@ export default definePlugin({
             if (fastBatcher === null) return;
             const openChannelId = SelectedChannelStore.getChannelId();
             if (!openChannelId) return;
+            patchHealthWatch?.noteMessagesLoaded();
             // Same standing as a CHANNEL_SELECT: this IS the channel being
             // opened, as far as the plugin is concerned, so the history load
             // that follows a restart still counts as this open's backlog and
@@ -5337,6 +5373,8 @@ export default definePlugin({
         // fire into a torn-down module (same reasoning as the timers below).
         updateWatch?.stop();
         updateWatch = null;
+        patchHealthWatch?.stop();
+        patchHealthWatch = null;
         onSettingsChanged(null);
         registerUpgradeOpener(null);
         connectInstallIdSetting(null);
