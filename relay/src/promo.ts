@@ -143,8 +143,54 @@ export function applyInstallEnd(s: InstallState, ok: boolean): boolean {
     return true;
 }
 
+/**
+ * CHECKOUT LOCK (G1). An object named `cko:<install hash>:<kind>` serialises
+ * the check-and-create of a checkout session for that install and kind
+ * (checkout.ts createSession), and holds the sessions it opened. KV cannot do
+ * this: two checkouts arriving at the same moment through different Cloudflare
+ * locations both read "no open session" (KV is eventually consistent, up to
+ * ~60 s between locations) and both create one, so the buyer holds two payable
+ * sessions. Here the lock is taken and the list read with no await in between,
+ * and the list is strongly consistent, so the second request waits, then sees
+ * the first one's session and reopens it.
+ *
+ * The lock is in memory only: a worker that dies holding it loses it after
+ * CKO_LOCK_STALE_MS, so a crash never locks a buyer out for longer.
+ */
+export const CKO_LOCK_STALE_MS = 60_000;
+/** Most sessions one object keeps (checkout.ts CKO_MAX is lower). */
+const CKO_LIST_MAX = 10;
+
+export interface CkoLock { token: string | null; at: number }
+
+/** Pure: take the lock when it is free or stale. Returns the token, or null (busy). */
+export function applyCkoBegin(l: CkoLock, now: number, token: string): string | null {
+    if (l.token !== null && now - l.at < CKO_LOCK_STALE_MS) return null;
+    l.token = token;
+    l.at = now;
+    return token;
+}
+
+/** Pure: release the lock if `token` still holds it. */
+export function applyCkoEnd(l: CkoLock, token: string): boolean {
+    if (l.token === null || l.token !== token) return false;
+    l.token = null;
+    return true;
+}
+
+/** Pure: one more hit on an address's per-minute counter (GET /v1/purchase-status). */
+export interface RlState { n: number }
+export function applyRlHit(s: RlState, limit: number): boolean {
+    if (s.n >= limit) return false;
+    s.n += 1;
+    return true;
+}
+
 export class Promo {
     private state: PromoState = { claimed: 0, installs: new Set(), nets: new Map() };
+    private cko: unknown[] = [];
+    private ckoLock: CkoLock = { token: null, at: 0 };
+    private rl: RlState = { n: 0 };
     /** Claim times in the last hour, and the drain alerts already raised. */
     private recent: number[] = [];
     private alerted = new Set<number>();
@@ -161,12 +207,45 @@ export class Promo {
             this.ip.fail = (await ctx.storage.get<number>("ipFail")) ?? 0;
             this.inst.done = (await ctx.storage.get<boolean>("instDone")) === true;
             this.state.nets = new Map(Object.entries((await ctx.storage.get<Record<string, number>>("nets")) ?? {}));
+            const cko = await ctx.storage.get<unknown[]>("cko");
+            this.cko = Array.isArray(cko) ? cko : [];
         });
     }
 
     async fetch(req: Request): Promise<Response> {
         await this.ready;
         const path = new URL(req.url).pathname;
+        if (path === "/rl/hit") {
+            // In memory only: the object is named for one address and one
+            // minute, so nothing is stored.
+            const body = await req.json().catch(() => ({})) as { limit?: unknown };
+            const limit = Number(body.limit);
+            return Response.json({ allowed: Number.isFinite(limit) && limit > 0 && applyRlHit(this.rl, limit) });
+        }
+        if (path === "/cko/begin") {
+            // Take the lock and read the list with no await in between (see CHECKOUT LOCK).
+            const token = applyCkoBegin(this.ckoLock, Date.now(), crypto.randomUUID());
+            return Response.json(token === null ? { result: "busy" } : { result: "go", token, open: this.cko });
+        }
+        if (path === "/cko/end") {
+            const body = await req.json().catch(() => ({})) as { token?: unknown; add?: unknown; ttlMs?: unknown };
+            const token = typeof body.token === "string" ? body.token : "";
+            if (token === "" || this.ckoLock.token !== token) return Response.json({ released: false });
+            if (body.add && typeof body.add === "object") {
+                this.cko = [body.add, ...this.cko].slice(0, CKO_LIST_MAX);
+                await this.ctx.storage.put("cko", this.cko);
+                // Clear the object once its sessions can no longer be paid.
+                const ttl = Number(body.ttlMs);
+                const storage = this.ctx.storage as DurableObjectStorage & { setAlarm?: (t: number) => Promise<void> };
+                if (storage.setAlarm && Number.isFinite(ttl) && ttl > 0) await storage.setAlarm(Date.now() + ttl);
+            }
+            return Response.json({ released: applyCkoEnd(this.ckoLock, token) });
+        }
+        if (path === "/cko/clear") {
+            this.cko = [];
+            await this.ctx.storage.put("cko", []);
+            return Response.json({ cleared: true });
+        }
         if (path === "/ip/begin") {
             return Response.json({ allowed: applyIpBegin(this.ip) });
         }
@@ -229,6 +308,7 @@ export class Promo {
     async alarm(): Promise<void> {
         await this.ctx.storage.deleteAll();
         this.ip = { ok: 0, fail: 0, inflight: 0 };
+        this.cko = [];
     }
 
     private async persist(): Promise<void> {

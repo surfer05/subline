@@ -92,7 +92,7 @@
     // Where Dodo sends the buyer after paying. Dodo appends payment_id or
     // subscription_id, status, license_key and email as query parameters, and
     // the site shows its thanks view when it sees them.
-    "CHECKOUT_RETURN_URL": "https://surfer05.github.io/subline/",
+    "CHECKOUT_RETURN_URL": "https://subline.page/",
     // Launch of the paid-only model (v2 clients), epoch ms or an ISO date. Set to
     // the moment the fixed early-user cutoff went live, so the legacy path stops
     // starting trials from now on. The release step may move it to the publish
@@ -113,6 +113,9 @@
   },
   // PROMO: one Durable Object per promo code, the exact claim counter behind
   // "the first 100 installs" (src/promo.ts). Migration v2 creates the class.
+  // The same class also holds the per-install checkout lock (cko:<hash>:<kind>)
+  // and the per-address purchase-status rate counter (ps:<addr>:<minute>):
+  // new object NAMES only, no new class, so no new migration.
   "durable_objects": { "bindings": [
     { "name": "BUDGET", "class_name": "Budget" },
     { "name": "PROMO", "class_name": "Promo" }

@@ -26,12 +26,12 @@
  *     subscription_cycles, usage_limit, restricted_to):
  *     /api-reference/discounts/create-discount
  */
-import { ipBucket, isNewClient, isTasteBearer, variantConfig, type CodeRecord, type Env } from "./codes";
+import { followReissue, ipBucket, isNewClient, isTasteBearer, variantConfig, type CodeRecord, type Env } from "./codes";
 import { installOf, isApiV2, resolveEntitlement } from "./entitle";
 import { readCappedText, SMALL_BODY_BYTES } from "./body";
 
 export const DEFAULT_DODO_API_BASE = "https://live.dodopayments.com";
-export const DEFAULT_CHECKOUT_RETURN_URL = "https://surfer05.github.io/subline/";
+export const DEFAULT_CHECKOUT_RETURN_URL = "https://subline.page/";
 
 /**
  * Where Dodo sends the buyer after paying. Every checkout this relay makes is
@@ -228,13 +228,103 @@ async function createSession(
     env: Env, hash: string, productId: string, now: number, ip: string | null,
     from: "discord" | "installer" = "discord", kind: PurchaseKind = "ai"
 ): Promise<Response> {
-    // The sessions this install already opened for this kind (see CKO_WINDOW_MS).
+    // G1: one check-and-create at a time per install and kind, across every
+    // Cloudflare location (see promo.ts CHECKOUT LOCK). FAIL CLOSED when the
+    // lock object cannot be reached, like a KV read error on the marker below.
+    const lock = await takeCheckoutLock(env, hash, kind);
+    if (lock === "unavailable") return fail("checkout unavailable", 503);
+    if (lock === "busy") return fail("checkout unavailable", 503, CKO_LOCK_WAIT_MS);
+    const made: { added?: OpenSession } = {};
+    try {
+        return await createSessionLocked(env, hash, productId, now, ip, from, kind, lock?.open ?? [], made);
+    } finally {
+        if (lock) await releaseCheckoutLock(env, hash, kind, lock.token, made.added);
+    }
+}
+
+/** How long a checkout waits for another one of the same install and kind. */
+export const CKO_LOCK_WAIT_MS = 8_000;
+const CKO_LOCK_POLL_MS = 200;
+
+function checkoutLockStub(env: Env, hash: string, kind: PurchaseKind): DurableObjectStub {
+    return env.PROMO!.get(env.PROMO!.idFromName(checkoutOpenKey(hash, kind)));
+}
+
+/**
+ * Take the install+kind checkout lock, waiting up to CKO_LOCK_WAIT_MS for a
+ * checkout already running. Returns the lock token and the sessions the lock
+ * object holds; null when there is no PROMO binding (tests, or a relay without
+ * Durable Objects: the KV marker alone, as before); "busy" when the other
+ * checkout still holds it; "unavailable" when the object cannot be reached.
+ */
+async function takeCheckoutLock(env: Env, hash: string, kind: PurchaseKind):
+    Promise<{ token: string; open: OpenSession[] } | null | "busy" | "unavailable"> {
+    if (!env.PROMO) return null;
+    // Counted in polls, not clock time, so a frozen clock can never spin here.
+    for (let tries = 0; ; tries++) {
+        let out: any;
+        try {
+            const res = await checkoutLockStub(env, hash, kind).fetch("https://promo.internal/cko/begin", { method: "POST" });
+            out = await res.json();
+        } catch (e) {
+            console.warn("checkout: lock object unreachable, refusing", { error: cause(e) });
+            return "unavailable";
+        }
+        if (out?.result === "go" && typeof out.token === "string") {
+            return { token: out.token, open: parseOpen(JSON.stringify(Array.isArray(out.open) ? out.open : [])) };
+        }
+        if (tries >= CKO_LOCK_WAIT_MS / CKO_LOCK_POLL_MS) {
+            console.warn("checkout: another checkout for this install still running, refusing", { kind });
+            return "busy";
+        }
+        await new Promise(r => setTimeout(r, CKO_LOCK_POLL_MS));
+    }
+}
+
+/** Release the lock, recording the session just made (if any) in the lock object. */
+async function releaseCheckoutLock(env: Env, hash: string, kind: PurchaseKind, token: string, added?: OpenSession): Promise<void> {
+    try {
+        await checkoutLockStub(env, hash, kind).fetch("https://promo.internal/cko/end", {
+            method: "POST",
+            body: JSON.stringify({ token, ...(added ? { add: added, ttlMs: CKO_TTL_S * 1000 } : {}) })
+        });
+    } catch (e) {
+        // The lock goes stale on its own (CKO_LOCK_STALE_MS); the KV marker
+        // still holds the session for the locations that already see it.
+        console.warn("checkout: lock release failed", { error: cause(e) });
+    }
+}
+
+/** Empty the lock object's session list (a failed or cancelled payment). Best-effort. */
+async function clearCheckoutLock(env: Env, hash: string, kind: PurchaseKind): Promise<void> {
+    if (!env.PROMO) return;
+    try {
+        await checkoutLockStub(env, hash, kind).fetch("https://promo.internal/cko/clear", { method: "POST" });
+    } catch (e) {
+        // Not needed for safety: Dodo answers "ended" for that session anyway.
+        console.warn("checkout: lock object clear failed", { error: cause(e) });
+    }
+}
+
+/** Sessions from the lock object and the KV marker, newest first, each once. */
+function mergeOpen(a: OpenSession[], b: OpenSession[]): OpenSession[] {
+    const seen = new Set<string>();
+    return [...a, ...b].sort((x, y) => y.at - x.at).filter(o => !seen.has(o.s) && !!seen.add(o.s));
+}
+
+async function createSessionLocked(
+    env: Env, hash: string, productId: string, now: number, ip: string | null,
+    from: "discord" | "installer", kind: PurchaseKind, locked: OpenSession[], made: { added?: OpenSession }
+): Promise<Response> {
+    // The sessions this install already opened for this kind (see CKO_WINDOW_MS):
+    // the lock object's list (strongly consistent) and the KV marker (kept so
+    // rows written before the lock existed still count).
     // FAIL CLOSED on a KV read error: without the list, a paid but unconfirmed
     // session could be sold again, and the rate counter below needs KV anyway.
     const ckoKey = checkoutOpenKey(hash, kind);
     let open: OpenSession[];
     try {
-        open = parseOpen(await env.CODES.get(ckoKey));
+        open = mergeOpen(locked, parseOpen(await env.CODES.get(ckoKey))).slice(0, CKO_MAX);
     } catch (e) {
         console.warn("checkout: open session lookup failed, refusing", { error: cause(e) });
         return fail("checkout unavailable", 503);
@@ -305,8 +395,10 @@ async function createSession(
     }
     if (sessionId) {
         // FAIL OPEN on this write: the buyer already holds a valid session,
-        // and the buying: row from the first webhook still guards a repeat.
-        const next = [{ s: sessionId, u: url, p: productId, f: from, at: now }, ...open].slice(0, CKO_MAX);
+        // the lock object records it too (createSession), and the buying: row
+        // from the first webhook still guards a repeat.
+        made.added = { s: sessionId, u: url, p: productId, f: from, at: now };
+        const next = [made.added, ...open].slice(0, CKO_MAX);
         try {
             await env.CODES.put(ckoKey, JSON.stringify(next), { expirationTtl: CKO_TTL_S });
         } catch (e) {
@@ -449,7 +541,10 @@ export async function linkFromLifecycle(env: Env, name: string, data: any): Prom
         if (PURCHASE_ENDED.has(name) || lapsed) {
             await env.CODES.delete(buyingKey(hash, kind));
             // The attempt is over: its checkout-open row must not hold a retry.
-            if (PURCHASE_ENDED.has(name)) await env.CODES.delete(checkoutOpenKey(hash, kind));
+            if (PURCHASE_ENDED.has(name)) {
+                await env.CODES.delete(checkoutOpenKey(hash, kind));
+                await clearCheckoutLock(env, hash, kind);
+            }
         } else await env.CODES.put(buyingKey(hash, kind), JSON.stringify({ plan, at: Date.now() }), { expirationTtl: INST_TTL_S });
         const ids = [data?.payment_id, data?.subscription_id]
             .filter((x: unknown): x is string => typeof x === "string" && x !== "");
@@ -512,6 +607,145 @@ export async function clearBuying(env: Env, paymentId: string): Promise<void> {
     } catch (e) {
         console.warn("purchase pending marker clear failed", { error: cause(e) });
     }
+}
+
+/* -------------------------------------------------------- purchase status -- */
+
+/**
+ * PUBLIC PURCHASE STATUS (R7) for the site's thanks page:
+ *   GET /v1/purchase-status?payment_id=pay_…   or   ?subscription_id=sub_…
+ *   → 200 {"state":"active"|"pending"|"failed"|"unknown"}
+ *
+ * Built only from what the webhooks already wrote; Dodo is never called (no
+ * API key use from a public endpoint, and the webhook data answers it):
+ *   1. `order:<id>` → key (license_key.created). Its code live (active, not
+ *      terminal, not past expiry) → "active". A code that exists but is dead
+ *      (refunded, revoked, an unmapped product) → "unknown": the buyer is
+ *      never told a payment failed when it did not.
+ *   2. Otherwise `pst:<id>` (recordPurchaseState): paid or pending →
+ *      "pending" (the key is still on its way), failed → "failed".
+ *   3. Nothing → "unknown" (no webhook yet, or a mistyped id).
+ * At most two KV reads. KV is eventually consistent and caches a miss for up to
+ * ~60 s per location, so "pending" can lag the webhook by about a minute.
+ *
+ * No personal data: no key, email, plan, amount or install is ever returned.
+ * Strict input: exactly one of the two ids, Dodo's prefix plus 8 to 64 letters
+ * or digits; anything else is 400 before any read. Rate-limited per address
+ * (PURCHASE_STATUS_PER_MINUTE, an in-memory counter in a Promo object named for
+ * the address and the minute). CORS for the site's origins only.
+ */
+export const PURCHASE_STATUS_PER_MINUTE = 120;
+export const SITE_ORIGINS = ["https://subline.page", "https://surfer05.github.io"];
+const PAYMENT_ID_RE = /^pay_[A-Za-z0-9]{8,64}$/;
+const SUBSCRIPTION_ID_RE = /^sub_[A-Za-z0-9]{8,64}$/;
+/** Webhook evidence for a payment or subscription id; same life as the inst: rows. */
+export const PST_TTL_S = INST_TTL_S;
+
+type PstState = "paid" | "pending" | "failed";
+/** The events that say how a payment or a first subscription stands. Others write nothing. */
+const PST_FOR: Record<string, PstState> = {
+    "payment.succeeded": "paid",
+    "payment.processing": "pending",
+    "payment.failed": "failed",
+    "payment.cancelled": "failed",
+    "subscription.active": "paid",
+    "subscription.failed": "failed"
+};
+/** paid > failed > pending: a late or replayed event never moves a state backwards
+ *  (a failed renewal never marks a paid subscription failed). */
+const PST_RANK: Record<PstState, number> = { pending: 0, failed: 1, paid: 2 };
+
+/**
+ * Remember how a payment or subscription stands, for GET /v1/purchase-status.
+ * One read and at most one write per id, only for the events in PST_FOR.
+ * Best-effort: a failure only leaves the thanks page on "unknown"; it never
+ * fails the webhook.
+ */
+export async function recordPurchaseState(env: Env, name: string, data: any): Promise<void> {
+    const next = PST_FOR[name];
+    if (!next) return;
+    const ids = [data?.payment_id, data?.subscription_id]
+        .filter((x: unknown): x is string => typeof x === "string" && (PAYMENT_ID_RE.test(x) || SUBSCRIPTION_ID_RE.test(x)));
+    for (const id of new Set(ids)) {
+        try {
+            const prev = await env.CODES.get(`pst:${id}`) as PstState | null;
+            if (prev && prev in PST_RANK && PST_RANK[prev] >= PST_RANK[next]) continue;
+            await env.CODES.put(`pst:${id}`, next, { expirationTtl: PST_TTL_S });
+        } catch (e) {
+            console.warn("purchase state write failed", { event: name, error: cause(e) });
+        }
+    }
+}
+
+function siteCors(req: Request): Record<string, string> {
+    const origin = req.headers.get("origin") || "";
+    return {
+        vary: "Origin",
+        ...(SITE_ORIGINS.includes(origin) ? { "access-control-allow-origin": origin } : {})
+    };
+}
+
+/** GET (and OPTIONS) /v1/purchase-status. */
+export async function handlePurchaseStatus(req: Request, env: Env, now: number = Date.now()): Promise<Response> {
+    const cors = siteCors(req);
+    const answer = (body: Record<string, unknown>, status: number, cache: string, extra: Record<string, string> = {}) =>
+        new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": cache, ...cors, ...extra } });
+    if (req.method === "OPTIONS") {
+        return new Response(null, {
+            status: 204,
+            headers: { ...cors, "access-control-allow-methods": "GET", "access-control-max-age": "86400" }
+        });
+    }
+    if (req.method !== "GET") return answer({ state: "unknown", error: "method not allowed" }, 405, "no-store", { allow: "GET, OPTIONS" });
+
+    const q = new URL(req.url).searchParams;
+    const pays = q.getAll("payment_id"), subs = q.getAll("subscription_id");
+    let id = "";
+    if (pays.length === 1 && subs.length === 0 && PAYMENT_ID_RE.test(pays[0]!)) id = pays[0]!;
+    else if (subs.length === 1 && pays.length === 0 && SUBSCRIPTION_ID_RE.test(subs[0]!)) id = subs[0]!;
+    if (!id) return answer({ state: "unknown", error: "bad request" }, 400, "no-store");
+
+    const ip = req.headers.get("cf-connecting-ip");
+    if (ip && env.PROMO) {
+        const minute = Math.floor(now / 60_000);
+        let allowed = true;
+        try {
+            const stub = env.PROMO.get(env.PROMO.idFromName(`ps:${ipBucket(ip)}:${minute}`));
+            const out = await (await stub.fetch("https://promo.internal/rl/hit", {
+                method: "POST", body: JSON.stringify({ limit: PURCHASE_STATUS_PER_MINUTE })
+            })).json() as { allowed?: unknown };
+            allowed = out.allowed === true;
+        } catch (e) {
+            // FAIL OPEN: a read-only answer with no personal data; a limiter
+            // outage must not leave every buyer's thanks page on "unknown".
+            console.warn("purchase status: rate limiter unreachable, allowing", { error: cause(e) });
+        }
+        if (!allowed) {
+            const wait = 60_000 - (now % 60_000);
+            return answer({ state: "unknown", error: "slow down", retryAfterMs: wait }, 429, "no-store",
+                { "retry-after": String(Math.ceil(wait / 1000)) });
+        }
+    }
+
+    let state: "active" | "pending" | "failed" | "unknown" = "unknown";
+    try {
+        const key = await env.CODES.get(`order:${id}`);
+        if (key) {
+            const { rec } = await followReissue(env, key);
+            const live = !!rec && rec.status === "active" && !rec.terminal && !(rec.expiresAt && now > rec.expiresAt);
+            state = live ? "active" : "unknown";
+        } else {
+            const pst = await env.CODES.get(`pst:${id}`);
+            state = pst === "paid" || pst === "pending" ? "pending" : pst === "failed" ? "failed" : "unknown";
+        }
+    } catch (e) {
+        console.warn("purchase status: lookup failed", { error: cause(e) });
+        return answer({ state: "unknown", error: "temporarily unavailable" }, 503, "no-store");
+    }
+    // "active" is settled; the rest can still move ("failed" too: a
+    // subscription retried after a failed first payment), so only for a poll.
+    const cache = state === "active" ? "public, max-age=300" : "public, max-age=3";
+    return answer({ state }, 200, cache);
 }
 
 /**

@@ -59,7 +59,7 @@ describe("openrouter request shape", () => {
         expect(init.method).toBe("POST");
         expect(init.headers.authorization).toBe("Bearer or-key");
         expect(init.headers["content-type"]).toBe("application/json");
-        expect(init.headers["HTTP-Referer"]).toBe("https://surfer05.github.io/subline/");
+        expect(init.headers["HTTP-Referer"]).toBe("https://subline.page/");
         expect(init.headers["X-Title"]).toBe("Subline");
         // The key never travels in the URL (proxy/access-log safety).
         expect(url).not.toContain("or-key");

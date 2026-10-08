@@ -367,7 +367,7 @@ const OPENROUTER_ROUTING = {
  *  values only — the download page and the product name, never a user, a code,
  *  or a key. */
 const OPENROUTER_HEADERS: Record<string, string> = {
-    "HTTP-Referer": "https://surfer05.github.io/subline/",
+    "HTTP-Referer": "https://subline.page/",
     "X-Title": "Subline"
 };
 
