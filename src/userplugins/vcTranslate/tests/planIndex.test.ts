@@ -551,7 +551,7 @@ describe("an Automatic owner", () => {
         await flush();
         expect(payloadOf(calls("relay")[0]!).messages[0].text).toBe(ROMANIZED);
         const shown = text(render(msg("1", content)));
-        expect(shown).toContain("✦ reads this as: I want to go");
+        expect(shown).toContain("✦ ar · I want to go · Add AI");
         expect(shown).not.toMatch(/:cake:|111111111111111111/);
     });
 
@@ -575,7 +575,10 @@ describe("an Automatic owner", () => {
         expect(payloadOf(relay[0]!).mode).toBe("preview");
         expect(relay[0]![5]).toMatch(/^free_[0-9a-f]{32}$/);
         const after = render(msg("1", ROMANIZED));
-        expect(text(after)).toContain("✦ reads this as: I don't want to go… Add AI");
+        // The FULL ✦ line, in place of ≈, with Add AI on the same line.
+        expect(text(after)).toContain("✦ ar · I don't want to go · Add AI");
+        expect(text(after)).not.toContain("…");
+        expect(text(after)).not.toContain("≈");
         expect(clickables(after).some(c => c.label === "Preview ✦")).toBe(false);
         // The preview is never stored as a translation.
         expect(getTranslation(key("1"))).toMatchObject({ via: "google" });

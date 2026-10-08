@@ -349,7 +349,7 @@ export async function authCode(env: Env, code: string | null): Promise<AuthOutco
 }
 
 export type ReserveOutcome =
-    | { ok: true; used: number; cap: number }
+    | { ok: true; used: number; cap: number; charged?: number }
     | { ok: false; reason: "cap_exceeded" | "month_cap_exceeded" | "rate_limited" | "capacity" | "unavailable"; retryAfterMs: number; used?: number; cap?: number };
 
 /**
@@ -562,7 +562,8 @@ function redacted(e: unknown, redact: string[]): string {
  *  `unavailable` (503) with the cause logged, and a keyless request's counters
  *  are rolled back first, so the account never loses a preview to an outage. */
 export async function reserve(
-    env: Env, code: string, rec: CodeRecord, cost: number, now: number, ip?: string | null, budgetCost: number = cost
+    env: Env, code: string, rec: CodeRecord, cost: number, now: number, ip?: string | null, budgetCost: number = cost,
+    once?: ReserveReq["once"]
 ): Promise<ReserveOutcome> {
     const rpmLimit = rpmLimitFor(rec);
     // SKIPPED when the daily cap makes it unreachable: every successful
@@ -580,6 +581,7 @@ export async function reserve(
             day: { key: dayRowKey(code, now), add: cost, cap: rec.dailyCap },
             ...(monthCap !== null ? { month: { key: monthRowKey(code, now), add: budgetCost, cap: monthCap } } : {}),
             ...(rpmTracked ? { rpm: { key: code, limit: rpmLimit } } : {}),
+            ...(once ? { once } : {}),
             now
         };
         let d: ReserveRes;
@@ -591,7 +593,7 @@ export async function reserve(
             console.warn("reserve: budget call failed, request refused", { error: redacted(e, redact) });
             return { ok: false, reason: "unavailable", retryAfterMs: 60_000 };
         }
-        if (d.allowed) return { ok: true, used: d.used ?? cost, cap: rec.dailyCap };
+        if (d.allowed) return { ok: true, used: d.used ?? cost, cap: rec.dailyCap, charged: typeof d.charged === "number" ? d.charged : cost };
         const used = d.used ?? 0;
         if (d.reason === "rate_limited") return { ok: false, reason: "rate_limited", retryAfterMs: 60_000 - (now % 60_000) };
         if (d.reason === "cap_exceeded") return { ok: false, reason: "cap_exceeded", retryAfterMs: msUntilUtcMidnight(now), used, cap: rec.dailyCap };
@@ -710,11 +712,14 @@ export async function reserve(
  *  response, and a failed refund only leaves a counter slightly high. */
 export async function refund(
     env: Env, code: string, cost: number, now: number, ip?: string | null,
-    plan: CodeRecord["plan"] = "taste", budgetCost: number = cost
+    plan: CodeRecord["plan"] = "taste", budgetCost: number = cost, onceKey?: string
 ): Promise<void> {
     const redact = [code, ip ?? ""];
     if (!countsInKv(code, { plan })) {
         const rows = [{ key: dayRowKey(code, now), sub: cost }];
+        // A preview's per-message marker (ReserveReq.once) goes back too, so a
+        // failed first try leaves the retry counted as the first.
+        if (onceKey) rows.push({ key: onceKey, sub: 1 });
         if (monthlyCapFor(env, plan) !== null) rows.push({ key: monthRowKey(code, now), sub: budgetCost });
         try {
             await budgetStub(env).fetch("https://budget.internal/refund", { method: "POST", body: JSON.stringify({ rows }) });

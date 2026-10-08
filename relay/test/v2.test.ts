@@ -6,6 +6,7 @@ import { EARLY_CUTOFF_MS as CUTOFF, isAiPlan, launchAt, signToken, usedBeforeCut
 import { applyClaim, applyIpBegin, applyIpEnd, Promo, REDEEM_IP_DAILY_FAILURES, REDEEM_IP_DAILY_SUCCESSES } from "../src/promo";
 import { codeRec, fakeBudget, fakeKV } from "./kv-mock";
 import { dayRowKey } from "../src/budget";
+import { PREVIEW_FREE_REPEATS } from "../src/index";
 
 // ===========================================================================
 //  v2: the paid-only model. Automatic ($4.99 once), AI on top, promo codes,
@@ -87,10 +88,10 @@ const redeem = async (e: Env, install: string, code: string, ip?: string) => {
     }), e, ctx);
     return { status: res.status, body: await res.json() as any };
 };
-const translate = async (e: Env, install: string, bearer: string, mode?: string) => {
+const translate = async (e: Env, install: string, bearer: string, mode?: string, id = "0", text = "hola que tal amigo como estas hoy") => {
     const res = await worker.fetch(new Request("https://relay/v1/translate", {
         method: "POST", headers: v2Headers(install, bearer),
-        body: JSON.stringify({ messages: [{ id: "0", author: "a", text: "hola que tal amigo como estas hoy" }], context: [], targetLang: "en", ...(mode ? { mode } : {}) })
+        body: JSON.stringify({ messages: [{ id, author: "a", text }], context: [], targetLang: "en", ...(mode ? { mode } : {}) })
     }), e, ctx);
     return { status: res.status, body: await res.json() as any };
 };
@@ -109,10 +110,14 @@ async function buy(e: Env, install: string, key: string, product: string, pay: s
 }
 
 function stubProvider() {
-    const content = JSON.stringify({ translations: [{ id: "0", lang: "es", text: "hi how are you today my friend", skip: false }] });
-    const mock = vi.fn(async () => ({
+    // Answers every message id the prompt names, so tests can vary the id.
+    const mock = vi.fn(async (_url?: unknown, init?: any) => ({
         ok: true, status: 200, headers: new Headers(),
-        json: async () => ({ choices: [{ message: { content } }] }),
+        json: async () => {
+            const ids = [...String(init?.body ?? "").matchAll(/\[id=\\"([^\\]*)\\"\]/g)].map(m => m[1]);
+            const translations = (ids.length ? ids : ["0"]).map(id => ({ id, lang: "es", text: "hi how are you today my friend", skip: false }));
+            return { choices: [{ message: { content: JSON.stringify({ translations }) } }] };
+        },
         clone() { return this; }, text: async () => ""
     }));
     vi.stubGlobal("fetch", mock);
@@ -320,7 +325,7 @@ describe("v2 translate", () => {
         expect(r.body.error).toBe("not_activated");
     });
 
-    it("Automatic gets previews only: 5 a day per account, cut on the relay", async () => {
+    it("Automatic gets previews only: 5 messages a day per account, each the FULL ✦ line", async () => {
         const up = stubProvider();
         const e = env(fakeKV());
         await buy(e, A, "KEY-AUTO-1", "pdt_auto", "pay_a");
@@ -330,13 +335,108 @@ describe("v2 translate", () => {
         expect(full.body.error).toBe("ai_required");
         expect(up).not.toHaveBeenCalled();
         for (let i = 0; i < 5; i++) {
-            const p = await translate(e, i === 4 ? B : A, "KEY-AUTO-1", "preview");
+            const p = await translate(e, i === 4 ? B : A, "KEY-AUTO-1", "preview", String(i));
             expect(p.status).toBe(200);
-            expect(p.body.results[0].truncated).toBe(true);
+            // Never cut: the reader is shown the whole translation.
+            expect(p.body.results[0].text).toBe("hi how are you today my friend");
+            expect(p.body.results[0].truncated).toBeUndefined();
         }
-        const sixth = await translate(e, A, "KEY-AUTO-1", "preview");
+        const sixth = await translate(e, A, "KEY-AUTO-1", "preview", "5");
         expect(sixth.status).toBe(429);
         expect((await status(e, A, "KEY-AUTO-1")).body.previews).toEqual({ used: 5, cap: 5 });
+    });
+
+    describe("one preview per message", () => {
+        async function automatic() {
+            const up = stubProvider();
+            const kv = fakeKV();
+            const e = env(kv);
+            await buy(e, A, "KEY-AUTO-1", "pdt_auto", "pay_a");
+            await status(e, A);
+            return { up, kv, e };
+        }
+
+        it("asking again for the same message (a lost answer, a second press, a restart) is not counted again", async () => {
+            const { kv, e } = await automatic();
+            const first = await translate(e, A, "KEY-AUTO-1", "preview", "m1");
+            expect(first.body.used).toBe(1);
+            // Another computer on the same account, same message: still one.
+            const again = await translate(e, B, "KEY-AUTO-1", "preview", "m1");
+            expect(again.status).toBe(200);
+            expect(again.body.results[0].text).toBe("hi how are you today my friend");
+            expect(again.body.used).toBe(1);
+            expect((await status(e, A, "KEY-AUTO-1")).body.previews).toEqual({ used: 1, cap: 5 });
+        });
+
+        it("a repeat still answers once today's five are used", async () => {
+            const { e } = await automatic();
+            for (let i = 0; i < 5; i++) await translate(e, A, "KEY-AUTO-1", "preview", "n" + i);
+            const repeat = await translate(e, A, "KEY-AUTO-1", "preview", "n0");
+            expect(repeat.status).toBe(200);
+            expect((await translate(e, A, "KEY-AUTO-1", "preview", "n9")).status).toBe(429);
+        });
+
+        it("the same id with other text is a new preview, so ids cannot be reused for free", async () => {
+            const { e } = await automatic();
+            await translate(e, A, "KEY-AUTO-1", "preview", "m1", "hola");
+            const other = await translate(e, A, "KEY-AUTO-1", "preview", "m1", "otra cosa distinta");
+            expect(other.body.used).toBe(2);
+        });
+
+        it("one message cannot be looped for free: past the free repeats it counts again", async () => {
+            const { e } = await automatic();
+            const used: number[] = [];
+            for (let i = 0; i < 1 + PREVIEW_FREE_REPEATS + 1; i++) {
+                used.push((await translate(e, A, "KEY-AUTO-1", "preview", "m1")).body.used);
+            }
+            expect(used).toEqual([...Array(1 + PREVIEW_FREE_REPEATS).fill(1), 2]);
+        });
+
+        for (const [name, upstream] of [
+            ["a 5xx", { ok: false, status: 500 }],
+            ["a timeout", "timeout"]
+        ] as const) {
+            it(`${name} upstream spends no preview, and the retry is counted as the first`, async () => {
+                const { e } = await automatic();
+                const good = vi.mocked(globalThis.fetch).getMockImplementation()!;
+                vi.mocked(globalThis.fetch).mockImplementation((async (...args: any[]) => {
+                    if (upstream === "timeout") {
+                        const err: any = new Error("aborted"); err.name = "AbortError"; throw Object.assign(err, { status: 504 });
+                    }
+                    return { ...upstream, headers: new Headers(), json: async () => ({}), text: async () => "", clone() { return this; } };
+                }) as any);
+                const failed = await translate(e, A, "KEY-AUTO-1", "preview", "m1");
+                expect(failed.status === 503 || failed.status === 429).toBe(true);
+                expect((await status(e, A, "KEY-AUTO-1")).body.previews).toEqual({ used: 0, cap: 5 });
+                vi.mocked(globalThis.fetch).mockImplementation(good as any);
+                const retry = await translate(e, A, "KEY-AUTO-1", "preview", "m1");
+                expect(retry.body.used).toBe(1);
+                // And that retry was the counted first: one more repeat is free.
+                expect((await translate(e, A, "KEY-AUTO-1", "preview", "m1")).body.used).toBe(1);
+            });
+        }
+
+        it("a preview whose row came back failed is given back", async () => {
+            const { e } = await automatic();
+            vi.mocked(globalThis.fetch).mockImplementation((async () => ({
+                ok: true, status: 200, headers: new Headers(), text: async () => "", clone() { return this; },
+                json: async () => ({ choices: [{ message: { content: JSON.stringify({ translations: [{ id: "m1", lang: "es", text: "", skip: false }] }) } }] })
+            })) as any);
+            const r = await translate(e, A, "KEY-AUTO-1", "preview", "m1");
+            expect(r.status).toBe(200);
+            expect("failed" in r.body.results[0]).toBe(true);
+            expect((await status(e, A, "KEY-AUTO-1")).body.previews).toEqual({ used: 0, cap: 5 });
+        });
+
+        it("a preview is forced: the model is told not to skip", async () => {
+            const { up, e } = await automatic();
+            await worker.fetch(new Request("https://relay/v1/translate", {
+                method: "POST", headers: v2Headers(A, "KEY-AUTO-1"),
+                body: JSON.stringify({ messages: [{ id: "f", author: "a", text: "hola" }], context: [], targetLang: "en", mode: "preview", force: true })
+            }), e, ctx);
+            const sent = JSON.stringify((up.mock.calls.at(-1) as any)[1]);
+            expect(sent).toContain("Never skip");
+        });
     });
 
     it("AI gets full text, charged to the AI code", async () => {

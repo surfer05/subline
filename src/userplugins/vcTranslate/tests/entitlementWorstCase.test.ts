@@ -384,3 +384,189 @@ describe("the previews' day is the relay's day", () => {
         expect(tasteExhausted(T + 35 * 60_000)).toBe(false);
     });
 });
+
+// ---------------------------------------------------------------------------
+// P1 (field test 2026-10-08): ONE ✦ PREVIEW PER MESSAGE. "Translating…" at
+// once, a second press never spends or sends, the FULL ✦ text replaces the ≈
+// line with "Add AI" on it, across channel switches and restarts.
+describe("one ✦ preview per message", () => {
+    const LONG_SRC = ROMANIZED + " " + "w".repeat(10);
+    /** A relay answer the test releases by hand. */
+    function heldRelay(row: (m: { id: string }) => any = m => ({ id: m.id, lang: "ar", text: "I don't want to go", skip: false })) {
+        let release!: () => void;
+        const gate = new Promise<void>(r => { release = r; });
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) => {
+            const p = JSON.parse(payload);
+            if (engine !== "relay") return { ok: true, results: [] };
+            await gate;
+            return { ok: true, results: p.messages.map(row), quotaUsed: calls("relay").length, quotaCap: 5 };
+        });
+        return () => release();
+    }
+    const rough = (id = "1", t = "I want to walk") =>
+        setTranslation(key(id), { lang: "ar", text: t, via: "google", conf: 1 });
+    const popover = (id = "1", content = ROMANIZED) => __getPopoverButton(FORCE_QUALITY_POPOVER_ID)!.render(msg(id, content));
+    const link = (id = "1", content = ROMANIZED) => clickables(render(msg(id, content))).find(c => c.label === "Preview ✦");
+
+    it("shows translating at once, and a double click (⚡ then the link, then ⚡ again) sends one request", async () => {
+        await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
+        rough();
+        const release = heldRelay();
+        const ask = link()!;
+        const bolt = popover()!;
+        ask.onClick({ preventDefault() { } });
+        // Synchronously, before anything was awaited: the pending state shows.
+        expect(text(render(msg("1", ROMANIZED)))).toContain("translating…");
+        bolt.onClick();
+        ask.onClick({ preventDefault() { } });
+        await flush();
+        expect(popover()).toBeNull();
+        expect(link()).toBeUndefined();
+        release();
+        await flush();
+        expect(calls("relay")).toHaveLength(1);
+        expect(payloadOf(calls("relay")[0]!)).toMatchObject({ mode: "preview", force: true });
+        expect(popover()?.label ?? null).toBeNull();
+        expect(text(render(msg("1", ROMANIZED)))).toBe("✦ ar · I don't want to go · Add AI");
+    });
+
+    it("keeps the pending state and the result across a channel switch", async () => {
+        await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
+        rough();
+        const release = heldRelay();
+        popover()!.onClick();
+        __stubSetSelectedChannel("c2");
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: "c2" });
+        await flush();
+        __stubSetSelectedChannel(CHANNEL);
+        FluxDispatcher.dispatch("CHANNEL_SELECT", { channelId: CHANNEL });
+        await flush();
+        expect(text(render(msg("1", ROMANIZED)))).toContain("translating…");
+        expect(popover()).toBeNull();
+        release();
+        await flush();
+        expect(text(render(msg("1", ROMANIZED)))).toBe("✦ ar · I don't want to go · Add AI");
+        expect(calls("relay")).toHaveLength(1);
+    });
+
+    it("a restart shows the same ✦ line and never offers or sends again", async () => {
+        await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
+        rough();
+        answer({ relay: m => ({ id: m.id, lang: "ar", text: "I don't want to go", skip: false }), relayQuota: { used: 1, cap: 5 } });
+        popover()!.onClick();
+        await flush();
+        await restart(() => {
+            DataStore.setEntitlementForTest({ automatic: true, ai: false, tokenExpiresAt: Date.now() + 7 * 24 * HOUR, checkedAt: Date.now() });
+            native.relayStatus.mockResolvedValue(v2({ automatic: true, previews: { used: 1, cap: 5 } }));
+        });
+        rough();
+        expect(text(render(msg("1", ROMANIZED)))).toBe("✦ ar · I don't want to go · Add AI");
+        expect(popover()).toBeNull();
+        expect(link()).toBeUndefined();
+        expect(calls("relay")).toHaveLength(1);
+        // And the other messages still count from four left.
+        rough("2");
+        expect(popover("2")!.label).toBe("Preview ✦ (4 left today)");
+    });
+
+    it("pressed while the ≈ line is still pending: the ✦ line wins once ≈ lands", async () => {
+        await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
+        const release = heldRelay();
+        popover()!.onClick();
+        expect(text(render(msg("1", ROMANIZED)))).toContain("translating…");
+        release();
+        await flush();
+        rough();
+        expect(text(render(msg("1", ROMANIZED)))).toBe("✦ ar · I don't want to go · Add AI");
+    });
+
+    for (const [name, fail] of [
+        ["times out", () => native.translateBatch.mockResolvedValue({ ok: false, error: "relay: HTTP 429 translation service busy", retryAfterMs: 60_000 })],
+        ["answers 500", () => native.translateBatch.mockResolvedValue({ ok: false, error: "relay: HTTP 500 internal" })],
+        ["returns a failed row", () => answer({ relay: m => ({ id: m.id, failed: true }), relayQuota: { used: 0, cap: 5 } })]
+    ] as const) {
+        it(`spends no preview when the relay ${name}, and recovers on the next press`, async () => {
+            await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
+            rough();
+            fail();
+            popover()!.onClick();
+            await flush();
+            expect(text(render(msg("1", ROMANIZED)))).toContain("Preview didn't load. Try again.");
+            expect(popover()!.label).toBe("Preview ✦ (5 left today)");
+            answer({ relay: m => ({ id: m.id, lang: "ar", text: "I don't want to go", skip: false }), relayQuota: { used: 1, cap: 5 } });
+            popover()!.onClick();
+            await flush();
+            expect(text(render(msg("1", ROMANIZED)))).toBe("✦ ar · I don't want to go · Add AI");
+        });
+    }
+
+    it("when ✦ reads it the same as ≈, the ✦ line simply replaces ≈", async () => {
+        await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
+        rough("1", "I want to walk");
+        answer({ relay: m => ({ id: m.id, lang: "ar", text: "I want to walk", skip: false }), relayQuota: { used: 1, cap: 5 } });
+        popover()!.onClick();
+        await flush();
+        const shown = text(render(msg("1", ROMANIZED)));
+        expect(shown).toBe("✦ ar · I want to walk · Add AI");
+        expect(shown).not.toContain("same way");
+    });
+
+    it("shows a very long ✦ line in full, never cut with …", async () => {
+        await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
+        rough("1", "x");
+        const long = Array.from({ length: 300 }, (_, i) => "word" + i).join(" ");
+        answer({ relay: m => ({ id: m.id, lang: "ar", text: long, skip: false }), relayQuota: { used: 1, cap: 5 } });
+        popover("1", LONG_SRC)!.onClick();
+        await flush();
+        const shown = text(render(msg("1", LONG_SRC)));
+        expect(shown).toBe(`✦ ar · ${long} · Add AI`);
+        expect(shown).not.toContain("…");
+    });
+
+    it("an edit after the preview drops the stale ✦ line and never charges again", async () => {
+        await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
+        rough();
+        answer({ relay: m => ({ id: m.id, lang: "ar", text: "I don't want to go", skip: false }), relayQuota: { used: 1, cap: 5 } });
+        popover()!.onClick();
+        await flush();
+        const edited = ROMANIZED + " ghda";
+        rough("1", "I want to walk tomorrow");
+        expect(text(render(msg("1", edited)))).toContain("I want to walk tomorrow");
+        expect(text(render(msg("1", edited)))).not.toContain("I don't want to go");
+        expect(popover("1", edited)).toBeNull();
+        expect(link("1", edited)).toBeUndefined();
+        expect(calls("relay")).toHaveLength(1);
+    });
+
+    it("with none left, a stale Preview ✦ link opens Add AI and sends nothing", async () => {
+        await startAutomatic({ automatic: true, previews: { used: 4, cap: 5 } });
+        rough("1"); rough("2");
+        const stale = link("2")!;
+        answer({ relay: m => ({ id: m.id, lang: "ar", text: "I don't want to go", skip: false }), relayQuota: { used: 5, cap: 5 } });
+        popover("1")!.onClick();
+        await flush();
+        expect(popover("2")!.label).toBe("Add AI ✦");
+        const before = openedModals.length;
+        stale.onClick({ preventDefault() { } });
+        await flush();
+        expect(calls("relay")).toHaveLength(1);
+        expect(openedModals.length).toBe(before + 1);
+        expect(lastModal().el.props.title).toBe("Add AI");
+    });
+
+    it("an AI subscriber's ✦ lines carry no Add AI, even for a message once previewed", async () => {
+        await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
+        rough();
+        answer({ relay: m => ({ id: m.id, lang: "ar", text: "I don't want to go", skip: false }), relayQuota: { used: 1, cap: 5 } });
+        popover()!.onClick();
+        await flush();
+        await restart(() => {
+            DataStore.setEntitlementForTest({ automatic: true, ai: true, tokenExpiresAt: Date.now() + 7 * 24 * HOUR, checkedAt: Date.now() });
+            native.relayStatus.mockResolvedValue(v2({ automatic: true, ai: true, code: "slp_ai" }));
+        });
+        setTranslation(key("1"), { lang: "ar", text: "I really don't want to go", via: "relay" });
+        rough("2");
+        expect(text(render(msg("1", ROMANIZED)))).toBe("✦ ar · I really don't want to go");
+        expect(text(render(msg("2", ROMANIZED)))).not.toContain("Add AI");
+    });
+});

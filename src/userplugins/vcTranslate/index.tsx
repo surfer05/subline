@@ -25,7 +25,7 @@ import {
     entitlementLevel, ENTITLEMENT_REFRESH_MS, getEntitlement, holderFor, type Level, loadEntitlement, setCurrentHolder,
     setEntitlement
 } from "./entitlement";
-import { previewDiffers, previewText, PRICING_URL } from "./freePlan";
+import { contentHash, loadPreviewLedger, PRICING_URL, rememberPreview, type PreviewResult } from "./freePlan";
 import {
     acquireSlot, loadRateGateTuning, rateGateAvailable, rateGateSettings, rateGateWaitMs,
     resetRateGate, tryAcquireIdleSlot, tuneRateGateToObservedLimit, tuneRateGateToProviderBudget
@@ -533,7 +533,7 @@ function modelFor(engine: EngineId): string {
  * ✦ (the relay) needs AI on the account. An Automatic owner's saved code is a
  * real Subline code, so the configured engine is "relay", but without AI there
  * is no quality tier for it: Google (≈) alone, plus the day's five ✦
- * previews on rough lines (see requestPreview). Everything that reads this
+ * previews on rough lines (see previewPress). Everything that reads this
  * (the quality batcher, the ⚡ label, the chat-bar indicator) then treats an
  * Automatic owner as Google-only.
  */
@@ -2681,15 +2681,37 @@ async function forceQualityTranslate(message: Message): Promise<void> {
 /* ---------------------------------------------------- ✦ previews -- */
 
 /**
- * The ✦ previews this session has been shown: the first few words of the real
- * ✦ translation, cut by the relay. Kept apart from the translation store on
- * purpose: a preview is not a translation, is never persisted, and must never
- * replace or be mistaken for the ≈ line it sits under.
+ * The ✦ previews this install has been shown: the FULL ✦ translation of one
+ * message each, shown IN PLACE of its ≈ line with an "Add AI" link. Kept apart
+ * from the translation store on purpose: a preview is not an automatic
+ * translation and must never be mistaken for one by catch-up or the cache.
+ * Persisted (freePlan.ts), so a restart neither loses the line nor offers the
+ * message again: one message never costs more than one preview.
  */
-const previews = new Map<string, { text: string; truncated: boolean; same?: true }>();
-/** Messages a preview has already been asked for this session: one per message. */
-const previewAsked = new Set<string>();
-const MAX_PREVIEWS_KEPT = 200;
+const previews = new Map<string, PreviewResult>();
+/**
+ * Messages with a preview request out right now. Set SYNCHRONOUSLY on the
+ * press, before anything is awaited, so a double click sends one request.
+ */
+const previewPending = new Set<string>();
+
+/** Has this message had (or is it having) its one preview? Then it is never offered again. */
+function previewTaken(messageId: string): boolean {
+    return previews.has(messageId) || previewPending.has(messageId);
+}
+
+/**
+ * The preview to show for this message, if any: only on an Automatic install
+ * (an AI subscriber's ✦ lines come from the store and carry no "Add AI"), and
+ * only while the message still reads as it did when previewed. An edit makes
+ * it stale: the ≈ line of the new text shows instead.
+ */
+function previewFor(message: Message): PreviewResult | undefined {
+    if (!isAutomaticOnly()) return undefined;
+    const p = previews.get(message.id);
+    if (p === undefined || p.src !== contentHash(message.content ?? "")) return undefined;
+    return p;
+}
 
 /**
  * Is this Google line one the plugin's own confidence logic says not to
@@ -2709,59 +2731,57 @@ function googleUnsure(entry: { via: EngineId; lang: string; conf?: number }, con
 
 /**
  * An Automatic owner's ✦ preview of this message: from "Preview ✦" on a rough
- * ≈ line, or from ⚡. Three a day, counted by the relay.
+ * ≈ line, or from ⚡. Five a day, counted by the relay once per message.
+ *
+ * Shows "⚡ translating…" at once (forcedInFlight), and a second press while
+ * it is out, or after it is done, sends nothing. Charged only once the relay
+ * served it: a failure (relay down, a 5xx, a timeout, a failed row) leaves
+ * the message free to be pressed again, and the relay counts a retry of the
+ * same message as the same preview.
  */
 async function previewPress(message: Message): Promise<void> {
-    if (forcedInFlight.has(message.id)) return;
-    const entry = getTranslation(makeKey(message.id, settings.store.targetLang));
-    const googleText = isRealTranslation(entry) && entry.via === "google" ? entry.text : null;
-    forcedInFlight.add(message.id);
+    const id = message.id;
+    if (previewTaken(id) || forcedInFlight.has(id)) return;
+    if (rolloverTasteIfNewUtcDay()) void refreshEntitlement();
+    if (tasteExhausted()) {
+        // Today's five are used, so a press would send nothing. Offer the
+        // one thing that does help, as the ⚡ "Add AI ✦" label does.
+        tasteLog(`${id}: no preview, today's ${tasteCap()} are used`);
+        openUpgrade();
+        return;
+    }
+    previewPending.add(id);
+    forcedInFlight.add(id);
+    clearForcedHint(id);
     notifyForcedInFlight();
+    let served = false;
     try {
-        await requestPreview(message, readableContent(message.content ?? "", message.channel_id), googleText);
+        served = await sendPreview(message);
+    } catch {
+        served = false;
     } finally {
-        forcedInFlight.delete(message.id);
+        previewPending.delete(id);
+        forcedInFlight.delete(id);
+        if (!served && !tasteExhausted()) setForcedHint(id, { kind: "preview" });
         notifyForcedInFlight();
     }
 }
 
-/**
- * Ask the relay what ✦ reads this message as, in PREVIEW mode: the relay
- * translates it for real and returns only the first few words, and this
- * client cuts whatever comes back by the same rule, so an Automatic owner
- * never gets the full ✦ line. Five a day. When the five are gone nothing is
- * sent and nothing is said: the ⚡ label already counts down.
- */
-async function requestPreview(message: Message, text: string, googleText: string | null): Promise<void> {
-    if (previewAsked.has(message.id)) return;
-    if (rolloverTasteIfNewUtcDay()) void refreshEntitlement();
-    if (tasteExhausted()) {
-        tasteLog(`${message.id}: no preview, today's ${tasteCap()} are used`);
-        return;
-    }
-    previewAsked.add(message.id);
-    // Charged once the relay served the preview. Anything short of that (the
-    // relay down, a 503, a network blip, the credentials not read) leaves the
-    // message free to be asked again: the button used to vanish for good
-    // after one failed press, with nothing said.
-    let served = false;
-    try {
-        served = await sendPreview(message, text, googleText);
-    } finally {
-        if (!served) {
-            previewAsked.delete(message.id);
-            if (!tasteExhausted()) setForcedHint(message.id, { kind: "preview" });
-        }
-    }
-}
-
-/** requestPreview's request. True once the relay served (and charged) it. */
-async function sendPreview(message: Message, text: string, googleText: string | null): Promise<boolean> {
+/** previewPress's request. True once the relay served it and the ✦ line is stored. */
+async function sendPreview(message: Message): Promise<boolean> {
     const { credential, install } = await relayCredentials();
+    const content = message.content ?? "";
     const req: BatchRequest = {
-        messages: [{ id: message.id, author: message.author?.username ?? "unknown", text, replyToId: replyParentId(message) }],
+        messages: [{
+            id: message.id,
+            author: message.author?.username ?? "unknown",
+            text: readableContent(content, message.channel_id),
+            replyToId: replyParentId(message)
+        }],
         context: contextBefore(message, FORCED_CONTEXT_SIZE),
         targetLang: settings.store.targetLang,
+        // The reader asked for this one: translate it, never skip.
+        force: true,
         mode: "preview"
     };
     let res: Awaited<ReturnType<typeof Native.translateBatch>> | null;
@@ -2777,28 +2797,21 @@ async function sendPreview(message: Message, text: string, googleText: string | 
         tasteLog(`${message.id}: no preview (${res === null ? "IPC call rejected" : "the relay refused"})`);
         return false;
     }
-    noteTasteSpent();
     if (!(typeof res.quotaCap === "number" && res.quotaCap > TASTE_CAP)) recordTasteQuota(res.quotaUsed, res.quotaCap);
     const r = res.results.find(x => x.id === message.id);
-    // Served and charged even when the row says skip or failed: asking again
-    // would spend another preview on the same answer.
-    if (r === undefined || "failed" in r || r.skip) return true;
-    // CUT HERE TOO. The relay cuts a preview itself, but the same 5-word /
-    // 32-character rule is applied again, so a full ✦ line can never appear
-    // in a preview whatever the relay did.
-    const cut = previewText(cleanTranslation(r.text, message.content ?? ""));
-    const preview = { text: cut.text, truncated: cut.truncated || r.truncated === true };
-    // ✦ reads it the same way ≈ does: the reader is told so ("✦ reads this the
-    // same way.") rather than shown words they can already read.
-    const shown = googleText !== null && !previewDiffers(preview.text, googleText)
-        ? { text: "", truncated: false, same: true as const }
-        : preview;
-    if (previews.size >= MAX_PREVIEWS_KEPT) {
-        const oldest = previews.keys().next();
-        if (!oldest.done) previews.delete(oldest.value);
+    // No row, or a failed row: nothing to show, so the reader may press again.
+    // The relay counts that retry as this same preview.
+    if (r === undefined || "failed" in r) {
+        tasteLog(`${message.id}: no preview (the relay returned no translation)`);
+        return false;
     }
-    previews.set(message.id, shown);
-    notifyForcedInFlight();
+    const text = r.skip ? "" : cleanTranslation(r.text.trim(), content);
+    noteTasteSpent();
+    rememberPreview(previews, message.id, {
+        text: text === "" ? null : text,
+        ...(!r.skip && r.lang ? { lang: r.lang } : {}),
+        src: contentHash(content)
+    });
     return true;
 }
 
@@ -3610,30 +3623,46 @@ function forcedHintDisplay(hint: ForcedHint): { text: string; title: string } {
 }
 
 /**
- * "✦ reads this as: the leak says the… Upgrade" — the real ✦ translation's
- * first few words, under a ≈ line rated rough. See requestPreview.
+ * "✦ ES · the leak says the album drops friday · Add AI": a ✦ preview, the
+ * FULL ✦ translation, shown IN PLACE of the ≈ line (one line, never a second
+ * one under it), with the "Add AI" link on that same line. When ✦ reads it
+ * the same way ≈ did, this is still the line: its text simply replaces ≈.
+ * See previewPress.
  */
-function previewLine(messageId: string) {
-    const preview = previews.get(messageId);
-    if (preview === undefined) return null;
-    if (preview.same) {
-        return (
-            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-                ✦ reads this the same way.
-            </div>
-        );
-    }
-    return (
-        <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-            ✦ reads this as: <span dir={translationDir()}>{preview.text}{preview.truncated ? "…" : ""}</span>{" "}
+function previewLine(preview: PreviewResult) {
+    const addAi = (
+        <span style={{ color: "var(--text-muted)" }}>
+            {" · "}
             <a
                 href={PRICING_URL}
                 target="_blank"
                 rel="noreferrer"
+                data-subline-preview-add-ai=""
                 onClick={(e: any) => { e?.preventDefault?.(); openUpgrade(); }}
             >
                 {UPGRADE_COPY.previewLink}
             </a>
+        </span>
+    );
+    recordRendered();
+    if (preview.text === null) {
+        return (
+            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }} data-subline-preview="">
+                {UPGRADE_COPY.nothingToTranslate}
+                {addAi}
+            </div>
+        );
+    }
+    const provenance = ENGINE_PROVENANCE.relay;
+    const label = preview.lang === undefined ? null : languageLabel(preview.lang);
+    const langName = label === null ? null : languageName(label);
+    return (
+        <div style={{ fontSize: "0.95rem", color: TEXT_COLOUR, fontStyle: "italic" }} data-subline-preview="">
+            <span style={{ color: "var(--text-muted)" }} title={`Translated by ${provenance.label}${langName === null ? "" : ` · ${langName}`}`}>
+                {provenance.glyph}{label === null ? "" : ` ${label}`} ·{" "}
+            </span>
+            <span dir={translationDir()} style={TRANSLATION_TEXT_STYLE}>{preview.text}</span>
+            {addAi}
         </div>
     );
 }
@@ -3707,6 +3736,12 @@ function translationLines(message: Message) {
     // when `forcing` is true, for exactly that reason.
     const hint = forcing ? undefined : forcedHintFor(message.id);
 
+    // An Automatic owner's ✦ preview REPLACES whatever line this message has
+    // (≈, a Google skip, a pending or failed ≈): one line, with "Add AI" on
+    // it. Only a real ✦ line from the store outranks it.
+    const preview = previewFor(message);
+    if (preview !== undefined && !(isRealTranslation(entry) && entry.via !== "google")) return previewLine(preview);
+
     if (!entry) {
         // Nothing to show yet — UNLESS a forced request is why: the reader
         // clicked ⚡ on a message that had never been translated at all (no
@@ -3745,8 +3780,6 @@ function translationLines(message: Message) {
     // offers ⚡ on a Google-only skip (see forceQualityPopoverRender), so this
     // is a real, reachable state, not a dead one.
     if ("skipped" in entry) {
-        // A ⚡ preview of a message Google skipped still has something to say.
-        if (!forcing && !hint && previews.has(message.id)) return previewLine(message.id);
         if (forcing) {
             return (
                 <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
@@ -3866,7 +3899,7 @@ function translationLines(message: Message) {
     const rough = unsure && isAutomaticOnly();
     // An Automatic owner can ask what ✦ reads a rough line as, five times a
     // day. Offered once per message, and not once today's five are used.
-    const offerPreview = rough && !forcing && !previews.has(message.id) && !previewAsked.has(message.id) && !tasteExhausted();
+    const offerPreview = rough && !forcing && !previewTaken(message.id) && !tasteExhausted();
     // No label at all for "und", "zxx" or anything that names no language.
     const label = languageLabel(entry.lang);
     const langName = label === null ? null : languageName(label);
@@ -3942,7 +3975,6 @@ function translationLines(message: Message) {
                     {" "}· {forcedHintDisplay(hint).text}
                 </span>
             )}
-            {entry.via === "google" && previewLine(message.id)}
         </div>
     );
 }
@@ -4012,8 +4044,8 @@ function forceQualityPopoverRender(message: Message) {
             };
         }
         // Nothing to offer once one has been asked for this message: asking
-        // again would spend another of the three for the same answer.
-        if (previews.has(message.id) || previewAsked.has(message.id)) return null;
+        // again would spend another of the five for the same answer.
+        if (previewTaken(message.id)) return null;
         return {
             label: UPGRADE_COPY.popoverPreview.replace("{n}", String(tasteRemaining())),
             icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
@@ -4929,6 +4961,8 @@ export default definePlugin({
         await loadWeeklyStats();
         // The client's own count of today's five (a second guard; taste.ts).
         await loadLocalTasteCount();
+        // The previews already shown: their ✦ lines, and never a second charge.
+        await loadPreviewLedger(previews);
         showWeeklyNoteIfDue();
 
         await loadEnabledChannels();
@@ -5138,8 +5172,9 @@ export default definePlugin({
         if (statusRetryTimer !== null) clearTimeout(statusRetryTimer);
         statusRetryTimer = null;
         statusAttempts = 0;
+        // Read back from the ledger on the next start() (loadPreviewLedger).
         previews.clear();
-        previewAsked.clear();
+        previewPending.clear();
         __resetWeeklyStats();
         // clearStore() has existed and worked the whole time, and the plugin
         // never called it — only the test harness did, which is why the tests

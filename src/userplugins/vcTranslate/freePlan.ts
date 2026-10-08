@@ -1,10 +1,13 @@
+import * as DataStore from "@api/DataStore";
+
 /**
  * ✦ PREVIEWS for an Automatic owner, and where Upgrade links point.
  *
  * There is no free plan any more (see entitlement.ts): an install is not
- * activated, Automatic, or AI. Automatic owners get five ✦ previews a day on
- * rough ≈ lines: the first few words of the real ✦ translation, cut by the
- * relay and again here. Pure, so the cut can be tested on its own.
+ * activated, Automatic, or AI. Automatic owners get five ✦ previews a day: the
+ * FULL ✦ translation of one message, shown in place of its ≈ line with an
+ * "Add AI" link. One message never costs more than one preview, so every
+ * preview shown is remembered here, across restarts.
  */
 
 /** Where every Upgrade link points when the in-Discord panel cannot open. */
@@ -12,43 +15,67 @@ export const PRICING_URL = "https://surfer05.github.io/subline/#pricing";
 
 /* ------------------------------------------------------------ preview -- */
 
-/** How much of a ✦ preview the relay returns (mirrors relay previewText). */
-export const PREVIEW_WORDS = 5;
-export const PREVIEW_MAX_CHARS = 32;
-
 /**
- * The first few words of a translation, exactly as the relay cuts a ✦ preview.
- *
- * A MIRROR of the relay's own truncation, used twice. (1) On whatever the relay
- * returns in preview mode: a v0.1.6 relay has already cut it, but an older one
- * ignores `mode` and sends the full ✦ line, so the client cuts again and a
- * preview can never show more than this. (2) On the ≈ line, before comparing:
- * if the two cut the same, the preview would show nothing new, so it is not
- * shown.
- *
- * WHAT THIS DOES NOT PROMISE: the relay cuts only v0.1.6 preview requests. A
- * header-less legacy (v0.1.5) ⚡ press still gets the full ✦ line within the
- * 3-a-day taste allowance, as it always did.
+ * One message's ✦ preview. `text` is the full ✦ translation, or null when ✦
+ * said there is nothing to translate. `src` is a hash of the message content
+ * it was made from: an edit makes it stale (see contentHash).
  */
-export function previewText(text: string): { text: string; truncated: boolean } {
-    const words = text.trim().split(/\s+/).filter(Boolean);
-    const full = words.join(" ");
-    let out = words.slice(0, PREVIEW_WORDS).join(" ");
-    const chars = Array.from(out);
-    if (chars.length > PREVIEW_MAX_CHARS) out = chars.slice(0, PREVIEW_MAX_CHARS).join("").trimEnd();
-    return { text: out, truncated: out !== full };
+export interface PreviewResult {
+    text: string | null;
+    lang?: string;
+    src: string;
 }
 
-/** Case, spacing and punctuation folded away: "Hello, there." reads as "hello there". */
-function normalise(s: string): string {
-    return s.toLowerCase().replace(/[\p{P}\p{S}]/gu, " ").replace(/\s+/g, " ").trim();
-}
+/** Where the previews shown are kept. */
+export const PREVIEW_LEDGER_KEY = "VcTranslate_previews";
+/** The newest this many are kept; the oldest go first. */
+export const MAX_PREVIEWS_KEPT = 200;
 
 /**
- * Would this ✦ preview tell the reader anything the ≈ line does not already?
- * False when ✦ reads the same as ≈ over the words the preview shows.
+ * FNV-1a over the content, as 8 hex digits. Only tells "this is the text the
+ * preview was made from" apart from an edit, so the message text itself is
+ * never stored with the preview.
  */
-export function previewDiffers(preview: string, googleText: string): boolean {
-    return normalise(previewText(googleText).text) !== normalise(preview)
-        && normalise(googleText) !== normalise(preview);
+export function contentHash(s: string): string {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h.toString(16).padStart(8, "0");
+}
+
+/** A stored ledger, read defensively: anything malformed is dropped. */
+export function parseLedger(raw: unknown): [string, PreviewResult][] {
+    if (!Array.isArray(raw)) return [];
+    const out: [string, PreviewResult][] = [];
+    for (const row of raw) {
+        if (!Array.isArray(row) || row.length !== 2) continue;
+        const [id, p] = row as [unknown, any];
+        if (typeof id !== "string" || id === "" || !p || typeof p !== "object") continue;
+        if (typeof p.src !== "string") continue;
+        if (p.text !== null && typeof p.text !== "string") continue;
+        const lang = typeof p.lang === "string" ? p.lang : undefined;
+        out.push([id, { text: p.text, src: p.src, ...(lang !== undefined ? { lang } : {}) }]);
+    }
+    return out.slice(-MAX_PREVIEWS_KEPT);
+}
+
+/** Fill `into` from the stored ledger. A read failure leaves it empty. */
+export async function loadPreviewLedger(into: Map<string, PreviewResult>): Promise<void> {
+    let raw: unknown;
+    try { raw = await DataStore.get<unknown>(PREVIEW_LEDGER_KEY); } catch { return; }
+    for (const [id, p] of parseLedger(raw)) into.set(id, p);
+}
+
+/** Add one preview, drop the oldest past the limit, and store the lot. */
+export function rememberPreview(map: Map<string, PreviewResult>, id: string, p: PreviewResult): void {
+    map.delete(id);
+    map.set(id, p);
+    while (map.size > MAX_PREVIEWS_KEPT) {
+        const oldest = map.keys().next();
+        if (oldest.done) break;
+        map.delete(oldest.value);
+    }
+    void DataStore.set(PREVIEW_LEDGER_KEY, [...map.entries()]).catch(() => { });
 }

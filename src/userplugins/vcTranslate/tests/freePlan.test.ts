@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach } from "vitest";
 
-import { previewDiffers, previewText, PRICING_URL } from "../freePlan";
+import { contentHash, loadPreviewLedger, MAX_PREVIEWS_KEPT, parseLedger, PREVIEW_LEDGER_KEY, PRICING_URL, rememberPreview, type PreviewResult } from "../freePlan";
 import {
     __resetWeeklyStats, __weeklyStats, closeWeekIfDue, countShown, loadWeeklyStats, WEEK_MS, WEEKLY_KEY,
     weeklyNoteText
@@ -16,28 +16,42 @@ describe("the copy", () => {
     });
 });
 
-describe("the ✦ preview cut (mirrors the relay)", () => {
-    it("keeps the first 5 words and says so", () => {
-        expect(previewText("the leak says the album drops friday")).toEqual({
-            text: "the leak says the album", truncated: true
-        });
+describe("the ✦ preview ledger", () => {
+    beforeEach(() => DataStore.__reset());
+
+    it("tells an edit apart, and stores no message text", async () => {
+        expect(contentHash("hola")).toBe(contentHash("hola"));
+        expect(contentHash("hola")).not.toBe(contentHash("hola!"));
+        const m = new Map<string, PreviewResult>();
+        rememberPreview(m, "1", { text: "hi", lang: "es", src: contentHash("hola secreto") });
+        await Promise.resolve();
+        expect(JSON.stringify(await DataStore.get(PREVIEW_LEDGER_KEY))).not.toContain("secreto");
     });
 
-    it("leaves a short line whole, and does not flag it", () => {
-        expect(previewText("  see you   tomorrow ")).toEqual({ text: "see you tomorrow", truncated: false });
+    it("survives a restart, and keeps the full text", async () => {
+        const long = "word ".repeat(400).trim();
+        const m = new Map<string, PreviewResult>();
+        rememberPreview(m, "1", { text: long, src: "x" });
+        rememberPreview(m, "2", { text: null, src: "y" });
+        await Promise.resolve();
+        const back = new Map<string, PreviewResult>();
+        await loadPreviewLedger(back);
+        expect(back.get("1")).toEqual({ text: long, src: "x" });
+        expect(back.get("2")).toEqual({ text: null, src: "y" });
     });
 
-    it("caps a long unspaced line at 32 characters", () => {
-        const cjk = "今日はとても良い天気ですね本当に素晴らしい一日になりそうですね皆さん";
-        const out = previewText(cjk);
-        expect(Array.from(out.text)).toHaveLength(32);
-        expect(out.truncated).toBe(true);
+    it("keeps the newest few hundred, oldest first out", () => {
+        const m = new Map<string, PreviewResult>();
+        for (let i = 0; i < MAX_PREVIEWS_KEPT + 5; i++) rememberPreview(m, String(i), { text: "t", src: "s" });
+        expect(m.size).toBe(MAX_PREVIEWS_KEPT);
+        expect(m.has("0")).toBe(false);
+        expect(m.has(String(MAX_PREVIEWS_KEPT + 4))).toBe(true);
     });
 
-    it("hides a preview that reads the same as ≈ over the words it shows", () => {
-        expect(previewDiffers("I don't want to go", "I don't want to go home")).toBe(false);
-        expect(previewDiffers("Hello, there.", "hello there")).toBe(false);
-        expect(previewDiffers("I want to go", "I don't want to go home")).toBe(true);
+    it("drops anything malformed", () => {
+        expect(parseLedger("junk")).toEqual([]);
+        expect(parseLedger([["1", { text: 5, src: "s" }], ["", { text: "a", src: "s" }], ["2", { text: "a" }], ["3", { text: "ok", src: "s", lang: 7 }]]))
+            .toEqual([["3", { text: "ok", src: "s" }]]);
     });
 });
 

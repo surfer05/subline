@@ -7,7 +7,7 @@ import * as DataStore from "@api/DataStore";
  * install id the relay ties purchases, promo codes and the 3-computer limit
  * to (sent as `x-subline-install`, and as the credential when no code is
  * saved). HOW MANY ✦ previews are left today: an Automatic owner gets five a
- * day on rough ≈ lines (see index.tsx requestPreview).
+ * day on rough ≈ lines (see index.tsx previewPress).
  *
  * Everything here is deliberately free of Discord and of the network, so the
  * count, the day rollover and the wording can be read and tested on their

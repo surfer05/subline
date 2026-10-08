@@ -30,6 +30,7 @@ import { adminReissue, adminResetInstalls, createPromo, handleRedeem, handleStat
 import { bumpStat, markActive, safely, clampDays, readStats } from "./stats";
 import { createCoupon, handleCheckout, purchaseFor } from "./checkout";
 import { readCapped } from "./body";
+import { dayRowKey } from "./budget";
 export { Budget } from "./budget";
 export { Promo } from "./promo";
 
@@ -186,10 +187,11 @@ export function normalizeBatch(v: unknown): NormalizedBatch | null {
     }));
     const size = (cs: BatchRequest["context"]) => cs.reduce((n, c) => n + c.text.length + c.author.length, 0);
     while (context.length > 0 && size(context) > MAX_CONTEXT_CHARS) context = context.slice(1);
-    // force: the reader pressed ⚡ on these messages and wants them translated
-    // even where the model would normally skip. Only an exact `true` counts,
-    // and never for a preview (a preview is cut and counted, not forced).
-    const force = b.force === true && b.mode !== "preview";
+    // force: the reader pressed ⚡ (or Preview ✦) on these messages and wants
+    // them translated even where the model would normally skip. Only an exact
+    // `true` counts. A preview may be forced too: it is counted per message,
+    // and a counted preview that came back "skip" showed the reader nothing.
+    const force = b.force === true;
     return { batch: { messages, context, targetLang: b.targetLang, ...(force ? { force: true } : {}) }, tooLong };
 }
 
@@ -268,7 +270,7 @@ function withRefused(order: string[], results: Result[], tooLong: string[]): Res
 async function serveBatch(
     env: Env, ctx: ExecutionContext, done: Done, req: Request, code: string | null, rec: CodeRecord,
     norm: NormalizedBatch, order: string[], preview: boolean, free: FreePlan | null, newClient: boolean, now: number,
-    v2: boolean = false
+    v2: boolean = false, once?: { key: string; maxFree: number }
 ): Promise<Response> {
     const plan = rec.plan ?? "free";
     const { batch, tooLong } = norm;
@@ -295,7 +297,7 @@ async function serveBatch(
     // per address, so it skips the keyless per-IP ceilings.
     const tasteIp = !v2 && (plan === "taste" || plan === "trial") ? req.headers.get("cf-connecting-ip") : null;
 
-    const res = await reserve(env, code!, rec, cost, now, tasteIp, budgetCost);
+    const res = await reserve(env, code!, rec, cost, now, tasteIp, budgetCost, once);
     if (!res.ok) {
         // Counters or the budget could not be reached: refused CLOSED,
         // before any spend (see reserve).
@@ -321,6 +323,10 @@ async function serveBatch(
             status, res.retryAfterMs
         ), res.reason as Outcome, code, 0, plan);
     }
+
+    // What this request really added to the day count: 0 for a repeat of a
+    // preview already counted today (see previewOnce).
+    const charged = res.charged ?? cost;
 
     // Every KV write that is not a spend counter happens only from here
     // on, after reserve() passed the per-bearer and per-IP ceilings and
@@ -349,19 +355,25 @@ async function serveBatch(
         // a row, so a primary that is out of credit (402) or has a dead key
         // (401) is countable while users never notice.
         if (primaryFail !== null) ctx.waitUntil(record(env, "primary_fail", code, 0, plan, String(primaryFail)));
-        // Preview: cut on the server, so a request that asks for a
-        // preview never gets the full text back. Only a v0.1.6 client
-        // asks; a legacy (v0.1.5) free_ press sends no mode and still
-        // gets full ✦ text within its 3-a-day taste allowance.
-        const results = withRefused(order, preview ? toPreview(full) : full, tooLong);
-        if (preview) ctx.waitUntil(safely(() => bumpStat(env, now, "previews")));
+        // A LEGACY (v0.1.6 keyless) preview is cut on the server. A v2
+        // preview, an Automatic owner's, is the FULL ✦ line: it is counted
+        // once per message (previewOnce) and the reader is shown all of it.
+        const results = withRefused(order, preview && !v2 ? toPreview(full) : full, tooLong);
+        // A v2 preview with nothing to show (every row failed) is given back:
+        // the reader saw nothing, and the client offers the press again.
+        if (preview && v2 && results.every(r => "failed" in r)) {
+            ctx.waitUntil(refund(env, code!, charged, now, tasteIp, plan, budgetCost, once?.key));
+            const failedOk = { ok: true, results, used: Math.max(0, res.used - charged), cap: res.cap, rpmLimit: rpmLimitFor(rec) };
+            return done(json(newClient ? { ...failedOk, now } : failedOk), "ok", code, 0, plan);
+        }
+        if (preview && charged > 0) ctx.waitUntil(safely(() => bumpStat(env, now, "previews")));
         // `rpmLimit` rides every success so the plugin's rate gate can
         // tune itself to this code's ceiling without ever hitting it.
         // `now` (server epoch ms) only for a header'd client, so it can
         // count trialEndsAt down against the relay's clock rather than a
         // skewed local one; a legacy body stays byte-identical.
         const ok = { ok: true, results, used: res.used, cap: res.cap, rpmLimit: rpmLimitFor(rec) };
-        return done(json(newClient ? { ...ok, now } : ok), "ok", code, cost, plan);
+        return done(json(newClient ? { ...ok, now } : ok), "ok", code, charged, plan);
     } catch (e) {
         clearTimeout(timer);
         const err = (e ?? {}) as FallbackError;
@@ -372,8 +384,12 @@ async function serveBatch(
         // followed by a fallback that failed fast is refunded.
         const timedOut = controller.signal.aborted || err.timedOut === true || err.status === 504;
         const keyFault = err.status === 401 || err.status === 403;
-        if (!timedOut && !keyFault) {
-            ctx.waitUntil(refund(env, code!, cost, now, tasteIp, plan, budgetCost));
+        // A v2 PREVIEW is always given back, a timeout included: the reader
+        // saw nothing and must be able to press again for free. Its body is
+        // one capped message and the global budget stays charged, so this
+        // cannot be turned into free upstream spend beyond that.
+        if ((preview && v2) || (!timedOut && !keyFault)) {
+            ctx.waitUntil(refund(env, code!, charged, now, tasteIp, plan, budgetCost, once?.key));
         }
         const label = upstreamLabel(err);
         // The relay's OWN key failing (401/403) or its credit running out
@@ -399,7 +415,7 @@ async function serveBatch(
 /**
  * /v1/translate for a v2 (paid-only) client. ✦ needs AI and is charged to the
  * account's live AI code. An Automatic owner without AI gets ✦ PREVIEWS only
- * (5 a day per account, cut on the relay). Nothing else is served: no
+ * (5 messages a day per account, each the full ✦ line, see previewOnce). Nothing else is served: no
  * entitlement is 402 not_activated. The trial and taste tiers do not exist for
  * a v2 client.
  */
@@ -429,7 +445,8 @@ async function translateV2(env: Env, ctx: ExecutionContext, done: Done, req: Req
     // The account's previews: a synthetic taste-shaped record on its own
     // counter ("pv:<account>", counted in the Budget object, see reserve).
     const pvRec: CodeRecord = { status: "active", plan: "taste", dailyCap: PREVIEW_DAILY_CAP };
-    return serveBatch(env, ctx, done, req, "pv:" + r.acctId, pvRec, norm, order, true, null, true, now, true);
+    return serveBatch(env, ctx, done, req, "pv:" + r.acctId, pvRec, norm, order, true, null, true, now, true,
+        await previewOnce(r.acctId, norm, now));
 }
 
 /** /v1/translate for an older (0.1.x) client: a code or a free_ id. */
@@ -494,6 +511,29 @@ async function translateLegacy(env: Env, ctx: ExecutionContext, done: Done, req:
         return done(fail("temporarily unavailable", 503, 60_000), "capacity", code, 0, plan);
     }
     return serveBatch(env, ctx, done, req, code, rec, norm, order, preview, free, newClient, now);
+}
+
+/** How often one previewed message may be asked again in a day without being
+ *  counted again (a lost answer, a restart). Past this a repeat counts. */
+export const PREVIEW_FREE_REPEATS = 2;
+
+/**
+ * ONE PREVIEW PER MESSAGE, on the relay. The marker row (budget.ts
+ * ReserveReq.once) is keyed by the account, the UTC day and a hash of the
+ * message id, its text and the target language, so a retry of the same
+ * message is free while a reused id with other text is a new preview. Only a
+ * one-message preview gets a marker; anything else is counted as before.
+ */
+export async function previewOnce(
+    acctId: string, norm: NormalizedBatch, now: number
+): Promise<{ key: string; maxFree: number } | undefined> {
+    const msgs = norm.batch.messages;
+    if (msgs.length !== 1) return undefined;
+    const m = msgs[0]!;
+    const data = new TextEncoder().encode(`${m.id}\n${norm.batch.targetLang}\n${m.text}`);
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", data));
+    const hex = Array.from(digest.slice(0, 12), b => b.toString(16).padStart(2, "0")).join("");
+    return { key: dayRowKey(`pvm:${acctId}:${hex}`, now), maxFree: PREVIEW_FREE_REPEATS };
 }
 
 /** Owner check for the /admin/* routes: null when allowed, else the refusal. */

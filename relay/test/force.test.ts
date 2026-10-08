@@ -39,12 +39,13 @@ describe("the forced (⚡) prompt", () => {
         expect(a.filter((line, i) => line !== b[i])).toHaveLength(1);
     });
 
-    it("only an exact `force: true` counts, and never on a preview", () => {
+    it("only an exact `force: true` counts, and a preview may be forced", () => {
         const body = (extra: Record<string, unknown>) => ({ messages: [{ id: "0", text: "hola" }], context: [], targetLang: "en", ...extra });
         expect(normalizeBatch(body({ force: true }))!.batch.force).toBe(true);
         for (const v of ["true", 1, {}, false, null]) expect(normalizeBatch(body({ force: v }))!.batch.force).toBeUndefined();
         expect(normalizeBatch(body({}))!.batch).not.toHaveProperty("force");
-        expect(normalizeBatch(body({ force: true, mode: "preview" }))!.batch.force).toBeUndefined();
+        // A counted preview that came back "skip" showed the reader nothing.
+        expect(normalizeBatch(body({ force: true, mode: "preview" }))!.batch.force).toBe(true);
     });
 
     it("the forced rule escapes the target language like every other line", () => {

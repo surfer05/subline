@@ -59,6 +59,15 @@ export interface ReserveReq {
     rpm?: { key: string; limit: number };
     /** The request's clock (epoch ms), for the minute bucket. */
     now?: number;
+    /**
+     * ONE COUNT PER MESSAGE (a ✦ preview). A marker row for this exact message
+     * on this day: the first reserve counts `day.add` as usual and sets it; a
+     * repeat of the same message (a lost answer retried, a second press, a
+     * restart) adds nothing to the day count, up to `maxFree` repeats. Past
+     * that a repeat counts again, so one message cannot be looped for free
+     * upstream spend. The global `cost` is always charged: the model still runs.
+     */
+    once?: { key: string; maxFree: number };
 }
 
 export type ReserveReason = "capacity" | "cap_exceeded" | "month_cap_exceeded" | "rate_limited";
@@ -71,6 +80,8 @@ export interface ReserveRes {
     /** The day counter after this call (or as it stands, when refused). */
     used?: number;
     monthUsed?: number;
+    /** What this call added to the day counter (0 for a free repeat, see `once`). */
+    charged?: number;
 }
 
 export interface CounterState {
@@ -87,23 +98,27 @@ export interface CounterState {
 export function applyReserve(st: CounterState, r: ReserveReq): ReserveRes {
     const dayUsed = r.day ? st.counters.get(r.day.key) ?? 0 : undefined;
     const monthUsed = r.month ? st.counters.get(r.month.key) ?? 0 : undefined;
+    const seen = r.once ? st.counters.get(r.once.key) ?? 0 : 0;
+    // A repeat of a message already counted today is free (see ReserveReq.once).
+    const dayAdd = r.day ? (r.once && seen >= 1 && seen <= r.once.maxFree ? 0 : r.day.add) : 0;
     const refuse = (reason: ReserveReason): ReserveRes => ({
         allowed: false, reason, total: st.total, frozen: st.total >= r.freezeAt,
         ...(dayUsed !== undefined ? { used: dayUsed } : {}),
         ...(monthUsed !== undefined ? { monthUsed } : {})
     });
     if (r.rpm && (st.rpm.get(r.rpm.key) ?? 0) >= r.rpm.limit) return refuse("rate_limited");
-    if (r.day && dayUsed! + r.day.add > r.day.cap) return refuse("cap_exceeded");
+    if (r.day && dayUsed! + dayAdd > r.day.cap) return refuse("cap_exceeded");
     if (r.month && monthUsed! + r.month.add > r.month.cap) return refuse("month_cap_exceeded");
     const b = applyBudget({ total: st.total }, r.cost, r.freezeAt);
     if (!b.allowed) return refuse("capacity");
     st.total = b.total;
-    if (r.day) st.counters.set(r.day.key, dayUsed! + r.day.add);
+    if (r.day) st.counters.set(r.day.key, dayUsed! + dayAdd);
+    if (r.once) st.counters.set(r.once.key, seen + 1);
     if (r.month) st.counters.set(r.month.key, monthUsed! + r.month.add);
     if (r.rpm) st.rpm.set(r.rpm.key, (st.rpm.get(r.rpm.key) ?? 0) + 1);
     return {
         allowed: true, total: b.total, frozen: b.frozen,
-        ...(r.day ? { used: dayUsed! + r.day.add } : {}),
+        ...(r.day ? { used: dayUsed! + dayAdd, charged: dayAdd } : {}),
         ...(r.month ? { monthUsed: monthUsed! + r.month.add } : {})
     };
 }
@@ -182,7 +197,7 @@ export class Budget {
         if (path === "/reserve") {
             const r = await req.json() as ReserveReq;
             const now = typeof r.now === "number" ? r.now : Date.now();
-            await this.load([r.day?.key, r.month?.key].filter((k): k is string => !!k), now);
+            await this.load([r.day?.key, r.month?.key, r.once?.key].filter((k): k is string => !!k), now);
             const minute = Math.floor(now / 60_000);
             if (minute !== this.rpmMinute) { this.st.rpm.clear(); this.rpmMinute = minute; }
             const wasFrozen = this.st.total >= r.freezeAt;
@@ -192,6 +207,7 @@ export class Budget {
                 const rows: Record<string, number> = { total: this.st.total };
                 if (r.day) rows[r.day.key] = this.st.counters.get(r.day.key)!;
                 if (r.month) rows[r.month.key] = this.st.counters.get(r.month.key)!;
+                if (r.once) rows[r.once.key] = this.st.counters.get(r.once.key)!;
                 await this.ctx.storage.put(rows);
                 if (r.day || r.month) await this.ensureAlarm(now);
             }
