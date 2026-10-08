@@ -3785,6 +3785,33 @@ describe("the Subline code in the plugin", () => {
         for (let i = 0; i < 20; i++) await Promise.resolve();
     }
 
+    // Owner rule: a reader on the Subline relay is never told about its
+    // parts ("relay", engine names) and Subline never names itself twice.
+    it("says what ✦ is doing in plain words: ready, cooling down, can't connect", async () => {
+        settings.store.sublineCode = "SUBLINE-TEST-CODE";
+        const titles: string[] = [];
+        titles.push(indicator().props.title);
+        expect(titles[0]).toBe("✦ is ready. ⚡ sends right away.");
+        setCooldown("relay", Date.now() + 45_000);
+        titles.push(indicator().props.title);
+        expect(titles[1]).toBe("✦ is cooling down after a rate limit. ⚡ sends nothing for another 0:45.");
+        setCooldown("relay", 0);
+        native.translateBatch.mockImplementation(async (engine: string, _k: string, payload: string) =>
+            engine === "relay"
+                ? { ok: false, error: "relay: HTTP 403" }
+                : { ok: true, results: JSON.parse(payload).messages.map((m: any) => ({ id: m.id, lang: "es", text: "rough", skip: false })) });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
+        await settle();
+        const node = indicator();
+        expect(text(node)).toBe("✦ blocked");
+        titles.push(node.props.title);
+        expect(titles[2]).toBe("✦ can't connect right now. Showing ≈.");
+        for (const t of titles) {
+            expect(t).not.toMatch(/relay|Groq|Gemini|engine|plugin/i);
+            expect(t).not.toMatch(/Subline.*Subline/);
+        }
+    });
+
     it("turns on ✦ from the code alone, with no Engine change", async () => {
         settings.store.sublineCode = "SUBLINE-TEST-CODE";
         expect(settings.store.engine).toBe("relay");
@@ -3825,13 +3852,13 @@ describe("the Subline code in the plugin", () => {
         const rejected = shownToasts.filter(t => /Subline code/.test(t.message));
         expect(rejected).toHaveLength(1);
         expect(rejected[0].message).toBe(
-            "Your Subline code wasn't accepted. Using Google (≈) for now."
+            "Your Subline code wasn't accepted. Showing ≈ for now."
         );
         expect(shownToasts.some(t => /API key/.test(t.message))).toBe(false);
 
         const node = indicator();
         expect(text(node)).toBe("✦ code rejected");
-        expect(node.props.title).toContain("Subline code");
+        expect(node.props.title).toBe("Your Subline code wasn't accepted. Showing ≈. Check it in Subline → Settings.");
         expect(node.props.title).not.toContain("API key");
         expect(node.props.title).not.toContain("—");
     });
@@ -3843,7 +3870,7 @@ describe("the Subline code in the plugin", () => {
         FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("1", "hola") });
         await settle();
         expect(shownToasts.some(t =>
-            t.message === "No Subline code set. Using Google (≈) until you add one.")).toBe(true);
+            t.message === "No Subline code set. Showing ≈ until you add one.")).toBe(true);
         expect(shownToasts.some(t => /API key/.test(t.message))).toBe(false);
     });
 });
@@ -4460,7 +4487,7 @@ describe("the manual ⚡ in-flight indicator on the subtitle accessory", () => {
         // A short human phrase, not the raw "500 upstream error" — see
         // beaconErrorCode()/describeFailureReason(): only a closed category
         // ever reaches the DOM.
-        expect(titleOf(rendered)).toContain("engine error");
+        expect(titleOf(rendered)).toBe("The request failed (no answer).");
         expect(titleOf(rendered)).not.toContain("500 upstream error");
 
         // Quality-tier failures deliberately write nothing to the store (see
@@ -4550,7 +4577,7 @@ describe("the manual ⚡ in-flight indicator on the subtitle accessory", () => {
         // Google line the click was trying to upgrade.
         expect(text(rendered)).toContain("rough");
         expect(text(rendered)).toContain("translation failed");
-        expect(titlesOf(rendered).some(t => t.includes("rejected key"))).toBe(true);
+        expect(titlesOf(rendered).some(t => t.includes("not accepted"))).toBe(true);
     });
 
     it("still fails silently for the AUTOMATIC pipeline — no hint, no accessory change, from a live-chat quality failure", async () => {

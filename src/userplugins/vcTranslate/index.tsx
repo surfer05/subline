@@ -1899,7 +1899,7 @@ function fallBackToGoogle(reason: string, kind: FallbackKind = "key") {
         Toasts.show({
             id: Toasts.genId(),
             type: Toasts.Type.FAILURE,
-            message: `${sentenceCase(reason)}. Using Google (≈) for now.`
+            message: `${sentenceCase(reason)}. Showing ≈ for now.`
         });
     }
     rebuildBatcher();
@@ -1931,7 +1931,7 @@ function announceMissingKeyOnce() {
     Toasts.show({
         id: Toasts.genId(),
         type: Toasts.Type.FAILURE,
-        message: `No ${credential} set. Using Google (≈) until you add one.`
+        message: `No ${credential} set. Showing ≈ until you add one.`
     });
 }
 
@@ -3815,10 +3815,10 @@ const ENGINE_PROVENANCE: Record<EngineId, { glyph: string; label: string; }> = {
 function describeFailureReason(code: BeaconErrorCode): string {
     switch (code) {
         case "rate-limited": return "rate limited";
-        case "auth-rejected": return "rejected key";
+        case "auth-rejected": return "not accepted";
         case "ipc-failed":
         case "engine-error":
-        default: return "engine error";
+        default: return "no answer";
     }
 }
 
@@ -4083,7 +4083,7 @@ function translationLines(message: Message) {
             <div
                 style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}
                 title={llmComing
-                    ? "The quick translator (Google) didn't answer, so the quality engine is translating this message instead."
+                    ? "Google didn't answer, so ✦ is translating this message instead."
                     : UPGRADE_COPY.googleBusy}
             >
                 {llmComing ? "⏳ translating…" : "⏳ waiting for the translator…"}
@@ -4423,7 +4423,12 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
             <div
                 style={indicatorStyle}
                 title={
-                    fallbackKind === "blocked"
+                    configured === "relay"
+                        // The Subline relay: plain words, no internal parts named.
+                        ? fallbackKind === "blocked"
+                            ? "✦ can't connect right now. Showing ≈."
+                            : "Your Subline code wasn't accepted. Showing ≈. Check it in Subline → Settings."
+                        : fallbackKind === "blocked"
                         ? `Subline could not reach ${LLM_ENGINES[configured].label} from this network. A VPN, `
                           + "region or ISP is refusing the connection. "
                           + `Your ${configured === "relay" ? "Subline code" : "API key"} is not the problem. `
@@ -4443,6 +4448,8 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
     if (!isLlmEngine(engine)) return null;
 
     const { label } = LLM_ENGINES[engine];
+    // On the Subline relay the reader knows ✦, not the parts behind it.
+    const name = engine === "relay" ? "✦" : label;
     const quota = describeQuotaState(engine);
 
     if (quota.cooling) {
@@ -4451,7 +4458,7 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
             <div
                 style={indicatorStyle}
                 title={
-                    `${label} is cooling down after a rate limit. ⚡ sends nothing for another ${countdown}.`
+                    `${name} is cooling down after a rate limit. ⚡ sends nothing for another ${countdown}.`
                 }
             >
                 ✦ {countdown}
@@ -4464,7 +4471,7 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
             <div
                 style={indicatorStyle}
                 title={
-                    `${label} is ready. ⚡ sends right away.`
+                    `${name} is ready. ⚡ sends right away.`
                 }
             >
                 ✦
@@ -4482,9 +4489,11 @@ function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat:
     // wrong, showing a plugin-budget number while the provider was the real
     // reason a request would fail.
     const countdown = formatCountdown(quota.remainingMs);
-    const why = quota.source === "provider"
-        ? `${label} itself reports no requests left in its current window`
-        : `Subline is pacing requests to ${label} to stay within safe usage limits`;
+    const why = engine === "relay"
+        ? quota.source === "provider" ? "✦ has no requests left right now" : "✦ is pacing itself to stay within safe limits"
+        : quota.source === "provider"
+            ? `${label} itself reports no requests left in its current window`
+            : `Subline is pacing requests to ${label} to stay within safe usage limits`;
 
     return (
         <div
