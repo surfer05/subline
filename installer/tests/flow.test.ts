@@ -114,7 +114,14 @@ interface Script {
     /** Stands in for the real Dodo product id (the source holds the placeholder). */
     automaticProductId?: string;
     bundle?: Result<ModBundle>;
-    installs?: Result<DiscordInstall[]>;
+    /** One answer, or one per call (the last repeats). */
+    installs?: Result<DiscordInstall[]> | Array<Result<DiscordInstall[]>>;
+    /** The bundle a patched Discord loads (audit #12). Absent: the port is not wired. */
+    installedBundle?: Result<ModBundle>;
+    /** adoptPatch's answer (audit #11). Absent: the port is not wired. */
+    adopt?: Result<{ pluginBuildId: string; discordVersion: string | null }>;
+    /** A language chosen on an earlier run that stopped before activation (I6). */
+    pendingLanguage?: string | null;
     inspect?: Result<InstallState> | ((install: DiscordInstall) => Result<InstallState>);
     processes?: Array<Array<{ pid: number; command: string }>>;
     requestQuit?: () => Promise<void>;
@@ -174,6 +181,14 @@ interface Harness {
     /** URLs opened in the browser. */
     opened: string[];
     installIdWrites: number;
+    /** Every rememberPatchedInstall call, by rootPath. */
+    remembered: string[];
+    adoptCalls: number;
+    pendingWrites: string[];
+    pendingClears: number;
+    /** The install each patch call targeted. */
+    patchTargets: string[];
+    launchedTargets: string[];
 }
 
 function harness(script: Script = {}): Harness {
@@ -199,8 +214,15 @@ function harness(script: Script = {}): Harness {
         steps: [],
         relayCalls: [],
         opened: [],
-        installIdWrites: 0
+        installIdWrites: 0,
+        remembered: [],
+        adoptCalls: 0,
+        pendingWrites: [],
+        pendingClears: 0,
+        patchTargets: [],
+        launchedTargets: []
     } as unknown as Harness;
+    let locateCall = 0;
     let statusCall = 0;
 
     const record = (level: string) => (event: string, fields: Record<string, unknown> = {}) => {
@@ -220,7 +242,24 @@ function harness(script: Script = {}): Harness {
             return script.installBundle ?? { ok: true, value: { ...BUNDLE, replaced: false } };
         },
 
-        locate: () => script.installs ?? { ok: true, value: [INSTALL] },
+        locate: () => {
+            const scripted = script.installs ?? { ok: true, value: [INSTALL] };
+            if (!Array.isArray(scripted)) return scripted;
+            return scripted[Math.min(locateCall++, scripted.length - 1)] as Result<DiscordInstall[]>;
+        },
+        ...(script.installedBundle === undefined ? {} : { inspectInstalledBundle: () => script.installedBundle as Result<ModBundle> }),
+        ...(script.adopt === undefined ? {} : {
+            adoptPatch: () => {
+                h.adoptCalls += 1;
+                return script.adopt as Result<{ pluginBuildId: string; discordVersion: string | null }>;
+            }
+        }),
+        ...(script.pendingLanguage === undefined ? {} : {
+            pendingLanguage: () => script.pendingLanguage ?? null,
+            rememberPendingLanguage: (code: string) => { h.pendingWrites.push(code); },
+            clearPendingLanguage: () => { h.pendingClears += 1; }
+        }),
+        rememberPatchedInstall: (install: DiscordInstall) => { h.remembered.push(install.rootPath); },
         inspect: (install: DiscordInstall) => {
             if (typeof script.inspect === "function") return script.inspect(install);
             return script.inspect ?? { ok: true, value: installState("unpatched") };
@@ -295,8 +334,9 @@ function harness(script: Script = {}): Harness {
             };
         },
 
-        patch: (_install, options) => {
+        patch: (install, options) => {
             h.patchCalls.push(options);
+            h.patchTargets.push(install.rootPath);
             patchCall += 1;
             if (typeof script.patch === "function") return script.patch();
             return script.patch ?? { ok: true, value: patchReport() };
@@ -317,8 +357,9 @@ function harness(script: Script = {}): Harness {
                 value: { action: "unchanged", reason: null, registered: "/Applications/Subline.app/Contents/MacOS/Subline", expected: "/Applications/Subline.app/Contents/MacOS/Subline" }
             };
         },
-        launchDiscord: async () => {
+        launchDiscord: async (install: DiscordInstall) => {
             h.launched += 1;
+            h.launchedTargets.push(install.rootPath);
             t += 500;
             return script.launch ?? { ok: true, value: true };
         },
@@ -1340,7 +1381,8 @@ describe("the activation screen (paid only)", () => {
         for (let i = 0; i < 20; i++) await Promise.resolve();
         await new Promise(r => setTimeout(r, 5));
         expect(h.flow.state.step).toBe("activation-waiting");
-        expect(h.flow.state.actions).toEqual(["back"]);
+        // Try again reopens the checkout; Back returns to the choice (I7).
+        expect(h.flow.state.actions).toEqual(["retry", "back"]);
         expect(h.patchCalls).toHaveLength(0);
         const back = await h.flow.send({ type: "back" });
         expect(back.step).toBe("choose-code");
@@ -1386,7 +1428,7 @@ describe("the activation screen (paid only)", () => {
         const url = new URL(h.opened[0]!);
         expect(url.origin + url.pathname).toBe("https://checkout.dodopayments.com/buy/pdt_Real123");
         expect(url.searchParams.get("metadata_install")).toMatch(/^[0-9a-f]{16}$/);
-        expect(url.searchParams.get("redirect_url")).toBe("https://surfer05.github.io/subline/?from=installer");
+        expect(url.searchParams.get("redirect_url")).toBe("https://subline.page/?from=installer");
     });
 
     it("never opens the static link while the product id is the placeholder: says the relay is unreachable", async () => {
@@ -1449,7 +1491,7 @@ describe("the activation screen (paid only)", () => {
             await new Promise(r => setTimeout(r, 1));
         }
         expect(h.flow.state.step).toBe("activation-waiting");
-        expect(h.flow.state.detail).toBe("Subline carries on by itself when it's done.\n\nPaid already? It can take a few minutes. Close this and reopen Subline later.");
+        expect(h.flow.state.detail).toBe("Subline carries on by itself when it's done.\n\nUsing a VPN? Turn it off only while you pay. Discord can stay on.\n\nPaid already? It can take a few minutes. Close this and reopen Subline later.");
         await h.flow.send({ type: "back" });
         await pending;
     });
@@ -1523,7 +1565,7 @@ describe("the activation screen (paid only)", () => {
         expect(CODE_SCREEN_COPY.errNotFound).toBe("That code doesn't exist.");
         expect(CODE_SCREEN_COPY.errAlready).toBe("Already yours.");
         expect(CODE_SCREEN_COPY.errUnreachable).toBe("Can't reach Subline right now. Try again in a minute.");
-        expect(CODE_SCREEN_COPY.errDeviceLimit).toBe("This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub.");
+        expect(CODE_SCREEN_COPY.errDeviceLimit).toBe("This code is on 3 computers already. It frees up after 30 days unused, or email support@subline.page for a reset.");
         expect(CODE_SCREEN_COPY.errEmpty).toBe("Type or paste a code first.");
         // The confirm step reads the same as the plugin's confirm window.
         expect(CODE_SCREEN_COPY.confirmTitle).toBe("Use this code?");
@@ -1644,8 +1686,8 @@ describe("the activation screen (paid only)", () => {
         const next = await h.flow.send({ type: "set-language", code: "tr" });
         expect(next.detail).toBe(CODE_SCREEN_COPY.errDeviceLimit);
         expect(next.actions).toEqual(["set-code"]);
-        expect(next.helpUrl).toBe("https://github.com/surfer05/subline/issues");
-        expect(RESET_HELP_URL).toBe("https://github.com/surfer05/subline/issues");
+        expect(next.helpUrl).toBe("mailto:support@subline.page");
+        expect(RESET_HELP_URL).toBe("mailto:support@subline.page");
     });
 
     it("any other refusal keeps Buy and draws no reset link", async () => {
@@ -2680,5 +2722,294 @@ describe("the helper's memory is seeded before the helper is registered", () => 
         expect(order.indexOf("remember")).toBeGreaterThanOrEqual(0);
         expect(order.indexOf("remember")).toBeLessThan(order.indexOf("installHelper"));
         expect(seen?.buildId).toBe(BUILD_ID);
+    });
+});
+
+/* ------------------------------------------------------------------------ *
+ * Part 2 of the 0.2.3 installer fixes (audit 2026-10-06, field test I5-I7)
+ * ------------------------------------------------------------------------ */
+
+const WIN_OLD: DiscordInstall = {
+    branch: "stable",
+    rootPath: "C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.1",
+    stableId: "C:\\Users\\x\\AppData\\Local\\Discord",
+    resourcesPath: "C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.1\\resources",
+    asarPath: "C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.1\\resources\\app.asar",
+    backupPath: "C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.1\\resources\\_app.asar",
+    buildInfoPath: "C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.1\\resources\\build_info.json",
+    fromExplicitPath: false
+};
+const WIN_NEW: DiscordInstall = {
+    ...WIN_OLD,
+    rootPath: "C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.2",
+    resourcesPath: "C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.2\\resources",
+    asarPath: "C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.2\\resources\\app.asar",
+    backupPath: "C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.2\\resources\\_app.asar",
+    buildInfoPath: "C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.2\\resources\\build_info.json"
+};
+
+describe("a wrong code shows only its sentence (field test I5)", () => {
+    it.each([
+        ["not_found", CODE_SCREEN_COPY.errNotFound],
+        ["claimed", CODE_SCREEN_COPY.errClaimed],
+        ["rate_limited", CODE_SCREEN_COPY.errRateLimited],
+        ["net_limited", CODE_SCREEN_COPY.errNetLimited]
+    ] as const)("promo %s: CODE_REFUSED, no cause", async (kind, line) => {
+        const h = harness({ relayRedeem: { kind } as RedeemAnswer });
+        await toDetection(h);
+        await h.flow.send({ type: "set-language", code: "tr" });
+        const refused = await h.flow.send({ type: "set-code", code: "MYSERVER" });
+        expect(refused.step).toBe("choose-code");
+        expect(refused.detail.startsWith(line)).toBe(true);
+        expect(refused.error?.code).toBe("CODE_REFUSED");
+        expect(refused.error?.cause).toBeUndefined();
+    });
+
+    it("a code at its computer limit is CODE_REFUSED too", async () => {
+        const h = harness({ relayStatus: { kind: "device_limit" } });
+        await toDetection(h);
+        await h.flow.send({ type: "set-language", code: "tr" });
+        const refused = await h.flow.send({ type: "set-code", code: "slp_typedcode" });
+        expect(refused.error?.code).toBe("CODE_REFUSED");
+    });
+
+    it("an unreachable relay keeps its diagnostics (IO_ERROR with the cause)", async () => {
+        const h = harness({ relayRedeem: { kind: "unreachable", cause: "ENOTFOUND relay" } as RedeemAnswer });
+        await toDetection(h);
+        await h.flow.send({ type: "set-language", code: "tr" });
+        const failed = await h.flow.send({ type: "set-code", code: "MYSERVER" });
+        expect(failed.error?.code).toBe("IO_ERROR");
+        expect(failed.error?.cause).toBe("ENOTFOUND relay");
+    });
+});
+
+describe("a restart mid-checkout resumes at Activate Subline (field test I6)", () => {
+    it("language chosen on an earlier run, no code saved: starts on the activation screen", async () => {
+        const h = harness({ pendingLanguage: "tr" });
+        const first = await h.flow.start();
+        expect(first.step).toBe("choose-code");
+        // Activation lands, and the language from the earlier run is the one saved.
+        const done = await h.flow.send({ type: "buy-automatic" });
+        await h.flow.settled();
+        expect(done.step).toBe("done");
+        expect(h.languageWrites).toEqual(["tr"]);
+        expect(h.pendingClears).toBe(1);
+    });
+
+    it("a saved install id is asked about first: a purchase that landed meanwhile goes straight on", async () => {
+        const h = harness({ pendingLanguage: "de", savedInstallId: TEST_INSTALL_ID });
+        const first = await h.flow.start();
+        expect(first.step).toBe("done");
+        expect(h.languageWrites).toEqual(["de"]);
+        expect(h.opened).toEqual([]);
+    });
+
+    it("no pending language: Welcome, as before", async () => {
+        const h = harness({ pendingLanguage: null });
+        expect((await h.flow.start()).step).toBe("welcome");
+    });
+
+    it("a code already saved, or two Discords to choose from: Welcome", async () => {
+        expect((await harness({ pendingLanguage: "tr", hasSublineCode: true }).flow.start()).step).toBe("welcome");
+        expect((await harness({ pendingLanguage: "tr", installs: { ok: true, value: [INSTALL, PTB_INSTALL] } }).flow.start()).step).toBe("welcome");
+    });
+
+    it("choosing a language remembers it until it is saved", async () => {
+        const h = harness({ pendingLanguage: null, relayStatus: { kind: "ok", automatic: false, ai: false, code: null } });
+        await toDetection(h);
+        await h.flow.send({ type: "set-language", code: "ja" });
+        expect(h.pendingWrites).toEqual(["ja"]);
+        expect(h.languageWrites).toEqual([]);
+    });
+});
+
+describe("the finish-paying screen (field test I7)", () => {
+    it("says to turn a VPN off while paying, and Try again opens a new checkout", async () => {
+        const h = harness({ relayStatus: { kind: "ok", automatic: false, ai: false, code: null } });
+        await toDetection(h);
+        await h.flow.send({ type: "set-language", code: "tr" });
+        const pending = h.flow.send({ type: "buy-automatic" });
+        for (let i = 0; i < 20 && h.flow.state.step !== "activation-waiting"; i++) await new Promise(r => setTimeout(r, 1));
+        expect(h.flow.state.detail).toContain("Using a VPN? Turn it off only while you pay. Discord can stay on.");
+        expect(h.flow.state.actions).toEqual(["retry", "back"]);
+        const again = h.flow.send({ type: "retry" });
+        for (let i = 0; i < 20 && h.opened.length < 2; i++) await new Promise(r => setTimeout(r, 1));
+        expect(h.relayCalls.filter(call => call.kind === "checkout")).toHaveLength(2);
+        expect(h.opened).toHaveLength(2);
+        await h.flow.send({ type: "back" });
+        await pending;
+        await again;
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("a payment already on its way offers Back only (nothing to reopen)", async () => {
+        const h = harness({ relayCheckout: { kind: "purchase_pending" } as CheckoutAnswer, relayStatus: { kind: "ok", automatic: false, ai: false, code: null } });
+        await toDetection(h);
+        await h.flow.send({ type: "set-language", code: "tr" });
+        const pending = h.flow.send({ type: "buy-automatic" });
+        for (let i = 0; i < 20 && h.flow.state.step !== "activation-waiting"; i++) await new Promise(r => setTimeout(r, 1));
+        expect(h.flow.state.actions).toEqual(["back"]);
+        await h.flow.send({ type: "back" });
+        await pending;
+    });
+});
+
+describe("an older installer over a newer Subline (audit #12)", () => {
+    const older: ModBundle = { ...BUNDLE, buildId: "aaaaaaaaaaaaaaaa", pluginVersion: "0.2.0" };
+    const newerOnDisk: ModBundle = { ...BUNDLE, buildId: "bbbbbbbbbbbbbbbb", pluginVersion: "0.2.1" };
+
+    it("never downgrades: says so, patches nothing, installs nothing", async () => {
+        const h = harness({
+            bundle: { ok: true, value: older },
+            installedBundle: { ok: true, value: newerOnDisk },
+            inspect: { ok: true, value: updatedInstallState() },
+            hasSublineCode: true
+        });
+        const first = await h.flow.start();
+        expect(first.step).toBe("already-installed");
+        expect(first.detail).toContain("A newer Subline (0.2.1) is already installed.");
+        expect(first.actions).toEqual(["finish"]);
+        expect(h.patchCalls).toHaveLength(0);
+        expect(h.bundleInstalls).toBe(0);
+        expect(h.helperInstalls).toBe(0);
+        expect(h.helperEnsures).toBe(0);
+        expect(h.logged.some(line => line.event === "flow.newer-installed" && line.fields.installed === "0.2.1" && line.fields.shipped === "0.2.0")).toBe(true);
+    });
+
+    it("also when the marker is gone (the stub still names the loader)", async () => {
+        const state: InstallState = { ...installState("patched-by-us", "subline"), marker: null, warnings: ["marker-missing"] };
+        const h = harness({
+            bundle: { ok: true, value: older },
+            installedBundle: { ok: true, value: newerOnDisk },
+            inspect: { ok: true, value: state },
+            hasSublineCode: true
+        });
+        expect((await h.flow.start()).step).toBe("already-installed");
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("an unreadable installed bundle is 'cannot say': the update goes ahead", async () => {
+        const h = harness({
+            bundle: { ok: true, value: older },
+            installedBundle: { ok: false, error: fail("MOD_BUNDLE_INVALID") },
+            inspect: { ok: true, value: updatedInstallState() },
+            hasSublineCode: true
+        });
+        await h.flow.start();
+        await h.flow.settled();
+        expect(h.patchCalls).toHaveLength(1);
+    });
+
+    it("the same version with another build id (a dogfood build) updates", async () => {
+        const h = harness({
+            bundle: { ok: true, value: { ...older, pluginVersion: "0.2.1" } },
+            installedBundle: { ok: true, value: newerOnDisk },
+            inspect: { ok: true, value: updatedInstallState() },
+            hasSublineCode: true
+        });
+        await h.flow.start();
+        await h.flow.settled();
+        expect(h.patchCalls).toHaveLength(1);
+    });
+});
+
+describe("every patched Discord is remembered (audit #15)", () => {
+    it("already set up: remembered on the way to the screen", async () => {
+        const state: InstallState = { ...installState("patched-by-us", "subline"), marker: { pluginBuildId: BUILD_ID } as InstallState["marker"] };
+        const h = harness({ inspect: { ok: true, value: state } });
+        expect((await h.flow.start()).step).toBe("already-installed");
+        expect(h.remembered).toEqual([INSTALL.rootPath]);
+    });
+
+    it("another account's Discord is never remembered", async () => {
+        const state: InstallState = { ...installState("patched-by-us", "subline"), loaderPath: "/Users/other/Library/Application Support/Subline/mod/patcher.js" };
+        const h = harness({ inspect: { ok: true, value: state } });
+        h.ports.isOtherAccountLoader = () => true;
+        await h.flow.start();
+        await toDetection(h);
+        expect(h.remembered).toEqual([]);
+    });
+
+    it("Windows staged update: remembered, and the marker written at once when the stub already loads this bundle (audit #11)", async () => {
+        const h = harness({
+            platform: "win32",
+            permission: ["not-required"],
+            inspect: { ok: true, value: updatedInstallState() },
+            hasSublineCode: true,
+            processes: [[WINDOWS_DISCORD_PROCESS]],
+            adopt: { ok: true, value: { pluginBuildId: BUILD_ID, discordVersion: "1.0.9044" } }
+        });
+        const done = await h.flow.start();
+        expect(h.remembered).toContain(INSTALL.rootPath);
+        expect(h.adoptCalls).toBe(1);
+        expect(h.patchCalls).toHaveLength(0);
+        expect(done.step).toBe("done");
+        expect(done.detail).toContain("It starts the next time you open Discord");
+        expect(done.detail).not.toContain("after you close Discord");
+    });
+
+    it("Windows staged update where the stub loads another Subline path: stays staged, never fails", async () => {
+        const h = harness({
+            platform: "win32",
+            permission: ["not-required"],
+            inspect: { ok: true, value: updatedInstallState() },
+            hasSublineCode: true,
+            processes: [[WINDOWS_DISCORD_PROCESS]],
+            adopt: { ok: false, error: fail("NOT_ADOPTABLE") }
+        });
+        const done = await h.flow.start();
+        expect(done.step).toBe("done");
+        expect(done.detail).toContain("finishes on its own after you close Discord");
+        expect(h.helperInstalls).toBe(1);
+    });
+});
+
+describe("Discord moved while the installer waited (audit #23)", () => {
+    it("patches and launches the folder Discord runs now, same stable id", async () => {
+        const h = harness({
+            platform: "win32",
+            permission: ["not-required"],
+            installs: [{ ok: true, value: [WIN_OLD] }, { ok: true, value: [WIN_OLD] }, { ok: true, value: [WIN_NEW] }]
+        });
+        await h.flow.start();
+        await toDetection(h);
+        await setLanguage(h.flow);
+        expect(h.patchTargets).toEqual([WIN_NEW.rootPath]);
+        expect(h.remembered).toContain(WIN_NEW.rootPath);
+        expect(h.launchedTargets).toEqual([WIN_NEW.rootPath]);
+        expect(h.logged.some(line => line.event === "patch.target-moved")).toBe(true);
+    });
+
+    it("that Discord is gone: a named failure, never a patch of the old folder", async () => {
+        const h = harness({
+            platform: "win32",
+            permission: ["not-required"],
+            installs: [{ ok: true, value: [WIN_OLD] }, { ok: true, value: [WIN_OLD] }, { ok: true, value: [] }]
+        });
+        await h.flow.start();
+        await toDetection(h);
+        const failed = await setLanguage(h.flow);
+        expect(failed.step).toBe("patch-failed");
+        expect(failed.error?.code).toBe("DISCORD_MOVED");
+        expect(h.patchCalls).toHaveLength(0);
+        expect(h.bundleInstalls).toBe(0);
+    });
+});
+
+describe("patch-failed names the remedy (audit #13, #16)", () => {
+    it("FILE_IN_USE right after Discord was seen closed: a scan, not Discord", async () => {
+        const h = harness({ platform: "win32", permission: ["not-required"], patch: { ok: false, error: fail("FILE_IN_USE", "Cannot install the new app.asar: another program still has Discord's files open.") } });
+        await toDetection(h);
+        const failed = await setLanguage(h.flow);
+        expect(failed.step).toBe("patch-failed");
+        expect(failed.detail).toBe("Another program, often antivirus, is still scanning Discord's files. Wait a few seconds and press Try again.");
+    });
+
+    it("a verification failure on the backup says reinstall Discord, not 'report this'", async () => {
+        const h = harness({ patch: { ok: false, error: { code: "VERIFICATION_FAILED", message: "The preserved _app.asar is not Discord's original archive. Discord was restored to how it was before.", path: INSTALL.backupPath } } });
+        await toDetection(h);
+        const failed = await setLanguage(h.flow);
+        expect(failed.detail).toContain("Reinstall Discord from discord.com, then run Subline again.");
+        expect(failed.detail).not.toContain("Please report this");
     });
 });

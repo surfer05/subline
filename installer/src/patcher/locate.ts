@@ -11,6 +11,7 @@
  */
 
 import { existsSync, readdirSync, realpathSync, statSync } from "./realFs.js";
+import { compareVersions } from "./compareVersions.js";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -168,16 +169,6 @@ export function findWindowsAppDirs(branchDir: string, onIgnoredError?: IgnoredEr
     return versioned.map(item => join(branchDir, item.name));
 }
 
-function compareVersions(a: string, b: string): number {
-    const pa = a.split(".").map(Number);
-    const pb = b.split(".").map(Number);
-    const len = Math.max(pa.length, pb.length);
-    for (let i = 0; i < len; i++) {
-        const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
-        if (diff !== 0) return diff;
-    }
-    return 0;
-}
 
 /**
  * Locate every Discord install we can see.

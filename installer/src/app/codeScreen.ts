@@ -18,22 +18,24 @@ export const CODE_SCREEN_COPY = {
     /** The heading of the screen. */
     title: "Activate Subline",
     /** The line under the heading. */
-    detail: "Subline is $4.99, once. Or use a code from your server.",
+    detail: "$4.99, once.",
     /** The filled button: opens the checkout in the browser. */
     buy: "Buy for $4.99",
     /** The secondary button that reveals the code field. Not a flow action. */
     haveCode: "I have a code",
     /** The button under the revealed field. */
     save: "Save code",
-    fieldLabel: "Subline code",
+    fieldLabel: "Code",
     placeholder: "Paste or type your code",
-    /** Under the field, once revealed. Names the sender, because the email lands in spam. */
-    whereFrom: "A server code, or the code in your email from **Dodo Payments**. **Check spam.**",
+    /** Under the field, once revealed. Names the sender, because the email lands in spam (field test I4). */
+    whereFrom: "Bought it? The code is in the email from Dodo Payments. Check spam.",
     /** The link to Dodo's customer portal, shown only when the portal URL is known. */
-    findCode: "Find my code",
+    findCode: "Lost your code?",
     /** The waiting screen while the purchase happens in the browser. */
     waitingTitle: "Finish paying in your browser",
     waiting: "Subline carries on by itself when it's done.",
+    /** On the finish-paying screen: a VPN can make the payment fail (field test I7). */
+    vpn: "Using a VPN? Turn it off only while you pay. Discord can stay on.",
     /** Added to the finish-paying screen after 10 minutes. */
     waitingLate: "Paid already? It can take a few minutes. Close this and reopen Subline later.",
     /** Leaves the waiting screen. */
@@ -46,7 +48,7 @@ export const CODE_SCREEN_COPY = {
     errAlready: "Already yours.",
     errUnreachable: "Can't reach Subline right now. Try again in a minute.",
     /** At the limit the screen offers no Buy, and links RESET_HELP_URL under this line. */
-    errDeviceLimit: "This code is on 3 computers already. It frees up after 30 days unused, or ask for a reset on GitHub.",
+    errDeviceLimit: "This code is on 3 computers already. It frees up after 30 days unused, or email support@subline.page for a reset.",
     errNotActive: "That code is not active.",
     errRateLimited: "Too many codes tried from this network today. Try again after midnight UTC.",
     /** A promo code allows only a few claims from one network. */
@@ -77,12 +79,28 @@ export const CODE_SCREEN_COPY = {
     useIt: "Use it"
 } as const;
 
+/** Subline's support address (field test I8). The same in the plugin and on the site. */
+export const SUPPORT_EMAIL = "support@subline.page";
+
 /**
- * Where someone whose code is on 3 computers asks for a reset. Opened through
- * the main process (shell:open), like "Find my code". Its link text is the
- * address itself, so there is no extra sentence to translate or rewrite.
+ * Where someone whose code is on 3 computers asks for a reset: an email to
+ * support. Opened through the main process (shell:open), which allows https
+ * and exactly this mailto. Its link text is the address itself.
  */
-export const RESET_HELP_URL = "https://github.com/surfer05/subline/issues";
+export const RESET_HELP_URL = `mailto:${SUPPORT_EMAIL}`;
+
+/** Subline's site (field test I8). */
+export const SITE_URL = "https://subline.page";
+
+/**
+ * Whether an activation error gets the "What went wrong" box (field test I5).
+ * The relay's answers about a code (wrong, claimed, at its limit) are a
+ * sentence to read, not a failure to diagnose: no box. Everything else keeps
+ * its code, path and cause, copyable.
+ */
+export function showsDiagnostics(error: { code: string } | null): boolean {
+    return error !== null && error.code !== "CODE_REFUSED";
+}
 
 /**
  * The Dodo Payments business id, which the customer portal login URL needs.

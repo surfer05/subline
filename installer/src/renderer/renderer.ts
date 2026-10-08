@@ -13,7 +13,7 @@
  */
 
 import { ACTION_LABELS, IS_PRIMARY } from "../app/actions.js";
-import { CODE_SCREEN_COPY, codeScreenView } from "../app/codeScreen.js";
+import { CODE_SCREEN_COPY, codeScreenView, showsDiagnostics } from "../app/codeScreen.js";
 import type { FlowAction, FlowActionType, FlowState } from "../app/flow.js";
 import type { LanguageOption } from "../app/language.js";
 import { pendingAlertLines } from "../app/pendingAlerts.js";
@@ -181,9 +181,11 @@ function render(state: FlowState | null): void {
         detail.prepend(spinner, document.createTextNode(" "));
     }
 
-    errorBox.hidden = state.error === null;
+    // A wrong or claimed code is a sentence to read, not a failure to
+    // diagnose: no "What went wrong" box for the relay's answers (I5).
+    errorBox.hidden = !showsDiagnostics(state.error);
     errorBox.replaceChildren();
-    if (state.error !== null) renderError(state.error);
+    if (state.error !== null && showsDiagnostics(state.error)) renderError(state.error);
 
     extra.replaceChildren();
     renderExtra(state);
@@ -308,13 +310,13 @@ function renderExtra(state: FlowState): void {
             field.append(find);
         }
         if (state.helpUrl !== undefined) {
-            // The computer-limit reset request. Its text is the address, so
-            // "ask for a reset on GitHub" in the line above has a place to go.
+            // The computer-limit reset request: an email to support. Its text
+            // is the address, the same one the line above names.
             const helpUrl = state.helpUrl;
             const help = document.createElement("a");
             help.className = "note";
             help.href = helpUrl;
-            help.textContent = helpUrl.replace(/^https:\/\//, "");
+            help.textContent = helpUrl.replace(/^(https:\/\/|mailto:)/, "");
             help.onclick = event => { event.preventDefault(); void api.openUrl(helpUrl); };
             field.append(help);
         }

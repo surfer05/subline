@@ -1347,7 +1347,7 @@ async function failUpdate(run: Run, error: { code: PatcherErrorCode; message: st
         await run.alert(
             "update-failed",
             tooOld
-                ? "This Subline can no longer read its update feed. Get the new Subline from surfer05.github.io/subline."
+                ? "This Subline can no longer read its update feed. Get the new Subline from subline.page."
                 : error.code === "RELEASE_UNVERIFIED"
                 ? "Subline downloaded an update that did not match its published checksum, so it was not installed."
                 : "Subline has not been able to check for updates. If translation stops working after a Discord "

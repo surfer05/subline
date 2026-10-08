@@ -164,6 +164,16 @@ export function identifyModFromLoaderPath(loaderPath: string | null, context: In
     return "unknown";
 }
 
+/**
+ * What the user can do about a broken Discord (audit 2026-10-06 #13). Every
+ * broken screen names one, so nobody is left on "Discord needs repairing" with
+ * a button that cannot repair it.
+ */
+export const BROKEN_REMEDY = {
+    reinstall: "Reinstall Discord from discord.com, then run Subline again.",
+    uninstall: "Press Uninstall at the bottom to put Discord's original files back."
+} as const;
+
 function broken(
     install: DiscordInstall,
     reason: BrokenReason,
@@ -242,14 +252,20 @@ export function inspectInstall(install: DiscordInstall, options: InspectOptions 
                 : broken(
                       install,
                       "asar-and-backup-missing",
-                      "Discord's app.asar and its backup are both missing. Reinstall Discord to repair it."
+                      `Discord's app.asar and its backup are both missing. ${BROKEN_REMEDY.reinstall}`
                   )
         );
     }
 
     const markerResult = readMarker(install.resourcesPath);
     if (!markerResult.ok) {
-        return ok(broken(install, "marker-unreadable", markerResult.error.message));
+        // Our marker is there, so the backup beside it is ours: Uninstall
+        // puts it back (patch.ts unpatchBroken).
+        return ok(broken(
+            install,
+            "marker-unreadable",
+            `${markerResult.error.message} ${hasBackup ? BROKEN_REMEDY.uninstall : BROKEN_REMEDY.reinstall}`
+        ));
     }
     const marker = markerResult.value;
 
@@ -259,7 +275,7 @@ export function inspectInstall(install: DiscordInstall, options: InspectOptions 
             broken(
                 install,
                 "asar-unrecognised",
-                `Discord's app.asar is neither Discord's own code nor a loader Subline knows (${stubResult.value.why}). Subline will not move it.`,
+                `Discord's app.asar is neither Discord's own code nor a loader Subline knows (${stubResult.value.why}). Subline will not move it. ${BROKEN_REMEDY.reinstall}`,
                 { marker }
             )
         );
@@ -280,7 +296,7 @@ export function inspectInstall(install: DiscordInstall, options: InspectOptions 
                     ? "Subline could not open Discord's app.asar. Discord itself is "
                       + "probably fine. This is normally a permissions problem. "
                       + `(${stubResult.error.message})`
-                    : `Discord's app.asar could not be read as an archive (${stubResult.error.message})`
+                    : `Discord's app.asar could not be read as an archive (${stubResult.error.message}). ${marker !== null && hasBackup ? BROKEN_REMEDY.uninstall : BROKEN_REMEDY.reinstall}`
             )
         );
     }
@@ -379,7 +395,7 @@ function classifyStub(
                 broken(
                     install,
                     "our-patch-without-backup",
-                    "Subline's patch is installed but Discord's original app.asar backup is missing, so it cannot be restored.",
+                    `Subline's patch is installed but Discord's original app.asar backup is missing, so it cannot be restored. ${BROKEN_REMEDY.reinstall}`,
                     { mod: "subline", modName: MOD_NAMES.subline, loaderPath, marker, asarIsStub: true, warnings, ...extra }
                 )
             );
@@ -429,7 +445,7 @@ function classifyStub(
             broken(
                 install,
                 "foreign-patch-without-backup",
-                `${modName} has patched Discord here, but the original app.asar was not preserved. Reinstall Discord before continuing.`,
+                `${modName} has patched Discord here, but the original app.asar was not preserved. ${BROKEN_REMEDY.reinstall}`,
                 { mod, modName, loaderPath, warnings, asarIsStub: true }
             )
         );

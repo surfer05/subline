@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { DiagnosticsLog } from "../app/log.js";
+import { RESET_HELP_URL } from "../app/codeScreen.js";
 import { InstallFlow } from "../app/flow.js";
 import type { FlowAction, FlowState } from "../app/flow.js";
 import {
@@ -713,7 +714,8 @@ ipcMain.handle("uninstall:check", async (): Promise<{ discordRunning: boolean; p
 ipcMain.handle("shell:open", async (_event, url: string) => {
     // Only ever our own deep links and documentation. A renderer that could open
     // an arbitrary URL through the main process is a phishing primitive.
-    if (!/^(https:\/\/|x-apple\.systempreferences:)/.test(url)) return false;
+    // And exactly one mailto: Subline's support address (field test I8).
+    if (!/^(https:\/\/|x-apple\.systempreferences:)/.test(url) && url !== RESET_HELP_URL) return false;
     await shell.openExternal(url);
     return true;
 });

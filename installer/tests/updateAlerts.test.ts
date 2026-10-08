@@ -121,7 +121,7 @@ describe("update-failed cadence (audit 2026-10-06 #33)", () => {
         await runEverySixHours(40);
         expect(updateFailed().length).toBeLessThanOrEqual(2);
         // An HTML page is a malformed feed, not a format this Subline is too old for.
-        expect(updateFailed().every(alert => !alert.message.includes("surfer05.github.io/subline"))).toBe(true);
+        expect(updateFailed().every(alert => !alert.message.includes("subline.page"))).toBe(true);
     });
 
     it("a manifest format this Subline cannot read says so on the first run, and names the site", async () => {
@@ -134,7 +134,7 @@ describe("update-failed cadence (audit 2026-10-06 #33)", () => {
         await harness.run();
         expect(updateFailed()).toHaveLength(1);
         expect(updateFailed()[0]?.message).toBe(
-            "This Subline can no longer read its update feed. Get the new Subline from surfer05.github.io/subline."
+            "This Subline can no longer read its update feed. Get the new Subline from subline.page."
         );
         expect(updateFailed()[0]?.detail.code).toBe("RELEASE_FORMAT_UNSUPPORTED");
     });

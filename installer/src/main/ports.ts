@@ -58,7 +58,8 @@ import { modBundleDirFor, productDirFor } from "../bundle/layout.js";
 import { locateDiscordInstalls } from "../patcher/locate.js";
 import type { DiscordBranch, DiscordInstall } from "../patcher/locate.js";
 import { loaderPathFor } from "../bundle/spec.js";
-import { patchInstall } from "../patcher/patch.js";
+import { adoptPatch, patchInstall } from "../patcher/patch.js";
+import { clearPendingLanguage, readPendingLanguage, writePendingLanguage } from "../app/pendingSetup.js";
 import { err, ok } from "../patcher/result.js";
 import type { Result } from "../patcher/result.js";
 import { inspectInstall } from "../patcher/state.js";
@@ -746,6 +747,19 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
                 productVersion: options.productVersion,
                 overwriteForeignMod: patchOptions.overwriteForeignMod
             }),
+        inspectInstalledBundle: dir => inspectModBundle(dir),
+        adoptPatch: (install, modBundleDir) => {
+            const adopted = adoptPatch(install, { modBundleDir, productVersion: options.productVersion });
+            return adopted.ok
+                ? ok({ pluginBuildId: adopted.value.pluginBuildId, discordVersion: adopted.value.discordVersion })
+                : adopted as Result<never>;
+        },
+        pendingLanguage: () => readPendingLanguage(productDirFor(platform, env, home), Date.now()),
+        rememberPendingLanguage: code => {
+            const written = writePendingLanguage(productDirFor(platform, env, home), code, Date.now());
+            if (!written.ok) options.log.warn("language.pending-save-failed", { code: written.error.code, cause: written.error.cause ?? null });
+        },
+        clearPendingLanguage: () => clearPendingLanguage(productDirFor(platform, env, home)),
         rememberPatchedInstall: (install, patched) => {
             const productDir = productDirFor(platform, env, home);
             const remembered = rememberPatchedInstall(productDir, install);

@@ -48,6 +48,7 @@ import { CODE_SCREEN_COPY, RESET_HELP_URL } from "./codeScreen.js";
 import { defaultLanguage, endonymOf, languageOptions } from "./language.js";
 import type { EnsureRelayEngineReport, LanguageOption, SetSublineCodeReport, SetTargetLanguageReport } from "./language.js";
 import type { ModBundle } from "../bundle/bundle.js";
+import { compareVersions } from "../patcher/compareVersions.js";
 import type { DiscordBranch, DiscordInstall } from "../patcher/locate.js";
 import type { PatchReport } from "../patcher/patch.js";
 import type { PatcherError, Result } from "../patcher/result.js";
@@ -289,6 +290,12 @@ export interface FlowLogger {
     error(event: string, fields?: Record<string, string | number | boolean | null | undefined>): void;
 }
 
+/** patch-failed lines that replace the raw error (audit 2026-10-06 #13, #16). */
+export const PATCH_FAILED_COPY = {
+    scanning: "Another program, often antivirus, is still scanning Discord's files. Wait a few seconds and press Try again.",
+    reinstall: "Reinstall Discord from discord.com, then run Subline again."
+} as const;
+
 /** The move-to-Applications screen (audit 2026-10-06 #24). Plain sentences, no dashes. */
 export const MOVE_COPY = {
     title: "Move Subline to Applications first",
@@ -401,6 +408,27 @@ export interface FlowPorts {
     moveToApplications?(): Promise<Result<boolean>>;
     launchDiscord(install: DiscordInstall): Promise<Result<true>>;
     verify(options: AwaitVerifyOptions): Promise<VerificationReport>;
+
+    /**
+     * Read the Subline bundle a patched Discord loads (the folder its loader
+     * lives in), for the version it carries (audit 2026-10-06 #12). An error
+     * means "cannot say", never a reason to block.
+     */
+    inspectInstalledBundle?(dir: string): Result<ModBundle>;
+    /**
+     * Write the marker beside our stub when the stub already loads this
+     * bundle (patch.ts adoptPatch). Writes nothing in app.asar, so it works
+     * while Discord runs on Windows (audit 2026-10-06 #11).
+     */
+    adoptPatch?(install: DiscordInstall, modBundleDir: string): Result<{ pluginBuildId: string; discordVersion: string | null }>;
+    /**
+     * The reading language chosen on an earlier run that stopped before
+     * activation (field test I6), or null. Kept outside Vencord's settings,
+     * so an abandoned run never looks like earlier Subline use.
+     */
+    pendingLanguage?(): string | null;
+    rememberPendingLanguage?(code: string): void;
+    clearPendingLanguage?(): void;
 
     /** Timings, injected so tests do not wait. */
     permissionPollIntervalMs?: number;
@@ -555,11 +583,36 @@ export class InstallFlow {
                         return this.alreadyInstalled(install, inspected.value);
                     }
                 }
+                const resumed = await this.resumeActivation(installs.value);
+                if (resumed !== null) return resumed;
             }
         } catch (cause) {
             this.ports.log.warn("flow.resume-check-failed", { cause: String(cause) });
         }
         return this.current;
+    }
+
+    /**
+     * A RESTART MID-CHECKOUT (field test 2026-10-08, I6). The language was
+     * chosen, the browser was paying, and the computer restarted: the next
+     * run started again at Welcome. With a language chosen on an earlier run,
+     * no code saved and exactly one Discord that is not Subline's yet, carry
+     * on at "Activate Subline". A saved install id is asked about first, so a
+     * purchase that landed meanwhile is found without a second press.
+     */
+    private async resumeActivation(installs: readonly DiscordInstall[]): Promise<FlowState | null> {
+        const language = this.ports.pendingLanguage?.() ?? null;
+        if (language === null || this.ports.hasSublineCode() || this.ports.priorSublineUse()) return null;
+        if (installs.length !== 1) return null;
+        const install = installs[0] as DiscordInstall;
+        const inspected = this.ports.inspect(install);
+        if (!inspected.ok || inspected.value.kind !== "unpatched") return null;
+        if (!this.ports.inspectShippedBundle().ok) return null;
+        this.chosenInstall = install;
+        this.chosenLanguage = language;
+        this.languagePending = true;
+        this.ports.log.info("flow.resume-activation", { lang: language });
+        return this.codeStepUnlessSaved();
     }
 
     async send(action: FlowAction): Promise<FlowState> {
@@ -686,6 +739,10 @@ export class InstallFlow {
                 // returns to the choice. The checkout stays open in the browser;
                 // a purchase finished later is found the next time the flow asks.
                 if (action.type === "back") return this.codeStep();
+                // Try again: a fresh checkout. The relay answers
+                // purchase_pending when a payment is already on its way, so
+                // this never sells twice (field test I7).
+                if (action.type === "retry") return this.buyAutomatic();
                 return this.current;
 
             case "activation-check-failed":
@@ -723,6 +780,8 @@ export class InstallFlow {
                 if (this.current.error?.code === "PERMISSION_DENIED" && this.ports.platform === "darwin") {
                     return this.explainPermission("blocked");
                 }
+                // The Discord that was chosen is gone: find Discord again.
+                if (this.current.error?.code === "DISCORD_MOVED") return this.detect();
                 return this.patchStep();
 
             // Discord is ALREADY PATCHED by the time this screen can appear, so
@@ -974,6 +1033,18 @@ export class InstallFlow {
                 actions: ["recheck", "cancel"]
             }));
         }
+        // REMEMBERED, ONCE, after the other-account check (audit #15): a
+        // Discord patched before patched-installs.json existed, or one only
+        // ever updated, is found again by Uninstall and the helper. Upserted
+        // by stable id, so a second write is harmless.
+        this.remember(install);
+        // AN OLDER INSTALLER IS NOT AN UPDATE (audit #12). Compared by the
+        // plugin version of the bundle Discord actually loads, never by the
+        // marker (a feed update rewrites the marker with an older product
+        // version). An unreadable bundle means "cannot say": the update goes
+        // ahead, since it is also the repair for a missing Subline folder.
+        const newer = this.newerInstalled(installState);
+        if (newer !== null) return newer;
         // AN OLDER BUILD IS NOT "ALREADY SET UP". Observed 2026-09-03: a new
         // installer run over an existing install landed on "nothing left to
         // do" while Discord kept running the previous plugin build - with the
@@ -1055,6 +1126,51 @@ export class InstallFlow {
             installState,
             actions: ["finish"]
         })));
+    }
+
+    /** Remember this Discord for Uninstall and the helper. Never fails the install. */
+    private remember(install: DiscordInstall, patched?: { discordVersion: string | null; buildId: string }): void {
+        try {
+            this.ports.rememberPatchedInstall?.(install, patched);
+        } catch (cause) {
+            this.ports.log.warn("patch.remember-failed", { cause: String(cause) });
+        }
+    }
+
+    /** The "newer Subline already installed" screen, or null when this installer is not older. */
+    private newerInstalled(installState: InstallState): FlowState | null {
+        const loader = installState.marker?.loaderPath ?? installState.loaderPath;
+        if (loader === null || loader === undefined || this.ports.inspectInstalledBundle === undefined) return null;
+        const shipped = this.ports.inspectShippedBundle();
+        if (!shipped.ok || shipped.value.pluginVersion === null) return null;
+        const dir = loader.replace(/[\\/][^\\/]+$/, "");
+        let installed: Result<ModBundle>;
+        try {
+            installed = this.ports.inspectInstalledBundle(dir);
+        } catch (cause) {
+            this.ports.log.warn("flow.installed-bundle-unreadable", { dir, cause: String(cause) });
+            return null;
+        }
+        if (!installed.ok || installed.value.pluginVersion === null) {
+            this.ports.log.info("flow.installed-bundle-unreadable", { dir, code: installed.ok ? "no-version" : installed.error.code });
+            return null;
+        }
+        if (compareVersions(shipped.value.pluginVersion, installed.value.pluginVersion) >= 0) return null;
+        this.ports.log.warn("flow.newer-installed", {
+            installed: installed.value.pluginVersion,
+            shipped: shipped.value.pluginVersion
+        });
+        const detail = `A newer Subline (${installed.value.pluginVersion}) is already installed. This installer is older (${shipped.value.pluginVersion}). `
+            + (this.ports.platform === "win32"
+                ? "Get the latest Subline from subline.page and run it."
+                : "Nothing was changed. Get the latest Subline from subline.page.");
+        return this.set(state({
+            step: "already-installed",
+            detail,
+            install: installState.install,
+            installState,
+            actions: ["finish"]
+        }));
     }
 
     /**
@@ -1255,6 +1371,11 @@ export class InstallFlow {
         this.chosenLanguage = code;
         this.languagePending = true;
         this.ports.log.info("language.chosen", { lang: code });
+        try {
+            this.ports.rememberPendingLanguage?.(code);
+        } catch (cause) {
+            this.ports.log.warn("language.pending-save-failed", { cause: String(cause) });
+        }
         return this.codeStepUnlessSaved();
     }
 
@@ -1271,6 +1392,11 @@ export class InstallFlow {
             }
             this.languagePending = false;
             this.chosenLanguage = saved.value.code;
+            try {
+                this.ports.clearPendingLanguage?.();
+            } catch (cause) {
+                this.ports.log.warn("language.pending-clear-failed", { cause: String(cause) });
+            }
             this.ports.log.info("language.saved", { lang: saved.value.code, created: saved.value.created });
         }
         return this.checkRunning();
@@ -1342,9 +1468,17 @@ export class InstallFlow {
         }));
     }
 
-    /** An error for the activation screen: the copy the user reads, plus the cause for the log. */
+    /**
+     * An error for the activation screen: the copy the user reads, plus the
+     * cause for the log. With no cause it is the relay's ANSWER (a wrong or
+     * claimed code, a limit): CODE_REFUSED, which shows only the line, never
+     * the "What went wrong" box (field test I5). With a cause (the relay
+     * could not be reached) the box stays, so the errno can be copied.
+     */
     private activationError(message: string, cause?: string): PatcherError {
-        return { code: "IO_ERROR", message, ...(cause === undefined ? {} : { cause }) };
+        return cause === undefined
+            ? { code: "CODE_REFUSED", message }
+            : { code: "IO_ERROR", message, cause };
     }
 
     /**
@@ -1503,12 +1637,16 @@ export class InstallFlow {
             ));
         }
 
-        const waitingDetail = url === null ? CODE_SCREEN_COPY.purchasePending : CODE_SCREEN_COPY.waiting;
+        const waitingDetail = url === null
+            ? CODE_SCREEN_COPY.purchasePending
+            : `${CODE_SCREEN_COPY.waiting}\n\n${CODE_SCREEN_COPY.vpn}`;
+        // Try again reopens the checkout; Back returns to the choice.
+        const waitingActions: FlowActionType[] = url === null ? ["back"] : ["retry", "back"];
         let waiting = this.set(state({
             step: "activation-waiting",
             detail: waitingDetail,
             busy: true,
-            actions: ["back"]
+            actions: waitingActions
         }));
         const startedAt = this.ports.now();
         let hinted = false;
@@ -1551,7 +1689,7 @@ export class InstallFlow {
                     step: "activation-waiting",
                     detail: `${waitingDetail}\n\n${CODE_SCREEN_COPY.waitingLate}`,
                     busy: true,
-                    actions: ["back"]
+                    actions: waitingActions
                 }));
             }
             const answer = await this.ports.relay.status(installBearer(id.value), id.value);
@@ -1899,14 +2037,42 @@ export class InstallFlow {
             return this.failPatch(installed.error);
         }
         this.installedBundle = installed.value;
-        this.updateStaged = true;
+        this.remember(install);
+        // THE MARKER NOW, NOT AFTER DISCORD CLOSES (audit #11). When Discord's
+        // stub already loads this bundle, the update is only a marker rewrite,
+        // which Windows allows while Discord runs. Without it the helper waited
+        // for a quit and, 30 minutes later, said "Discord updated, quit
+        // Discord", which was not true. Anything else (a stub that loads
+        // another Subline path, a damaged one) stays staged for the helper.
+        const adopted = this.adopt(install, installed.value.dir);
+        this.updateStaged = !adopted;
         this.ports.log.info("bundle.staged", {
             build: installed.value.buildId,
             replaced: installed.value.replaced,
             dir: installed.value.dir,
-            reason: "Discord is open on Windows, so the helper applies this after it closes"
+            markerWritten: adopted,
+            reason: adopted
+                ? "Discord is open on Windows; the stub already loads this bundle, so only the marker was written"
+                : "Discord is open on Windows, so the helper applies this after it closes"
         });
         return this.installHelper();
+    }
+
+    /** adoptPatch through its port. True when the marker now names this build. Never fails the update. */
+    private adopt(install: DiscordInstall, modBundleDir: string): boolean {
+        if (this.ports.adoptPatch === undefined) return false;
+        try {
+            const adopted = this.ports.adoptPatch(install, modBundleDir);
+            if (!adopted.ok) {
+                this.ports.log.info("bundle.adopt-skipped", errorFields(adopted.error));
+                return false;
+            }
+            this.ports.log.info("bundle.adopted", { build: adopted.value.pluginBuildId });
+            return true;
+        } catch (cause) {
+            this.ports.log.warn("bundle.adopt-skipped", { cause: String(cause) });
+            return false;
+        }
     }
 
     private async applyPatch(): Promise<FlowState> {
@@ -1944,6 +2110,21 @@ export class InstallFlow {
             }
         }
 
+        // DISCORD MAY HAVE MOVED (audit #23). On Windows, Discord's updater
+        // lays down a new app-1.0.x folder while Discord runs, and the user may
+        // have spent minutes paying or granting permission since detection.
+        // Discord is closed now (checked just above), so the folder it will run
+        // next is settled: patch that one, never a folder it has left.
+        const target = this.relocate(install);
+        if (!target.ok) return this.failPatch(target.error);
+        if (target.value !== install) {
+            const moved = this.ports.inspect(target.value);
+            if (!moved.ok || (moved.value.kind !== "unpatched" && moved.value.kind !== "patched-by-us")) {
+                return this.inspectChosen(target.value);
+            }
+        }
+        const patchTarget = target.value;
+
         // The bundle goes to its runtime location FIRST, and the patch points at
         // that copy — never at a path inside our own app bundle. See
         // `modInstall.ts`: the wrong path here breaks Discord's ability to start.
@@ -1959,7 +2140,7 @@ export class InstallFlow {
             dir: installed.value.dir
         });
 
-        const patched = this.ports.patch(install, {
+        const patched = this.ports.patch(patchTarget, {
             modBundleDir: installed.value.dir,
             overwriteForeignMod: this.overwriteForeignMod
         });
@@ -1970,16 +2151,12 @@ export class InstallFlow {
 
         this.patchReport = patched.value;
         this.patchedAt = this.ports.now();
-        try {
-            // BEFORE the helper is registered: macOS starts it at once, and its
-            // first run must already know this Discord is ours.
-            this.ports.rememberPatchedInstall?.(install, {
-                discordVersion: patched.value.discordVersion,
-                buildId: patched.value.pluginBuildId
-            });
-        } catch (cause) {
-            this.ports.log.warn("patch.remember-failed", { cause: String(cause) });
-        }
+        // BEFORE the helper is registered: macOS starts it at once, and its
+        // first run must already know this Discord is ours.
+        this.remember(patchTarget, {
+            discordVersion: patched.value.discordVersion,
+            buildId: patched.value.pluginBuildId
+        });
         this.ports.log.info("patch.ok", {
             build: patched.value.pluginBuildId,
             discord: patched.value.discordVersion ?? null,
@@ -2008,6 +2185,47 @@ export class InstallFlow {
      * screen says exactly that and offers to carry on, because refusing to finish
      * an install that is working would be a worse answer than a named warning.
      */
+    /**
+     * The install to patch now: the same Discord (stable id) as the one
+     * chosen, as it is on disk now. Unchanged when nothing moved or the
+     * search cannot say; DISCORD_MOVED when that Discord is gone.
+     */
+    private relocate(install: DiscordInstall): Result<DiscordInstall> {
+        let located: Result<DiscordInstall[]>;
+        try {
+            located = this.ports.locate(this.explicitPaths.length > 0 ? this.explicitPaths : undefined);
+        } catch (cause) {
+            this.ports.log.warn("patch.relocate-failed", { cause: String(cause) });
+            return { ok: true, value: install };
+        }
+        if (!located.ok) {
+            this.ports.log.warn("patch.relocate-failed", errorFields(located.error));
+            return { ok: true, value: install };
+        }
+        const same = located.value.find(candidate => candidate.stableId === install.stableId);
+        if (same === undefined) {
+            // A hand-picked folder outside the search can be missing from it;
+            // only a folder that is really gone is refused.
+            if (located.value.some(candidate => candidate.rootPath === install.rootPath)) return { ok: true, value: install };
+            if (install.fromExplicitPath) return { ok: true, value: install };
+            this.ports.log.error("patch.target-gone", { path: install.rootPath, stableId: install.stableId });
+            return {
+                ok: false,
+                error: {
+                    code: "DISCORD_MOVED",
+                    message: "Discord changed while Subline was waiting, so Subline did not change anything. Press Try again.",
+                    path: install.rootPath
+                }
+            };
+        }
+        if (same.rootPath !== install.rootPath) {
+            this.ports.log.info("patch.target-moved", { from: install.rootPath, to: same.rootPath });
+            this.chosenInstall = same;
+            return { ok: true, value: same };
+        }
+        return { ok: true, value: install };
+    }
+
     private async installHelper(): Promise<FlowState> {
         if (this.aborted) return this.current;
         this.set(state({
@@ -2076,9 +2294,18 @@ export class InstallFlow {
         // is now broken" — which is the state they would then try to fix by
         // hand, on a Discord that is already fine.
         const rolledBack = error.code === "VERIFICATION_FAILED";
-        const detail = rolledBack
-            ? `${error.message} Discord has been put back exactly as it was, so nothing is broken. Please report this.`
-            : error.message;
+        // A damaged backup another tool left is not ours to report: name the
+        // remedy (audit #13). A file held open right after Discord was seen
+        // closed is a scan, usually antivirus (audit #16), not Discord.
+        const backupDamaged = error.code === "BACKUP_CORRUPT"
+            || (rolledBack && this.chosenInstall !== null && error.path === this.chosenInstall.backupPath);
+        const detail = backupDamaged
+            ? `${error.message}${rolledBack ? ` Discord has been put back as it was. ${PATCH_FAILED_COPY.reinstall}` : ""}`
+            : rolledBack
+                ? `${error.message} Discord has been put back exactly as it was, so nothing is broken. Please report this.`
+                : error.code === "FILE_IN_USE" && !this.updatingWithDiscordOpen
+                    ? PATCH_FAILED_COPY.scanning
+                    : error.message;
         return this.set(state({
             step: "patch-failed",
             detail,

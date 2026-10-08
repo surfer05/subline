@@ -110,6 +110,16 @@ export type PatcherErrorCode =
      * so a helper registered now would point at a path that soon disappears.
      */
     | "HELPER_APP_LOCATION_TEMPORARY"
+    /**
+     * The relay's answer about a code: it does not exist, is fully claimed,
+     * is at its computer limit, too many tries. Not a failure of Subline, so
+     * the screen shows the sentence alone, with no diagnostics box.
+     */
+    | "CODE_REFUSED"
+    /** Discord changed under the installer (its folder went away before the patch). */
+    | "DISCORD_MOVED"
+    /** Something the installer did not expect threw. The cause is in the log. */
+    | "UNEXPECTED"
     /** Anything else that came back from the filesystem. */
     | "IO_ERROR";
 
