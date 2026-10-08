@@ -152,6 +152,32 @@ export class DiagnosticsLog {
     private readonly maxFiles: number;
     private readonly clock: () => number;
     private readonly home: string;
+    /**
+     * Lines that could not be written, and why (audit 2026-10-06 #20). The
+     * next line that lands is preceded by one "subline.log.lost" entry with
+     * the count and the errno, so a full disk or a locked folder is visible
+     * in the very log it interrupted.
+     */
+    private lost: { count: number; code: string | null; path: string } | null = null;
+
+    /** The last write failure, or null once a line has landed again. For tests and the header. */
+    get lastWriteError(): { count: number; code: string | null; path: string } | null {
+        return this.lost === null ? null : { ...this.lost };
+    }
+
+    private noteLost(cause: unknown, path: string): void {
+        const code = typeof (cause as { code?: unknown } | null)?.code === "string" ? (cause as { code: string }).code : null;
+        if (this.lost === null) {
+            this.lost = { count: 0, code, path };
+            try {
+                process.stderr.write(`subline: could not write the diagnostics log at ${path} (${code ?? String(cause)})\n`);
+            } catch {
+                // stderr itself may be gone; nothing more to do.
+            }
+        }
+        this.lost.count += 1;
+        this.lost.code = code ?? this.lost.code;
+    }
     /** Kept so the copied bundle can restate what version wrote it. */
     private header: DiagnosticsHeader | null = null;
 
@@ -221,7 +247,8 @@ export class DiagnosticsLog {
     private append(line: string): void {
         try {
             mkdirSync(this.dir, { recursive: true });
-        } catch {
+        } catch (cause) {
+            this.noteLost(cause, this.dir);
             return; // Nowhere to write. Losing a line beats stopping the caller.
         }
         try {
@@ -229,10 +256,16 @@ export class DiagnosticsLog {
         } catch {
             // A rotation that failed leaves an oversized file, which is fine.
         }
+        const lost = this.lost;
+        const text = lost === null
+            ? line
+            : formatEntry(this.clock(), "warn", "subline.log.lost", { lines: lost.count, code: lost.code, path: lost.path }) + line;
         try {
-            appendFileSync(this.path, line, "utf8");
-        } catch {
+            appendFileSync(this.path, text, "utf8");
+            this.lost = null;
+        } catch (cause) {
             // Same rule: never let a log line stop the caller.
+            this.noteLost(cause, this.path);
         }
     }
 

@@ -14,6 +14,7 @@
 
 import { ACTION_LABELS, IS_PRIMARY } from "../app/actions.js";
 import { CODE_SCREEN_COPY, codeScreenView, showsDiagnostics } from "../app/codeScreen.js";
+import { UNEXPECTED_FAILURE_COPY, unexpectedFailureState } from "../app/failure.js";
 import type { FlowAction, FlowActionType, FlowState } from "../app/flow.js";
 import type { LanguageOption } from "../app/language.js";
 import { pendingAlertLines } from "../app/pendingAlerts.js";
@@ -94,7 +95,8 @@ const STEP_TITLES: Record<FlowState["step"], string> = {
     "launch-failed": "Could not start Discord",
     verifying: "Checking it works",
     done: "Finished",
-    cancelled: "Cancelled"
+    cancelled: "Cancelled",
+    failed: UNEXPECTED_FAILURE_COPY.title
 };
 
 
@@ -577,7 +579,14 @@ async function onAction(action: FlowActionType): Promise<void> {
 }
 
 async function act(action: FlowAction): Promise<void> {
-    render(await api.send(action));
+    // A rejected call must still leave a screen with a button (audit #20).
+    let next: FlowState | null;
+    try {
+        next = await api.send(action);
+    } catch (cause) {
+        next = unexpectedFailureState(cause) as unknown as FlowState;
+    }
+    render(next);
 }
 
 document.getElementById("copy-diagnostics")?.addEventListener("click", () => {

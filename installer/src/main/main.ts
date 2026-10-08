@@ -24,6 +24,7 @@ import { dirname, join } from "node:path";
 import { DiagnosticsLog } from "../app/log.js";
 import { RESET_HELP_URL } from "../app/codeScreen.js";
 import { InstallFlow } from "../app/flow.js";
+import { guardedFlowCall } from "../app/failure.js";
 import type { FlowAction, FlowState } from "../app/flow.js";
 import {
     APP_MANAGEMENT_SETTINGS_URL, appManagementSummary, awaitAppManagement, isLoggedAttempt, probeAppManagement, worstAppManagementStatus
@@ -361,22 +362,27 @@ app.on("window-all-closed", () => {
  * IPC — the whole renderer contract
  * ------------------------------------------------------------------------ */
 
-ipcMain.handle("flow:start", () => {
+// EVERY FLOW CALL IS GUARDED (audit 2026-10-06 #20): a throw becomes a
+// "Something went wrong" screen with Done, and its cause goes to the log,
+// instead of a rejected call that left the window on a busy screen.
+const onFlowCrash = (cause: unknown): void => log.error("flow.crashed", describeCrash(cause));
+
+ipcMain.handle("flow:start", () => guardedFlowCall(() => {
     // Also here, not only on activate: a window that was already open when the
     // new bundle landed asks for its first state through this handler, and
     // starting the flow would run the old build's install.
     if (relaunchIfBundleChanged()) return null;
     if (uninstallStarted) return null;
     return (flow ??= createFlow()).start();
-});
+}, onFlowCrash));
 
-ipcMain.handle("flow:send", async (_event, action: FlowAction) => {
+ipcMain.handle("flow:send", (_event, action: FlowAction) => guardedFlowCall(() => {
     if (uninstallStarted) return null;
     flow ??= createFlow();
     return flow.send(action);
-});
+}, onFlowCrash));
 
-ipcMain.handle("flow:restart", () => {
+ipcMain.handle("flow:restart", () => guardedFlowCall(() => {
     if (uninstallStarted) return null;
     // The old flow may still have a background confirmation running (see
     // InstallFlow.verify); detach it so a late result cannot repaint the new
@@ -384,7 +390,7 @@ ipcMain.handle("flow:restart", () => {
     if (flow !== null) flow.onChange = null;
     flow = createFlow();
     return flow.start();
-});
+}, onFlowCrash));
 
 /** The manual path picker for "Discord installed somewhere unusual" (§7). */
 ipcMain.handle("flow:pick-discord", async () => {

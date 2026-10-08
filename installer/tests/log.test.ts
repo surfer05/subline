@@ -286,6 +286,23 @@ describe("two writers, one log (audit 2026-10-06 #39)", () => {
         expect(log.read()).toContain("subline.session");
     });
 
+    it("a lost line is recorded with its errno, and the next line that lands says so (audit #20)", () => {
+        const blocker = join(dir, "blocker2");
+        writeFileSync(blocker, "a file where the folder should be");
+        const log = new DiagnosticsLog({ dir: blocker, clock: () => clockValue });
+        log.info("lost.one");
+        log.info("lost.two");
+        expect(log.lastWriteError?.count).toBe(2);
+        expect(["EEXIST", "ENOTDIR"]).toContain(log.lastWriteError?.code);
+        rmSync(blocker);
+        log.info("landed");
+        expect(log.lastWriteError).toBeNull();
+        const text = log.read();
+        expect(text).toContain("subline.log.lost");
+        expect(text.indexOf("subline.log.lost")).toBeLessThan(text.indexOf("landed"));
+        expect(text).not.toContain("lost.one");
+    });
+
     it("a missing log folder that cannot be made never throws", () => {
         const blocker = join(dir, "blocker");
         writeFileSync(blocker, "a file where the folder should be");

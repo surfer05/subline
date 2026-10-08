@@ -43,7 +43,41 @@ const SRC = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
  * gets that judgement right every time — but "no module in patcher/ may import
  * node:fs at all". Keep additions here to files that genuinely live elsewhere.
  */
-const ASAR_TOUCHING_OUTSIDE_PATCHER = ["app/uninstall.ts"];
+const ASAR_TOUCHING_OUTSIDE_PATCHER = ["app/uninstall.ts", "helper/ports.ts"];
+
+/**
+ * Files outside patcher/ ALLOWED to import an asar-sensitive name from
+ * node:fs, because they never see a Discord path (audit 2026-10-06 #19: the
+ * hand list above missed helper/ports.ts exactly as it once missed
+ * locate.ts). Inverted on purpose: a new file that imports statSync or
+ * existsSync from node:fs fails below until someone adds it here and states
+ * that it never touches an asar.
+ */
+const NEVER_SEES_A_DISCORD_PATH = new Set([
+    "app/appManagement.ts", // a probe file of its own beside Discord's files, never an .asar
+    "app/language.ts", // Vencord's and Discord's settings.json
+    "app/log.ts", // Subline's own log folder
+    "app/modInstall.ts", // Subline's mod folder
+    "app/patchedInstalls.ts", // Subline's own record
+    "app/pendingSetup.ts", // Subline's own record
+    "bundle/bundle.ts", // Subline's mod folder
+    "bundle/spec.ts", // Subline's mod folder
+    "helper/alerts.ts", // Subline's own record
+    "helper/launchAgent.ts", // ~/Library/LaunchAgents
+    "helper/scheduledTask.ts", // Subline's task XML
+    "helper/state.ts", // Subline's own record
+    "main/main.ts", // the Start Menu shortcut
+    "main/ports.ts", // the LaunchAgent plist
+    "verify/beacon.ts" // the plugin's status file
+]);
+
+function sourceFiles(dir: string, rel = ""): string[] {
+    return readdirSync(join(dir, rel), { withFileTypes: true }).flatMap(entry => {
+        const path = rel === "" ? entry.name : `${rel}/${entry.name}`;
+        if (entry.isDirectory()) return sourceFiles(dir, path);
+        return entry.name.endsWith(".ts") ? [path] : [];
+    });
+}
 
 /** Calls that would hit Electron's patched module if imported from node:fs. */
 const ASAR_SENSITIVE = [
@@ -61,6 +95,19 @@ describe("asar-touching modules use the unpatched filesystem", () => {
         // realFs.ts is the single permitted importer; it is what wraps the
         // module. Everything else goes through it, including files whose fs use
         // looks obviously safe — `locate.ts` looked obviously safe.
+        expect(offenders).toEqual([]);
+    });
+
+    it("every file outside patcher/ that imports an asar-sensitive node:fs name is on the allowlist", () => {
+        const offenders = sourceFiles(SRC)
+            .filter(rel => !rel.startsWith("patcher/"))
+            .filter(rel => {
+                const source = readFileSync(join(SRC, rel), "utf8");
+                const names = [...source.matchAll(/import \{([^}]*)\} from "node:fs";/g)]
+                    .flatMap(m => (m[1] ?? "").split(",").map(n => n.trim()));
+                return names.some(n => ASAR_SENSITIVE.includes(n));
+            })
+            .filter(rel => !NEVER_SEES_A_DISCORD_PATH.has(rel));
         expect(offenders).toEqual([]);
     });
 

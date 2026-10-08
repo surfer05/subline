@@ -250,14 +250,41 @@ function describeExplicitPath(
     }
     const branch = branchFromPath(rootPath, platform) ?? branches[0] ?? "stable";
     const install = makeInstall(branch, rootPath, platform, true);
-    if (!looksLikeDiscord(install)) {
-        return err<DiscordInstall>(
-            "NOT_A_DISCORD_INSTALL",
-            `${rootPath} does not look like a Discord installation (no app.asar under ${install.resourcesPath}).`,
-            { path: rootPath }
-        );
+    if (looksLikeDiscord(install)) return ok(install);
+
+    // THE OBVIOUS PICK IS NOT ALWAYS THE FOLDER WITH app.asar IN IT (audit
+    // 2026-10-06 #21). On Windows people pick the Discord folder itself
+    // (Update.exe and app-1.0.xxxx inside), and on either system the
+    // resources folder. Both lead to the same Discord, found the same way
+    // the search finds it: the newest app folder that really is Discord.
+    if (platform === "win32") {
+        for (const appDir of findWindowsAppDirs(rootPath)) {
+            const candidate = makeInstall(branch, appDir, platform, true);
+            if (looksLikeDiscord(candidate)) return ok(candidate);
+        }
     }
-    return ok(install);
+    const parent = resourcesParent(rootPath, platform);
+    if (parent !== null) {
+        const candidate = makeInstall(branchFromPath(parent, platform) ?? branch, parent, platform, true);
+        if (looksLikeDiscord(candidate)) return ok(candidate);
+    }
+    return err<DiscordInstall>(
+        "NOT_A_DISCORD_INSTALL",
+        platform === "win32"
+            ? `${rootPath} is not Discord. Pick the Discord folder, usually C:\\Users\\<you>\\AppData\\Local\\Discord, or the app-1.0.xxxx folder inside it.`
+            : `${rootPath} is not Discord. Pick Discord in your Applications folder.`,
+        { path: rootPath, cause: `no app.asar under ${install.resourcesPath}` }
+    );
+}
+
+/** The Discord folder a picked resources folder belongs to, or null when the pick is not one. */
+function resourcesParent(rootPath: string, platform: NodeJS.Platform): string | null {
+    const trimmed = rootPath.replace(/[\\/]+$/, "");
+    if (platform === "win32") {
+        return basename(trimmed).toLowerCase() === "resources" ? dirname(trimmed) : null;
+    }
+    if (basename(trimmed) === "Resources" && basename(dirname(trimmed)) === "Contents") return dirname(dirname(trimmed));
+    return null;
 }
 
 /** Best-effort branch inference for a hand-picked path; falls back to the caller's default. */

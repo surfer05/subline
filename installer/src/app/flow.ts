@@ -168,7 +168,9 @@ export type FlowStep =
     | "verifying"
     | "done"
     /* The user stopped. Not a failure. */
-    | "cancelled";
+    | "cancelled"
+    /** Something threw that nobody expected (app/failure.ts). Done is the only action. */
+    | "failed";
 
 export type FlowActionType =
     | "next"

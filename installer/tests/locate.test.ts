@@ -308,3 +308,55 @@ describe("uninstallTargets", () => {
     });
 });
 
+
+describe("a hand-picked Discord folder (audit 2026-10-06 #21)", () => {
+    function branchTree(versions: Array<[string, boolean]>): string {
+        const root = tempRoot();
+        const branchDir = join(root, "Apps", "Discord");
+        for (const [version, withAsar] of versions) {
+            mkdirSync(join(branchDir, `app-${version}`, "resources"), { recursive: true });
+            if (withAsar) writeFileSync(join(branchDir, `app-${version}`, "resources", "app.asar"), buildOriginalDiscordAsar());
+        }
+        return branchDir;
+    }
+
+    it("Windows: the branch folder itself finds the newest app folder", () => {
+        const branchDir = branchTree([["1.0.1", true], ["1.0.2", true]]);
+        const result = locateDiscordInstalls({ platform: "win32", explicitPaths: [branchDir], searchRoots: [] });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value).toHaveLength(1);
+        expect(result.value[0]!.rootPath).toBe(join(branchDir, "app-1.0.2"));
+        expect(result.value[0]!.stableId).toBe(branchDir);
+        expect(result.value[0]!.fromExplicitPath).toBe(true);
+    });
+
+    it("Windows: skips an app folder that is not really Discord", () => {
+        const branchDir = branchTree([["1.0.1", true], ["1.0.2", false]]);
+        const result = locateDiscordInstalls({ platform: "win32", explicitPaths: [branchDir], searchRoots: [] });
+        expect(result.ok && result.value[0]!.rootPath).toBe(join(branchDir, "app-1.0.1"));
+    });
+
+    it("Windows: no Discord inside says what to pick, in plain words", () => {
+        const branchDir = branchTree([["1.0.1", false]]);
+        const result = locateDiscordInstalls({ platform: "win32", explicitPaths: [branchDir], searchRoots: [] });
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error.code).toBe("NOT_A_DISCORD_INSTALL");
+        expect(result.error.message).toContain("app-1.0");
+        expect(result.error.message).toContain("AppData\\Local\\Discord");
+    });
+
+    it("a pick of the resources folder climbs to its Discord", () => {
+        const branchDir = branchTree([["1.0.2", true]]);
+        const win = locateDiscordInstalls({ platform: "win32", explicitPaths: [join(branchDir, "app-1.0.2", "resources")], searchRoots: [] });
+        expect(win.ok && win.value[0]!.rootPath).toBe(join(branchDir, "app-1.0.2"));
+
+        const root = tempRoot();
+        const app = join(root, "Discord.app");
+        mkdirSync(join(app, "Contents", "Resources"), { recursive: true });
+        writeFileSync(join(app, "Contents", "Resources", "app.asar"), buildOriginalDiscordAsar());
+        const mac = locateDiscordInstalls({ platform: "darwin", explicitPaths: [join(app, "Contents", "Resources")], searchRoots: [] });
+        expect(mac.ok && mac.value[0]!.rootPath).toBe(app);
+    });
+});

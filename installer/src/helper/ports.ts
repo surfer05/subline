@@ -9,7 +9,13 @@
  * `/Applications`.
  */
 
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+// realFs for statSync (audit 2026-10-06 #19): mtimeOf stats Discord's app.asar
+// and _app.asar. Under Electron, node:fs treats those as archives to mount: the
+// stat opened app.asar and kept the handle for the life of the helper, so every
+// Windows repatch then failed to rename it, and the settle check read a fake
+// mtime. The bundle lookups below use it too; it is the same call on a folder.
+import { statSync, writeFileSync } from "../patcher/realFs.js";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
