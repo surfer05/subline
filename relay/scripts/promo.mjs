@@ -7,9 +7,11 @@
  *
  * The code is 4 to 16 uppercase letters or digits. Installs redeem it in the
  * installer ("I have a code") or in Discord. Each install gets its own Subline
- * code; the relay counts claims exactly (a Durable Object per promo code), one
- * per install and at most 3 per address a day. Running it again for the same
- * code changes its cap. Prints the code and cap.
+ * code; the relay counts claims exactly (a Durable Object per promo code). One
+ * install gets one promo, ever. One address (a shared VPN exit too) gets at
+ * most 30 successful claims a day and 20 wrong codes a day; an IPv6 /48 at
+ * most max(30, 5% of the cap) claims of one promo. Running it again for the
+ * same code changes its cap. Prints the code and cap.
  * The token is read from the environment only and never printed.
  */
 const RELAY = process.env.RELAY_URL ?? "https://subline-relay.rahul05alok.workers.dev";

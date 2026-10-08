@@ -20,11 +20,33 @@
  * limits, so a burst of concurrent attempts cannot slip past either. A refused
  * attempt is not counted (it would only extend the lockout).
  *
+ * WHY THE SUCCESS CAP IS LOOSE (30). Many Discord users are always on a VPN,
+ * some because Discord is blocked where they live, and thousands share one VPN
+ * exit address. A server drive (the first 100 installs) can put dozens of real
+ * members on one exit in a day; a cap of 3 refused them. Abuse is bounded
+ * elsewhere: each install claims a promo once (below), every promo has a cap,
+ * and the drain alerts fire. So the address cap only stops one address from
+ * taking more than 30 Automatic codes a day, under a third of a 100 drive. The
+ * failure cap stays at 20: guessing codes is the real abuse, and a real member
+ * rarely mistypes more than once or twice.
+ *
+ * ONE PROMO PER INSTALL, EVER. An object named `inst:<install hash>`
+ * (/inst/begin, /inst/end) lets one redemption of an install run at a time, and
+ * remembers for good that the install claimed a promo. Without it, one install
+ * firing five different codes at once got several Automatic codes: each request
+ * saw "no Automatic yet" before any grant landed (KV is not read-your-writes).
+ * Ever, not per day: a promo gives Automatic for good, so a second is never
+ * needed, and an install whose promo code was revoked must not just take
+ * another. Only a success is stored (one storage write); a failed or refused try
+ * leaves nothing behind.
+ *
  * PER NETWORK, PER PROMO. Install ids are made by the client, so each fresh id
  * is a new claimant, and the per-address limit above is per IPv6 /64. One
  * person with a /48 (a free tunnel, many VPS hosts) holds 65,536 of those and
  * could drain "the first 100" in seconds. So a promo also counts its claims per
  * IPv6 /48 (see promoNetKey) and allows at most netLimitFor(cap) from one.
+ * That limit is never below the address cap, so an IPv6 VPN exit gets the same
+ * room as an IPv4 one, and a /48 holder gets no more than one IPv4 address.
  * IPv4 is not counted per network: carrier-grade NAT and campus networks put
  * many real people behind one /24. A genuine burst spread over many networks is not
  * slowed. Residential proxy pools cannot be fully stopped without proof of
@@ -32,15 +54,16 @@
  * the drain alerts below make one visible while it happens.
  */
 
-export const REDEEM_IP_DAILY_SUCCESSES = 3;
+export const REDEEM_IP_DAILY_SUCCESSES = 30;
 export const REDEEM_IP_DAILY_FAILURES = 20;
 
 export interface PromoState { claimed: number; installs: Set<string>; nets?: Map<string, number> }
 export type ClaimResult = "ok" | "claimed" | "already" | "net_limited";
 
-/** Claims of one promo allowed from one wide network. */
+/** Claims of one promo allowed from one wide network (an IPv6 /48): never
+ *  below the per-address daily cap (see the header), else 5% of a large cap. */
 export function netLimitFor(cap: number): number {
-    return Math.max(5, Math.ceil(cap * 0.05));
+    return Math.max(REDEEM_IP_DAILY_SUCCESSES, Math.ceil(cap * 0.05));
 }
 
 /** Pure decision, unit-tested. Mutates `state` only when the claim succeeds.
@@ -97,12 +120,36 @@ export function applyIpEnd(s: IpState, outcome: "ok" | "fail" | "none"): void {
     else if (outcome === "fail") s.fail += 1;
 }
 
+/** An install's redemption still in flight after this long is taken as lost
+ *  (the worker died before /inst/end), so the install is not locked out. */
+export const INSTALL_INFLIGHT_STALE_MS = 60_000;
+
+export interface InstallState { done: boolean; inflightAt: number | null }
+export type InstallBegin = "go" | "done" | "busy";
+
+/** Pure: may this install start a redemption? Takes the slot when it may. */
+export function applyInstallBegin(s: InstallState, now: number): InstallBegin {
+    if (s.done) return "done";
+    if (s.inflightAt !== null && now - s.inflightAt < INSTALL_INFLIGHT_STALE_MS) return "busy";
+    s.inflightAt = now;
+    return "go";
+}
+
+/** Pure: the install's redemption finished. True when `done` must be stored. */
+export function applyInstallEnd(s: InstallState, ok: boolean): boolean {
+    s.inflightAt = null;
+    if (!ok || s.done) return false;
+    s.done = true;
+    return true;
+}
+
 export class Promo {
     private state: PromoState = { claimed: 0, installs: new Set(), nets: new Map() };
     /** Claim times in the last hour, and the drain alerts already raised. */
     private recent: number[] = [];
     private alerted = new Set<number>();
     private ip: IpState = { ok: 0, fail: 0, inflight: 0 };
+    private inst: InstallState = { done: false, inflightAt: null };
     private ready: Promise<void>;
 
     constructor(private ctx: DurableObjectState) {
@@ -112,6 +159,7 @@ export class Promo {
             this.state.installs = new Set(list);
             this.ip.ok = (await ctx.storage.get<number>("ipOk")) ?? 0;
             this.ip.fail = (await ctx.storage.get<number>("ipFail")) ?? 0;
+            this.inst.done = (await ctx.storage.get<boolean>("instDone")) === true;
             this.state.nets = new Map(Object.entries((await ctx.storage.get<Record<string, number>>("nets")) ?? {}));
         });
     }
@@ -121,6 +169,14 @@ export class Promo {
         const path = new URL(req.url).pathname;
         if (path === "/ip/begin") {
             return Response.json({ allowed: applyIpBegin(this.ip) });
+        }
+        if (path === "/inst/begin") {
+            return Response.json({ result: applyInstallBegin(this.inst, Date.now()) });
+        }
+        if (path === "/inst/end") {
+            const body = await req.json().catch(() => ({})) as { ok?: unknown };
+            if (applyInstallEnd(this.inst, body.ok === true)) await this.ctx.storage.put("instDone", true);
+            return Response.json({ done: this.inst.done });
         }
         if (path === "/ip/end") {
             const body = await req.json().catch(() => ({})) as { outcome?: unknown };

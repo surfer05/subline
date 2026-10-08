@@ -10,6 +10,7 @@ import {
     reissueCode, resetInstalls, signToken, TOKEN_TTL_MS
 } from "./entitle";
 import { readCappedText, SMALL_BODY_BYTES } from "./body";
+import { installHash } from "./checkout";
 import { REDEEM_IP_DAILY_FAILURES, REDEEM_IP_DAILY_SUCCESSES } from "./promo";
 
 export { REDEEM_IP_DAILY_FAILURES, REDEEM_IP_DAILY_SUCCESSES };
@@ -165,13 +166,45 @@ async function redeemOnce(req: Request, env: Env, id: { install: string; credent
     if (!def) return fail("not_found", 404);
     const cap = Number(def.cap) || PROMO_DEFAULT_CAP;
 
+    // One promo per install, ever, and one try at a time (see promo.ts), so
+    // one install cannot fire several codes at once and farm Automatic codes.
+    const lock = env.PROMO!.get(env.PROMO!.idFromName(`inst:${await installHash(id.install)}`));
+    let begin: string | undefined;
+    try {
+        const res = await lock.fetch("https://promo.internal/inst/begin", { method: "POST", body: "{}" });
+        begin = ((await res.json()) as { result?: string }).result;
+    } catch (e) {
+        console.warn("redeem: install lock failed", { error: String((e as any)?.message ?? e).slice(0, 200) });
+        return fail("unavailable", 503);
+    }
+    if (begin === "done") return fail("already", 409);
+    // "busy": an earlier try from this install is still running. The client's
+    // retry a minute later gets "already" and reads its status.
+    if (begin !== "go") return fail("unavailable", 503);
+    let res: Response | undefined;
+    try {
+        res = await claimAndGrant(req, env, id, promo, cap, now);
+        return res;
+    } finally {
+        try {
+            await lock.fetch("https://promo.internal/inst/end", { method: "POST", body: JSON.stringify({ ok: res?.status === 200 }) });
+        } catch (e) {
+            // A success not stored here is still caught by the Automatic check
+            // in claimAndGrant once KV has the grant; a failure frees in a minute.
+            console.warn("redeem: install unlock failed", { error: String((e as any)?.message ?? e).slice(0, 200) });
+        }
+    }
+}
+
+async function claimAndGrant(req: Request, env: Env, id: { install: string; credential: string }, promo: string, cap: number, now: number): Promise<Response> {
     const r = await resolveEntitlement(env, id.install, id.credential, now);
     if (!r.ok) return fail(r.error, r.status);
     if (r.automatic) return fail("already", 409);
 
     const stub = env.PROMO!.get(env.PROMO!.idFromName(promo));
-    // The caller's IPv6 /48: a promo allows only a few claims from one, so one
-    // person cannot drain it (see promo.ts). IPv4 has no network limit here:
+    // The caller's IPv6 /48: a promo allows at most netLimitFor(cap) claims
+    // from one (as many as one address a day), so one person cannot drain it
+    // with 65,536 /64s (see promo.ts). IPv4 has no network limit here:
     // CGNAT and campuses share one /24 among many real people (promoNetKey).
     const ip = req.headers.get("cf-connecting-ip");
     const net = ip ? promoNetKey(ip) : undefined;
