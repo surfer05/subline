@@ -589,6 +589,11 @@ export interface UnpatchReport {
     alreadyClean: boolean;
     removedArtifacts: string[];
     previousState: InstallStateKind;
+    /**
+     * Set when another client mod owns this Discord and it was left as it is
+     * (its name, or null when unknown). Uninstall lists it instead of failing.
+     */
+    foreignMod?: string | null;
     /** One sentence the GUI can show verbatim. */
     summary: string;
 }
@@ -607,13 +612,15 @@ export function unpatchInstall(install: DiscordInstall, options: UnpatchOptions 
             return unpatchBroken(install, state, dryRun);
 
         case "patched-by-other":
-            if (!options.removeForeignMod) {
-                return err<UnpatchReport>(
-                    "FOREIGN_MOD_PRESENT",
-                    `Subline is not installed here. ${state.modName ?? "another client mod"} is. Remove it with its own uninstaller.`,
-                    { path: install.rootPath }
-                );
-            }
+            // NOT OURS, SO NOT A FAILURE (audit 2026-10-06 #2). Subline on
+            // Stable and Vencord on Canary is common; refusing here made every
+            // uninstall on such a machine fail, forever. Another mod's Discord
+            // is left exactly as it is: its stub and its _app.asar (the stub
+            // still boots from it). Only a marker of OURS beside it goes: the
+            // stub Discord runs loads someone else's loader, so the marker is
+            // stale by definition, and keeping it made the next uninstall
+            // believe this Discord still needs Subline's files.
+            if (!options.removeForeignMod) return leaveForeign(install, state, dryRun);
             return restoreOriginal(install, state, dryRun);
 
         case "patched-by-us":
@@ -621,12 +628,33 @@ export function unpatchInstall(install: DiscordInstall, options: UnpatchOptions 
     }
 }
 
+function leaveForeign(install: DiscordInstall, state: InstallState, dryRun: boolean): Result<UnpatchReport> {
+    const removed: string[] = [];
+    if (!dryRun) {
+        const markerRemoved = removeMarker(install.resourcesPath);
+        if (!markerRemoved.ok) return markerRemoved;
+        if (markerRemoved.value) removed.push(markerPathFor(install.resourcesPath));
+    }
+    const mod = state.modName ?? null;
+    return ok({
+        install,
+        restored: false,
+        alreadyClean: removed.length === 0,
+        removedArtifacts: removed,
+        previousState: state.kind,
+        foreignMod: mod,
+        summary: `Subline is not installed here. ${mod ?? "Another client mod"} is, and it was left as it is.`
+    });
+}
+
 /** A dry run that found nothing to refuse. Nothing was written. */
 function wouldSucceed(install: DiscordInstall, state: InstallState): Result<UnpatchReport> {
     return ok({
         install,
         restored: false,
-        alreadyClean: false,
+        // An untouched Discord with no marker of ours: the real call would
+        // find nothing of Subline's to remove (see cleanUpUnpatched).
+        alreadyClean: state.kind === "unpatched" && state.marker === null,
         removedArtifacts: [],
         previousState: state.kind,
         summary: "Dry run: Subline can be removed from this Discord."

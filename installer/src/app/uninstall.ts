@@ -41,7 +41,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from "../patcher/
 
 import { removeModBundle } from "../bundle/bundle.js";
 import { MARKER_FILENAME } from "../patcher/marker.js";
-import type { DiscordInstall } from "../patcher/locate.js";
+import type { DiscordBranch, DiscordInstall } from "../patcher/locate.js";
 import type { UnpatchReport } from "../patcher/patch.js";
 import type { PatcherError, Result } from "../patcher/result.js";
 import { err, fsError, ok } from "../patcher/result.js";
@@ -100,13 +100,16 @@ export interface HelperRemoval {
  * function enforces is one a test can hold it to.
  */
 export interface UninstallSystemPorts {
-    /** Discord processes running now, for every branch being removed. */
-    listDiscordProcesses(): Promise<readonly { pid: number }[]>;
+    /**
+     * Discord processes running now, for these branches. Only the branches
+     * Subline is in: a Canary running Vencord is none of our business.
+     */
+    listDiscordProcesses(branches: readonly DiscordBranch[]): Promise<readonly { pid: number }[]>;
     /**
      * Close Discord on the user's behalf (ask, then force). Only called when
      * the user pressed the button that says so.
      */
-    quitDiscord(mode: "ask" | "force"): Promise<void>;
+    quitDiscord(mode: "ask" | "force", branches: readonly DiscordBranch[]): Promise<void>;
     /** Stop the background helper. Called only once every check has passed. */
     removeHelper(): Promise<HelperRemoval>;
     /**
@@ -137,7 +140,18 @@ export interface RestoreOutcome {
     /** True when Discord's original archive is back in place. */
     restored: boolean;
     error: PatcherError | null;
+    /**
+     * Why this Discord was left as it is, when Subline is not in it: another
+     * client mod owns it, its files could not be read and carry no marker of
+     * ours, or Subline was never there. Never touched, never a blocker.
+     */
+    leftAlone: LeftAloneReason | null;
 }
+
+export type LeftAloneReason =
+    | { kind: "foreign"; mod: string | null }
+    | { kind: "unreadable" }
+    | { kind: "not-ours" };
 
 export type TranslationCacheDisposition =
     /** Left where it is — inside Discord's own storage, orphaned and unread. */
@@ -269,9 +283,30 @@ export async function uninstall(
     //    before the helper is touched. Another mod, a missing backup, a
     //    damaged one: each refuses here with nothing changed, rather than
     //    after the helper is gone and half the Discords are restored.
+    //
+    //    ONLY SUBLINE'S DISCORDS TAKE PART (audit 2026-10-06 #2). Subline on
+    //    Stable with Vencord on Canary is common in this audience; a Discord
+    //    another mod owns, one whose files cannot be read and carry no marker
+    //    of ours, or one Subline was never in, is left exactly as it is and
+    //    listed. It never blocks the uninstall of the Discords that ARE ours.
+    const ours: DiscordInstall[] = [];
+    const leftAlone = new Map<DiscordInstall, LeftAloneReason>();
     for (const install of options.installs) {
         const verdict = ports.unpatch(install, { dryRun: true });
-        if (verdict.ok) continue;
+        if (verdict.ok) {
+            if (verdict.value.foreignMod !== undefined) {
+                leftAlone.set(install, { kind: "foreign", mod: verdict.value.foreignMod });
+            } else if (verdict.value.alreadyClean) {
+                leftAlone.set(install, { kind: "not-ours" });
+            } else {
+                ours.push(install);
+            }
+            continue;
+        }
+        if (verdict.error.code === "BROKEN_INSTALL" && !existsSync(join(install.resourcesPath, MARKER_FILENAME))) {
+            leftAlone.set(install, { kind: "unreadable" });
+            continue;
+        }
         ports.log.error("uninstall.refused", {
             code: verdict.error.code,
             branch: install.branch,
@@ -279,13 +314,24 @@ export async function uninstall(
         });
         return refusedReport([verdict.error], refusalSummary(verdict.error));
     }
+    for (const [install, reason] of leftAlone) {
+        ports.log.info("uninstall.left-alone", {
+            branch: install.branch,
+            path: install.rootPath,
+            reason: reason.kind,
+            mod: reason.kind === "foreign" ? reason.mod : null
+        });
+    }
+    const ourBranches = [...new Set(ours.map(install => install.branch))];
 
     // 2. DISCORD MUST BE CLOSED. Restoring Discord renames _app.asar back over
     //    app.asar, and Windows refuses to rename a file a running process holds
     //    open. Checked again after a quit, because a quit can fail and Discord
     //    can start itself again.
-    if (options.closeDiscord !== undefined) await ports.quitDiscord(options.closeDiscord);
-    const running = await ports.listDiscordProcesses();
+    if (options.closeDiscord !== undefined && ourBranches.length > 0) {
+        await ports.quitDiscord(options.closeDiscord, ourBranches);
+    }
+    const running = ourBranches.length > 0 ? await ports.listDiscordProcesses(ourBranches) : [];
     if (running.length > 0) {
         ports.log.error("uninstall.discord-running", {
             pids: running.map(p => p.pid).join(","),
@@ -314,6 +360,11 @@ export async function uninstall(
     //    — a stale one makes the NEXT install misread a foreign or absent patch
     //    as ours).
     for (const install of options.installs) {
+        const reason = leftAlone.get(install);
+        if (reason !== undefined) {
+            restores.push({ install, ok: true, restored: false, error: null, leftAlone: reason });
+            continue;
+        }
         const result = ports.unpatch(install, {});
         if (!result.ok) {
             ports.log.error("uninstall.restore-failed", {
@@ -322,7 +373,7 @@ export async function uninstall(
                 path: install.rootPath
             });
             problems.push(result.error);
-            restores.push({ install, ok: false, restored: false, error: result.error });
+            restores.push({ install, ok: false, restored: false, error: result.error, leftAlone: null });
             continue;
         }
         ports.log.info("uninstall.restored", {
@@ -331,7 +382,13 @@ export async function uninstall(
             alreadyClean: result.value.alreadyClean,
             artifacts: result.value.removedArtifacts.length
         });
-        restores.push({ install, ok: true, restored: result.value.restored, error: null });
+        restores.push({
+            install,
+            ok: true,
+            restored: result.value.restored,
+            error: null,
+            leftAlone: result.value.foreignMod !== undefined ? { kind: "foreign", mod: result.value.foreignMod } : null
+        });
     }
 
     // "Every target restored" is not "no Discord needs Subline": an unrelated
@@ -347,9 +404,11 @@ export async function uninstall(
             paths: stillMarked.join(", ")
         });
     }
-    // True for an empty list: with no Discord at all, nothing loads Subline.
+    // True for an empty list: with no Discord at all, nothing loads Subline,
+    // and Subline's own files and helper go (audit 2026-10-06 #40: they used
+    // to be kept forever, "for safety", with no Discord to keep them for).
     const nothingLoadsSubline = restores.every(entry => entry.ok) && stillMarked.length === 0;
-    const discordRestored = restores.length > 0 && nothingLoadsSubline;
+    const discordRestored = nothingLoadsSubline;
 
     // 5. A DISCORD STILL LOADS SUBLINE: the helper comes back. Without it the
     //    next Discord update ends translation silently and nothing repairs it.
@@ -430,7 +489,7 @@ export async function uninstall(
         }
     }
 
-    const clean = discordRestored && problems.length === 0;
+    const clean = nothingLoadsSubline && problems.length === 0;
     return {
         restores,
         helperStopped,
@@ -445,12 +504,11 @@ export async function uninstall(
         nothingChanged: false,
         summary: summarize({
             restores,
-            stillMarked: stillMarked.length,
             discordRestored,
-            // Either counts: a machine with no settings file still had its
-            // product folder removed, and "nothing was there to delete" is not
-            // the same statement as "we kept your settings".
-            settingsRemoved: settingsRemoved || productDataRemoved,
+            helperRemoved: helper.removed,
+            filesRemoved: modBundleRemoved || productDataRemoved,
+            settingsRemoved,
+            productDataRemoved,
             settingsAskedToGo: !keepSettings,
             helperBack
         })
@@ -479,26 +537,47 @@ function refusalSummary(error: PatcherError): string {
     return `${UNINSTALL_COPY.couldNotRemove} ${unchanged} ${UNINSTALL_COPY.tryAgain}`;
 }
 
+const BRANCH_NAMES: Record<DiscordBranch, string> = {
+    stable: "Discord",
+    ptb: "Discord PTB",
+    canary: "Discord Canary"
+};
+
+/** "Left alone: Discord Canary, another client mod (Vencord)." Only the ones worth saying. */
+function leftAloneLine(restores: readonly RestoreOutcome[]): string | null {
+    const items = restores.flatMap(entry => {
+        const reason = entry.leftAlone;
+        if (reason === null || reason.kind === "not-ours") return [];
+        const name = BRANCH_NAMES[entry.install.branch];
+        if (reason.kind === "unreadable") return [`${name}, ${UNINSTALL_COPY.leftAloneUnreadable}`];
+        return [`${name}, ${UNINSTALL_COPY.leftAloneForeign}${reason.mod === null ? "" : ` (${reason.mod})`}`];
+    });
+    return items.length === 0 ? null : `${UNINSTALL_COPY.leftAlone} ${items.join("; ")}.`;
+}
+
 function summarize(input: {
     restores: RestoreOutcome[];
-    /** Discords that still carry Subline's marker after the restores. */
-    stillMarked: number;
     discordRestored: boolean;
+    helperRemoved: boolean;
+    /** The mod bundle or the product folder went. */
+    filesRemoved: boolean;
     /** What ACTUALLY happened, not what was asked for. */
     settingsRemoved: boolean;
+    productDataRemoved: boolean;
     settingsAskedToGo: boolean;
     /** null: the helper was not stopped or did not need to come back. */
     helperBack: boolean | null;
 }): string {
-    if (input.restores.length === 0 && input.stillMarked === 0) {
-        return "There was nothing to remove. Subline is not installed in any Discord we can find.";
-    }
+    const aside = leftAloneLine(input.restores);
+    const withAside = (parts: string[]): string => [...parts, ...(aside === null ? [] : [aside])].join(" ");
+    // The Discords Subline was actually in. The others were left alone.
+    const ours = input.restores.filter(entry => entry.leftAlone === null);
 
     if (!input.discordRestored) {
         // Read from the outcomes. This used to say "Nothing has been deleted"
         // after the helper was gone and, sometimes, after the settings were.
-        const total = input.restores.length;
-        const done = input.restores.filter(entry => entry.ok).length;
+        const total = ours.length;
+        const done = ours.filter(entry => entry.ok).length;
         const parts = [
             done > 0 && done < total
                 ? `Subline was removed from ${done} of ${total} Discords, but not from the rest.`
@@ -507,17 +586,37 @@ function summarize(input: {
         ];
         if (input.helperBack === false) parts.push(UNINSTALL_COPY.helperNotBack);
         if (input.settingsAskedToGo) parts.push(UNINSTALL_COPY.settingsKept);
+        if (aside !== null) parts.push(aside);
         parts.push(UNINSTALL_COPY.tryAgain);
         return parts.join(" ");
+    }
+
+    if (ours.length === 0) {
+        // No Discord had Subline in it. Say what of Subline's own did go.
+        const removed = [
+            ...(input.filesRemoved ? [UNINSTALL_COPY.itsFiles] : []),
+            ...(input.helperRemoved ? [UNINSTALL_COPY.itsUpdater] : [])
+        ];
+        if (removed.length === 0 && !input.settingsRemoved) {
+            return withAside([UNINSTALL_COPY.nothingToRemove]);
+        }
+        return withAside([
+            UNINSTALL_COPY.noDiscordWithSubline,
+            ...(removed.length > 0 ? [`Subline removed ${removed.join(" and ")}.`] : []),
+            ...(input.settingsRemoved ? [UNINSTALL_COPY.settingsRemoved] : [])
+        ]);
     }
 
     // Reads the OUTCOME, not the request. It used to read `keepSettings`, so a
     // removal that was asked for and then did not happen still announced "your
     // settings were removed" — a screen telling the user something about their
     // own machine that was not true.
-    const tail = input.settingsRemoved
-        ? " Your settings were removed. Cached translations live inside Discord's own storage and are no longer "
+    // Either counts: a machine with no settings file still had its product
+    // folder removed, and "nothing was there to delete" is not the same
+    // statement as "we kept your settings".
+    const tail = input.settingsRemoved || input.productDataRemoved
+        ? "Your settings were removed. Cached translations live inside Discord's own storage and are no longer "
           + "read by anything."
-        : " Your settings and cached translations were kept, so reinstalling picks up where you left off.";
-    return `Discord has been put back to normal and Subline has been removed.${tail}`;
+        : "Your settings and cached translations were kept, so reinstalling picks up where you left off.";
+    return withAside(["Discord has been put back to normal and Subline has been removed.", tail]);
 }

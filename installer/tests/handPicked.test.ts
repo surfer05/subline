@@ -6,7 +6,8 @@
  * still require()s. Each test fails on that code.
  */
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -19,6 +20,9 @@ import { MARKER_FILENAME } from "../src/patcher/marker.js";
 import { patchInstall, unpatchInstall } from "../src/patcher/patch.js";
 import { isOtherAccountLoader } from "../src/patcher/ownership.js";
 import { makeDiscordFixture, makeModBundleFixture, uninstallSystemFake } from "./fixture.js";
+import { PLUGIN_SETTINGS_KEY } from "../src/app/language.js";
+import { buildStubAsar } from "../src/patcher/stub.js";
+import type { DiscordInstall } from "../src/patcher/locate.js";
 import type { Fixture, ModBundleFixture } from "./fixture.js";
 
 let ptb: Fixture;
@@ -124,5 +128,100 @@ describe("isOtherAccountLoader", () => {
         expect(isOtherAccountLoader("/opt/vencord/dist/patcher.js", "/Users/sam", "darwin")).toBe(false);
         expect(isOtherAccountLoader("C:\\Users\\Alex\\AppData\\Local\\Subline\\mod\\patcher.js", "C:\\Users\\sam", "win32")).toBe(true);
         expect(isOtherAccountLoader("c:\\users\\SAM\\AppData\\Local\\Subline\\mod\\patcher.js", "C:\\Users\\sam", "win32")).toBe(false);
+    });
+});
+
+/* ------------------------------------------------------------------------ *
+ * Audit 2026-10-06 #2, on real files: another mod's Discord never blocks
+ * Subline's uninstall, and is never touched.
+ * ------------------------------------------------------------------------ */
+
+describe("uninstall next to another client mod (real files)", () => {
+    const VENCORD = "/Users/someone/Library/Application Support/Vencord/dist/patcher.js";
+    const hash = (path: string): string => createHash("sha256").update(readFileSync(path)).digest("hex");
+    let extra: { cleanup(): void }[] = [];
+    let settingsPath: string;
+
+    beforeEach(() => {
+        extra = [];
+        settingsPath = join(productDir, "..", "Vencord", "settings.json");
+        mkdirSync(join(productDir, "..", "Vencord"), { recursive: true });
+        writeFileSync(settingsPath, JSON.stringify({ plugins: { [PLUGIN_SETTINGS_KEY]: { sublineCode: "slp_x" } } }), "utf8");
+    });
+    afterEach(() => { for (const fixture of extra) fixture.cleanup(); });
+
+    function vencordCanary(): DiscordInstall {
+        const canary = makeDiscordFixture({ appName: "Discord Canary.app", withBackup: true, stubLoaderPath: VENCORD });
+        extra.push(canary);
+        return { ...canary.install, branch: "canary" };
+    }
+
+    function run(installs: DiscordInstall[], remembered: string[] = []) {
+        const sys = uninstallSystemFake();
+        const ownLoader = join(modDir, "patcher.js");
+        return {
+            sys,
+            report: uninstall(
+                {
+                    ...sys.ports,
+                    unpatch: (target, opts) => unpatchInstall(target, { ...opts, ownLoaderPaths: [ownLoader] }),
+                    modBundleDir: modDir,
+                    productDir,
+                    logDir: null,
+                    vencordSettingsPath: settingsPath,
+                    log: quiet
+                },
+                { installs, keepSettings: false, rememberedResources: remembered }
+            )
+        };
+    }
+
+    it("Stable ours + Canary with Vencord: Stable restored, Canary untouched and listed, Subline fully gone", async () => {
+        expect(patchInstall(stable.install, { modBundleDir: modDir, productVersion: "0.2.2" }).ok).toBe(true);
+        const canary = vencordCanary();
+        const canaryAsar = hash(canary.asarPath);
+        const canaryBackup = hash(canary.backupPath);
+
+        const { sys, report } = run([stable.install, canary]);
+        const done = await report;
+
+        expect(done.clean).toBe(true);
+        expect(readFileSync(stable.install.asarPath).equals(stable.originalAsar)).toBe(true);
+        expect(hash(canary.asarPath)).toBe(canaryAsar);
+        expect(hash(canary.backupPath)).toBe(canaryBackup);
+        expect(done.modBundleRemoved).toBe(true);
+        expect(done.settingsRemoved).toBe(true);
+        expect(done.summary).toContain("Discord has been put back to normal and Subline has been removed.");
+        expect(done.summary).toContain("Left alone: Discord Canary, another client mod");
+        expect(sys.branches).toEqual([["stable"]]);
+    });
+
+    it("hand-picked PTB ours + Stable with Vencord: PTB restored, Stable untouched", async () => {
+        const picked = patchPickedPtb();
+        writeFileSync(stable.install.asarPath, buildStubAsar(VENCORD));
+        writeFileSync(stable.install.backupPath, stable.originalAsar);
+        const stableAsar = hash(stable.install.asarPath);
+        const remembered = readPatchedInstalls(productDir).map(entry => rememberedResourcesPath(entry, "darwin"));
+
+        const { report } = run([stable.install, picked], remembered);
+        const done = await report;
+
+        expect(done.clean).toBe(true);
+        expect(existsSync(join(picked.resourcesPath, MARKER_FILENAME))).toBe(false);
+        expect(hash(stable.install.asarPath)).toBe(stableAsar);
+        expect(existsSync(stable.install.backupPath)).toBe(true);
+        expect(done.summary).toContain("Left alone: Discord, another client mod");
+    });
+
+    it("only foreign Discords: nothing of theirs touched, Subline's own files removed", async () => {
+        const canary = vencordCanary();
+        const canaryAsar = hash(canary.asarPath);
+        const { sys, report } = run([canary]);
+        const done = await report;
+        expect(done.clean).toBe(true);
+        expect(hash(canary.asarPath)).toBe(canaryAsar);
+        expect(existsSync(modDir)).toBe(false);
+        expect(sys.calls).toEqual(["removeHelper"]);
+        expect(done.summary).toContain("No Discord with Subline in it was found.");
     });
 });

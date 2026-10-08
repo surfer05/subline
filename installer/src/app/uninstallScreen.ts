@@ -50,7 +50,17 @@ export const UNINSTALL_COPY = {
     staysInstalledUpdating: "Subline stays installed and keeps updating, so Discord keeps working as it does now.",
     helperNotBack: "Background updates could not be turned back on. Open Subline again to fix that.",
     settingsKept: "Your settings and code were kept.",
-    tryAgain: "Press Uninstall to try again. The diagnostics log has the details."
+    tryAgain: "Press Uninstall to try again. The diagnostics log has the details.",
+    /* Discords that are not Subline's, listed and never touched (audit #2). */
+    leftAlone: "Left alone:",
+    leftAloneForeign: "another client mod",
+    leftAloneUnreadable: "its files could not be read",
+    /* No Discord with Subline in it (audit #40). */
+    nothingToRemove: "There was nothing to remove. Subline is not installed in any Discord we can find.",
+    noDiscordWithSubline: "No Discord with Subline in it was found.",
+    itsFiles: "its own files",
+    itsUpdater: "its background updater",
+    settingsRemoved: "Your settings were removed."
 } as const;
 
 /** Where Discord is when it is "still open". The Windows line is the field test's wording. */

@@ -582,8 +582,6 @@ ipcMain.handle("uninstall:run", async (
     // supplies the ports. It used to remove the helper here, before anything
     // was checked, and a refused uninstall left Discord patched with no helper
     // (field logs 2026-10-06 and 2026-10-08).
-    const branches = [...new Set(installs.map(install => install.branch))];
-    const modDir = uninstallPaths().modBundleDir;
     log.info("uninstall.start", {
         installs: installs.length,
         keepSettings: options.keepSettings,
@@ -593,16 +591,16 @@ ipcMain.handle("uninstall:run", async (
         {
             // Our own loader by path too, so a stub whose marker went missing (a
             // Windows Discord update copies app.asar without it) is still restored.
-            unpatch: (install, opts) =>
-                unpatchInstall(install, { ...opts, ownLoaderPaths: modDir === null ? [] : [loaderPathFor(modDir)] }),
+            unpatch: (install, opts) => unpatchOurs(install, opts),
             ...uninstallPaths(),
             platform: process.platform,
             log,
-            listDiscordProcesses: () => runningDiscord(branches),
+            // Only the branches Subline is in: uninstall() decides which.
+            listDiscordProcesses: branches => runningDiscord(branches),
             // Two strengths, and the second is only ever reached from a button
             // that says so: "ask" is the polite request that escalates inside
             // quitDiscord, "force" is the consented close.
-            quitDiscord: async mode => {
+            quitDiscord: async (mode, branches) => {
                 for (const branch of branches) {
                     const quit = await quitDiscord({
                         branch,
@@ -641,6 +639,16 @@ ipcMain.handle("uninstall:run", async (
     return refused(report);
 });
 
+/**
+ * unpatchInstall with our own loader known by path, so a stub whose marker
+ * went missing (a Windows Discord update copies app.asar without it) is still
+ * recognised as ours and restored.
+ */
+function unpatchOurs(install: DiscordInstall, opts: { removeForeignMod?: boolean; dryRun?: boolean }) {
+    const modDir = uninstallPaths().modBundleDir;
+    return unpatchInstall(install, { ...opts, ownLoaderPaths: modDir === null ? [] : [loaderPathFor(modDir)] });
+}
+
 /** Discord processes of the given branches, right now. */
 async function runningDiscord(branches: readonly DiscordInstall["branch"][]): Promise<{ pid: number }[]> {
     const processes = await listProcesses(process.platform, execFileAsync, log);
@@ -664,7 +672,14 @@ function refused(report: UninstallReport): UninstallReport {
 ipcMain.handle("uninstall:check", async (): Promise<{ discordRunning: boolean; platform: NodeJS.Platform }> => {
     const remembered = readPatchedInstalls(productDirFor());
     const installs = uninstallTargets({ platform: process.platform }, remembered, () => {});
-    const branches = [...new Set(installs.map(install => install.branch))];
+    // Only Discords Subline is in. A Canary running Vencord is not "Discord
+    // is still open" for this uninstall. Same dry run uninstall() makes.
+    const branches = [...new Set(installs
+        .filter(install => {
+            const verdict = unpatchOurs(install, { dryRun: true });
+            return !verdict.ok || (verdict.value.foreignMod === undefined && !verdict.value.alreadyClean);
+        })
+        .map(install => install.branch))];
     const running = await runningDiscord(branches);
     log.info("uninstall.check", { installs: installs.length, discordRunning: running.length });
     return { discordRunning: running.length > 0, platform: process.platform };

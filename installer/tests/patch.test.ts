@@ -610,17 +610,39 @@ describe("unpatchInstall", () => {
         expect(result.value.removedArtifacts).toEqual([]);
     });
 
-    it("refuses to uninstall another mod on the user's behalf", () => {
+    // Audit 2026-10-06 #2: another mod's Discord is not a failure of
+    // Subline's uninstall. It is left exactly as it is, and named.
+    it("leaves another mod's Discord as it is, and says whose it is", () => {
         fixture = makeDiscordFixture({ withBackup: true, stubLoaderPath: VENCORD_LOADER });
         const asarHash = sha256(fixture.install.asarPath);
+        const backupHash = sha256(fixture.install.backupPath);
 
         const result = unpatchInstall(fixture.install);
-        expect(result.ok).toBe(false);
-        if (result.ok) return;
-        expect(result.error.code).toBe("FOREIGN_MOD_PRESENT");
-        expect(result.error.message).toContain("Vencord");
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.restored).toBe(false);
+        expect(result.value.foreignMod).toContain("Vencord");
+        expect(result.value.alreadyClean).toBe(true);
         expect(sha256(fixture.install.asarPath)).toBe(asarHash);
-        expect(existsSync(fixture.install.backupPath)).toBe(true);
+        expect(sha256(fixture.install.backupPath)).toBe(backupHash);
+    });
+
+    it("removes only a stale marker of ours from under another mod's stub", () => {
+        // Vencord installed over Subline: our marker stays beside their stub.
+        fixture = makeDiscordFixture();
+        expect(patchInstall(fixture.install, options()).ok).toBe(true);
+        writeFileSync(fixture.install.asarPath, buildStubAsar(VENCORD_LOADER));
+        expect(existsSync(markerPathFor(fixture.install.resourcesPath))).toBe(true);
+        const asarHash = sha256(fixture.install.asarPath);
+        const backupHash = sha256(fixture.install.backupPath);
+
+        const result = unpatchInstall(fixture.install);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.foreignMod).not.toBeUndefined();
+        expect(existsSync(markerPathFor(fixture.install.resourcesPath))).toBe(false);
+        expect(sha256(fixture.install.asarPath)).toBe(asarHash);
+        expect(sha256(fixture.install.backupPath)).toBe(backupHash);
     });
 
     it("restores Discord from another mod's patch when explicitly asked", () => {
@@ -719,14 +741,22 @@ describe("unpatchInstall dry run", () => {
         });
     }
 
-    it("another mod: FOREIGN_MOD_PRESENT, nothing written", () => {
-        fixture = makeDiscordFixture({ withBackup: true, stubLoaderPath: VENCORD_LOADER });
+    it("another mod: named as left alone, nothing written (not even a stale marker removed)", () => {
+        fixture = makeDiscordFixture();
+        expect(patchInstall(fixture.install, options()).ok).toBe(true);
+        writeFileSync(fixture.install.asarPath, buildStubAsar(VENCORD_LOADER));
         const before = snapshot();
         const dry = unpatchInstall(fixture.install, { dryRun: true });
-        expect(dry.ok).toBe(false);
-        if (dry.ok) return;
-        expect(dry.error.code).toBe("FOREIGN_MOD_PRESENT");
+        expect(dry.ok).toBe(true);
+        if (!dry.ok) return;
+        expect(dry.value.foreignMod).not.toBeUndefined();
         expect(snapshot()).toEqual(before);
+    });
+
+    it("an untouched Discord is reported as already clean by the dry run", () => {
+        fixture = makeDiscordFixture();
+        const dry = unpatchInstall(fixture.install, { dryRun: true });
+        expect(dry.ok && dry.value.alreadyClean).toBe(true);
     });
 
     it("a leftover backup and marker of ours are not swept by a dry run", () => {

@@ -249,7 +249,9 @@ describe("uninstall — Discord still open", () => {
 describe("uninstall — a refused or failed uninstall keeps settings, code, data and helper", () => {
     const CODE_SETTINGS = { plugins: { [PLUGIN_SETTINGS_KEY]: { sublineCode: "slp_kept", installId: "a".repeat(32), targetLang: "tr" } } };
 
-    for (const code of ["FOREIGN_MOD_PRESENT", "BACKUP_MISSING", "BACKUP_CORRUPT"] as const) {
+    // FOREIGN_MOD_PRESENT is no longer a refusal: another mod's Discord is left
+    // alone (see "Discords that are not Subline's" below).
+    for (const code of ["BACKUP_MISSING", "BACKUP_CORRUPT"] as const) {
         it(`${code} is found by the dry run: nothing written, helper never stopped`, async () => {
             writeSettings(CODE_SETTINGS);
             const before = readFileSync(settingsPath, "utf8");
@@ -281,7 +283,7 @@ describe("uninstall — a refused or failed uninstall keeps settings, code, data
             ports({
                 unpatch: (install, options) => {
                     if (options.dryRun !== true) writes.push(install.branch);
-                    return install.branch === "ptb" ? unpatchFail("FOREIGN_MOD_PRESENT", "Vencord is.") : unpatchOk(install);
+                    return install.branch === "ptb" ? unpatchFail("BACKUP_MISSING", "_app.asar is gone.") : unpatchOk(install);
                 }
             }),
             { installs: [INSTALL, PTB], keepSettings: false }
@@ -500,10 +502,12 @@ describe("uninstall", () => {
         expect(report.summary).not.toContain("cache has been deleted");
     });
 
-    it("reports having nothing to remove rather than claiming success", async () => {
+    it("reports having nothing to remove when there is nothing of Subline's anywhere", async () => {
+        rmSync(productDir, { recursive: true, force: true });
+        sys = uninstallSystemFake({ helper: { applicable: true, removed: false, error: null } });
         const report = await uninstall(ports(), { installs: [] });
-        expect(report.discordRestored).toBe(false);
-        expect(report.summary).toContain("nothing to remove");
+        expect(report.summary).toBe("There was nothing to remove. Subline is not installed in any Discord we can find.");
+        expect(report.clean).toBe(true);
     });
 
     it("tolerates a bundle that is already gone", async () => {
@@ -741,5 +745,128 @@ describe("the diagnostics log survives its own uninstall", () => {
         );
         expect(report.productDataRemoved).toBe(true);
         expect(existsSync(productDir)).toBe(false);
+    });
+});
+
+/* ------------------------------------------------------------------------ *
+ * Audit 2026-10-06 #2 and #40: Discords that are not Subline's, and none
+ * ------------------------------------------------------------------------ */
+
+const CANARY: DiscordInstall = {
+    ...INSTALL,
+    branch: "canary",
+    rootPath: "/Applications/Discord Canary.app",
+    stableId: "/Applications/Discord Canary.app",
+    resourcesPath: "/Applications/Discord Canary.app/Contents/Resources",
+    asarPath: "/Applications/Discord Canary.app/Contents/Resources/app.asar",
+    backupPath: "/Applications/Discord Canary.app/Contents/Resources/_app.asar"
+};
+
+/** Another mod's Discord, as unpatchInstall reports it: ok, left as it is. */
+function foreign(install: DiscordInstall): Result<UnpatchReport> {
+    return {
+        ok: true,
+        value: {
+            install,
+            restored: false,
+            alreadyClean: true,
+            removedArtifacts: [],
+            previousState: "patched-by-other",
+            foreignMod: "Vencord",
+            summary: "left"
+        }
+    };
+}
+
+describe("uninstall — Discords that are not Subline's are left alone, never blockers", () => {
+    it("ours restore fails + a foreign Canary: names the real failure, lists the Canary, keeps everything", async () => {
+        writeSettings({ plugins: { [PLUGIN_SETTINGS_KEY]: { sublineCode: "slp_kept" } } });
+        const ourFailure = failsOnWrite("FILE_IN_USE");
+        const report = await uninstall(
+            ports({ unpatch: (install, options) => install.branch === "canary" ? foreign(install) : ourFailure(install, options) }),
+            { installs: [INSTALL, CANARY], keepSettings: false }
+        );
+        expect(report.problems.map(problem => problem.code)).toEqual(["FILE_IN_USE"]);
+        expect(report.summary).toContain("Subline could not remove itself from Discord.");
+        expect(report.summary).not.toMatch(/of 2 Discords/);
+        expect(report.summary).toContain("Left alone: Discord Canary, another client mod (Vencord).");
+        expect(readFileSync(settingsPath, "utf8")).toContain("slp_kept");
+        expect(existsSync(join(modDir, "patcher.js"))).toBe(true);
+        expect(sys.calls).toContain("restoreHelper");
+        // Only Subline's Discord is quit or checked: Canary is not ours.
+        expect(sys.branches).toEqual([["stable"]]);
+    });
+
+    it("a Discord whose files cannot be read and carry no marker of ours is left alone", async () => {
+        const report = await uninstall(
+            ports({
+                unpatch: install => install.branch === "canary"
+                    ? unpatchFail("BROKEN_INSTALL", "app.asar could not be read")
+                    : unpatchOk(install)
+            }),
+            { installs: [INSTALL, CANARY] }
+        );
+        expect(report.clean).toBe(true);
+        expect(report.summary).toContain("Left alone: Discord Canary, its files could not be read.");
+    });
+
+    it("an open Canary that is not ours does not block the uninstall of Stable", async () => {
+        const report = await uninstall(
+            ports({ unpatch: install => install.branch === "canary" ? foreign(install) : unpatchOk(install) }),
+            { installs: [INSTALL, CANARY] }
+        );
+        expect(sys.branches).toEqual([["stable"]]);
+        expect(report.clean).toBe(true);
+    });
+});
+
+describe("uninstall — no Discord with Subline in it (audit #40)", () => {
+    it("no Discord found, helper present: removes the helper, Subline's files and the settings, and says so", async () => {
+        writeSettings({ plugins: { [PLUGIN_SETTINGS_KEY]: { sublineCode: "slp_x" } } });
+        const report = await uninstall(ports(), { installs: [], keepSettings: false });
+        expect(sys.calls).toEqual(["removeHelper"]);
+        expect(report.modBundleRemoved).toBe(true);
+        expect(report.productDataRemoved).toBe(true);
+        expect(existsSync(productDir)).toBe(false);
+        expect(report.settingsRemoved).toBe(true);
+        expect(report.clean).toBe(true);
+        expect(report.summary).toBe(
+            "No Discord with Subline in it was found. Subline removed its own files and its background updater. "
+            + "Your settings were removed."
+        );
+        expect(logged).not.toContain("warn:uninstall.bundle-kept");
+    });
+
+    it("no Discord found, settings kept: the files and the helper still go, the settings stay", async () => {
+        writeSettings({ plugins: { [PLUGIN_SETTINGS_KEY]: { sublineCode: "slp_x" } } });
+        const report = await uninstall(ports(), { installs: [], keepSettings: true });
+        expect(report.modBundleRemoved).toBe(true);
+        expect(existsSync(join(productDir, "status.json"))).toBe(true);
+        expect(readFileSync(settingsPath, "utf8")).toContain("slp_x");
+        expect(report.summary).toContain("Subline removed its own files and its background updater.");
+    });
+
+    it("only foreign Discords: Subline's files go, the foreign ones are listed and untouched", async () => {
+        const writes: string[] = [];
+        const report = await uninstall(
+            ports({ unpatch: (install, options) => { if (options.dryRun !== true) writes.push(install.branch); return foreign(install); } }),
+            { installs: [INSTALL, CANARY] }
+        );
+        expect(writes).toEqual([]);
+        expect(report.clean).toBe(true);
+        expect(report.modBundleRemoved).toBe(true);
+        expect(sys.branches).toEqual([]);
+        expect(report.summary).toContain("No Discord with Subline in it was found.");
+        expect(report.summary).toContain("Left alone: Discord, another client mod (Vencord); Discord Canary, another client mod (Vencord).");
+    });
+
+    it("a remembered Discord still marked keeps the bundle even with no Discord found", async () => {
+        const resources = join(root, "Elsewhere", "Resources");
+        mkdirSync(resources, { recursive: true });
+        writeFileSync(join(resources, "subline-patch.json"), "{}", "utf8");
+        const report = await uninstall(ports(), { installs: [], keepSettings: false, rememberedResources: [resources] });
+        expect(report.modBundleKeptForSafety).toBe(true);
+        expect(existsSync(join(modDir, "patcher.js"))).toBe(true);
+        expect(report.clean).toBe(false);
     });
 });

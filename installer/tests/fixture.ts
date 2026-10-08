@@ -575,6 +575,8 @@ export function makeModBundleFixture(options: ModBundleOptions = {}): ModBundleF
 export interface UninstallSystemFake {
     ports: UninstallSystemPorts & { platform: NodeJS.Platform };
     calls: string[];
+    /** The branches each list and quit was asked about, in order. */
+    branches: string[][];
 }
 
 export function uninstallSystemFake(options: {
@@ -585,19 +587,22 @@ export function uninstallSystemFake(options: {
     platform?: NodeJS.Platform;
 } = {}): UninstallSystemFake {
     const calls: string[] = [];
+    const branches: string[][] = [];
     const running = options.running ?? [[]];
     let listed = 0;
     return {
         calls,
+        branches,
         ports: {
             platform: options.platform ?? "darwin",
-            listDiscordProcesses: async () => {
+            listDiscordProcesses: async asked => {
                 calls.push("list");
+                branches.push([...asked]);
                 const table = running[Math.min(listed, running.length - 1)] ?? [];
                 listed += 1;
                 return table;
             },
-            quitDiscord: async mode => { calls.push(`quit:${mode}`); },
+            quitDiscord: async (mode, asked) => { calls.push(`quit:${mode}`); branches.push([...asked]); },
             removeHelper: async () => {
                 calls.push("removeHelper");
                 return options.helper ?? { applicable: true, removed: true, error: null };
