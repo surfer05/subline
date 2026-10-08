@@ -55,6 +55,9 @@ export const UNINSTALL_COPY = {
     leftAlone: "Left alone:",
     leftAloneForeign: "another client mod",
     leftAloneUnreadable: "its files could not be read",
+    leftAloneOtherAccount: "set up by another account on this Mac",
+    /** Audit #5: a Discord another account on this Mac set up. */
+    otherAccount: "Another account on this Mac set up Subline for this Discord. Only that account can remove it.",
     /* No Discord with Subline in it (audit #40). */
     nothingToRemove: "There was nothing to remove. Subline is not installed in any Discord we can find.",
     noDiscordWithSubline: "No Discord with Subline in it was found.",

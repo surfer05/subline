@@ -2605,3 +2605,63 @@ describe("running from the disk image", () => {
         );
     });
 });
+
+/* ------------------------------------------------------------------------ *
+ * Install audit 2026-10-06, ownership family: states the flow must not call
+ * "already set up" or "broken" when the install can be repaired.
+ * ------------------------------------------------------------------------ */
+
+describe("audit: repairable states are repaired, not reported", () => {
+    it("#26/#44: an interrupted patch (app.asar gone, original in _app.asar) takes the install path and is patched", async () => {
+        const st = { ...installState("broken"), reason: "asar-missing-backup-present" as const };
+        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: true });
+        const seen: string[] = [];
+        h.flow.onChange = next => seen.push(next.step);
+        const after = await toDetection(h);
+        expect(seen).not.toContain("broken-install");
+        // The normal install path: a fresh user is asked the language next.
+        expect(after.step).toBe("choose-language");
+    });
+
+    it("#26/#44: a broken install that cannot be repaired still stops on its own screen", async () => {
+        const st = { ...installState("broken"), reason: "our-patch-without-backup" as const };
+        const h = harness({ inspect: { ok: true, value: st } });
+        const state = await toDetection(h);
+        expect(state.step).toBe("broken-install");
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("#4: Subline's files missing behind our stub is an update, not 'already set up'", async () => {
+        const st = { ...installState("patched-by-us", "subline"), warnings: ["loader-missing" as const] };
+        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: true });
+        const first = await h.flow.start();
+        expect(first.step).not.toBe("already-installed");
+        expect(h.patchCalls.length).toBeGreaterThan(0);
+    });
+
+    it("#4: an older stub form is an update, so the stub is rewritten while Discord is closed", async () => {
+        const st = { ...installState("patched-by-us", "subline"), stubForm: "legacy" as const };
+        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: true });
+        const first = await h.flow.start();
+        expect(first.step).not.toBe("already-installed");
+        expect(h.patchCalls.length).toBeGreaterThan(0);
+    });
+
+    it("#9: our stub shadowed by BetterDiscord shows the blocked screen saying Subline is installed, and patches nothing", async () => {
+        const st = { ...installState("patched-by-us", "subline"), warnings: ["shadowed-by-unpacked-app" as const], shadowedBy: "betterdiscord" as const };
+        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: true });
+        const first = await h.flow.start();
+        expect(first.step).toBe("betterdiscord-blocked");
+        expect(first.detail).toContain("Subline is installed");
+        expect(first.detail).toContain("uninstall Subline");
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("#30: a stale marker is an update (the patch rewrites only the marker)", async () => {
+        const st = { ...installState("patched-by-us", "subline"), warnings: ["marker-stale" as const] };
+        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: true });
+        const first = await h.flow.start();
+        expect(first.step).not.toBe("already-installed");
+        expect(h.patchCalls.length).toBeGreaterThan(0);
+    });
+});

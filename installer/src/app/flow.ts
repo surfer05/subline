@@ -822,6 +822,18 @@ export class InstallFlow {
             branch: install.branch
         });
 
+        // AN INTERRUPTED PATCH (audit 2026-10-06 #26, #44): app.asar gone,
+        // Discord's original in _app.asar. Discord cannot start like this, and
+        // the patch itself now finishes it (patchInstall puts the original back
+        // first, then patches). So it takes the normal install path, Discord
+        // quit gate included, instead of a screen whose only button re-checked
+        // the same state. A _app.asar that is not Discord's original is still
+        // refused there, by name.
+        if (installState.kind === "broken" && installState.reason === "asar-missing-backup-present") {
+            this.ports.log.warn("flow.resume-interrupted-patch", { path: install.rootPath });
+            return this.beforeQuit();
+        }
+
         if (installState.kind === "broken") {
             return this.set(state({
                 step: "broken-install",
@@ -973,10 +985,46 @@ export class InstallFlow {
         // skipping the language step, whose answer is the user's saved setting
         // and must not be asked twice. The activation screen is skipped only
         // when a code is saved or the relay confirms this install (updateGate).
+        // ANOTHER MOD'S resources/app IN FRONT OF OUR STUB (audit #9): Subline
+        // is installed and Discord ignores it. Never "already set up".
+        if (installState.warnings.includes("shadowed-by-unpacked-app")) {
+            const mod = installState.shadowedBy === "betterdiscord" ? "BetterDiscord" : "Another client mod";
+            this.ports.log.warn("flow.shadowed", { path: install.rootPath, mod });
+            return this.set(state({
+                step: "betterdiscord-blocked",
+                detail:
+                    `Subline is installed, but ${mod} was installed after it and loads in front of it, so Discord ignores Subline. `
+                    + `Remove ${mod === "BetterDiscord" ? "BetterDiscord" : "that mod"} with its own uninstaller, or uninstall Subline.`,
+                error: {
+                    code: "FOREIGN_MOD_PRESENT",
+                    message: installState.summary,
+                    path: install.resourcesPath
+                },
+                install,
+                installState,
+                modName: mod,
+                actions: ["recheck", "cancel"]
+            }));
+        }
+        // SUBLINE'S FILES ARE GONE (audit #4): the stub fails open, so Discord
+        // starts without translation. Continue as an update, which puts the
+        // files back and rewrites the stub.
+        if (installState.warnings.includes("loader-missing")) {
+            this.ports.log.warn("flow.loader-missing", { path: install.rootPath, loader: installState.loaderPath ?? null });
+            this.updating = true;
+            return this.updateGate();
+        }
+        // AN OLDER STUB FORM (audit #4): continue as an update; Discord is
+        // closed before the patch, so the stub is rewritten safely.
+        if (installState.stubForm !== undefined && installState.stubForm !== null && installState.stubForm !== "current") {
+            this.ports.log.info("flow.stub-outdated", { path: install.rootPath, form: installState.stubForm });
+            this.updating = true;
+            return this.updateGate();
+        }
         // OUR STUB WITHOUT OUR MARKER (Windows: a Discord update copied the
         // stub into a new app folder and left the marker behind). Not "already
         // set up": continue as an update, whose patch rewrites the marker.
-        if (installState.warnings.includes("marker-missing") || installState.warnings.includes("marker-mismatch")) {
+        if (installState.warnings.includes("marker-missing") || installState.warnings.includes("marker-mismatch") || installState.warnings.includes("marker-stale")) {
             this.ports.log.info("flow.marker-rewrite", { path: install.rootPath, warnings: installState.warnings.join(",") });
             this.updating = true;
             return this.updateGate();

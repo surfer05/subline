@@ -151,7 +151,9 @@ export interface RestoreOutcome {
 export type LeftAloneReason =
     | { kind: "foreign"; mod: string | null }
     | { kind: "unreadable" }
-    | { kind: "not-ours" };
+    | { kind: "not-ours" }
+    /** Another account on this Mac set Subline up here (audit #5). Only that account may remove it. */
+    | { kind: "other-account" };
 
 export type TranslationCacheDisposition =
     /** Left where it is — inside Discord's own storage, orphaned and unread. */
@@ -301,6 +303,10 @@ export async function uninstall(
             } else {
                 ours.push(install);
             }
+            continue;
+        }
+        if (verdict.error.code === "OTHER_ACCOUNT") {
+            leftAlone.set(install, { kind: "other-account" });
             continue;
         }
         if (verdict.error.code === "BROKEN_INSTALL" && !existsSync(join(install.resourcesPath, MARKER_FILENAME))) {
@@ -550,6 +556,7 @@ function leftAloneLine(restores: readonly RestoreOutcome[]): string | null {
         if (reason === null || reason.kind === "not-ours") return [];
         const name = BRANCH_NAMES[entry.install.branch];
         if (reason.kind === "unreadable") return [`${name}, ${UNINSTALL_COPY.leftAloneUnreadable}`];
+        if (reason.kind === "other-account") return [`${name}, ${UNINSTALL_COPY.leftAloneOtherAccount}`];
         return [`${name}, ${UNINSTALL_COPY.leftAloneForeign}${reason.mod === null ? "" : ` (${reason.mod})`}`];
     });
     return items.length === 0 ? null : `${UNINSTALL_COPY.leftAlone} ${items.join("; ")}.`;
@@ -593,14 +600,19 @@ function summarize(input: {
 
     if (ours.length === 0) {
         // No Discord had Subline in it. Say what of Subline's own did go.
+        // A Discord another account set up is that account's, said first.
+        const lead = input.restores.some(entry => entry.leftAlone?.kind === "other-account")
+            ? [UNINSTALL_COPY.otherAccount]
+            : [];
         const removed = [
             ...(input.filesRemoved ? [UNINSTALL_COPY.itsFiles] : []),
             ...(input.helperRemoved ? [UNINSTALL_COPY.itsUpdater] : [])
         ];
         if (removed.length === 0 && !input.settingsRemoved) {
-            return withAside([UNINSTALL_COPY.nothingToRemove]);
+            return withAside([...lead, ...(lead.length > 0 ? [] : [UNINSTALL_COPY.nothingToRemove])]);
         }
         return withAside([
+            ...lead,
             UNINSTALL_COPY.noDiscordWithSubline,
             ...(removed.length > 0 ? [`Subline removed ${removed.join(" and ")}.`] : []),
             ...(input.settingsRemoved ? [UNINSTALL_COPY.settingsRemoved] : [])

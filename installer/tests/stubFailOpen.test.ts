@@ -13,7 +13,7 @@ import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { legacyStubIndexSource, parseRequirePath, stubIndexSource } from "../src/patcher/stub.js";
+import { legacyStubIndexSource, parseRequirePath, previousStubIndexSource, stubIndexSource } from "../src/patcher/stub.js";
 
 let root: string;
 let resources: string;
@@ -89,5 +89,78 @@ describe("the fail-open stub", () => {
         expect(parseRequirePath(legacyStubIndexSource(path))).toBe(path);
         const windows = "C:\\Users\\x\\AppData\\Local\\Subline\\mod\\patcher.js";
         expect(parseRequirePath(stubIndexSource(windows))).toBe(windows);
+    });
+});
+
+/*
+ * Audit 2026-10-06 #4 and #9. The 0.2.1 stub guarded only a loader it could
+ * not READ: one that threw (truncated, a syntax error) stopped Discord before
+ * its window opened. And with BetterDiscord's resources/app in front (it
+ * requires ../app.asar), the stub was not the main module and Discord's own
+ * code never loaded.
+ */
+describe("the fail-open stub, worst cases", () => {
+    function run(entry: string): { status: number | null; lines: string[]; stderr: string } {
+        const result = spawnSync(process.execPath, [entry], {
+            env: { ...process.env, NODE_PATH: join(root, "node_modules") },
+            encoding: "utf8"
+        });
+        return {
+            status: result.status,
+            lines: existsSync(out) ? readFileSync(out, "utf8").trim().split("\n") : [],
+            stderr: result.stderr
+        };
+    }
+    function loaderWith(source: string): string {
+        const loader = join(root, "loader", "patcher.js");
+        mkdirSync(join(root, "loader"), { recursive: true });
+        writeFileSync(loader, source);
+        return loader;
+    }
+    function stubAt(loaderPath: string): string {
+        const index = join(resources, "app.asar", "index.js");
+        writeFileSync(index, stubIndexSource(loaderPath));
+        return index;
+    }
+
+    it("a loader that throws before it starts Discord: stock Discord boots", () => {
+        const index = stubAt(loaderWith(`throw new Error("boom");`));
+        const result = run(index);
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.lines.some(line => line.startsWith("stock:"))).toBe(true);
+    });
+
+    it("a truncated loader (syntax error): stock Discord boots", () => {
+        const index = stubAt(loaderWith(`function half( {`));
+        const result = run(index);
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.lines.some(line => line.startsWith("stock:"))).toBe(true);
+    });
+
+    it("a loader that already pointed Discord at its code and then threw: rethrown, never booted twice", () => {
+        const index = stubAt(loaderWith(
+            `require.main.filename = "/somewhere/else.js"; require("fs").appendFileSync(${JSON.stringify(out)}, "subline\\n"); throw new Error("late");`
+        ));
+        const result = run(index);
+        expect(result.status).toBe(1);
+        expect(result.lines).toEqual(["subline"]);
+    });
+
+    it("required by another mod's resources/app (not the main module): loads Discord's own code, not the loader", () => {
+        const loader = loaderWith(`require("fs").appendFileSync(${JSON.stringify(out)}, "subline\\n");`);
+        stubAt(loader);
+        mkdirSync(join(resources, "app"), { recursive: true });
+        const shim = join(resources, "app", "index.js");
+        writeFileSync(shim, `module.exports = require("../app.asar");`);
+        const result = run(shim);
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.lines).not.toContain("subline");
+        expect(result.lines.some(line => line.startsWith("stock:"))).toBe(true);
+    });
+
+    it("the 0.2.1 stub is what threw: proof the cases above are new", () => {
+        const index = join(resources, "app.asar", "index.js");
+        writeFileSync(index, previousStubIndexSource(loaderWith(`throw new Error("boom");`)));
+        expect(run(index).status).toBe(1);
     });
 });

@@ -363,13 +363,37 @@ describe("patchInstall", () => {
         expect(existsSync(fixture.install.backupPath)).toBe(false);
     });
 
-    it("refuses to patch a broken install", () => {
-        fixture = makeDiscordFixture({ withoutAsar: true, withBackup: true });
+    it("refuses to patch a broken install it cannot repair (both archives gone)", () => {
+        fixture = makeDiscordFixture({ withoutAsar: true });
         const result = patchInstall(fixture.install, options());
         expect(result.ok).toBe(false);
         if (result.ok) return;
         expect(result.error.code).toBe("BROKEN_INSTALL");
         expect(existsSync(fixture.install.asarPath)).toBe(false);
+    });
+
+    // Audit 2026-10-06 #26 / #44: a kill between the two renames (or Vencord's
+    // host-update hook cut short) leaves _app.asar and no app.asar. It used to
+    // be refused as BROKEN_INSTALL forever, with a Discord that cannot start.
+    it("finishes an interrupted patch: app.asar gone, the original in _app.asar", () => {
+        fixture = makeDiscordFixture({ withoutAsar: true, withBackup: true });
+        writeFileSync(join(fixture.install.resourcesPath, ".subline-app.asar.tmp"), "half");
+        const result = patchInstall(fixture.install, options());
+        expect(result.ok).toBe(true);
+        expect(readFileSync(fixture.install.backupPath).equals(fixture.originalAsar)).toBe(true);
+        expect(existsSync(join(fixture.install.resourcesPath, ".subline-app.asar.tmp"))).toBe(false);
+        const state = inspectInstall(fixture.install);
+        expect(state.ok && state.value.kind).toBe("patched-by-us");
+    });
+
+    it("never finishes one whose _app.asar is a stub: refused, nothing moved", () => {
+        fixture = makeDiscordFixture({ withoutAsar: true });
+        writeFileSync(fixture.install.backupPath, buildStubAsar("/Users/x/Vencord/dist/patcher.js"));
+        const before = readFileSync(fixture.install.backupPath);
+        const result = patchInstall(fixture.install, options());
+        expect(!result.ok && result.error.code).toBe("BROKEN_INSTALL");
+        expect(existsSync(fixture.install.asarPath)).toBe(false);
+        expect(readFileSync(fixture.install.backupPath).equals(before)).toBe(true);
     });
 
     it("overwrites a stale leftover backup when the real app.asar is in place", () => {
