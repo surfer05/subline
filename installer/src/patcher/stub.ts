@@ -45,8 +45,41 @@ export const MAX_STUB_BYTES = 64 * 1024;
  *
  * The loader path is the first statement (`const L=<json>;`), so it parses
  * back without running anything (parseRequirePath).
+ *
+ * IS THIS STUB DISCORD'S ENTRY POINT? Electron loads the app's main script
+ * with `Module._load(main, Module, true)` (the `true` is isMain; read out of
+ * the Electron 33.4.11 binary: `i._load(s.join(c,f),i,!0)`), which makes
+ * `require.main === module` here. Vencord's own patcher.js relies on the same
+ * thing (it sets require.main.filename). The check exists for one case only:
+ * another mod's resources/app in front of us, which require()s app.asar from
+ * its own module (audit #9); then Discord's own code must load, not the
+ * loader. So the check is widened in the SAFE direction: any sign that we are
+ * the entry (require.main is us, is missing, has our filename, or no user
+ * module required us: Electron passes the Module constructor as the parent,
+ * which has no filename) loads Subline. Only a real module that required us
+ * (a filename on module.parent) and is not us means "someone is in front".
+ * If the isMain check were ever wrong, Subline still loads instead of Discord
+ * silently starting without it. Every use of require.main also tolerates it
+ * being missing.
  */
 export function stubIndexSource(loaderPath: string): string {
+    return `const L=${JSON.stringify(loaderPath)};`
+        + "const f=require(\"fs\");let ok=false;try{f.accessSync(L,f.constants.R_OK);ok=true}catch{}"
+        + "const r=require.main,q=module.parent,"
+        + "top=r===module||!r||r.filename===__filename||!(q&&typeof q.filename===\"string\");"
+        + "const b=()=>{const p=require(\"path\"),a=p.join(__dirname,\"..\",\"_app.asar\"),"
+        + "m=p.join(a,require(p.join(a,\"package.json\")).main);if(require.main)require.main.filename=m;"
+        + "require(\"electron\").app.setAppPath(a);require(m)};"
+        + "if(ok&&top){try{require(L)}catch(e){if(require.main&&require.main.filename!==__filename)throw e;"
+        + "console.error(\"[Subline] loader failed\",e);b()}}else{b()}";
+}
+
+/**
+ * The stub of the first 0.2.3 builds (owner dogfood only): the same, with a
+ * bare `require.main===module` check. Still ours, still verifies; rewritten
+ * when Discord is closed, like any older form.
+ */
+export function interimStubIndexSource(loaderPath: string): string {
     return `const L=${JSON.stringify(loaderPath)};`
         + "const f=require(\"fs\");let ok=false;try{f.accessSync(L,f.constants.R_OK);ok=true}catch{}"
         + "const b=()=>{const p=require(\"path\"),a=p.join(__dirname,\"..\",\"_app.asar\"),"
@@ -128,6 +161,7 @@ export type StubForm = "current" | "previous" | "legacy";
 export function stubFormOf(indexSource: string, loaderPath: string): StubForm | null {
     if (indexSource === stubIndexSource(loaderPath)) return "current";
     if (indexSource === previousStubIndexSource(loaderPath)) return "previous";
+    if (indexSource === interimStubIndexSource(loaderPath)) return "previous";
     if (indexSource === legacyStubIndexSource(loaderPath)) return "legacy";
     return null;
 }
