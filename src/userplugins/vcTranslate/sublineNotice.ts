@@ -16,11 +16,11 @@ import { currentNotice, noticesQueue, popNotice, showNotice } from "@api/Notices
  * while it is on screen or still queued; the X removes it from both without
  * calling anything, which is how a close by hand is seen.
  */
-export type NoticeSlot = "activation" | "checking";
+export type NoticeSlot = "activation" | "checking" | "appUpdate";
 
 type Entry = unknown[];
 
-const mine: Record<NoticeSlot, { cb: () => void; text: string; } | null> = { activation: null, checking: null };
+const mine: Record<NoticeSlot, { cb: () => void; text: string; } | null> = { activation: null, checking: null, appUpdate: null };
 
 const callbackOf = (entry: unknown): unknown => Array.isArray(entry) ? (entry as Entry)[3] : undefined;
 
@@ -58,20 +58,24 @@ export function takeNotice(slot: NoticeSlot): void {
  * Show `text` in this slot. Nothing when the same text is already there. Once
  * the reader has closed it, the same text is not shown again this session
  * unless `force` (they pressed something that asks for it).
+ *
+ * `display` replaces `text` on screen when given (a node with an inline link,
+ * appNotice.ts's "Later"); `text` stays the identity used above.
  */
 export function putNotice(
-    slot: NoticeSlot, text: string, button: string, onClick: () => void, force = false
+    slot: NoticeSlot, text: string, button: string, onClick: () => void, force = false, display?: unknown
 ): void {
     const m = mine[slot];
     if (m !== null && m.text === text && (noticePresent(slot) || !force)) return;
     takeNotice(slot);
     const cb = () => onClick();
     mine[slot] = { cb, text };
-    showNotice(text, button, cb);
+    showNotice((display ?? text) as Parameters<typeof showNotice>[0], button, cb);
 }
 
-/** Forget both slots without touching the screen (stop()). */
+/** Forget every slot without touching the screen (stop()). */
 export function forgetNotices(): void {
     mine.activation = null;
     mine.checking = null;
+    mine.appUpdate = null;
 }

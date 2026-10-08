@@ -43,7 +43,7 @@ import {
 import {
     recordError, recordPluginLoaded, recordRendered, recordTranslation, resetStatusBeacon
 } from "./statusBeacon";
-import { BUILD_ID, type BeaconErrorCode } from "./statusShape";
+import { BUILD_ID, type BeaconErrorCode, PLUGIN_VERSION } from "./statusShape";
 import {
     clearLanguage, clearStore, getTranslation, invalidateMessage, loadPersistedTranslations, makeKey,
     setTranslation, subscribe, type StoredTranslation
@@ -62,6 +62,7 @@ import {
     closePanel, type CodeSubmitResult, openActivatePanel, openCodeEntry, openPaymentPendingPanel, openUpgradePanel
 } from "./upgradePanel";
 import { createUpdateWatch, UPDATE_CHECK_INTERVAL_MS, type UpdateWatch } from "./updateNotice";
+import { APP_DOWNLOAD_URL, APP_NOTICE_COPY, checkAppNotice } from "./appNotice";
 import { SurfaceBudget } from "./surfaces/budget";
 import { SurfaceCache } from "./surfaces/cache";
 import {
@@ -699,6 +700,31 @@ function showDeviceLimitNotice(force = false): void {
     deviceLimited = true;
     // Idempotent: a notice already up (or queued) is never queued twice.
     putNotice("activation", UPGRADE_COPY.deviceLimit, UPGRADE_COPY.deviceLimitButton, openResetHelp, force);
+}
+
+/**
+ * "The installed app is too old" (appNotice.ts). A Vencord notice has one
+ * button and an X, so "Later" is an inline link in the message that takes
+ * only this notice down.
+ */
+function showAppNotice(): void {
+    const later = () => takeNotice("appUpdate");
+    const display = (
+        <span>
+            {APP_NOTICE_COPY.text}{" "}
+            <a
+                role="button"
+                onClick={later}
+                style={{ marginLeft: 6, textDecoration: "underline", cursor: "pointer", color: "inherit" }}
+            >
+                {APP_NOTICE_COPY.later}
+            </a>
+        </span>
+    );
+    putNotice("appUpdate", APP_NOTICE_COPY.text, APP_NOTICE_COPY.button, () => {
+        (globalThis as any).VencordNative?.native?.openExternal?.(APP_DOWNLOAD_URL);
+        takeNotice("appUpdate");
+    }, false, display);
 }
 
 /**
@@ -5211,6 +5237,17 @@ export default definePlugin({
             clearInterval: handle => clearInterval(handle as ReturnType<typeof setInterval>)
         });
         updateWatch.start();
+
+        // The installed APP may be older than this mod needs (the feed updates
+        // only the mod): say so once per mod version (appNotice.ts). Never
+        // awaited and never blocks translation.
+        void checkAppNotice({
+            modVersion: PLUGIN_VERSION,
+            readSignals: () => Native.readAppSignals(),
+            storage: { get: key => DataStore.get(key), set: (key, value) => DataStore.set(key, value) },
+            show: showAppNotice,
+            log: (event, detail) => logger.info(event, detail)
+        });
 
         // WHAT THIS INSTALL OWNS. The last answer is read from disk first
         // (awaited: it decides whether anything is translated at all), then
