@@ -190,8 +190,8 @@ function stillRunningSummary(platform: NodeJS.Platform, forced: boolean): string
     }
     if (platform === "win32") {
         return (
-            "Discord is still running. Closing its window only hides it in the system tray, near the clock. "
-            + "Right-click the Discord icon there and choose Quit, then continue. Or let Subline close it."
+            "Discord is still open in the background, behind the ^ near the clock. "
+            + "Right-click the Discord icon there and choose Quit Discord, then continue. Or let Subline close it."
         );
     }
     return (

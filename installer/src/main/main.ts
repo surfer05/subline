@@ -27,7 +27,7 @@ import type { FlowAction, FlowState } from "../app/flow.js";
 import {
     APP_MANAGEMENT_SETTINGS_URL, appManagementSummary, awaitAppManagement, isLoggedAttempt, probeAppManagement, worstAppManagementStatus
 } from "../app/appManagement.js";
-import { uninstall } from "../app/uninstall.js";
+import { refusedReport, uninstall } from "../app/uninstall.js";
 import type { UninstallReport } from "../app/uninstall.js";
 import {
     createHelperPorts, createLaunchctl, createSchtasks, HELPER_FLAG, HELPER_LABEL, launchAgentPlistPath,
@@ -40,6 +40,7 @@ import { shippedModDirFor } from "../app/modInstall.js";
 import { shouldRelaunchForNewerBundle } from "../app/relaunch.js";
 import { findDiscordProcesses, quitDiscord } from "../app/discordProcess.js";
 import { rememberedResourcesPath, uninstallTargets } from "../patcher/locate.js";
+import type { DiscordInstall } from "../patcher/locate.js";
 import { hiddenExec } from "../patcher/exec.js";
 import { readPatchedInstalls } from "../app/patchedInstalls.js";
 import { unpatchInstall } from "../patcher/patch.js";
@@ -525,19 +526,10 @@ ipcMain.handle("uninstall:run", async (
         // File ownership, not App Management: no toggle fixes it, so nothing
         // is opened and nothing waits. Nothing has been changed.
         const message = appManagementSummary("not-writable");
-        return {
-            restores: [],
-            helperStopped: false,
-            discordRestored: false,
-            modBundleRemoved: false,
-            modBundleKeptForSafety: false,
-            settingsRemoved: false,
-            productDataRemoved: false,
-            translationCache: "left-in-discord-storage",
-            problems: [{ code: "NOT_WRITABLE", message, path: installs[0]?.resourcesPath }],
-            clean: false,
-            summary: `${message} Nothing has been changed.`
-        };
+        return refused(refusedReport(
+            [{ code: "NOT_WRITABLE", message, path: installs[0]?.resourcesPath }],
+            `${message} Nothing has been changed.`
+        ));
     }
     if (status !== "granted" && status !== "not-required") {
         phase("permission");
@@ -559,122 +551,138 @@ ipcMain.handle("uninstall:run", async (
         });
         if (!report.permitted && report.status === "not-writable") {
             const message = appManagementSummary("not-writable");
-            return {
-                restores: [],
-                helperStopped: false,
-                discordRestored: false,
-                modBundleRemoved: false,
-                modBundleKeptForSafety: false,
-                settingsRemoved: false,
-                productDataRemoved: false,
-                translationCache: "left-in-discord-storage",
-                problems: [{ code: "NOT_WRITABLE", message, path: installs[0]?.resourcesPath }],
-                clean: false,
-                summary: `${message} Nothing has been changed.`
-            };
+            return refused(refusedReport(
+                [{ code: "NOT_WRITABLE", message, path: installs[0]?.resourcesPath }],
+                `${message} Nothing has been changed.`
+            ));
         }
         if (!report.permitted) {
             // Nothing has been touched: no helper removed, no file moved.
             // Cancelled: the renderer says so and nothing more. Failed: the
             // probe itself kept erroring, and the renderer offers to try again.
-            return {
-                restores: [],
-                helperStopped: false,
-                discordRestored: false,
-                modBundleRemoved: false,
-                modBundleKeptForSafety: false,
-                settingsRemoved: false,
-                productDataRemoved: false,
-                translationCache: "left-in-discord-storage",
-                problems: report.cancelled
-                    ? []
-                    : [{ code: "IO_ERROR", message: report.summary, path: installs[0]?.resourcesPath }],
-                clean: false,
+            return refused({
+                ...refusedReport(
+                    report.cancelled
+                        ? []
+                        : [{ code: "IO_ERROR", message: report.summary, path: installs[0]?.resourcesPath }],
+                    report.cancelled
+                        ? "Nothing was changed. Discord is exactly as it was."
+                        : `${report.summary} Nothing has been changed. Discord keeps working exactly as it does now.`
+                ),
                 cancelled: report.cancelled,
-                permissionCheckFailed: report.failed,
-                summary: report.cancelled
-                    ? "Nothing was changed. Discord is exactly as it was."
-                    : `${report.summary} Nothing has been changed. Discord keeps working exactly as it does now.`
-            };
+                permissionCheckFailed: report.failed
+            });
         }
     }
     phase("removing");
 
-    // §8 step 3 FIRST (among the writes). Restoring Discord under a live helper
-    // would have the helper put the patch straight back at its next interval.
-    // `removeHelperFor` returns the precondition `uninstall` requires, so this
-    // call site cannot assemble it wrongly.
-    const helper = await removeHelperFor(helperWiring(), process.platform, app.getPath("home"));
-
-    // Restoring Discord renames _app.asar back over app.asar, and Windows
-    // refuses to rename a file a running process holds open. Looked up here
-    // because `uninstall` does no I/O of its own — the same reason `helper`
-    // arrives already resolved. Without it the failure surfaced as FILE_IN_USE
-    // from deep inside the restore, which is a filesystem error standing in for
-    // a fact the user could have been told first.
-    // Uninstall may be asked to close Discord on the user's behalf, exactly as
-    // the install flow does — "one click to install, one click to remove" is not
-    // met by handing someone a file error and letting them work out that the
-    // remedy is to quit an app they believe is already closed.
-    //
-    // Two strengths, and the second is only ever reached from a button that
-    // says so: "ask" is the polite request, "force" is the consented close for
-    // the Windows case where the polite one merely hides Discord in the tray.
-    const branches = new Set(installs.map(install => install.branch));
-    if (options.closeDiscord !== undefined) {
-        for (const branch of branches) {
-            // The escalation lives in quitDiscord now. This used to re-implement
-            // it — ask, inspect the report, ask again with force — beside a
-            // near-identical copy in flow.ts that differed in the details, in
-            // the file whose own header says there is nothing here to be wrong
-            // about. An invariant enforced in two places is enforced in none.
-            const report = await quitDiscord({
-                branch,
-                platform: process.platform,
-                listProcesses: () => listProcesses(process.platform, execFileAsync, log),
-                requestQuit: () => requestQuit(branch, process.platform, execFileAsync),
-                forceQuit: () => forceQuit(branch, process.platform, execFileAsync),
-                force: options.closeDiscord === "force",
-                escalate: options.closeDiscord === "ask"
-            });
-            log.info("uninstall.quit-discord", {
-                branch,
-                outcome: report.outcome,
-                clear: report.clear,
-                forced: report.forced
-            });
-        }
-    }
-
-    const processes = await listProcesses(process.platform, execFileAsync, log);
-    const discordRunning = [...branches]
-        .flatMap(branch => findDiscordProcesses(processes, branch, process.platform));
-
+    // THE ORDER IS uninstall()'s: dry run, close Discord (if asked), check it
+    // is gone, stop the helper, restore, bring the helper back if a restore
+    // failed, and only then the bundle and the settings. This handler only
+    // supplies the ports. It used to remove the helper here, before anything
+    // was checked, and a refused uninstall left Discord patched with no helper
+    // (field logs 2026-10-06 and 2026-10-08).
     log.info("uninstall.start", {
         installs: installs.length,
         keepSettings: options.keepSettings,
-        helperRemoved: helper.removed,
-        discordRunning: discordRunning.length
+        closeDiscord: options.closeDiscord ?? null
     });
-    return uninstall(
+    const report = await uninstall(
         {
             // Our own loader by path too, so a stub whose marker went missing (a
             // Windows Discord update copies app.asar without it) is still restored.
-            unpatch: (install, opts) => {
-                const modDir = uninstallPaths().modBundleDir;
-                return unpatchInstall(install, { ...opts, ownLoaderPaths: modDir === null ? [] : [loaderPathFor(modDir)] });
-            },
+            unpatch: (install, opts) => unpatchOurs(install, opts),
             ...uninstallPaths(),
-            log
+            platform: process.platform,
+            log,
+            // Only the branches Subline is in: uninstall() decides which.
+            listDiscordProcesses: branches => runningDiscord(branches),
+            // Two strengths, and the second is only ever reached from a button
+            // that says so: "ask" is the polite request that escalates inside
+            // quitDiscord, "force" is the consented close.
+            quitDiscord: async (mode, branches) => {
+                for (const branch of branches) {
+                    const quit = await quitDiscord({
+                        branch,
+                        platform: process.platform,
+                        listProcesses: () => listProcesses(process.platform, execFileAsync, log),
+                        requestQuit: () => requestQuit(branch, process.platform, execFileAsync),
+                        forceQuit: () => forceQuit(branch, process.platform, execFileAsync),
+                        force: mode === "force",
+                        escalate: mode === "ask"
+                    });
+                    log.info("uninstall.quit-discord", {
+                        branch,
+                        outcome: quit.outcome,
+                        clear: quit.clear,
+                        forced: quit.forced
+                    });
+                }
+            },
+            removeHelper: () => removeHelperFor(helperWiring(), process.platform, app.getPath("home")),
+            restoreHelper: () => installHelperFor(helperWiring(), process.platform, app.getPath("home"))
         },
         {
             installs,
             keepSettings: options.keepSettings,
-            helper,
-            discordRunning,
+            ...(options.closeDiscord === undefined ? {} : { closeDiscord: options.closeDiscord }),
             rememberedResources: remembered.map(entry => rememberedResourcesPath(entry, process.platform))
         }
     );
+    log.info("uninstall.done", {
+        clean: report.clean,
+        nothingChanged: report.nothingChanged === true,
+        helperStopped: report.helperStopped,
+        settingsRemoved: report.settingsRemoved,
+        code: report.problems[0]?.code ?? null
+    });
+    return refused(report);
+});
+
+/**
+ * unpatchInstall with our own loader known by path, so a stub whose marker
+ * went missing (a Windows Discord update copies app.asar without it) is still
+ * recognised as ours and restored.
+ */
+function unpatchOurs(install: DiscordInstall, opts: { removeForeignMod?: boolean; dryRun?: boolean }) {
+    const modDir = uninstallPaths().modBundleDir;
+    return unpatchInstall(install, { ...opts, ownLoaderPaths: modDir === null ? [] : [loaderPathFor(modDir)] });
+}
+
+/** Discord processes of the given branches, right now. */
+async function runningDiscord(branches: readonly DiscordInstall["branch"][]): Promise<{ pid: number }[]> {
+    const processes = await listProcesses(process.platform, execFileAsync, log);
+    return branches.flatMap(branch => findDiscordProcesses(processes, branch, process.platform));
+}
+
+/**
+ * A report that changed nothing hands the window back to the install flow:
+ * the user can press Back and carry on, instead of a dead window (audit
+ * 2026-10-06: after a refused uninstall nothing could be pressed).
+ */
+function refused(report: UninstallReport): UninstallReport {
+    if (report.nothingChanged === true) uninstallStarted = false;
+    return report;
+}
+
+/**
+ * The first uninstall screen asks this before anything is changed, so it can
+ * offer "Quit Discord and remove" up front, as the install does.
+ */
+ipcMain.handle("uninstall:check", async (): Promise<{ discordRunning: boolean; platform: NodeJS.Platform }> => {
+    const remembered = readPatchedInstalls(productDirFor());
+    const installs = uninstallTargets({ platform: process.platform }, remembered, () => {});
+    // Only Discords Subline is in. A Canary running Vencord is not "Discord
+    // is still open" for this uninstall. Same dry run uninstall() makes.
+    const branches = [...new Set(installs
+        .filter(install => {
+            const verdict = unpatchOurs(install, { dryRun: true });
+            return !verdict.ok || (verdict.value.foreignMod === undefined && !verdict.value.alreadyClean);
+        })
+        .map(install => install.branch))];
+    const running = await runningDiscord(branches);
+    log.info("uninstall.check", { installs: installs.length, discordRunning: running.length });
+    return { discordRunning: running.length > 0, platform: process.platform };
 });
 
 ipcMain.handle("shell:open", async (_event, url: string) => {

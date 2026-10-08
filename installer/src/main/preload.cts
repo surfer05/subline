@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld("subline", {
     readDiagnostics: () => ipcRenderer.invoke("diagnostics:read"),
     uninstall: (options: { keepSettings: boolean; closeDiscord?: "ask" | "force" }) =>
         ipcRenderer.invoke("uninstall:run", options),
+    /** Before anything is changed: is Discord open, and on which platform (for the first uninstall screen). */
+    checkUninstall: () => ipcRenderer.invoke("uninstall:check"),
     /** Stop waiting for App Management during an uninstall. */
     cancelUninstall: () => ipcRenderer.invoke("uninstall:cancel"),
     openUrl: (url: string) => ipcRenderer.invoke("shell:open", url),

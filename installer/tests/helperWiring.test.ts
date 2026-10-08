@@ -34,7 +34,7 @@ import { HELPER_TASK_NAME } from "../src/helper/scheduledTask.js";
 import { ensureHelperFor, firstProgramArgument, installHelperFor, removeHelperFor } from "../src/main/ports.js";
 import type { UnpatchReport } from "../src/patcher/patch.js";
 import type { Result } from "../src/patcher/result.js";
-import { makeFakeLaunchctl, makeFakeSchtasks } from "./fixture.js";
+import { makeFakeLaunchctl, makeFakeSchtasks, uninstallSystemFake } from "./fixture.js";
 import type { FakeLaunchctl, FakeSchtasks } from "./fixture.js";
 
 const UID = 501;
@@ -286,7 +286,11 @@ describe("uninstall consumes what removeHelperFor produces", () => {
             productDir: null,
             logDir: null,
             vencordSettingsPath: null,
-            log
+            log,
+            ...uninstallSystemFake().ports,
+            // The REAL removal and registration, against the fake launchctl.
+            removeHelper: () => removeHelperFor(wiring(), "darwin", home),
+            restoreHelper: () => installHelperFor(wiring(), "darwin", home)
         };
     }
 
@@ -303,8 +307,7 @@ describe("uninstall consumes what removeHelperFor produces", () => {
 
     it("proceeds when the agent really was unregistered", async () => {
         await installHelperFor(wiring(), "darwin", home);
-        const helper = await removeHelperFor(wiring(), "darwin", home);
-        const report = uninstall(unpatchPorts(), { installs: [INSTALL], helper });
+        const report = await uninstall(unpatchPorts(), { installs: [INSTALL] });
         expect(report.helperStopped).toBe(true);
         expect(report.discordRestored).toBe(true);
     });
@@ -312,9 +315,8 @@ describe("uninstall consumes what removeHelperFor produces", () => {
     it("ABORTS with nothing changed when the agent could not be stopped", async () => {
         await installHelperFor(wiring(), "darwin", home);
         launchctl.failBootout = true;
-        const helper = await removeHelperFor(wiring(), "darwin", home);
 
-        const report = uninstall(unpatchPorts(), { installs: [INSTALL], helper });
+        const report = await uninstall(unpatchPorts(), { installs: [INSTALL] });
         // Restoring Discord's original archive under a live agent would have the
         // helper put the patch straight back at the next interval — software the
         // user removed, still modifying another application.

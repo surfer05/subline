@@ -185,6 +185,15 @@ export function errnoOf(cause: unknown): string | undefined {
  * them as distinct failures the GUI must explain differently: App Management
  * has a remedy (deep link + poll), a read-only volume does not.
  */
+/**
+ * Where a "closed" Discord hides on Windows. Closing its window only hides it,
+ * and on Windows 11 its tray icon sits behind the ^ overflow arrow near the
+ * clock (field test 2026-10-08). "Check the system tray" did not get the user
+ * there; the ^ does.
+ */
+const WINDOWS_HIDDEN_DISCORD =
+    "Discord may still be open in the background, behind the ^ near the clock. Quit it there, then try again.";
+
 export function fsError<T>(cause: unknown, path: string, what: string, platform: NodeJS.Platform = process.platform): Result<T> {
     const errno = errnoOf(cause);
     // WINDOWS: EPERM is nearly always a file something holds open (antivirus
@@ -195,16 +204,14 @@ export function fsError<T>(cause: unknown, path: string, what: string, platform:
     if (platform === "win32" && (errno === "EPERM" || errno === "EBUSY")) {
         return err<T>(
             "FILE_IN_USE",
-            `Cannot ${what}: another program still has Discord's files open. Close Discord completely, `
-            + "including any Discord icon in the system tray near the clock, then try again.",
+            `Cannot ${what}: another program still has Discord's files open. ${WINDOWS_HIDDEN_DISCORD}`,
             { path, cause }
         );
     }
     if (platform === "win32" && errno === "EACCES") {
         return err<T>(
             "PERMISSION_DENIED",
-            `Not allowed to ${what}. Windows would not let Subline change Discord's files. Close Discord fully, `
-            + "including the tray icon near the clock, then try again.",
+            `Not allowed to ${what}. Windows would not let Subline change Discord's files. ${WINDOWS_HIDDEN_DISCORD}`,
             { path, cause }
         );
     }
@@ -230,8 +237,7 @@ export function fsError<T>(cause: unknown, path: string, what: string, platform:
         case "EBUSY":
             return err<T>(
                 "FILE_IN_USE",
-                `Cannot ${what}: another program still has Discord's files open. Close Discord completely, `
-                + "including any Discord icon in the system tray near the clock, then try again.",
+                `Cannot ${what}: another program still has Discord's files open. Quit Discord completely, then try again.`,
                 { path, cause }
             );
         default:

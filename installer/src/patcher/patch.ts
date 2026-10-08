@@ -570,6 +570,15 @@ export interface UnpatchOptions {
      * `…/Subline/mod/patcher.js` is recognised without it.
      */
     ownLoaderPaths?: readonly string[];
+    /**
+     * Decide, but write nothing. Returns the exact error the real call would
+     * return for every refusal that can be known before a write (another mod,
+     * a missing or damaged backup, an unrecoverable broken install), and ok
+     * otherwise. Uninstall runs this over every Discord before it stops the
+     * helper, so a refusal leaves everything exactly as it was. Failures only
+     * a write can find (a file held open) still surface from the real call.
+     */
+    dryRun?: boolean;
 }
 
 export interface UnpatchReport {
@@ -580,6 +589,11 @@ export interface UnpatchReport {
     alreadyClean: boolean;
     removedArtifacts: string[];
     previousState: InstallStateKind;
+    /**
+     * Set when another client mod owns this Discord and it was left as it is
+     * (its name, or null when unknown). Uninstall lists it instead of failing.
+     */
+    foreignMod?: string | null;
     /** One sentence the GUI can show verbatim. */
     summary: string;
 }
@@ -589,26 +603,62 @@ export function unpatchInstall(install: DiscordInstall, options: UnpatchOptions 
     if (!stateResult.ok) return stateResult;
     const state = stateResult.value;
 
+    const dryRun = options.dryRun === true;
     switch (state.kind) {
         case "unpatched":
-            return cleanUpUnpatched(install, state);
+            return dryRun ? wouldSucceed(install, state) : cleanUpUnpatched(install, state);
 
         case "broken":
-            return unpatchBroken(install, state);
+            return unpatchBroken(install, state, dryRun);
 
         case "patched-by-other":
-            if (!options.removeForeignMod) {
-                return err<UnpatchReport>(
-                    "FOREIGN_MOD_PRESENT",
-                    `Subline is not installed here. ${state.modName ?? "another client mod"} is. Remove it with its own uninstaller.`,
-                    { path: install.rootPath }
-                );
-            }
-            return restoreOriginal(install, state);
+            // NOT OURS, SO NOT A FAILURE (audit 2026-10-06 #2). Subline on
+            // Stable and Vencord on Canary is common; refusing here made every
+            // uninstall on such a machine fail, forever. Another mod's Discord
+            // is left exactly as it is: its stub and its _app.asar (the stub
+            // still boots from it). Only a marker of OURS beside it goes: the
+            // stub Discord runs loads someone else's loader, so the marker is
+            // stale by definition, and keeping it made the next uninstall
+            // believe this Discord still needs Subline's files.
+            if (!options.removeForeignMod) return leaveForeign(install, state, dryRun);
+            return restoreOriginal(install, state, dryRun);
 
         case "patched-by-us":
-            return restoreOriginal(install, state);
+            return restoreOriginal(install, state, dryRun);
     }
+}
+
+function leaveForeign(install: DiscordInstall, state: InstallState, dryRun: boolean): Result<UnpatchReport> {
+    const removed: string[] = [];
+    if (!dryRun) {
+        const markerRemoved = removeMarker(install.resourcesPath);
+        if (!markerRemoved.ok) return markerRemoved;
+        if (markerRemoved.value) removed.push(markerPathFor(install.resourcesPath));
+    }
+    const mod = state.modName ?? null;
+    return ok({
+        install,
+        restored: false,
+        alreadyClean: removed.length === 0,
+        removedArtifacts: removed,
+        previousState: state.kind,
+        foreignMod: mod,
+        summary: `Subline is not installed here. ${mod ?? "Another client mod"} is, and it was left as it is.`
+    });
+}
+
+/** A dry run that found nothing to refuse. Nothing was written. */
+function wouldSucceed(install: DiscordInstall, state: InstallState): Result<UnpatchReport> {
+    return ok({
+        install,
+        restored: false,
+        // An untouched Discord with no marker of ours: the real call would
+        // find nothing of Subline's to remove (see cleanUpUnpatched).
+        alreadyClean: state.kind === "unpatched" && state.marker === null,
+        removedArtifacts: [],
+        previousState: state.kind,
+        summary: "Dry run: Subline can be removed from this Discord."
+    });
 }
 
 function cleanUpUnpatched(install: DiscordInstall, state: InstallState): Result<UnpatchReport> {
@@ -643,7 +693,7 @@ function cleanUpUnpatched(install: DiscordInstall, state: InstallState): Result<
     });
 }
 
-function unpatchBroken(install: DiscordInstall, state: InstallState): Result<UnpatchReport> {
+function unpatchBroken(install: DiscordInstall, state: InstallState, dryRun = false): Result<UnpatchReport> {
     switch (state.reason) {
         // All three are "put the original back if it is there". restoreOriginal
         // finishes an interrupted patch when `_app.asar` survived, and reports
@@ -651,13 +701,13 @@ function unpatchBroken(install: DiscordInstall, state: InstallState): Result<Unp
         case "asar-missing-backup-present":
         case "our-patch-without-backup":
         case "asar-and-backup-missing":
-            return restoreOriginal(install, state);
+            return restoreOriginal(install, state, dryRun);
         default:
             return err<UnpatchReport>("BROKEN_INSTALL", state.summary, { path: install.rootPath });
     }
 }
 
-function restoreOriginal(install: DiscordInstall, state: InstallState): Result<UnpatchReport> {
+function restoreOriginal(install: DiscordInstall, state: InstallState, dryRun = false): Result<UnpatchReport> {
     if (!existsSync(install.backupPath)) {
         return err<UnpatchReport>(
             "BACKUP_MISSING",
@@ -682,6 +732,8 @@ function restoreOriginal(install: DiscordInstall, state: InstallState): Result<U
             { path: install.backupPath }
         );
     }
+    // Every check a read can make has passed. The rest needs the write.
+    if (dryRun) return wouldSucceed(install, state);
 
     try {
         renameSync(install.backupPath, install.asarPath);

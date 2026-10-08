@@ -181,7 +181,10 @@ describe("uninstall restores our stub whatever the marker says", () => {
     it("a stub loading a bundle outside …/Subline/mod is restored when the caller names that loader", () => {
         const b = bundle();
         const f = fixture({ stubLoaderPath: b.loaderPath, withBackup: true });
-        expect(unpatchInstall(f.install).ok).toBe(false);
+        // Without the loader named it looks like another mod's: left alone.
+        const unnamed = unpatchInstall(f.install);
+        expect(unnamed.ok && unnamed.value.restored).toBe(false);
+        expect(unnamed.ok && unnamed.value.foreignMod !== undefined).toBe(true);
         const result = unpatchInstall(f.install, { ownLoaderPaths: [b.loaderPath] });
         expect(result.ok && result.value.restored).toBe(true);
     });
