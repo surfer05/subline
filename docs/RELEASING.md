@@ -94,7 +94,9 @@ The paid-only release. Do these in order.
    The release notes are tracked in the repo, at `docs/release-notes/v0.2.0.md`.
 6. **Build and deploy the site** without `SUBLINE_ALLOW_PLACEHOLDER`:
    `node scripts/buildSite.mjs`, then `node scripts/buildSite.mjs --check`, then
-   deploy as usual.
+   deploy as usual. The site is two pages now: copy `site/index.html` and
+   `site/buy/index.html` (as `buy/index.html`) to gh-pages, and keep its
+   `CNAME` (subline.page) and `.nojekyll`.
 7. **Coupons.** The 100% coupon from `relay/scripts/coupon.mjs` only works on
    the **monthly** AI product, and it goes on Dodo's **payment page**, not in
    Subline's code box.

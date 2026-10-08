@@ -33,6 +33,110 @@ const parse = new Function(`${THANKS_JS}\nreturn parseCheckoutReturn;`)() as (se
 const cleaned = (ret: NonNullable<Return>): string =>
     (new Function(`${THANKS_JS}\nreturn cleanedReturnSearch;`)() as (r: NonNullable<Return>) => string)(ret);
 
+type Purchase = { param: "payment_id" | "subscription_id"; id: string } | null;
+const { purchaseOf, watchPurchase } = new Function(`${THANKS_JS}\nreturn { purchaseOf: purchaseOf, watchPurchase: watchPurchase };`)() as {
+    purchaseOf: (search: string) => Purchase;
+    watchPurchase: (base: string, purchase: NonNullable<Purchase>, deps: any, done: (how: string) => void) => void;
+};
+
+/** The page's thanks script, cut from the SHIPPED page. */
+function thanksIife(): string {
+    const script = PAGE.slice(PAGE.lastIndexOf("<script>") + 8, PAGE.lastIndexOf("</script>"));
+    const start = script.indexOf("(function () {\n    var ret = parseCheckoutReturn");
+    expect(start).toBeGreaterThanOrEqual(0);
+    return script.slice(start, script.indexOf("})();", start) + 5);
+}
+
+const VIEWS = ["ok", "pending", "failed", "discord", "discord-pending", "installer", "installer-pending", "keys", "key", "fallback"];
+
+/**
+ * Run the shipped thanks script against a fake page. The status check is
+ * replaced by a stub: `finish(how)` plays the relay's answer.
+ */
+function runThanks(search: string, opts: { noFetch?: boolean } = {}) {
+    const mk = (hidden = true): any => ({
+        hidden, textContent: "", attrs: {} as Record<string, string>,
+        setAttribute(k: string, v: string) { this.attrs[k] = v; },
+        parentNode: { insertBefore() {} }, addEventListener() {}
+    });
+    const nodes: Record<string, any> = {};
+    for (const n of VIEWS) nodes[n] = [mk()];
+    nodes["site-only"] = [mk(false), mk(false), mk(false)];
+    nodes["buy-only"] = [mk(), mk()];
+    nodes.email = [mk(), mk()];
+    nodes.timeout = [mk()];
+    nodes["buy-nokey"] = [mk()];
+    nodes.retry = [mk(false)];
+    const codeNode = { textContent: "" };
+    nodes.key[0].querySelector = (sel: string) => sel === "[data-thanks-code]" ? codeNode : { addEventListener() {} };
+    const fbNodes: Record<string, any> = {
+        "[data-thanks-fallback-discord]": { hidden: false }, "[data-thanks-fallback-installer]": { hidden: true },
+        "[data-thanks-fallback-code]": { textContent: "" }, "[data-thanks-fallback-copy]": { addEventListener() {} }
+    };
+    nodes.fallback[0].querySelector = (sel: string) => fbNodes[sel] ?? null;
+    const name = (sel: string) => sel.slice("[data-thanks-".length, -1);
+    const section = {
+        hidden: true,
+        querySelector: (sel: string) => nodes[name(sel)]?.[0] ?? null,
+        querySelectorAll: (sel: string) => nodes[name(sel)] ?? []
+    };
+    const others = [{ hidden: false }, { hidden: false }, { hidden: false }];
+    const doc = {
+        getElementById: (id: string) => id === "thanks" ? section : null,
+        querySelectorAll: (sel: string) => sel === "body > section" ? [section, ...others] : []
+    };
+    const loc = { search, hash: "", pathname: "/" };
+    let replaced = "";
+    const hist = { replaceState: (_a: unknown, _b: string, url: string) => { replaced = url; loc.search = url.slice(1, url.indexOf("#")); } };
+    let watched: { base: string; purchase: NonNullable<Purchase>; done: (how: string) => void } | null = null;
+    const watch = (base: string, purchase: NonNullable<Purchase>, _deps: unknown, done: (how: string) => void) => { watched = { base, purchase, done }; };
+    new Function("location", "document", "history", "parseCheckoutReturn", "cleanedReturnSearch", "copyText", "purchaseOf", "watchPurchase", "STATUS_URL", "fetch", "setTimeout", thanksIife())(
+        loc, doc, hist, parse, cleaned, () => {}, purchaseOf, watch, "https://relay.test/v1/purchase-status",
+        opts.noFetch ? undefined : () => Promise.reject(new Error("unused")), () => 0
+    );
+    const visible = (n: string): number => nodes[n].filter((x: any) => !x.hidden).length;
+    return {
+        get result() {
+            const shown = VIEWS.filter(n => !nodes[n][0].hidden && n !== "key");
+            return {
+                shown, code: codeNode.textContent, replaced,
+                fallbackCode: nodes.fallback[0].hidden ? "" : fbNodes["[data-thanks-fallback-code]"].textContent,
+                fallbackLine: nodes.fallback[0].hidden ? null : fbNodes["[data-thanks-fallback-discord]"].hidden ? "installer" : "discord"
+            };
+        },
+        get watched() { return watched; },
+        visible, nodes, others, section,
+        finish(how: string) { expect(watched).not.toBeNull(); watched!.done(how); }
+    };
+}
+
+/** A fake clock for watchPurchase: timers run in time order, promises settle between them. */
+function fakeClock() {
+    let now = 0;
+    const timers: { at: number; fn: () => void }[] = [];
+    return {
+        deps(fetch: (url: string) => Promise<any>) {
+            return { fetch, now: () => now, setTimeout: (fn: () => void, ms: number) => { timers.push({ at: now + ms, fn }); } };
+        },
+        get now() { return now; },
+        async runUntil(stop: () => boolean, limitMs = 10 * 60_000) {
+            for (let i = 0; i < 50; i++) await Promise.resolve();
+            while (!stop() && timers.length > 0) {
+                timers.sort((a, b) => a.at - b.at);
+                const t = timers.shift()!;
+                if (t.at > limitMs) break;
+                now = t.at;
+                t.fn();
+                for (let i = 0; i < 50; i++) await Promise.resolve();
+            }
+        }
+    };
+}
+const reply = (status: number, body: unknown) => Promise.resolve({
+    status, ok: status >= 200 && status < 300,
+    json: () => typeof body === "string" ? Promise.reject(new SyntaxError("not json")) : Promise.resolve(body)
+});
+
 function section(id: string): string {
     const start = PAGE.indexOf(`<section id="${id}"`);
     expect(start, id).toBeGreaterThanOrEqual(0);
@@ -169,44 +273,19 @@ describe("the built page", () => {
         const discord = block("data-thanks-discord");
         expect(discord).toContain("<h2 class=\"sec\">You're all set.</h2>");
         expect(discord).toContain("<p class=\"lead\">Go back to Discord. Subline is already on.</p>");
-        expect(discord).toContain("<p class=\"fine\">Your code is also in your email from Dodo Payments.</p>");
+        // The email line ships hidden: the page shows it only after a one-time purchase (S3).
+        expect(discord).toContain("<p class=\"fine\" data-thanks-email hidden>Your code is also in your email from Dodo Payments.</p>");
         expect(discord.match(/<p /g)).toHaveLength(3); // the kicker, the one line, the email line
         expect(discord).not.toMatch(/data-dl|data-thanks-code|data-thanks-copy/);
         const pending = block("data-thanks-discord-pending");
         expect(pending.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "))
             .toContain("Payment is being confirmed. Subline switches on in Discord by itself, usually within a few minutes.");
-        expect(pending).toContain("<p class=\"fine\">Your code is also in your email from Dodo Payments.</p>");
+        expect(pending).toContain("<p class=\"fine\" data-thanks-email hidden>Your code is also in your email from Dodo Payments.</p>");
+        expect(pending).toContain("<p class=\"lead\" data-thanks-timeout hidden>Check Subline → Settings in Discord. It shows your plan.</p>");
     });
 
     it("shows only the Discord view on a Discord return, and only the code view on a site return", () => {
-        const script = PAGE.slice(PAGE.lastIndexOf("<script>") + 8, PAGE.lastIndexOf("</script>"));
-        const start = script.indexOf("(function () {\n    var ret = parseCheckoutReturn");
-        expect(start).toBeGreaterThanOrEqual(0);
-        const iife = script.slice(start, script.indexOf("})();", start) + 5);
-        const run = (search: string) => {
-            const names = ["ok", "pending", "failed", "discord", "discord-pending", "installer", "installer-pending", "keys", "key", "fallback"];
-            const parts: Record<string, any> = {};
-            const codeNode = { textContent: "" };
-            for (const n of names) parts[n] = { hidden: true, parentNode: { insertBefore() {} } };
-            parts.key.querySelector = (sel: string) => sel === "[data-thanks-code]" ? codeNode : { addEventListener() {} };
-            const fbNodes: Record<string, any> = {
-                "[data-thanks-fallback-discord]": { hidden: false }, "[data-thanks-fallback-installer]": { hidden: true },
-                "[data-thanks-fallback-code]": { textContent: "" }, "[data-thanks-fallback-copy]": { addEventListener() {} }
-            };
-            parts.fallback.querySelector = (sel: string) => fbNodes[sel] ?? null;
-            const section = { hidden: true, querySelector: (sel: string) => parts[sel.slice("[data-thanks-".length, -1)] ?? null };
-            const doc = { getElementById: (id: string) => id === "thanks" ? section : null };
-            const loc = { search, hash: "", pathname: "/subline/" };
-            let replaced = "";
-            const hist = { replaceState: (_a: unknown, _b: string, url: string) => { replaced = url; } };
-            new Function("location", "document", "history", "parseCheckoutReturn", "cleanedReturnSearch", "copyText", iife)(loc, doc, hist, parse, cleaned, () => {});
-            const shown = names.filter(n => !parts[n].hidden && n !== "key");
-            return {
-                shown, code: codeNode.textContent, replaced,
-                fallbackCode: parts.fallback.hidden ? "" : fbNodes["[data-thanks-fallback-code]"].textContent,
-                fallbackLine: parts.fallback.hidden ? null : fbNodes["[data-thanks-fallback-discord]"].hidden ? "installer" : "discord"
-            };
-        };
+        const run = (search: string) => runThanks(search).result;
         const d = run("?from=discord&subscription_id=sub_1&status=active&license_key=LK-001");
         expect(d.shown).toEqual(["discord", "fallback"]);
         expect(d.code).toBe("");
@@ -215,21 +294,21 @@ describe("the built page", () => {
         expect(d.fallbackLine).toBe("discord");
         // No key in the address: no fallback.
         expect(run("?from=discord&subscription_id=sub_1&status=active").shown).toEqual(["discord"]);
-        expect(d.replaced).toBe("/subline/?from=discord&result=ok#thanks");
+        expect(d.replaced).toBe("/?from=discord&result=ok#thanks");
         expect(run("?from=discord&subscription_id=sub_1&status=pending").shown).toEqual(["discord-pending"]);
         const s = run("?subscription_id=sub_1&status=active&license_key=LK-001");
         expect(s.shown).toEqual(["ok", "keys"]);
         expect(s.code).toBe("LK-001");
-        expect(s.replaced).toBe("/subline/?result=ok#thanks");
+        expect(s.replaced).toBe("/?result=ok#thanks");
         // A refresh after the clean-up: the Discord view again, in its ok state.
-        expect(run(d.replaced.slice("/subline/".length, d.replaced.indexOf("#"))).shown).toEqual(["discord"]);
+        expect(run(d.replaced.slice(1, d.replaced.indexOf("#"))).shown).toEqual(["discord"]);
         // A checkout started in the installer says to go back to it, never the code.
         const i = run("?from=installer&payment_id=pay_1&status=succeeded&license_key=LK-001");
         expect(i.shown).toEqual(["installer", "fallback"]);
         expect(i.code).toBe("");
         expect(i.fallbackCode).toBe("LK-001");
         expect(i.fallbackLine).toBe("installer");
-        expect(i.replaced).toBe("/subline/?from=installer&result=ok#thanks");
+        expect(i.replaced).toBe("/?from=installer&result=ok#thanks");
         expect(run("?from=installer&payment_id=pay_1&status=processing").shown).toEqual(["installer-pending"]);
         expect(run("?from=installer").shown).toEqual(["installer-pending"]);
         // A failed or pending return, then a refresh: never "You're all set".
@@ -241,7 +320,7 @@ describe("the built page", () => {
             const first = run(search);
             expect(first.shown, search).toEqual([view]);
             expect(first.replaced, search).toMatch(/result=(failed|pending)#thanks$/);
-            const refreshed = run(first.replaced.slice("/subline/".length, first.replaced.indexOf("#")));
+            const refreshed = run(first.replaced.slice(1, first.replaced.indexOf("#")));
             expect(refreshed.shown, search).toEqual([view]);
         }
     });
@@ -267,9 +346,13 @@ describe("the built page", () => {
         expect(PAGE).toContain('history.replaceState(null, "", location.pathname + keep + "#thanks")');
         expect(PAGE).toContain("var keep = cleanedReturnSearch(ret);");
         const script = PAGE.slice(PAGE.lastIndexOf("<script>"));
-        // The only network call on the page is the GitHub release lookup.
-        expect(script.match(/fetch\(/g)).toHaveLength(1);
+        // Two network calls only: the GitHub release lookup, and the relay's
+        // purchase check, which is sent the payment or subscription id and nothing else.
+        expect(script.match(/\bfetch\(/g)).toHaveLength(3); // GitHub, watchPurchase's deps.fetch, and the page's wrapper
         expect(script).toContain('fetch("https://api.github.com/repos/"');
+        expect(script).toContain('var STATUS_URL = "https://subline-relay.rahul05alok.workers.dev/v1/purchase-status";');
+        expect(script).toContain('var url = base + "?" + purchase.param + "=" + encodeURIComponent(purchase.id);');
+        expect(script).toContain("return fetch(url, opts);");
     });
 
     it("has a page script that parses", () => {
@@ -304,7 +387,7 @@ describe("the built page", () => {
     });
 
     it("sends buyers back to the site root, where the thanks view reads Dodo's params", () => {
-        const root = encodeURIComponent("https://surfer05.github.io/subline/");
+        const root = encodeURIComponent("https://subline.page/");
         if (!PLACEHOLDER_IN_DESIGN) {
             // Once the real Automatic id is in, its card buys like the AI cards.
             const automatic = section("pricing").match(/<a [^>]*data-buy="automatic"[^>]*>[^<]*<\/a>/)?.[0] ?? "";
@@ -478,6 +561,219 @@ describe("worst cases on the site", () => {
         expect(run("windows")).toEqual({ first: "win", winPrimary: true, macPrimary: false, intel: false });
         expect(run("mac")).toEqual({ first: "mac", winPrimary: false, macPrimary: true, intel: true });
         expect(run("unknown")).toEqual({ first: "mac", winPrimary: false, macPrimary: true, intel: false });
+    });
+});
+
+describe("the purchase check after a pending return (S1)", () => {
+    const BASE = "https://relay.test/v1/purchase-status";
+
+    it("reads only an id-shaped payment or subscription id, the subscription first", () => {
+        expect(purchaseOf("?payment_id=pay_1&status=processing")).toEqual({ param: "payment_id", id: "pay_1" });
+        expect(purchaseOf("?subscription_id=sub_1&payment_id=pay_1")).toEqual({ param: "subscription_id", id: "sub_1" });
+        expect(purchaseOf("?payment_id=%3Cscript%3E")).toBeNull();
+        expect(purchaseOf("?result=pending")).toBeNull();
+        expect(purchaseOf("")).toBeNull();
+    });
+
+    async function watch(answer: (n: number, url: string) => Promise<any>) {
+        const clock = fakeClock();
+        const urls: string[] = [];
+        const outcomes: string[] = [];
+        let doneAt = -1;
+        let calls = 0;
+        watchPurchase(BASE, { param: "payment_id", id: "pay_1" }, clock.deps((url: string) => { urls.push(url); return answer(++calls, url); }), how => { outcomes.push(how); doneAt = clock.now; });
+        await clock.runUntil(() => false);
+        return { outcomes, urls, at: doneAt };
+    }
+
+    it("switches to all set as soon as the relay says active, sending only the id", async () => {
+        const r = await watch(n => reply(200, { state: n < 3 ? "pending" : "active" }));
+        expect(r.outcomes).toEqual(["ok"]);
+        expect(r.urls).toHaveLength(3);
+        expect(new Set(r.urls)).toEqual(new Set([`${BASE}?payment_id=pay_1`]));
+    });
+
+    it("says failed when the relay says failed", async () => {
+        expect((await watch(() => reply(200, { state: "failed" }))).outcomes).toEqual(["failed"]);
+    });
+
+    it("asks every 3 to 5 seconds and gives up after about 3 minutes, exactly once", async () => {
+        const r = await watch(() => reply(200, { state: "unknown" }));
+        expect(r.outcomes).toEqual(["timeout"]);
+        const every = 180_000 / (r.urls.length - 1);
+        expect(every).toBeGreaterThanOrEqual(3000);
+        expect(every).toBeLessThanOrEqual(5000);
+        expect(r.urls.length).toBeGreaterThan(30);
+    });
+
+    it("stops at once, with no error, on a relay without the endpoint", async () => {
+        const r = await watch(() => reply(404, "Not Found"));
+        expect(r.outcomes).toEqual(["timeout"]);
+        expect(r.urls).toHaveLength(1);
+    });
+
+    it("gives up quietly after 3 blocked or offline requests in a row (CORS, DNS)", async () => {
+        const r = await watch(() => Promise.reject(new TypeError("Failed to fetch")));
+        expect(r.outcomes).toEqual(["timeout"]);
+        expect(r.urls).toHaveLength(3);
+        expect(r.at).toBeLessThan(15_000);
+    });
+
+    it("treats a reply that is not the expected JSON like a failed request", async () => {
+        expect((await watch(() => reply(200, "<html>"))).outcomes).toEqual(["timeout"]);
+        expect((await watch(() => reply(200, { nope: 1 }))).outcomes).toEqual(["timeout"]);
+    });
+
+    it("keeps asking through busy (429) and server errors, then still switches", async () => {
+        const r = await watch(n => n <= 5 ? reply(n % 2 ? 429 : 503, "") : reply(200, { state: "active" }));
+        expect(r.outcomes).toEqual(["ok"]);
+    });
+
+    it("never waits forever on a request that does not answer", async () => {
+        const r = await watch(() => new Promise(() => {}));
+        expect(r.outcomes).toEqual(["timeout"]);
+        expect(r.at).toBeLessThanOrEqual(185_000);
+    });
+
+    it("never throws when fetch itself throws", async () => {
+        const r = await watch(() => { throw new Error("blocked"); });
+        expect(r.outcomes).toEqual(["timeout"]);
+    });
+});
+
+describe("the thanks page on its own (S1 to S5)", () => {
+    it("hides the home page under the thanks view (S2)", () => {
+        const t = runThanks("?payment_id=pay_1&status=succeeded&license_key=LK-001");
+        expect(t.section.hidden).toBe(false);
+        expect(t.others.every(o => o.hidden)).toBe(true);
+        // A plain visit leaves the home page alone.
+        const plain = runThanks("");
+        expect(plain.others.every(o => !o.hidden)).toBe(true);
+    });
+
+    it("a pending Discord return switches to all set when the relay says active, and keeps it on refresh", () => {
+        const t = runThanks("?from=discord&payment_id=pay_1&status=processing");
+        expect(t.result.shown).toEqual(["discord-pending"]);
+        expect(t.watched?.base).toBe("https://relay.test/v1/purchase-status");
+        expect(t.watched?.purchase).toEqual({ param: "payment_id", id: "pay_1" });
+        t.finish("ok");
+        expect(t.result.shown).toEqual(["discord"]);
+        expect(t.result.replaced).toBe("/?from=discord&result=ok#thanks");
+        expect(t.visible("timeout")).toBe(0);
+    });
+
+    it("a pending return the relay calls failed shows the failed view and no key", () => {
+        const t = runThanks("?from=discord&payment_id=pay_1&status=processing&license_key=LK-001");
+        expect(t.result.shown).toEqual(["discord-pending", "fallback"]);
+        t.finish("failed");
+        expect(t.result.shown).toEqual(["failed"]);
+        expect(t.result.replaced).toBe("/?from=discord&result=failed#thanks");
+    });
+
+    it("says to check Subline → Settings when the relay never answers, or there is no id to ask about", () => {
+        const t = runThanks("?from=discord&subscription_id=sub_1&status=pending");
+        expect(t.visible("timeout")).toBe(0);
+        t.finish("timeout");
+        expect(t.result.shown).toEqual(["discord-pending"]);
+        expect(t.visible("timeout")).toBe(1);
+        // A refresh of a cleaned pending address has no id: say it straight away.
+        expect(runThanks("?from=discord&result=pending").visible("timeout")).toBe(1);
+        expect(runThanks("?from=discord&result=pending").watched).toBeNull();
+        // No fetch in this browser: the same, with no error.
+        expect(runThanks("?from=discord&payment_id=pay_1&status=processing", { noFetch: true }).visible("timeout")).toBe(1);
+    });
+
+    it("does not check a return that already says paid or failed", () => {
+        expect(runThanks("?from=discord&payment_id=pay_1&status=succeeded").watched).toBeNull();
+        expect(runThanks("?payment_id=pay_1&status=failed").watched).toBeNull();
+    });
+
+    it("says the code is in the email only after a one-time purchase, never after AI (S3)", () => {
+        expect(runThanks("?from=discord&payment_id=pay_1&status=succeeded").visible("email")).toBe(2);
+        expect(runThanks("?from=discord&subscription_id=sub_1&status=active").visible("email")).toBe(0);
+        expect(runThanks("?from=discord&subscription_id=sub_1&payment_id=pay_1&status=active").visible("email")).toBe(0);
+        // Unknown after a refresh: leave it out.
+        expect(runThanks("?from=discord&result=ok").visible("email")).toBe(0);
+    });
+
+    it("shows a /buy return the code and I have a code, with no downloads (S5)", () => {
+        expect(parse("?from=buy&payment_id=pay_1&status=succeeded&license_key=LK-001", ""))
+            .toEqual({ state: "ok", keys: ["LK-001"], fromDiscord: false, fromInstaller: false, fromBuy: true });
+        const t = runThanks("?from=buy&payment_id=pay_1&status=succeeded&license_key=LK-001");
+        expect(t.result.shown).toEqual(["ok", "keys"]);
+        expect(t.result.code).toBe("LK-001");
+        expect(t.visible("buy-only")).toBe(2);
+        expect(t.visible("site-only")).toBe(0);
+        expect(t.visible("buy-nokey")).toBe(0);
+        expect(t.result.replaced).toBe("/?from=buy&result=ok#thanks");
+        // The refresh keeps the /buy view, without the key.
+        const again = runThanks("?from=buy&result=ok");
+        expect(again.result.shown).toEqual(["ok"]);
+        expect(again.visible("buy-nokey")).toBe(1);
+        // A failed /buy payment goes back to /buy.
+        const failed = runThanks("?from=buy&payment_id=pay_1&status=failed");
+        expect(failed.result.shown).toEqual(["failed"]);
+        expect(failed.nodes.retry[0].attrs.href).toBe("buy/");
+        // A site return keeps its own lines and downloads.
+        const site = runThanks("?payment_id=pay_1&status=succeeded&license_key=LK-001");
+        expect(site.visible("site-only")).toBe(3);
+        expect(site.visible("buy-only")).toBe(0);
+        expect(site.nodes.retry[0].attrs.href).toBeUndefined();
+    });
+
+    it("has the copy in the shipped thanks view", () => {
+        const thanks = section("thanks");
+        expect(thanks).toContain('<p class="fine" data-thanks-buy-only hidden>Enter it in Subline under <b>I have a code</b>. It\'s in your receipt email too.</p>');
+        expect(thanks).toContain('<p class="lead" data-thanks-buy-nokey hidden>Your code is in your email from <b>Dodo Payments</b>. Enter it in Subline under <b>I have a code</b>.</p>');
+        expect(thanks).toContain('<p class="fine">Using a VPN? Turn it off only while you pay. Discord can stay on.</p>');
+        expect(thanks).toContain('<a href="./#pricing" data-thanks-retry>Try again</a>');
+        // The haveCode label is the installer's real button.
+        expect(thanks).toContain(`<b>${CODE_SCREEN_COPY.haveCode}</b>`);
+    });
+});
+
+describe("the address and contact (S6, S7)", () => {
+    const BUY = readFileSync(join(ROOT, "site", "buy", "index.html"), "utf8");
+
+    it("points canonical and og:url at subline.page", () => {
+        expect(PAGE).toContain('<link rel="canonical" href="https://subline.page/">');
+        expect(PAGE).toContain('<meta property="og:url" content="https://subline.page/">');
+        expect(BUY).toContain('<link rel="canonical" href="https://subline.page/buy/">');
+        expect(PAGE).not.toContain("surfer05.github.io");
+        expect(BUY).not.toContain("surfer05.github.io");
+    });
+
+    it("gives support@subline.page as the contact, and sends no one to a public issue with a code", () => {
+        expect(section("pricing")).toContain('Email <a href="mailto:support@subline.page">support@subline.page</a>.');
+        expect(section("privacy")).toContain('Email <a href="mailto:support@subline.page">support@subline.page</a>.');
+        expect(BUY).toContain('<a href="mailto:support@subline.page">support@subline.page</a>');
+        expect(section("pricing")).not.toContain("github.com/surfer05/subline/issues");
+    });
+
+    it("builds /buy: Automatic checkout that returns to the thanks view with from=buy", () => {
+        if (PLACEHOLDER_IN_DESIGN) return;
+        const buy = BUY.match(/<a [^>]*data-buy="automatic"[^>]*>[^<]*<\/a>/)?.[0] ?? "";
+        const pricing = section("pricing").match(/<a [^>]*data-buy="automatic"[^>]*>[^<]*<\/a>/)?.[0] ?? "";
+        // The same product as the pricing card.
+        const product = (a: string) => /checkout\.dodopayments\.com\/buy\/(pdt_\w+)\?/.exec(a)?.[1];
+        expect(product(buy)).toBeTruthy();
+        expect(product(buy)).toBe(product(pricing));
+        expect(buy).toContain(`redirect_url=${encodeURIComponent("https://subline.page/?from=buy")}"`);
+        expect(buy).toContain(">Buy for $4.99</a>");
+        expect(section("pricing")).toContain('<a href="buy/">Buy here</a>');
+    });
+
+    it("keeps the /buy page's copy plain", () => {
+        const visible = BUY.replace(/<style[\s\S]*?<\/style>/g, " ").replace(/<!--[\s\S]*?-->/g, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").replace(/ ([.,])/g, "$1");
+        expect(visible).toContain("Buy Automatic");
+        expect(visible).toContain("$4.99, once. You can pay on any device, like your phone.");
+        expect(visible).toContain("Pay. Your code shows on the next page. It also comes by email from Dodo Payments.");
+        expect(visible).toContain(`Enter it in Subline under ${CODE_SCREEN_COPY.haveCode}.`);
+        expect(visible).toContain("Using a VPN on your computer? Pay on your phone instead. Your VPN can stay on.");
+        expect(visible).not.toMatch(/\b(free|trial)\b/i);
+        expect(visible).not.toMatch(/Plugins|VcTranslate/);
+        expect(BUY).not.toContain("—");
+        expect(BUY).not.toContain("<script");
     });
 });
 

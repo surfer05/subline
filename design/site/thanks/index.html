@@ -43,34 +43,40 @@ details.thanks-fallback summary:focus-visible{outline:2px solid var(--focus);out
 <div data-thanks-ok>
   <p class="kicker">Thanks</p>
   <h2 class="sec">You're all set.</h2>
-  <p class="lead">Bought from Discord? It's already on.</p>
+  <p class="lead" data-thanks-site-only>Bought from Discord? It's already on.</p>
   <div data-thanks-keys>
     <p class="lead">Your code:</p>
     <div class="panel keyrow" data-thanks-key><code class="mono" data-thanks-code>ABCD-1234-EFGH-5678</code><button class="btn btn-secondary" type="button" data-thanks-copy>Copy</button></div>
-    <p class="fine">Paste it when the installer asks. It's in your receipt email too.</p>
+    <p class="fine" data-thanks-site-only>Paste it when the installer asks. It's in your receipt email too.</p>
+    <p class="fine" data-thanks-buy-only hidden>Enter it in Subline under <b>I have a code</b>. It's in your receipt email too.</p>
   </div>
-  <div class="thanks-cta">
-    <a data-dl="mac" class="btn btn-primary" href="https://github.com/surfer05/subline/releases/latest">Download for Mac</a>
-    <a data-dl="win" class="btn btn-secondary" href="https://github.com/surfer05/subline/releases/latest">Download for Windows</a>
+  <p class="lead" data-thanks-buy-nokey hidden>Your code is in your email from <b>Dodo Payments</b>. Enter it in Subline under <b>I have a code</b>.</p>
+  <div data-thanks-site-only>
+    <div class="thanks-cta">
+      <a data-dl="mac" class="btn btn-primary" href="https://github.com/surfer05/subline/releases/latest">Download for Mac</a>
+      <a data-dl="win" class="btn btn-secondary" href="https://github.com/surfer05/subline/releases/latest">Download for Windows</a>
+    </div>
+    <p class="fine" data-thanks-intel hidden>Intel Mac? <a data-dl="mac-intel" href="https://github.com/surfer05/subline/releases/latest">Get the Intel version.</a></p>
   </div>
-  <p class="fine" data-thanks-intel hidden>Intel Mac? <a data-dl="mac-intel" href="https://github.com/surfer05/subline/releases/latest">Get the Intel version.</a></p>
 </div>
 <div data-thanks-pending hidden>
   <p class="kicker">Thanks</p>
   <h2 class="sec">Payment processing.</h2>
   <p class="lead">Your code arrives by email from <b>Dodo Payments</b> in a few minutes. <b>Check spam.</b></p>
+  <p class="fine" data-thanks-buy-only hidden>Enter it in Subline under <b>I have a code</b>.</p>
 </div>
 <div data-thanks-discord hidden>
   <p class="kicker">Thanks</p>
   <h2 class="sec">You're all set.</h2>
   <p class="lead">Go back to Discord. Subline is already on.</p>
-  <p class="fine">Your code is also in your email from Dodo Payments.</p>
+  <p class="fine" data-thanks-email hidden>Your code is also in your email from Dodo Payments.</p>
 </div>
 <div data-thanks-discord-pending hidden>
   <p class="kicker">Thanks</p>
   <h2 class="sec">Payment is being confirmed.</h2>
   <p class="lead">Subline switches on in Discord by itself, usually within a few minutes.</p>
-  <p class="fine">Your code is also in your email from Dodo Payments.</p>
+  <p class="fine" data-thanks-email hidden>Your code is also in your email from Dodo Payments.</p>
+  <p class="lead" data-thanks-timeout hidden>Check Subline → Settings in Discord. It shows your plan.</p>
 </div>
 <div data-thanks-installer hidden>
   <p class="kicker">Thanks</p>
@@ -93,7 +99,8 @@ details.thanks-fallback summary:focus-visible{outline:2px solid var(--focus);out
 <div data-thanks-failed hidden>
   <p class="kicker">Checkout</p>
   <h2 class="sec">Payment didn't go through.</h2>
-  <p class="lead">Nothing was charged. <a href="#pricing">Try again</a>.</p>
+  <p class="lead">Nothing was charged. <a href="./#pricing" data-thanks-retry>Try again</a>.</p>
+  <p class="fine">Using a VPN? Turn it off only while you pay. Discord can stay on.</p>
 </div>
 </body>
 </html>
