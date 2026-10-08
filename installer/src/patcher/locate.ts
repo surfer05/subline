@@ -12,6 +12,8 @@
 
 import { existsSync, readdirSync, realpathSync, statSync } from "./realFs.js";
 import { compareVersions } from "./compareVersions.js";
+import { isSublineLoaderPath } from "./ownership.js";
+import { readStub } from "./stub.js";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -320,9 +322,17 @@ function canonicalKey(path: string): string {
 }
 
 /**
- * Every Discord app directory that carries evidence of our patch — the marker,
- * or the `_app.asar` backup (the backup alone counts: it is the very thing a
- * restore needs, so its presence makes the directory ours to clean up).
+ * Every Discord app directory that carries evidence of our patch: our marker
+ * file, a stub that loads Subline's own loader (marker or not: Vencord's
+ * host-update hook copies the stub into a new Windows app folder and leaves
+ * the marker behind), or an interrupted patch (app.asar gone, _app.asar
+ * there).
+ *
+ * A BARE _app.asar IS NOT OURS (audit 2026-10-06 #37). Beside Discord's own
+ * app.asar it is a leftover nobody may delete without our marker (unpatch
+ * cleanUpUnpatched keeps it), and beside another mod's stub it is that mod's
+ * backup. Counting it made a Vencord PTB or Canary, or an old Windows folder
+ * Vencord once patched, a target of every uninstall.
  *
  * THE QUESTION THIS ANSWERS IS NOT locateDiscordInstalls'. That one asks
  * "which Discord is live?" and on Windows deliberately returns only the newest
@@ -335,8 +345,11 @@ function canonicalKey(path: string): string {
  * …patcher.js", and the repair was hand-written PowerShell. Uninstall must
  * sweep them all.
  */
-function carriesOurMark(install: DiscordInstall): boolean {
-    return existsSync(install.backupPath) || existsSync(join(install.resourcesPath, "subline-patch.json"));
+export function carriesOurMark(install: DiscordInstall): boolean {
+    if (existsSync(join(install.resourcesPath, "subline-patch.json"))) return true;
+    if (!existsSync(install.asarPath)) return existsSync(install.backupPath);
+    const stub = readStub(install.asarPath);
+    return stub.ok && stub.value !== null && isSublineLoaderPath(stub.value.loaderPath);
 }
 
 export function locatePatchedResidue(options: LocateOptions = {}): DiscordInstall[] {

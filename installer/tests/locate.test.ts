@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { defaultSearchRoots, findWindowsAppDirs, locateDiscordInstalls, locatePatchedResidue, stableIdFor, uninstallTargets } from "../src/patcher/locate.js";
+import { buildStubAsar } from "../src/patcher/stub.js";
 import { buildOriginalDiscordAsar } from "./fixture.js";
 
 const roots: string[] = [];
@@ -239,18 +240,51 @@ describe("locatePatchedResidue", () => {
         ]);
     });
 
-    it("returns a dir whose only evidence is the backup", () => {
-        // A half-removed patch: marker deleted, backup still there. The backup
-        // IS the thing restore needs, so its presence alone makes the dir ours
-        // to clean up.
+    // Audit 2026-10-06 #37: a bare _app.asar used to count, so a Vencord PTB
+    // or an old folder Vencord patched became a target of every uninstall.
+    it("a bare _app.asar beside Discord's own app.asar is NOT residue", () => {
         const root = tempRoot();
         const branchDir = join(root, "Discord");
         mkdirSync(join(branchDir, "app-1.0.1", "resources"), { recursive: true });
         writeFileSync(join(branchDir, "app-1.0.1", "resources", "app.asar"), buildOriginalDiscordAsar());
         writeFileSync(join(branchDir, "app-1.0.1", "resources", "_app.asar"), buildOriginalDiscordAsar());
 
+        expect(locatePatchedResidue({ platform: "win32", searchRoots: [root] })).toEqual([]);
+    });
+
+    it("another mod's stub with its _app.asar is NOT residue", () => {
+        const root = tempRoot();
+        const appDir = join(root, "DiscordPTB", "app-1.0.1");
+        mkdirSync(join(appDir, "resources"), { recursive: true });
+        writeFileSync(join(appDir, "resources", "app.asar"), buildStubAsar("C:\\Users\\Ada\\AppData\\Roaming\\Vencord\\dist\\patcher.js"));
+        writeFileSync(join(appDir, "resources", "_app.asar"), buildOriginalDiscordAsar());
+
+        expect(locatePatchedResidue({ platform: "win32", searchRoots: [root] })).toEqual([]);
+        expect(uninstallTargets({ platform: "win32", searchRoots: [root] }).map(i => i.branch)).not.toContain("ptb");
+    });
+
+    it("an older Windows folder holding OUR stub without a marker is still residue", () => {
+        const root = tempRoot();
+        const branchDir = join(root, "Discord");
+        for (const version of ["1.0.1", "1.0.2"]) {
+            mkdirSync(join(branchDir, `app-${version}`, "resources"), { recursive: true });
+            writeFileSync(join(branchDir, `app-${version}`, "resources", "app.asar"), buildOriginalDiscordAsar());
+        }
+        const old = join(branchDir, "app-1.0.1", "resources");
+        writeFileSync(join(old, "app.asar"), buildStubAsar("C:\\Users\\Ada\\AppData\\Local\\Subline\\mod\\patcher.js"));
+        writeFileSync(join(old, "_app.asar"), buildOriginalDiscordAsar());
+
         const residue = locatePatchedResidue({ platform: "win32", searchRoots: [root] });
-        expect(residue).toHaveLength(1);
+        expect(residue.map(i => i.rootPath.split(/[\\/]/).pop())).toEqual(["app-1.0.1"]);
+    });
+
+    it("an interrupted patch (app.asar gone, _app.asar there) is residue", () => {
+        const root = tempRoot();
+        const appDir = join(root, "Discord", "app-1.0.1");
+        mkdirSync(join(appDir, "resources"), { recursive: true });
+        writeFileSync(join(appDir, "resources", "_app.asar"), buildOriginalDiscordAsar());
+
+        expect(locatePatchedResidue({ platform: "win32", searchRoots: [root] })).toHaveLength(1);
     });
 
     it("returns nothing for a clean machine", () => {
@@ -265,8 +299,11 @@ describe("locatePatchedResidue", () => {
     it("covers macOS by the same rule", () => {
         const root = tempRoot();
         const appPath = makeMacApp(root, "Discord.app");
-        writeFileSync(join(appPath, "Contents", "Resources", "_app.asar"), buildOriginalDiscordAsar());
+        const resources = join(appPath, "Contents", "Resources");
+        writeFileSync(join(resources, "_app.asar"), buildOriginalDiscordAsar());
+        expect(locatePatchedResidue({ platform: "darwin", searchRoots: [root] })).toEqual([]);
 
+        writeFileSync(join(resources, "app.asar"), buildStubAsar("/Users/ada/Library/Application Support/Subline/mod/patcher.js"));
         const residue = locatePatchedResidue({ platform: "darwin", searchRoots: [root] });
         expect(residue.map(i => i.rootPath)).toEqual([appPath]);
     });
