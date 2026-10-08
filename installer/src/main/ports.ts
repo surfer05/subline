@@ -38,25 +38,29 @@ import {
 import { parsePsOutput, processNameFor } from "../app/discordProcess.js";
 import type { RunningProcess } from "../app/discordProcess.js";
 import { installModBundle, shippedModDirFor } from "../app/modInstall.js";
-import { rememberPatchedInstall } from "../app/patchedInstalls.js";
+import { readPatchedInstalls, rememberPatchedInstall } from "../app/patchedInstalls.js";
+import { seedHelperMemory } from "../helper/state.js";
 import { hiddenExec } from "../patcher/exec.js";
+import type { Exec } from "../patcher/exec.js";
 import { isOtherAccountLoader } from "../patcher/ownership.js";
 import { inspectModBundle } from "../bundle/bundle.js";
 import {
-    HELPER_LABEL, helperLaunchAgentSpec, installLaunchAgent, launchAgentPlistPath, readLaunchAgentPlist,
-    removeLaunchAgent, renderLaunchAgentPlist
+    HELPER_LABEL, helperLaunchAgentSpec, installLaunchAgent, launchAgentPlistPath, parseHdiutilMountPoints,
+    readLaunchAgentPlist, removeLaunchAgent, renderLaunchAgentPlist, temporaryAppLocation
 } from "../helper/launchAgent.js";
-import type { LaunchctlPort } from "../helper/launchAgent.js";
+import type { AppLocationVerdict, DiskImageMounts, LaunchctlPort } from "../helper/launchAgent.js";
 import {
     HELPER_TASK_NAME, helperScheduledTaskSpec, installScheduledTask, isoDuration, removeScheduledTask,
     WINDOWS_INTERVAL_SECONDS
 } from "../helper/scheduledTask.js";
 import type { SchtasksPort } from "../helper/scheduledTask.js";
 import { modBundleDirFor, productDirFor } from "../bundle/layout.js";
-import { locateDiscordInstalls } from "../patcher/locate.js";
+import { locateDiscordInstalls, locateRemembered } from "../patcher/locate.js";
 import type { DiscordBranch, DiscordInstall } from "../patcher/locate.js";
 import { loaderPathFor } from "../bundle/spec.js";
-import { patchInstall } from "../patcher/patch.js";
+import { adoptPatch, patchInstall } from "../patcher/patch.js";
+import { discordExecutablePaths, pathsHoldInstall } from "../app/processPaths.js";
+import { clearPendingLanguage, readPendingLanguage, writePendingLanguage } from "../app/pendingSetup.js";
 import { err, ok } from "../patcher/result.js";
 import type { Result } from "../patcher/result.js";
 import { inspectInstall } from "../patcher/state.js";
@@ -83,6 +87,11 @@ export interface RealPortsOptions {
     exec?: (file: string, args: string[]) => Promise<{ stdout: string }>;
     /** Injected by tests so no request reaches the real relay. Defaults to the live relay over fetch. */
     relay?: ActivationRelay;
+    /**
+     * macOS: Electron's app.moveToApplicationsFolder(). True when the move
+     * worked (Electron then relaunches from Applications). Absent: no move.
+     */
+    moveToApplications?: () => boolean;
     /**
      * Opens an https URL in the default browser. The app passes Electron's
      * shell.openExternal; without it the platform opener is used, which is fine
@@ -145,7 +154,34 @@ export interface HelperWiring {
      * WatchPaths, the hourly run still applies.
      */
     managedResources?: () => readonly string[];
+    /**
+     * macOS: the mount points of attached disk images, so an app on a /Volumes
+     * path is refused only when it really runs off a disk image (see
+     * temporaryAppLocation). Absent: every /Volumes path is refused.
+     */
+    diskImageMounts?: DiskImageMounts;
 }
+
+/** `hdiutil info -plist`, read only. Never attaches or detaches anything. */
+export function createDiskImageMounts(exec: Exec = run): DiskImageMounts {
+    return async () => {
+        try {
+            const { stdout } = await exec("/usr/bin/hdiutil", ["info", "-plist"]);
+            return ok(parseHdiutilMountPoints(stdout));
+        } catch (cause) {
+            return err<readonly string[]>("IO_ERROR", "Subline could not list the attached disk images.", { cause });
+        }
+    };
+}
+
+/** Where the running app is, judged the way the helper registration judges it. */
+export function appLocationFor(wiring: Pick<HelperWiring, "appPath" | "diskImageMounts">): Promise<AppLocationVerdict> {
+    return temporaryAppLocation(wiring.appPath, wiring.diskImageMounts);
+}
+
+/** The words for a refused registration from a temporary place. */
+export const HELPER_APP_LOCATION_TEMPORARY_MESSAGE =
+    "Subline is running from the disk image or a temporary copy. Move Subline to your Applications folder and open it from there.";
 
 /** The LaunchAgent definition for this wiring, with the current WatchPaths. */
 function launchAgentSpecFor(wiring: HelperWiring) {
@@ -172,11 +208,21 @@ function launchAgentSpecFor(wiring: HelperWiring) {
 export async function installHelperFor(
     wiring: HelperWiring,
     platform: NodeJS.Platform = process.platform,
-    home: string = homedir()
+    home: string = homedir(),
+    options: { runNow?: boolean } = {}
 ): Promise<Result<HelperInstallOutcome>> {
-    if (platform === "win32") return installWindowsHelper(wiring);
+    if (platform === "win32") return installWindowsHelper(wiring, options.runNow !== false);
     if (platform !== "darwin") {
         return ok({ applicable: false, installed: false, label: null, path: null });
+    }
+    // Audit 2026-10-06 #24: a LaunchAgent naming the .dmg or a translocated
+    // copy runs once and then never again. Refuse, and say where to move it.
+    const location = await appLocationFor(wiring);
+    if (location.temporary) {
+        return err<HelperInstallOutcome>("HELPER_APP_LOCATION_TEMPORARY", HELPER_APP_LOCATION_TEMPORARY_MESSAGE, {
+            path: wiring.appPath,
+            cause: location.reason
+        });
     }
     const registered = await installLaunchAgent({
         plistPath: launchAgentPlistPath(home),
@@ -206,7 +252,7 @@ export async function installHelperFor(
  * required was introduced to close — every test green, every install helperless,
  * and the symptom only appearing weeks later when Discord updates.
  */
-async function installWindowsHelper(wiring: HelperWiring): Promise<Result<HelperInstallOutcome>> {
+async function installWindowsHelper(wiring: HelperWiring, runNow: boolean): Promise<Result<HelperInstallOutcome>> {
     if (wiring.schtasks === undefined || wiring.executablePath === undefined || wiring.workDir === undefined) {
         return err<HelperInstallOutcome>(
             "HELPER_REGISTRATION_FAILED",
@@ -220,6 +266,18 @@ async function installWindowsHelper(wiring: HelperWiring): Promise<Result<Helper
         platform: "win32"
     });
     if (!registered.ok) return registered as Result<HelperInstallOutcome>;
+    // ONE RUN NOW (audit 2026-10-06 #49). The first scheduled run is up to 5
+    // minutes away; a Discord update in that gap used to find a helper that
+    // had never seen this install. macOS gets the same from RunAtLoad. The
+    // helper tolerates a Discord that is open (it waits or defers), and a
+    // failure here changes nothing: the schedule still runs it.
+    if (runNow && registered.value.registered && wiring.schtasks.run !== undefined) {
+        try {
+            await wiring.schtasks.run(HELPER_TASK_NAME);
+        } catch {
+            // The 5 minute schedule covers it.
+        }
+    }
     return ok({
         applicable: true,
         // Queried back after creation, never the exit code. See `scheduledTask.ts`.
@@ -287,7 +345,9 @@ export async function ensureHelperFor(
             if (interval !== null && interval !== want) reason = "definition-changed";
         }
         if (reason === null) return ok({ action: "unchanged", reason: null, registered, expected });
-        const repaired = await installHelperFor(wiring, platform, home);
+        // From the helper itself (registerIfMissing false) there is no run to
+        // start: this IS the run, and IgnoreNew would drop it anyway.
+        const repaired = await installHelperFor(wiring, platform, home, { runNow: options.registerIfMissing !== false });
         if (!repaired.ok) return repaired as Result<HelperEnsureReport>;
         return ok({ action: "repaired", reason, registered, expected });
     }
@@ -295,7 +355,7 @@ export async function ensureHelperFor(
 
     // Never re-point the helper at a copy that is about to vanish: the app run
     // straight off the mounted .dmg, or a Gatekeeper-translocated copy.
-    if (wiring.appPath.startsWith("/Volumes/") || wiring.appPath.includes("/AppTranslocation/")) {
+    if ((await appLocationFor(wiring)).temporary) {
         return ok({ action: "skipped", reason: "running-from-temporary-location", registered: null, expected: wiring.appPath });
     }
 
@@ -377,7 +437,7 @@ export async function ensureHelperFromHelper(
             };
         }
         if (platform !== "darwin") return { action: "skipped", reason: "no-helper-on-platform" };
-        if (wiring.appPath.startsWith("/Volumes/") || wiring.appPath.includes("/AppTranslocation/")) {
+        if ((await appLocationFor(wiring)).temporary) {
             return { action: "skipped", reason: "running-from-temporary-location" };
         }
         const plistPath = launchAgentPlistPath(home);
@@ -636,8 +696,8 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
                 ? err("MOD_BUNDLE_INVALID", "Subline does not know where to install the mod on this platform.")
                 : installModBundle({ sourceDir: shippedDir, destDir: runtimeDir }),
 
-        locate: explicitPaths =>
-            locateDiscordInstalls({
+        locate: explicitPaths => {
+            const live = locateDiscordInstalls({
                 platform,
                 ...(options.searchRoots === undefined ? {} : { searchRoots: options.searchRoots }),
                 ...(explicitPaths === undefined ? {} : { explicitPaths }),
@@ -645,7 +705,23 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
                 // is in" are the same screen. This is the only place that can
                 // tell them apart, and it costs one log line to do so.
                 onIgnoredError: detail => options.log.warn("locate.skipped", detail)
-            }),
+            });
+            // PLUS EVERY DISCORD THIS ACCOUNT PATCHED BY HAND (audit #15), as
+            // the helper does: a hand-picked PTB, Canary or unusual folder is
+            // found again on the next run instead of being picked by hand every
+            // time. Not when the user is picking one right now.
+            if (explicitPaths !== undefined && explicitPaths.length > 0) return live;
+            const remembered = locateRemembered(readPatchedInstalls(productDirFor(platform, env, home)), {
+                platform,
+                onSkipped: detail => options.log.warn("locate.remembered-skipped", detail)
+            });
+            if (remembered.length === 0) return live;
+            const merged: DiscordInstall[] = [...(live.ok ? live.value : [])];
+            for (const install of remembered) {
+                if (!merged.some(known => known.rootPath === install.rootPath || known.stableId === install.stableId)) merged.push(install);
+            }
+            return merged.length === 0 ? live : ok(merged);
+        },
         inspect: install => inspectInstall(install, { ownLoaderPaths: runtimeDir === null ? [] : [loaderPathFor(runtimeDir)] }),
 
         listProcesses: () => listProcesses(platform, exec, options.log),
@@ -703,8 +779,34 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
                 productVersion: options.productVersion,
                 overwriteForeignMod: patchOptions.overwriteForeignMod
             }),
-        rememberPatchedInstall: install => {
-            const remembered = rememberPatchedInstall(productDirFor(platform, env, home), install);
+        inspectInstalledBundle: dir => inspectModBundle(dir),
+        // Windows: Discord's Update.exe lives in the branch folder (the stable
+        // id). Only a path we can read under it counts; another app's
+        // Squirrel updater (also Update.exe) never blocks the install.
+        ...(platform === "win32"
+            ? {
+                discordUpdaterRunning: async (install: DiscordInstall) => {
+                    const paths = await discordExecutablePaths(exec, "Update.exe");
+                    if (paths === null) return false;
+                    return pathsHoldInstall(paths.filter((path): path is string => path !== null), install.stableId);
+                }
+            }
+            : {}),
+        adoptPatch: (install, modBundleDir) => {
+            const adopted = adoptPatch(install, { modBundleDir, productVersion: options.productVersion });
+            return adopted.ok
+                ? ok({ pluginBuildId: adopted.value.pluginBuildId, discordVersion: adopted.value.discordVersion })
+                : adopted as Result<never>;
+        },
+        pendingLanguage: () => readPendingLanguage(productDirFor(platform, env, home), Date.now()),
+        rememberPendingLanguage: code => {
+            const written = writePendingLanguage(productDirFor(platform, env, home), code, Date.now());
+            if (!written.ok) options.log.warn("language.pending-save-failed", { code: written.error.code, cause: written.error.cause ?? null });
+        },
+        clearPendingLanguage: () => clearPendingLanguage(productDirFor(platform, env, home)),
+        rememberPatchedInstall: (install, patched) => {
+            const productDir = productDirFor(platform, env, home);
+            const remembered = rememberPatchedInstall(productDir, install);
             if (!remembered.ok) {
                 options.log.warn("patch.remember-failed", {
                     code: remembered.error.code,
@@ -712,11 +814,40 @@ export function createFlowPorts(options: RealPortsOptions): FlowPorts {
                     cause: remembered.error.cause ?? null
                 });
             }
+            // The helper's own memory too (audit #49), merged, never overwritten.
+            if (productDir !== null && patched !== undefined) {
+                const seeded = seedHelperMemory(productDir, install.stableId, {
+                    discordVersion: patched.discordVersion,
+                    buildId: patched.buildId,
+                    patchedAt: Date.now()
+                });
+                if (!seeded.ok) {
+                    options.log.warn("patch.helper-memory-failed", { code: seeded.error.code, path: seeded.error.path ?? null });
+                }
+            }
         },
         ...(platform === "darwin"
             ? { isOtherAccountLoader: (loaderPath: string) => isOtherAccountLoader(loaderPath, home, platform) }
             : {}),
         installHelper: () => installHelperFor(options.helper, platform, home),
+        // macOS: off the .dmg or a translocated copy, the helper would die
+        // when the image goes (audit 2026-10-06 #24). The same check as the
+        // registration itself. A development run is never "temporary".
+        ...(platform === "darwin" && options.repairHelper !== false
+            ? {
+                appLocation: async () => {
+                    const verdict = await appLocationFor(options.helper);
+                    return ok({ stable: !verdict.temporary, path: options.helper.appPath, reason: verdict.reason });
+                },
+                moveToApplications: async () => {
+                    try {
+                        return ok(options.moveToApplications?.() ?? false);
+                    } catch (cause) {
+                        return err<boolean>("IO_ERROR", "Subline could not move itself to the Applications folder.", { cause });
+                    }
+                }
+            }
+            : {}),
         ensureHelper: () => options.repairHelper === false
             ? Promise.resolve(ok({ action: "skipped" as const, reason: "development-build", registered: null, expected: null }))
             : ensureHelperFor(options.helper, platform, home),

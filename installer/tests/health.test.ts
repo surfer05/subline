@@ -231,3 +231,23 @@ describe("health — the one signal that is real", () => {
         expect(second.escalated).toBe(true);
     });
 });
+
+// Audit 2026-10-06 #32: the quiet log needs to know whether a status is new.
+describe("a status that persists is marked unchanged", () => {
+    it("loaded-erroring: the first observation changed, the next did not", () => {
+        const [first, second] = observeRepeatedly("loaded-erroring", 2, 5 * 60_000);
+        expect(first?.changed).toBe(true);
+        expect(second?.changed).toBe(false);
+    });
+
+    it("suspect: changed on entry, unchanged after; the escalation to broken is changed and escalated", () => {
+        const observations = observeRepeatedly("translating-not-rendering", MIN_OBSERVATIONS + 2, MIN_WINDOW_MS);
+        expect(observations[0]?.changed).toBe(true);
+        expect(observations[1]?.changed).toBe(false);
+        const escalation = observations.find(entry => entry.escalated);
+        expect(escalation?.changed).toBe(true);
+        const after = observations[observations.indexOf(escalation!) + 1];
+        expect(after?.status).toBe("broken");
+        expect(after?.changed).toBe(false);
+    });
+});

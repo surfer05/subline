@@ -50,6 +50,12 @@ export interface InstallMemory {
      * and never quit otherwise stays untranslated with no word to the user.
      */
     blockedByRunningSince?: number | null;
+    /**
+     * When rewriting an older stub form last failed. Housekeeping, so it is
+     * retried weekly, not every run (a lost App Management grant would
+     * otherwise be a write attempt, and a macOS prompt, every few minutes).
+     */
+    stubUpgradeFailedAt?: number | null;
 }
 
 /**
@@ -97,6 +103,19 @@ export interface HelperState {
      * minutes costs one log line instead of a full entry. Null when it deferred nothing.
      */
     lastDeferralKey: string | null;
+    /**
+     * The Discords Subline skipped last run (another mod's, never ours), as a
+     * stable key. A run that skips the same set again is logged as one line
+     * (audit 2026-10-06 #43); a new skip is logged in full, with its evidence.
+     */
+    lastUnmanagedKey: string | null;
+    /**
+     * Stable ids of Discords Uninstall put back to normal while some other
+     * Discord kept Subline (a partial uninstall brings the helper back). The
+     * helper never puts Subline back into these; a later install from the
+     * app clears the entry.
+     */
+    released: string[];
     /** Consecutive failed update checks. A flaky network is not news. */
     updateFailures: number;
     health: HealthMemory;
@@ -112,6 +131,8 @@ export function emptyHelperState(): HelperState {
         lastReleaseBuildId: null,
         lastReleasePluginVersion: null,
         lastDeferralKey: null,
+        lastUnmanagedKey: null,
+        released: [],
         updateFailures: 0,
         health: { lastStatus: "unknown", lastObservedAt: null, suspectSince: null, observations: 0 },
         alerts: {}
@@ -160,6 +181,10 @@ export function parseHelperState(raw: string): HelperState {
     state.lastReleaseBuildId = str(parsed.lastReleaseBuildId);
     state.lastReleasePluginVersion = str(parsed.lastReleasePluginVersion);
     state.lastDeferralKey = str(parsed.lastDeferralKey);
+    state.lastUnmanagedKey = str(parsed.lastUnmanagedKey);
+    if (Array.isArray(parsed.released)) {
+        state.released = [...new Set(parsed.released.filter((id): id is string => typeof id === "string" && id !== ""))];
+    }
     state.updateFailures = count(parsed.updateFailures);
 
     if (isRecord(parsed.installs)) {
@@ -173,6 +198,8 @@ export function parseHelperState(raw: string): HelperState {
             };
             const blocked = num(value.blockedByRunningSince);
             if (blocked !== null) state.installs[rootPath]!.blockedByRunningSince = blocked;
+            const upgradeFailed = num(value.stubUpgradeFailedAt);
+            if (upgradeFailed !== null) state.installs[rootPath]!.stubUpgradeFailedAt = upgradeFailed;
         }
     }
 
@@ -197,6 +224,47 @@ export function parseHelperState(raw: string): HelperState {
     }
 
     return state;
+}
+
+/**
+ * The size of a helper-state.json that EXISTS but does not parse, or null.
+ * A lost memory used to look exactly like a machine Subline was never on
+ * (audit #49): this is what lets the run say so in the log.
+ */
+export function helperStateUnreadable(path: string): number | null {
+    let raw: string;
+    try {
+        raw = readFileSync(path, "utf8");
+    } catch {
+        return null;
+    }
+    try {
+        const parsed: unknown = JSON.parse(raw);
+        return isRecord(parsed) ? null : raw.length;
+    } catch {
+        return raw.length;
+    }
+}
+
+/**
+ * Seed or forget installs in helper-state.json from outside the helper (the
+ * app): read, change only `installs` and `released`, write. Every other
+ * field is the helper's and is kept as read.
+ */
+export function updateHelperInstalls(
+    path: string,
+    change: { remember?: Record<string, InstallMemory>; forget?: readonly string[]; release?: readonly string[]; unrelease?: readonly string[] }
+): Result<string> {
+    const state = readHelperState(path);
+    for (const [id, memory] of Object.entries(change.remember ?? {})) {
+        state.installs[id] = { ...memory };
+    }
+    for (const id of change.forget ?? []) delete state.installs[id];
+    const released = new Set(state.released);
+    for (const id of change.release ?? []) released.add(id);
+    for (const id of change.unrelease ?? []) released.delete(id);
+    state.released = [...released];
+    return writeHelperState(path, state);
 }
 
 export function readHelperState(path: string): HelperState {
@@ -227,4 +295,26 @@ export function writeHelperState(path: string, state: HelperState): Result<strin
         return fsError<string>(cause, path, `write ${HELPER_STATE_FILENAME}`);
     }
     return ok(path);
+}
+
+/**
+ * The installer just patched this Discord: the helper's FIRST run must
+ * already know it is ours (audit #49: a Discord update before that run used
+ * to read as "never patched"). Merged into whatever is there; a release
+ * from an earlier uninstall is lifted, since the user installed again.
+ */
+export function seedHelperMemory(
+    productDir: string,
+    stableId: string,
+    memory: { discordVersion: string | null; buildId: string | null; patchedAt: number }
+): Result<string> {
+    return updateHelperInstalls(helperStatePathFor(productDir), {
+        remember: { [stableId]: { ...memory, failures: 0, blockedByRunningSince: null } },
+        unrelease: [stableId]
+    });
+}
+
+/** Uninstall put these Discords back: forget and release them (see HelperState.released). */
+export function releaseHelperInstalls(productDir: string, stableIds: readonly string[]): Result<string> {
+    return updateHelperInstalls(helperStatePathFor(productDir), { forget: stableIds, release: stableIds });
 }

@@ -277,3 +277,36 @@ describe("removing the task while a helper run is going", () => {
         expect(end).toBeLessThan(del);
     });
 });
+
+describe("Uninstall waits for an ended helper run to be gone (audit 2026-10-06 #45)", () => {
+    it("polls until the run has stopped, then removes the task", async () => {
+        let polls = 0;
+        const schtasks = makeFakeSchtasks();
+        schtasks.registered.add(HELPER_TASK_NAME);
+        const calls: string[] = [];
+        schtasks.end = async () => { calls.push("end"); };
+        schtasks.isRunning = async () => { polls += 1; return polls < 3; };
+        const slept: number[] = [];
+        const result = await removeScheduledTask({ schtasks, platform: "win32", sleep: async ms => { slept.push(ms); } });
+        expect(result.ok).toBe(true);
+        expect(calls).toEqual(["end"]);
+        expect(slept).toEqual([500, 500]);
+    });
+
+    it("a run that never stops refuses, and the task stays registered", async () => {
+        const schtasks = makeFakeSchtasks();
+        schtasks.registered.add(HELPER_TASK_NAME);
+        schtasks.isRunning = async () => true;
+        const result = await removeScheduledTask({ schtasks, platform: "win32", sleep: async () => {} });
+        expect(result.ok).toBe(false);
+        expect(await schtasks.exists(HELPER_TASK_NAME)).toBe(true);
+    });
+
+    it("a state that cannot be read does not block the uninstall", async () => {
+        const schtasks = makeFakeSchtasks();
+        schtasks.registered.add(HELPER_TASK_NAME);
+        schtasks.isRunning = async () => null;
+        const result = await removeScheduledTask({ schtasks, platform: "win32", sleep: async () => {} });
+        expect(result.ok).toBe(true);
+    });
+});

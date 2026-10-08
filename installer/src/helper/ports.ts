@@ -9,23 +9,31 @@
  * `/Applications`.
  */
 
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+// realFs for statSync (audit 2026-10-06 #19): mtimeOf stats Discord's app.asar
+// and _app.asar. Under Electron, node:fs treats those as archives to mount: the
+// stat opened app.asar and kept the handle for the life of the helper, so every
+// Windows repatch then failed to rename it, and the settle check read a fake
+// mtime. The bundle lookups below use it too; it is the same call on a folder.
+import { existsSync, readFileSync, statSync, writeFileSync } from "../patcher/realFs.js";
+import { homedir, tmpdir, uptime } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 
 import type { FlowLogger } from "../app/flow.js";
 import { installModBundle, recoverModBundle } from "../app/modInstall.js";
 import { readPatchedInstalls } from "../app/patchedInstalls.js";
-import { isDiscordRunning } from "../app/discordProcess.js";
+import { isDiscordRunning, processNameFor } from "../app/discordProcess.js";
+import { discordExecutablePaths, pathsHoldInstall } from "../app/processPaths.js";
+export { parseExecutablePaths, pathsHoldInstall } from "../app/processPaths.js";
 import { inspectModBundle } from "../bundle/bundle.js";
 import { modBundleDirFor, productDirFor } from "../bundle/layout.js";
 import { loaderPathFor, manifestPathFor } from "../bundle/spec.js";
 import { listProcesses } from "../main/ports.js";
-import { locateDiscordInstalls, locateRemembered } from "../patcher/locate.js";
+import { locateDiscordInstalls, locateRemembered, siblingAppInstalls } from "../patcher/locate.js";
 import type { DiscordInstall } from "../patcher/locate.js";
 import { isOtherAccountLoader } from "../patcher/ownership.js";
 import { readMarker } from "../patcher/marker.js";
-import { adoptPatch, patchInstall, verifyPatch } from "../patcher/patch.js";
+import { adoptPatch, patchInstall, unpatchInstall, verifyPatch } from "../patcher/patch.js";
 import type { Exec } from "../patcher/exec.js";
 import { hiddenExec } from "../patcher/exec.js";
 import { err, fsError, ok } from "../patcher/result.js";
@@ -36,9 +44,10 @@ import { verifyOnce } from "../verify/verify.js";
 import type { Alert } from "./alerts.js";
 import type { HelperPorts } from "./helper.js";
 import type { LaunchctlPort } from "./launchAgent.js";
+import { launchAgentPlistPath } from "./launchAgent.js";
 import type { SchtasksPort } from "./scheduledTask.js";
 import { HELPER_TASK_NAME, taskCommandFromXml, taskIntervalFromXml } from "./scheduledTask.js";
-import { helperStatePathFor, readHelperState, writeHelperState } from "./state.js";
+import { helperStatePathFor, helperStateUnreadable, readHelperState, writeHelperState } from "./state.js";
 import type { HelperState } from "./state.js";
 
 /** Every console program goes through hiddenExec: no window flashes on Windows (see patcher/exec.ts). */
@@ -139,6 +148,26 @@ export async function unpackArchive(
     return ok(found);
 }
 
+/**
+ * The scratch folder unpackArchive made, found from the bundle directory it
+ * returned: the nearest ancestor (or the directory itself) named
+ * `subline-update-*` whose parent is the temp folder. Null for anything else.
+ *
+ * Never "..", ".." arithmetic (audit 2026-10-06 #25): a release zip with the
+ * bundle at its root returns `<scratch>/unpacked`, and two levels up from
+ * that is the user's whole temp folder, which used to be deleted.
+ */
+export function scratchRootOf(bundleDir: string, tmp: string = tmpdir()): string | null {
+    const root = resolve(tmp);
+    let current = resolve(bundleDir);
+    for (;;) {
+        const parent = dirname(current);
+        if (parent === current) return null;
+        if (parent === root) return basename(current).startsWith("subline-update-") ? current : null;
+        current = parent;
+    }
+}
+
 /** The directory holding `subline-mod.json`, at the root or one level down. */
 export function findBundleRoot(dir: string): string | null {
     try {
@@ -225,6 +254,9 @@ export function createLaunchctl(exec: Exec = run): LaunchctlPort {
  * found" from other failures only in localised text, and guessing at translated
  * strings is how a check silently inverts on a non-English Windows.
  */
+/** Written by the mod's quit hook (scripts/vencordRewrites.mjs QUIT_HOOK_BLOCK). */
+export const DISCORD_QUIT_FILENAME = "discord-quit.json";
+
 export function createSchtasks(exec: Exec = run): SchtasksPort {
     /** One /Query /XML read: both the command and the interval come from it. */
     const queryXml = async (name: string): Promise<string | null> => {
@@ -310,6 +342,32 @@ export function createSchtasks(exec: Exec = run): SchtasksPort {
             } catch {
                 // Not running, or already gone.
             }
+        },
+        async run(name: string): Promise<Result<true>> {
+            try {
+                await exec("schtasks", ["/Run", "/TN", name]);
+                return ok(true);
+            } catch (cause) {
+                return err<true>("HELPER_REGISTRATION_FAILED", "Windows did not start the Subline helper task.", { path: name, cause });
+            }
+        },
+        async isRunning(name: string): Promise<boolean | null> {
+            const split = name.lastIndexOf("\\");
+            const taskPath = name.slice(0, split + 1);
+            const taskName = name.slice(split + 1);
+            // Single quotes, doubled inside: the names are our own constants,
+            // but nothing reaches the command line unquoted.
+            const quote = (value: string): string => `'${value.replace(/'/g, "''")}'`;
+            try {
+                const { stdout } = await exec("powershell.exe", [
+                    "-NoProfile", "-NonInteractive", "-Command",
+                    `(Get-ScheduledTask -TaskPath ${quote(taskPath)} -TaskName ${quote(taskName)}).State`
+                ]);
+                const state = stdout.trim();
+                return state === "" ? null : state === "Running";
+            } catch {
+                return null;
+            }
         }
     };
 }
@@ -386,6 +444,39 @@ export function createHelperPorts(options: RealHelperPortsOptions): HelperPorts 
                 // Discord is not a reason to tell this one to restart.
                 listProcesses: () => listProcesses(platform, exec, undefined, uid)
             })).length > 0,
+        ...(platform === "win32"
+            ? {
+                discordHoldsInstall: async (install: DiscordInstall) => {
+                    const running = await isDiscordRunning({
+                        branch: install.branch,
+                        platform,
+                        listProcesses: () => listProcesses(platform, exec, undefined, uid)
+                    });
+                    if (running.length === 0) return false;
+                    const paths = await discordExecutablePaths(exec, processNameFor(install.branch, "win32"));
+                    // The lookup failed or saw nothing: the name match decides, as before.
+                    // Fewer paths than processes: one was missed, so it may be here.
+                    if (paths === null || paths.length < running.length) return true;
+                    return pathsHoldInstall(paths, install.rootPath);
+                },
+                discordQuitAt: () => {
+                    if (productDir === null) return null;
+                    try {
+                        const at = (JSON.parse(readFileSync(join(productDir, DISCORD_QUIT_FILENAME), "utf8")) as { at?: unknown } | null)?.at;
+                        return typeof at === "number" && Number.isFinite(at) ? at : null;
+                    } catch {
+                        return null;
+                    }
+                }
+            }
+            : {}),
+        uptimeMs: () => {
+            try {
+                return uptime() * 1000;
+            } catch {
+                return null;
+            }
+        },
         mtimeOf: path => {
             try {
                 return statSync(path).mtimeMs;
@@ -412,9 +503,12 @@ export function createHelperPorts(options: RealHelperPortsOptions): HelperPorts 
         unpack: (bytes, artifactName) => unpackArchive(bytes, artifactName, exec, platform),
         discardUnpacked: dir => {
             // The bundle sits inside the scratch root `unpackArchive` made; remove
-            // the whole thing rather than leaving the archive behind.
+            // the whole thing rather than leaving the archive behind. Only that
+            // root: anything that is not one is left alone.
+            const scratch = scratchRootOf(dir);
+            if (scratch === null) return;
             try {
-                rmSync(join(dir, "..", ".."), { recursive: true, force: true });
+                rmSync(scratch, { recursive: true, force: true });
             } catch {
                 // A stranded temp directory is cosmetic and must never mask a real
                 // failure in the run that produced it.
@@ -424,10 +518,35 @@ export function createHelperPorts(options: RealHelperPortsOptions): HelperPorts 
         verifyBeacon: verifyOptions => verifyOnce({ ...verifyOptions, platform, env, home }),
         notify: alert => notify(alert, platform, exec, options.log),
 
+        // Is Subline still installed? Asked before every write. macOS too
+        // (audit 2026-10-06 #46): when `launchctl print` failed while the job
+        // was loaded, Uninstall deleted the plist under a live job, and the
+        // job then downloaded the bundle and patched Discord again. The plist
+        // is always written by temp file and rename, so it is never briefly
+        // missing.
         ...(platform === "win32"
             ? { stillRegistered: () => createSchtasks(exec).exists(HELPER_TASK_NAME) }
-            : {}),
+            : platform === "darwin"
+                ? { stillRegistered: async () => existsSync(launchAgentPlistPath(home)) }
+                : {}),
         recoverBundle: dir => recoverModBundle(dir, platform),
+        unpatch: install => unpatchInstall(install, {
+            ownLoaderPaths: modDir === null ? [] : [loaderPathFor(modDir)],
+            ...(platform === "darwin" ? { isOtherAccountLoader: (loaderPath: string) => isOtherAccountLoader(loaderPath, home, platform) } : {})
+        }),
+        rememberedStableIds: () => new Set(readPatchedInstalls(productDir).map(entry => entry.stableId)),
+        stateUnreadable: () => (statePath === null ? null : helperStateUnreadable(statePath)),
+        ...(platform === "win32"
+            ? {
+                // Our stub in another app folder of the same branch: the
+                // Discord this user ran before it updated was Subline's.
+                siblingCarriesOurMark: (install: DiscordInstall) => siblingAppInstalls(install, platform).some(sibling => {
+                    const state = inspectInstall(sibling, { ownLoaderPaths: modDir === null ? [] : [loaderPathFor(modDir)] });
+                    return state.ok && state.value.mod === "subline"
+                        && (state.value.kind === "patched-by-us" || state.value.reason === "our-patch-without-backup");
+                })
+            }
+            : {}),
         ...(platform === "darwin"
             ? { isOtherAccountLoader: (loaderPath: string) => isOtherAccountLoader(loaderPath, home, platform) }
             : {})

@@ -109,10 +109,20 @@ describe("raising an alert", () => {
     it("keeps every other alert on the 24 hour cadence", async () => {
         expect(repeatMsFor("mod-stale")).toBe(DEFAULT_REPEAT_MS);
         expect(DEFAULT_REPEAT_MS).toBe(24 * 60 * 60 * 1000);
-        await raiseAlert(state, alert("update-failed"), ports());
+        await raiseAlert(state, alert("mod-stale"), ports());
         clock += 12 * 60 * 60 * 1000;
-        expect((await raiseAlert(state, alert("update-failed"), ports())).notified).toBe(false);
+        expect((await raiseAlert(state, alert("mod-stale"), ports())).notified).toBe(false);
         expect(shown).toHaveLength(1);
+    });
+
+    it("repeats update-failed once a week at most (audit 2026-10-06 #33)", async () => {
+        expect(repeatMsFor("update-failed")).toBe(7 * 24 * 60 * 60 * 1000);
+        await raiseAlert(state, alert("update-failed"), ports());
+        clock += 7 * 24 * 60 * 60 * 1000 - 1;
+        expect((await raiseAlert(state, alert("update-failed"), ports())).notified).toBe(false);
+        clock += 1;
+        expect((await raiseAlert(state, alert("update-failed"), ports())).notified).toBe(true);
+        expect(shown).toHaveLength(2);
     });
 
     it("keeps the durable record even when the notification is suppressed as a repeat", async () => {

@@ -32,7 +32,7 @@
 import { cpSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { inspectModBundle } from "../bundle/bundle.js";
+import { BUNDLE_OLD_SUFFIX, BUNDLE_STAGING_SUFFIX, inspectModBundle } from "../bundle/bundle.js";
 import type { ModBundle } from "../bundle/bundle.js";
 import { manifestPathFor, MOD_MANIFEST_FILENAME } from "../bundle/spec.js";
 import type { Result } from "../patcher/result.js";
@@ -69,9 +69,9 @@ export interface InstalledModBundle extends ModBundle {
     replaced: boolean;
 }
 
-const STAGING_SUFFIX = ".subline-staging";
+const STAGING_SUFFIX = BUNDLE_STAGING_SUFFIX;
 /** Where the live bundle waits while a new one is swapped in. */
-export const OLD_SUFFIX = ".subline-old";
+export const OLD_SUFFIX = BUNDLE_OLD_SUFFIX;
 
 /** Errnos a Windows antivirus or indexer lock produces for a moment. */
 const TRANSIENT_LOCK_ERRNOS = new Set(["EPERM", "EACCES", "EBUSY"]);
@@ -114,15 +114,31 @@ export function renameWithRetry(
  * it restored anything.
  */
 export function recoverModBundle(destDir: string, platform: NodeJS.Platform = process.platform): Result<boolean> {
+    if (existsSync(destDir)) return ok(false);
     const old = `${destDir}${OLD_SUFFIX}`;
-    if (existsSync(destDir) || !existsSync(old)) return ok(false);
-    if (!inspectModBundle(old).ok) return ok(false);
-    try {
-        renameWithRetry(old, destDir, platform);
-    } catch (cause) {
-        return fsError<boolean>(cause, destDir, "put the previous Subline mod back", platform);
+    const staging = `${destDir}${STAGING_SUFFIX}`;
+    if (existsSync(old) && inspectModBundle(old).ok) {
+        try {
+            renameWithRetry(old, destDir, platform);
+        } catch (cause) {
+            return fsError<boolean>(cause, destDir, "put the previous Subline mod back", platform);
+        }
+        // The staging copy was the new build that never went in: discarded.
+        try { rmSync(staging, { recursive: true, force: true }); } catch { /* the next install removes it */ }
+        return ok(true);
     }
-    return ok(true);
+    // A REPAIR INSTALL KILLED BETWEEN THE COPY AND THE RENAME (audit #45):
+    // no live bundle, nothing aside, and a complete staging copy. A stub may
+    // already name `mod`, and this is the only copy there is: promote it.
+    if (!existsSync(old) && existsSync(staging) && inspectModBundle(staging).ok) {
+        try {
+            renameWithRetry(staging, destDir, platform);
+        } catch (cause) {
+            return fsError<boolean>(cause, destDir, "put the Subline mod in place", platform);
+        }
+        return ok(true);
+    }
+    return ok(false);
 }
 
 /**

@@ -150,7 +150,7 @@ describe("codes and links", () => {
         expect(url.origin + url.pathname).toBe("https://checkout.dodopayments.com/buy/pdt_Real123");
         expect(url.searchParams.get("quantity")).toBe("1");
         expect(url.searchParams.get("metadata_install")).toBe(installHash(ID));
-        expect(url.searchParams.get("redirect_url")).toBe("https://surfer05.github.io/subline/?from=installer");
+        expect(url.searchParams.get("redirect_url")).toBe("https://subline.page/?from=installer");
         expect(new URL(staticAutomaticCheckoutUrl(ID)).pathname).toBe(`/buy/${AUTOMATIC_PRODUCT_ID}`);
     });
 

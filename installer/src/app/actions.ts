@@ -38,6 +38,7 @@ export const ACTION_LABELS: Record<FlowActionType, string> = {
     // Secondary: Subline already opened the pane itself. This is for someone
     // who closed it or lost it behind another window.
     "open-permission-settings": "Open it again",
+    "move-to-applications": "Move to Applications",
     retry: "Try again",
     // Named for what it costs, not for what it skips. "Continue" here would let
     // someone give up the thing that keeps their install alive without ever
@@ -74,6 +75,7 @@ const IS_PRIMARY: Record<FlowActionType, boolean> = {
     "use-code": true,
     back: false,
     "open-permission-settings": false,
+    "move-to-applications": true,
     retry: true,
     "skip-helper": false,
     "skip-launch": false,

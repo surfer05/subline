@@ -13,7 +13,7 @@ import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { legacyStubIndexSource, parseRequirePath, stubIndexSource } from "../src/patcher/stub.js";
+import { legacyStubIndexSource, parseRequirePath, previousStubIndexSource, stubIndexSource } from "../src/patcher/stub.js";
 
 let root: string;
 let resources: string;
@@ -89,5 +89,150 @@ describe("the fail-open stub", () => {
         expect(parseRequirePath(legacyStubIndexSource(path))).toBe(path);
         const windows = "C:\\Users\\x\\AppData\\Local\\Subline\\mod\\patcher.js";
         expect(parseRequirePath(stubIndexSource(windows))).toBe(windows);
+    });
+});
+
+/*
+ * Audit 2026-10-06 #4 and #9. The 0.2.1 stub guarded only a loader it could
+ * not READ: one that threw (truncated, a syntax error) stopped Discord before
+ * its window opened. And with BetterDiscord's resources/app in front (it
+ * requires ../app.asar), the stub was not the main module and Discord's own
+ * code never loaded.
+ */
+describe("the fail-open stub, worst cases", () => {
+    function run(entry: string): { status: number | null; lines: string[]; stderr: string } {
+        const result = spawnSync(process.execPath, [entry], {
+            env: { ...process.env, NODE_PATH: join(root, "node_modules") },
+            encoding: "utf8"
+        });
+        return {
+            status: result.status,
+            lines: existsSync(out) ? readFileSync(out, "utf8").trim().split("\n") : [],
+            stderr: result.stderr
+        };
+    }
+    function loaderWith(source: string): string {
+        const loader = join(root, "loader", "patcher.js");
+        mkdirSync(join(root, "loader"), { recursive: true });
+        writeFileSync(loader, source);
+        return loader;
+    }
+    function stubAt(loaderPath: string): string {
+        const index = join(resources, "app.asar", "index.js");
+        writeFileSync(index, stubIndexSource(loaderPath));
+        return index;
+    }
+
+    it("a loader that throws before it starts Discord: stock Discord boots", () => {
+        const index = stubAt(loaderWith(`throw new Error("boom");`));
+        const result = run(index);
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.lines.some(line => line.startsWith("stock:"))).toBe(true);
+    });
+
+    it("a truncated loader (syntax error): stock Discord boots", () => {
+        const index = stubAt(loaderWith(`function half( {`));
+        const result = run(index);
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.lines.some(line => line.startsWith("stock:"))).toBe(true);
+    });
+
+    it("a loader that already pointed Discord at its code and then threw: rethrown, never booted twice", () => {
+        const index = stubAt(loaderWith(
+            `require.main.filename = "/somewhere/else.js"; require("fs").appendFileSync(${JSON.stringify(out)}, "subline\\n"); throw new Error("late");`
+        ));
+        const result = run(index);
+        expect(result.status).toBe(1);
+        expect(result.lines).toEqual(["subline"]);
+    });
+
+    it("required by another mod's resources/app (not the main module): loads Discord's own code, not the loader", () => {
+        const loader = loaderWith(`require("fs").appendFileSync(${JSON.stringify(out)}, "subline\\n");`);
+        stubAt(loader);
+        mkdirSync(join(resources, "app"), { recursive: true });
+        const shim = join(resources, "app", "index.js");
+        writeFileSync(shim, `module.exports = require("../app.asar");`);
+        const result = run(shim);
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.lines).not.toContain("subline");
+        expect(result.lines.some(line => line.startsWith("stock:"))).toBe(true);
+    });
+
+    it("the 0.2.1 stub is what threw: proof the cases above are new", () => {
+        const index = join(resources, "app.asar", "index.js");
+        writeFileSync(index, previousStubIndexSource(loaderWith(`throw new Error("boom");`)));
+        expect(run(index).status).toBe(1);
+    });
+});
+
+/*
+ * Field test D (0.2.3): the stub decides it is Discord's entry point with
+ * require.main. Electron loads the app's main script as
+ * Module._load(main, Module, true) (the Electron 33.4.11 binary has
+ * `i._load(s.join(c,f),i,!0)`). These run the stub exactly that way, and the
+ * ways that check could be wrong, in a child Node process.
+ */
+describe("the stub knows it is Discord's entry point (field test D)", () => {
+    function launcher(body: string): string {
+        const path = join(root, "electron-init.js");
+        writeFileSync(path, body);
+        return path;
+    }
+    function run(entry: string): { status: number | null; lines: string[]; stderr: string } {
+        const result = spawnSync(process.execPath, [entry], {
+            env: { ...process.env, NODE_PATH: join(root, "node_modules") },
+            encoding: "utf8"
+        });
+        return { status: result.status, lines: existsSync(out) ? readFileSync(out, "utf8").trim().split("\n") : [], stderr: result.stderr };
+    }
+    function subline(): string {
+        const loader = join(root, "loader", "patcher.js");
+        mkdirSync(join(root, "loader"), { recursive: true });
+        writeFileSync(loader, `require("fs").appendFileSync(${JSON.stringify(out)}, "subline\\n");`);
+        const index = join(resources, "app.asar", "index.js");
+        writeFileSync(index, stubIndexSource(loader));
+        return index;
+    }
+
+    it("loaded the way Electron loads an app's main script: Subline loads", () => {
+        const index = subline();
+        const result = run(launcher(`const Module = require("module"); Module._load(${JSON.stringify(index)}, Module, true);`));
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.lines).toEqual(["subline"]);
+    });
+
+    it("if the isMain flag were ever missing (parent is Electron's Module, not a user module): Subline still loads", () => {
+        const index = subline();
+        const result = run(launcher(`const Module = require("module"); Module._load(${JSON.stringify(index)}, Module, false);`));
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.lines).toEqual(["subline"]);
+    });
+
+    it("with no require.main at all: Subline still loads, and nothing reads require.main.filename on a missing main", () => {
+        const index = subline();
+        const result = run(launcher(
+            `const Module = require("module"); process.mainModule = undefined; Module._load(${JSON.stringify(index)}, Module, false);`
+        ));
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.lines).toEqual(["subline"]);
+    });
+
+    it("required by another mod's resources/app: still Discord's own code, never the loader (audit #9 holds)", () => {
+        subline();
+        mkdirSync(join(resources, "app"), { recursive: true });
+        const shim = join(resources, "app", "index.js");
+        writeFileSync(shim, `module.exports = require("../app.asar");`);
+        const result = run(launcher(`const Module = require("module"); Module._load(${JSON.stringify(shim)}, Module, true);`));
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.lines).not.toContain("subline");
+        expect(result.lines.some(line => line.startsWith("stock:"))).toBe(true);
+    });
+
+    it("the first 0.2.3 stub form is still ours (an older form, rewritten when Discord is closed)", async () => {
+        const { interimStubIndexSource, stubFormOf } = await import("../src/patcher/stub.js");
+        const loader = "/Users/x/Library/Application Support/Subline/mod/patcher.js";
+        expect(stubFormOf(interimStubIndexSource(loader), loader)).toBe("previous");
+        expect(stubFormOf(stubIndexSource(loader), loader)).toBe("current");
+        expect(parseRequirePath(interimStubIndexSource(loader))).toBe(loader);
     });
 });

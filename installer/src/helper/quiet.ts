@@ -58,10 +58,25 @@ export function isIdleRun(report: HelperRunReport): boolean {
     if (report.repatched.length > 0 || report.deferred.length > 0 || report.failed.length > 0) return false;
     if (report.updateChecked || report.updateInstalled !== null) return false;
     if (report.alerts.length > 0) return false;
-    if (report.decisions.some(d => d.kind === "alert" || d.outcome === "state-not-saved" || d.outcome === "failed")) return false;
-    const health = report.health?.status ?? null;
-    if (health !== null && health !== "healthy" && health !== "quiet" && health !== "unknown") return false;
-    return true;
+    if (report.decisions.some(d => d.kind === "alert" || d.outcome === "state-not-saved" || d.outcome === "failed" || d.outcome === "state-unreadable")) return false;
+    // A Discord found and skipped is the signature of every abandonment bug
+    // (audit #43). Logged in full when the skipped set is new; the same set
+    // again is one line, or a BetterDiscord user would get a full entry every
+    // 5 minutes.
+    if (report.found > report.managed && report.repeatUnmanaged !== true) return false;
+    return healthIsQuiet(report);
+}
+
+/**
+ * Health worth no more than one line: healthy, quiet, unknown, or a problem
+ * status that has not changed and did not just escalate (audit #32: a sticky
+ * "erroring" logged in full every 5 minutes rotated the install records out).
+ */
+function healthIsQuiet(report: HelperRunReport): boolean {
+    const health = report.health;
+    if (health === null) return true;
+    if (health.status === "healthy" || health.status === "quiet" || health.status === "unknown") return true;
+    return health.changed === false && !health.escalated;
 }
 
 /**
@@ -75,9 +90,8 @@ export function isRepeatDeferralRun(report: HelperRunReport): boolean {
     if (report.updateChecked || report.updateInstalled !== null) return false;
     if (report.alerts.some(alert => alert.notified)) return false;
     if (report.decisions.some(d => d.outcome === "state-not-saved" || d.outcome === "failed" || d.outcome.endsWith(":resolved"))) return false;
-    const health = report.health?.status ?? null;
-    if (health !== null && health !== "healthy" && health !== "quiet" && health !== "unknown") return false;
-    return true;
+    if (report.found > report.managed && report.repeatUnmanaged !== true) return false;
+    return healthIsQuiet(report);
 }
 
 /**
@@ -132,14 +146,15 @@ export function concludeHelperLog(
     force = false
 ): boolean {
     if (!force && isIdleRun(report)) {
-        target.info("helper.idle", { summary: report.summary, managed: report.managed });
+        // found beside managed: even the one line shows a skipped Discord.
+        target.info("helper.idle", { summary: report.summary, found: report.found, managed: report.managed, health: report.health?.status ?? null });
         return true;
     }
     // The same deferral as last run (Windows: Discord still open after an
     // update, every 5 minutes for hours). One line, so the rotated log keeps
     // the install and uninstall records that "Copy diagnostics" needs.
     if (!force && isRepeatDeferralRun(report)) {
-        target.info("helper.deferred", { summary: report.summary, managed: report.managed, deferred: report.deferred.length });
+        target.info("helper.deferred", { summary: report.summary, found: report.found, managed: report.managed, deferred: report.deferred.length });
         return true;
     }
     writeHeader();

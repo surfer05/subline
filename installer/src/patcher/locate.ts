@@ -11,6 +11,7 @@
  */
 
 import { existsSync, readdirSync, realpathSync, statSync } from "./realFs.js";
+import { compareVersions } from "./compareVersions.js";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -168,16 +169,6 @@ export function findWindowsAppDirs(branchDir: string, onIgnoredError?: IgnoredEr
     return versioned.map(item => join(branchDir, item.name));
 }
 
-function compareVersions(a: string, b: string): number {
-    const pa = a.split(".").map(Number);
-    const pb = b.split(".").map(Number);
-    const len = Math.max(pa.length, pb.length);
-    for (let i = 0; i < len; i++) {
-        const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
-        if (diff !== 0) return diff;
-    }
-    return 0;
-}
 
 /**
  * Locate every Discord install we can see.
@@ -259,14 +250,41 @@ function describeExplicitPath(
     }
     const branch = branchFromPath(rootPath, platform) ?? branches[0] ?? "stable";
     const install = makeInstall(branch, rootPath, platform, true);
-    if (!looksLikeDiscord(install)) {
-        return err<DiscordInstall>(
-            "NOT_A_DISCORD_INSTALL",
-            `${rootPath} does not look like a Discord installation (no app.asar under ${install.resourcesPath}).`,
-            { path: rootPath }
-        );
+    if (looksLikeDiscord(install)) return ok(install);
+
+    // THE OBVIOUS PICK IS NOT ALWAYS THE FOLDER WITH app.asar IN IT (audit
+    // 2026-10-06 #21). On Windows people pick the Discord folder itself
+    // (Update.exe and app-1.0.xxxx inside), and on either system the
+    // resources folder. Both lead to the same Discord, found the same way
+    // the search finds it: the newest app folder that really is Discord.
+    if (platform === "win32") {
+        for (const appDir of findWindowsAppDirs(rootPath)) {
+            const candidate = makeInstall(branch, appDir, platform, true);
+            if (looksLikeDiscord(candidate)) return ok(candidate);
+        }
     }
-    return ok(install);
+    const parent = resourcesParent(rootPath, platform);
+    if (parent !== null) {
+        const candidate = makeInstall(branchFromPath(parent, platform) ?? branch, parent, platform, true);
+        if (looksLikeDiscord(candidate)) return ok(candidate);
+    }
+    return err<DiscordInstall>(
+        "NOT_A_DISCORD_INSTALL",
+        platform === "win32"
+            ? `${rootPath} is not Discord. Pick the Discord folder, usually C:\\Users\\<you>\\AppData\\Local\\Discord, or the app-1.0.xxxx folder inside it.`
+            : `${rootPath} is not Discord. Pick Discord in your Applications folder.`,
+        { path: rootPath, cause: `no app.asar under ${install.resourcesPath}` }
+    );
+}
+
+/** The Discord folder a picked resources folder belongs to, or null when the pick is not one. */
+function resourcesParent(rootPath: string, platform: NodeJS.Platform): string | null {
+    const trimmed = rootPath.replace(/[\\/]+$/, "");
+    if (platform === "win32") {
+        return basename(trimmed).toLowerCase() === "resources" ? dirname(trimmed) : null;
+    }
+    if (basename(trimmed) === "Resources" && basename(dirname(trimmed)) === "Contents") return dirname(dirname(trimmed));
+    return null;
 }
 
 /** Best-effort branch inference for a hand-picked path; falls back to the caller's default. */
@@ -397,6 +415,18 @@ export function uninstallTargets(
         }
     }
     return targets;
+}
+
+/**
+ * Windows: the OTHER app-x.y.z folders of this install's branch (its
+ * stableId), as installs. Empty elsewhere, and for a root that is not under a
+ * versioned branch folder.
+ */
+export function siblingAppInstalls(install: DiscordInstall, platform: NodeJS.Platform = process.platform): DiscordInstall[] {
+    if (platform !== "win32" || install.stableId === install.rootPath || !isDirectory(install.stableId)) return [];
+    return findWindowsAppDirs(install.stableId)
+        .filter(appDir => appDir !== install.rootPath)
+        .map(appDir => makeInstall(install.branch, appDir, platform, install.fromExplicitPath));
 }
 
 /** A Discord Subline remembers patching (app/patchedInstalls.ts). */

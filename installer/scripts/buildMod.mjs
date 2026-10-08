@@ -73,6 +73,7 @@ import {
     renderManifest,
     SOURCE_NOTICE_NAME
 } from "../src/bundle/spec.ts";
+import { carryMarkerOnHostUpdate, PERSIST_FILE } from "./vencordRewrites.mjs";
 
 const INSTALLER_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const REPO_ROOT = dirname(INSTALLER_DIR);
@@ -467,6 +468,24 @@ function brandSettings() {
     return `1 entry (Subline), replacing Vencord's 7; unexported ${UNEXPORTED_TABS.join(", ")}`;
 }
 
+/**
+ * Audit 2026-10-06 #1/#30/#48. On Windows, Vencord's persistAfterDiscordUpdates
+ * (bundled in our patcher.js) copies our stub into a new app-x.y.z folder on a
+ * host update and copies nothing else, so the new folder lost
+ * subline-patch.json. The rewrite makes it write a fresh marker there too.
+ * Anchored: a pin bump that moves the code fails the build (vencordRewrites.mjs).
+ */
+function carryMarker() {
+    const path = join(VENCORD_DIR, ...PERSIST_FILE.split("/"));
+    if (!existsSync(path)) fail(`Vencord's checkout has no ${PERSIST_FILE}; the layout has changed.`);
+    try {
+        writeFileSync(path, carryMarkerOnHostUpdate(readFileSync(path, "utf8")));
+    } catch (cause) {
+        fail(cause instanceof Error ? cause.message : String(cause));
+    }
+    return `${PERSIST_FILE} now carries subline-patch.json across a host update and starts the helper on quit`;
+}
+
 function prunePlugins() {
     const pluginsDir = join(VENCORD_DIR, "src", "plugins");
     if (!existsSync(pluginsDir)) fail(`Vencord's checkout has no src/plugins — the layout has changed.`);
@@ -532,6 +551,9 @@ function main() {
     log("3c/6 Rebranding the settings section");
     log(`     ${brandSettings()}`);
 
+    log("3d/6 Carrying Subline's marker through Vencord's host-update repatch");
+    log(`     ${carryMarker()}`);
+
     log("4/6  Installing Vencord's dependencies and building");
     pnpm(["install", "--frozen-lockfile"]);
     // --standalone: the bundle must not assume it sits in a git checkout, which
@@ -569,6 +591,12 @@ function main() {
     );
 
     log("6/6  Verifying the bundle is usable, not merely present");
+    // The host-update repatch must be in the loader, with our marker carry and
+    // upstream's _app.asar guard (Vencord #4472). A pin without either fails.
+    const loaderSource = readFileSync(join(OUT_DIR, "patcher.js"), "utf8");
+    for (const needle of ["Detected Host Update", "subline-patch.json", "[Subline] Could not carry the patch marker", "discord-quit.json", "[Subline] Could not start the background helper on quit"]) {
+        if (!loaderSource.includes(needle)) fail(`the built patcher.js does not contain "${needle}".`);
+    }
     const facts = inspectBundleDir(OUT_DIR);
     if (facts.manifest === null || facts.problems.length > 0) {
         fail(`the bundle this build just produced is not installable:\n  ${facts.problems.join("\n  ")}`);

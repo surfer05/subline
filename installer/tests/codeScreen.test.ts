@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ACTION_LABELS } from "../src/app/actions.js";
-import { CODE_SCREEN_COPY, DODO_BUSINESS_ID, codeScreenView, portalUrl } from "../src/app/codeScreen.js";
+import { CODE_SCREEN_COPY, DODO_BUSINESS_ID, RESET_HELP_URL, SITE_URL, codeScreenView, portalUrl, showsDiagnostics } from "../src/app/codeScreen.js";
 
 describe("the code screen", () => {
     it("starts as a choice: buying first and filled, the field hidden", () => {
@@ -91,11 +91,14 @@ describe("Find my code", () => {
 });
 
 describe("the activation copy (the owner's exact words)", () => {
-    it("says what Subline costs and offers a server code", () => {
-        expect(CODE_SCREEN_COPY.detail).toBe("Subline is $4.99, once. Or use a code from your server.");
+    it("says what Subline costs, in the field test's words (I4)", () => {
+        expect(CODE_SCREEN_COPY.title).toBe("Activate Subline");
+        expect(CODE_SCREEN_COPY.detail).toBe("$4.99, once.");
+        expect(CODE_SCREEN_COPY.fieldLabel).toBe("Code");
+        expect(CODE_SCREEN_COPY.findCode).toBe("Lost your code?");
         expect(CODE_SCREEN_COPY.buy).toBe("Buy for $4.99");
         expect(CODE_SCREEN_COPY.haveCode).toBe("I have a code");
-        expect(CODE_SCREEN_COPY.whereFrom).toBe("A server code, or the code in your email from **Dodo Payments**. **Check spam.**");
+        expect(CODE_SCREEN_COPY.whereFrom).toBe("Bought it? The code is in the email from Dodo Payments. Check spam.");
     });
 
     it("tells the buyer to finish in the browser, and that it carries on by itself", () => {
@@ -114,5 +117,19 @@ describe("the activation copy (the owner's exact words)", () => {
             expect(s).not.toContain("—");
             expect(s).not.toMatch(/\b(free|trial)\b/i);
         }
+    });
+});
+
+describe("the diagnostics box (field test I5)", () => {
+    it("is not drawn for the relay's answers about a code", () => {
+        expect(showsDiagnostics({ code: "CODE_REFUSED" })).toBe(false);
+        expect(showsDiagnostics(null)).toBe(false);
+    });
+    it("is drawn for a real failure", () => {
+        expect(showsDiagnostics({ code: "IO_ERROR" })).toBe(true);
+    });
+    it("support is an email to subline.page, the only mailto the main process opens", () => {
+        expect(RESET_HELP_URL).toBe("mailto:support@subline.page");
+        expect(SITE_URL).toBe("https://subline.page");
     });
 });

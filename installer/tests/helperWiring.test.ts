@@ -29,9 +29,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { InstallFlow } from "../src/app/flow.js";
 import type { FlowState } from "../src/app/flow.js";
 import { uninstall } from "../src/app/uninstall.js";
-import { HELPER_FLAG, HELPER_LABEL, launchAgentPlistPath, readLaunchAgentPlist } from "../src/helper/launchAgent.js";
+import { HELPER_FLAG, HELPER_LABEL, launchAgentPlistPath, parseHdiutilMountPoints, readLaunchAgentPlist, temporaryAppLocation } from "../src/helper/launchAgent.js";
 import { HELPER_TASK_NAME } from "../src/helper/scheduledTask.js";
-import { ensureHelperFor, firstProgramArgument, installHelperFor, removeHelperFor } from "../src/main/ports.js";
+import { ensureHelperFor, ensureHelperFromHelper, firstProgramArgument, installHelperFor, removeHelperFor } from "../src/main/ports.js";
 import type { UnpatchReport } from "../src/patcher/patch.js";
 import type { Result } from "../src/patcher/result.js";
 import { makeFakeLaunchctl, makeFakeSchtasks, uninstallSystemFake } from "./fixture.js";
@@ -609,6 +609,129 @@ describe("ensureHelperFor", () => {
     });
 });
 
+/* ------------------------------------------------------------------------ *
+ * Audit 2026-10-06 #24: a helper registered from the .dmg or a translocated
+ * copy dies the moment the disk image is ejected.
+ * ------------------------------------------------------------------------ */
+
+describe("a temporary app location", () => {
+    const DMG_APP = "/Volumes/Subline/Subline.app";
+    const TRANSLOCATED = "/private/var/folders/xy/abc/T/AppTranslocation/1234-5678/d/Subline.app";
+    const EXTERNAL = "/Volumes/ExternalDisk/Apps/Subline.app";
+    const images = (mounts: string[]) => async (): Promise<Result<readonly string[]>> => ({ ok: true, value: mounts });
+    const imagesFail = async (): Promise<Result<readonly string[]>> =>
+        ({ ok: false, error: { code: "IO_ERROR", message: "hdiutil failed" } });
+
+    it("parses the mount points out of hdiutil info -plist", () => {
+        const plist = `<?xml version="1.0"?><plist><dict><key>images</key><array><dict>
+            <key>system-entities</key><array>
+            <dict><key>dev-entry</key><string>/dev/disk4</string></dict>
+            <dict><key>dev-entry</key><string>/dev/disk4s1</string><key>mount-point</key><string>/Volumes/Subline</string></dict>
+            </array></dict><dict><key>system-entities</key><array>
+            <dict><key>mount-point</key><string>/Volumes/A &amp; B</string></dict></array></dict></array></dict></plist>`;
+        expect(parseHdiutilMountPoints(plist)).toEqual(["/Volumes/Subline", "/Volumes/A & B"]);
+    });
+
+    it("refuses an AppTranslocation path outright", async () => {
+        expect(await temporaryAppLocation(TRANSLOCATED, images([]))).toEqual({ temporary: true, reason: "translocated" });
+    });
+
+    it("refuses a /Volumes path that is a mounted disk image", async () => {
+        expect(await temporaryAppLocation(DMG_APP, images(["/Volumes/Subline"]))).toEqual({ temporary: true, reason: "disk-image" });
+    });
+
+    it("keeps an app on an external disk that is not a disk image", async () => {
+        expect(await temporaryAppLocation(EXTERNAL, images(["/Volumes/Subline"]))).toEqual({ temporary: false, reason: null });
+        // A mount whose name only starts the same way is not a prefix of the app's folder.
+        expect(await temporaryAppLocation("/Volumes/SublineData/Subline.app", images(["/Volumes/Subline"])))
+            .toEqual({ temporary: false, reason: null });
+    });
+
+    it("refuses /Volumes when the disk images cannot be listed (a dead helper is worse)", async () => {
+        expect(await temporaryAppLocation(EXTERNAL, imagesFail)).toEqual({ temporary: true, reason: "disk-image-unknown" });
+        expect(await temporaryAppLocation(EXTERNAL)).toEqual({ temporary: true, reason: "disk-image-unknown" });
+    });
+
+    it("keeps /Applications without asking hdiutil", async () => {
+        let asked = 0;
+        const counting = async (): Promise<Result<readonly string[]>> => { asked++; return { ok: true, value: [] }; };
+        expect(await temporaryAppLocation(APP_PATH, counting)).toEqual({ temporary: false, reason: null });
+        expect(asked).toBe(0);
+    });
+
+    it("installHelperFor refuses the .dmg copy and writes no plist", async () => {
+        const result = await installHelperFor({ ...wiring(), appPath: DMG_APP, diskImageMounts: images(["/Volumes/Subline"]) }, "darwin", home);
+        expect(result.ok).toBe(false);
+        if (result.ok) throw new Error("expected a refusal");
+        expect(result.error.code).toBe("HELPER_APP_LOCATION_TEMPORARY");
+        expect(existsSync(launchAgentPlistPath(home))).toBe(false);
+        expect(launchctl.loaded.has(HELPER_LABEL)).toBe(false);
+    });
+
+    it("installHelperFor refuses a translocated copy and writes no plist", async () => {
+        const result = await installHelperFor({ ...wiring(), appPath: TRANSLOCATED, diskImageMounts: images([]) }, "darwin", home);
+        expect(!result.ok && result.error.code).toBe("HELPER_APP_LOCATION_TEMPORARY");
+        expect(existsSync(launchAgentPlistPath(home))).toBe(false);
+    });
+
+    it("installHelperFor refuses /Volumes when hdiutil fails", async () => {
+        const result = await installHelperFor({ ...wiring(), appPath: EXTERNAL, diskImageMounts: imagesFail }, "darwin", home);
+        expect(!result.ok && result.error.code).toBe("HELPER_APP_LOCATION_TEMPORARY");
+        expect(existsSync(launchAgentPlistPath(home))).toBe(false);
+    });
+
+    it("installHelperFor registers an app kept on an external disk", async () => {
+        const result = await installHelperFor({ ...wiring(), appPath: EXTERNAL, diskImageMounts: images(["/Volumes/Subline"]) }, "darwin", home);
+        expect(result.ok && result.value.installed).toBe(true);
+        expect(firstProgramArgument(readLaunchAgentPlist(launchAgentPlistPath(home))!)).toBe(`${EXTERNAL}/Contents/MacOS/Subline`);
+    });
+
+    it("ensureHelperFor re-points the helper at an app kept on an external disk", async () => {
+        await installHelperFor(wiring(), "darwin", home);
+        const result = await ensureHelperFor({ ...wiring(), appPath: EXTERNAL, diskImageMounts: images([]) }, "darwin", home);
+        expect(result.ok && result.value.action).toBe("repaired");
+    });
+
+    it("ensureHelperFor still skips the .dmg copy", async () => {
+        await installHelperFor(wiring(), "darwin", home);
+        const before = readLaunchAgentPlist(launchAgentPlistPath(home));
+        const result = await ensureHelperFor({ ...wiring(), appPath: DMG_APP, diskImageMounts: images(["/Volumes/Subline"]) }, "darwin", home);
+        expect(result.ok && result.value).toMatchObject({ action: "skipped", reason: "running-from-temporary-location" });
+        expect(readLaunchAgentPlist(launchAgentPlistPath(home))).toBe(before);
+    });
+
+    // Audit #7/#17: the pieces the first part did not pin.
+    it("Uninstall run from the disk image still removes the agent (removal uses only uid and launchctl)", async () => {
+        await installHelperFor(wiring(), "darwin", home);
+        const dmgWiring: Parameters<typeof removeHelperFor>[0] = Object.assign({ ...wiring() }, { appPath: DMG_APP });
+        const removal = await removeHelperFor(dmgWiring, "darwin", home);
+        expect(removal).toEqual({ applicable: true, removed: true, error: null });
+        expect(existsSync(launchAgentPlistPath(home))).toBe(false);
+    });
+
+    it("an agent an older build left pointing at the disk image is re-pointed on the first run from Applications", async () => {
+        await installHelperFor({ ...wiring(), appPath: DMG_APP, diskImageMounts: images([]) }, "darwin", home);
+        expect(firstProgramArgument(readLaunchAgentPlist(launchAgentPlistPath(home))!)).toBe(`${DMG_APP}/Contents/MacOS/Subline`);
+        const result = await ensureHelperFor({ ...wiring(), diskImageMounts: images([]) }, "darwin", home);
+        expect(result.ok && result.value).toMatchObject({ action: "repaired", reason: "points-elsewhere" });
+        expect(firstProgramArgument(readLaunchAgentPlist(launchAgentPlistPath(home))!)).toBe("/Applications/Subline.app/Contents/MacOS/Subline");
+    });
+
+    it("the second run, from Applications, registers the agent the disk-image run could not", async () => {
+        await installHelperFor({ ...wiring(), appPath: DMG_APP, diskImageMounts: images(["/Volumes/Subline"]) }, "darwin", home);
+        expect(existsSync(launchAgentPlistPath(home))).toBe(false);
+        const result = await ensureHelperFor({ ...wiring(), diskImageMounts: images(["/Volumes/Subline"]) }, "darwin", home);
+        expect(result.ok && result.value).toMatchObject({ action: "repaired", reason: "missing" });
+        expect(launchctl.loaded.has(HELPER_LABEL)).toBe(true);
+    });
+
+    it("ensureHelperFromHelper skips a translocated copy", async () => {
+        await installHelperFor(wiring(), "darwin", home);
+        const result = await ensureHelperFromHelper({ ...wiring(), appPath: TRANSLOCATED, diskImageMounts: images([]) }, "darwin", home, () => {});
+        expect(result).toEqual({ action: "skipped", reason: "running-from-temporary-location" });
+    });
+});
+
 describe("this suite does not install anything", () => {
     it("leaves the real ~/Library/LaunchAgents exactly as it found it", () => {
         // Asserts the suite CHANGED nothing, rather than that no agent exists.
@@ -683,3 +806,34 @@ const VERIFICATION = {
     problem: null,
     summary: "confirmed"
 };
+
+describe("Windows: the helper runs once right after it is registered (audit 2026-10-06 #49)", () => {
+    it("install starts one run; a failed start changes nothing", async () => {
+        const runs: string[] = [];
+        schtasks.run = async name => { runs.push(name); return { ok: true, value: true }; };
+        const result = await installHelperFor(windowsWiring(), "win32", home);
+        expect(result.ok).toBe(true);
+        expect(runs).toEqual([HELPER_TASK_NAME]);
+
+        schtasks.run = async () => { throw new Error("schtasks /Run refused"); };
+        const again = await installHelperFor(windowsWiring(), "win32", home);
+        expect(again.ok).toBe(true);
+    });
+
+    it("no run when the registration was not confirmed", async () => {
+        const runs: string[] = [];
+        schtasks.run = async name => { runs.push(name); return { ok: true, value: true }; };
+        schtasks.lieAboutRegistered = true;
+        await installHelperFor(windowsWiring(), "win32", home);
+        expect(runs).toEqual([]);
+    });
+
+    it("the helper re-registering itself never starts another run", async () => {
+        await installHelperFor({ ...windowsWiring(), executablePath: "C:\\Old\\Subline.exe" }, "win32", home);
+        const runs: string[] = [];
+        schtasks.run = async name => { runs.push(name); return { ok: true, value: true }; };
+        const self = await ensureHelperFromHelper(windowsWiring(), "win32", home);
+        expect(self.action).toBe("rewritten");
+        expect(runs).toEqual([]);
+    });
+});

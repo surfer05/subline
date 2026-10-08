@@ -85,3 +85,11 @@ describe("the uninstall's words", () => {
         expect(uninstallReportTitle({ clean: false, cancelled: true, nothingChanged: true, problems: [] })).toBe("Cancelled");
     });
 });
+
+describe("the line under a clean removal (audit 2026-10-06 #42)", () => {
+    it("names where the app itself is removed, per system", async () => {
+        const { deleteAppLine } = await import("../src/app/uninstallScreen.js");
+        expect(deleteAppLine("win32")).toBe("You can now uninstall Subline in Windows Settings, under Apps.");
+        expect(deleteAppLine("darwin")).toBe("You can now move Subline to the Trash.");
+    });
+});

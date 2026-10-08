@@ -22,12 +22,16 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { DiagnosticsLog } from "../app/log.js";
+import { RESET_HELP_URL } from "../app/codeScreen.js";
 import { InstallFlow } from "../app/flow.js";
+import { guardedFlowCall } from "../app/failure.js";
 import type { FlowAction, FlowState } from "../app/flow.js";
 import {
     APP_MANAGEMENT_SETTINGS_URL, appManagementSummary, awaitAppManagement, isLoggedAttempt, probeAppManagement, worstAppManagementStatus
 } from "../app/appManagement.js";
 import { refusedReport, uninstall } from "../app/uninstall.js";
+import { UninstallSession } from "../app/uninstallSession.js";
+import { isHeadlessUninstall, runHeadlessUninstall, UNINSTALL_EXIT } from "../app/headlessUninstall.js";
 import type { UninstallReport } from "../app/uninstall.js";
 import {
     createHelperPorts, createLaunchctl, createSchtasks, HELPER_FLAG, HELPER_LABEL, launchAgentPlistPath,
@@ -42,14 +46,15 @@ import { writeAppVersionFile } from "../app/appVersionFile.js";
 import type { AppVersionWriter } from "../app/appVersionFile.js";
 import { findDiscordProcesses, quitDiscord } from "../app/discordProcess.js";
 import { rememberedResourcesPath, uninstallTargets } from "../patcher/locate.js";
+import { isOtherAccountLoader } from "../patcher/ownership.js";
 import type { DiscordInstall } from "../patcher/locate.js";
 import { hiddenExec } from "../patcher/exec.js";
-import { readPatchedInstalls } from "../app/patchedInstalls.js";
+import { readPatchedInstalls, releaseRestoredInstalls } from "../app/patchedInstalls.js";
 import { unpatchInstall } from "../patcher/patch.js";
 import { loaderPathFor } from "../bundle/spec.js";
 import { usingOriginalFs } from "../patcher/realFs.js";
 import {
-    createFlowPorts, ensureHelperFromHelper, forceQuit, installHelperFor, listProcesses, logDirFor, removeHelperFor,
+    createDiskImageMounts, createFlowPorts, ensureHelperFromHelper, forceQuit, installHelperFor, listProcesses, logDirFor, removeHelperFor,
     requestQuit, uninstallPaths
 } from "./ports.js";
 import type { HelperWiring } from "./ports.js";
@@ -65,7 +70,7 @@ let flow: InstallFlow | null = null;
  * window: no flow:start, flow:send or flow:restart may start (or restart) an
  * install while files are being put back.
  */
-let uninstallStarted = false;
+const session = new UninstallSession();
 
 const log = new DiagnosticsLog({ dir: logDirFor() });
 
@@ -129,6 +134,8 @@ const RELEASE_MANIFEST_URL: string | null = releaseManifestUrl();
  * ------------------------------------------------------------------------ */
 
 const isHelperRun = process.argv.includes(HELPER_FLAG);
+/** Windows' own uninstaller runs `Subline.exe --uninstall` (packaging/installer.nsh). No window. */
+const isUninstallRun = !isHelperRun && isHeadlessUninstall(process.argv);
 
 /**
  * Record which app version is installed, for the plugin (app/appVersionFile.ts).
@@ -163,7 +170,8 @@ function recordAppVersion(writtenBy: AppVersionWriter): void {
  * inconvenience, not a broken install.
  */
 function ensureStartMenuShortcut(): void {
-    if (process.platform !== "win32" || isHelperRun) return;
+    // Never from the headless uninstall: the shortcut is about to be deleted.
+    if (process.platform !== "win32" || isHelperRun || isUninstallRun) return;
     try {
         const lnk = join(
             app.getPath("appData"), "Microsoft", "Windows", "Start Menu", "Programs", "Subline.lnk"
@@ -209,10 +217,7 @@ if (isHelperRun) {
             // when this build defines it differently from what is registered.
             const registration = await ensureHelperFromHelper(helperWiring(), process.platform, app.getPath("home"));
             const forceFull = registration.action === "rewritten" || registration.action === "failed";
-            if (concludeHelperLog(report, held, log, writeHeader, forceFull)) {
-                app.exit(0);
-                return;
-            }
+            if (concludeHelperLog(report, held, log, writeHeader, forceFull)) return;
             if (registration.action === "rewritten" || registration.action === "failed") {
                 log.info("helper.registration", { action: registration.action, reason: registration.reason });
             }
@@ -231,11 +236,19 @@ if (isHelperRun) {
         } catch (cause) {
             // A helper that throws is one nobody hears from again. The log is the
             // only record there is of a run nobody watched.
-            writeHeader();
-            held.flush();
-            log.error("helper.crashed", { cause: String(cause) });
+            try {
+                writeHeader();
+                held.flush();
+                log.error("helper.crashed", { cause: String(cause) });
+            } catch {
+                // Even the crash record failed. Exiting still matters more.
+            }
+        } finally {
+            // ALWAYS. A helper that never exits keeps the next scheduled run
+            // from starting (Windows IgnoreNew; launchd will not start a second
+            // copy), so one throwing log write would end self-repair for good.
+            app.exit(0);
         }
-        app.exit(0);
     })();
 }
 
@@ -294,6 +307,7 @@ function createFlow(): InstallFlow {
         helper: helperWiring(),
         // An unpackaged dev run's "app" is the Electron binary in node_modules.
         repairHelper: app.isPackaged,
+        moveToApplications: () => app.moveToApplicationsFolder(),
         // The checkout opens in the default browser through Electron, never
         // through a shell: a checkout URL carries "&", which cmd.exe would read
         // as a command separator.
@@ -339,7 +353,27 @@ function createWindow(): void {
     });
 }
 
-if (!isHelperRun) app.whenReady().then(() => {
+if (isUninstallRun) {
+    // No window, no dock icon. Run the uninstall, log it, exit with its code.
+    app.dock?.hide();
+    void app.whenReady().then(async () => {
+        let code: number = UNINSTALL_EXIT.crashed;
+        try {
+            log.writeHeader({
+                productVersion: app.getVersion(),
+                os: process.platform,
+                osVersion: process.getSystemVersion(),
+                arch: process.arch,
+                originalFs: usingOriginalFs
+            });
+            code = await runHeadlessUninstall({ argv: process.argv, run: options => runUninstall(options, false), log });
+        } finally {
+            app.exit(code);
+        }
+    });
+}
+
+if (!isHelperRun && !isUninstallRun) app.whenReady().then(() => {
     ensureStartMenuShortcut();
     log.writeHeader({
         productVersion: app.getVersion(),
@@ -380,30 +414,35 @@ app.on("window-all-closed", () => {
  * IPC — the whole renderer contract
  * ------------------------------------------------------------------------ */
 
-ipcMain.handle("flow:start", () => {
+// EVERY FLOW CALL IS GUARDED (audit 2026-10-06 #20): a throw becomes a
+// "Something went wrong" screen with Done, and its cause goes to the log,
+// instead of a rejected call that left the window on a busy screen.
+const onFlowCrash = (cause: unknown): void => log.error("flow.crashed", describeCrash(cause));
+
+ipcMain.handle("flow:start", () => guardedFlowCall(() => {
     // Also here, not only on activate: a window that was already open when the
     // new bundle landed asks for its first state through this handler, and
     // starting the flow would run the old build's install.
     if (relaunchIfBundleChanged()) return null;
-    if (uninstallStarted) return null;
+    if (!session.mayDriveFlow) return null;
     return (flow ??= createFlow()).start();
-});
+}, onFlowCrash));
 
-ipcMain.handle("flow:send", async (_event, action: FlowAction) => {
-    if (uninstallStarted) return null;
+ipcMain.handle("flow:send", (_event, action: FlowAction) => guardedFlowCall(() => {
+    if (!session.mayDriveFlow) return null;
     flow ??= createFlow();
     return flow.send(action);
-});
+}, onFlowCrash));
 
-ipcMain.handle("flow:restart", () => {
-    if (uninstallStarted) return null;
+ipcMain.handle("flow:restart", () => guardedFlowCall(() => {
+    if (!session.mayDriveFlow) return null;
     // The old flow may still have a background confirmation running (see
     // InstallFlow.verify); detach it so a late result cannot repaint the new
     // run's screen with the previous run's verdict.
     if (flow !== null) flow.onChange = null;
     flow = createFlow();
     return flow.start();
-});
+}, onFlowCrash));
 
 /** The manual path picker for "Discord installed somewhere unusual" (§7). */
 ipcMain.handle("flow:pick-discord", async () => {
@@ -458,12 +497,20 @@ function helperWiring(): HelperWiring {
         // undefined and makes the Windows branch report a named failure rather
         // than writing the file somewhere arbitrary.
         workDir: productDirFor() ?? undefined,
+        // macOS: an app on /Volumes is "temporary" only when a disk image holds
+        // it (audit 2026-10-06 #24). Read only; never attaches anything.
+        ...(process.platform === "darwin" ? { diskImageMounts: createDiskImageMounts() } : {}),
         // Read fresh every time a registration is rendered (install, repair,
         // the already-set-up check, and the helper's own check), so WatchPaths
         // always names the Discords Subline manages right now.
         managedResources: () => {
             const ports = createHelperPorts({ productVersion: app.getVersion(), log, releaseManifestUrl: null });
-            const remembered = new Set(Object.keys(ports.readState().installs));
+            // The installer's record too: a lost helper memory must not drop
+            // a Discord from WatchPaths (audit #34).
+            const remembered = new Set([
+                ...Object.keys(ports.readState().installs),
+                ...(ports.rememberedStableIds?.() ?? [])
+            ]);
             return managedResourcesPaths(ports.locate, ports.inspect, remembered, ports.isOtherAccountLoader);
         }
     };
@@ -504,7 +551,18 @@ ipcMain.handle("uninstall:cancel", () => {
 ipcMain.handle("uninstall:run", async (
     _event,
     options: { keepSettings: boolean; closeDiscord?: "ask" | "force" }
-): Promise<UninstallReport> => {
+): Promise<UninstallReport> => runUninstall(options, true));
+
+/**
+ * The uninstall, for the window (interactive) and for Windows' own
+ * uninstaller (headless, `--uninstall`). One body, so the two cannot drift.
+ * Headless never opens System Settings and never waits for a grant: a
+ * permission it does not have is a refusal with nothing changed.
+ */
+async function runUninstall(
+    options: { keepSettings: boolean; closeDiscord?: "ask" | "force" },
+    interactive: boolean
+): Promise<UninstallReport> {
     // uninstallTargets, not locateDiscordInstalls: the latter deliberately
     // returns only the NEWEST Windows app dir (right for installing), but a
     // helper patches whichever dir is newest at the time, so after a Discord
@@ -519,7 +577,7 @@ ipcMain.handle("uninstall:run", async (
     // landing, then started a patch and a helper registration interleaved
     // with the restore below. abort() ends the polls and waits for anything
     // already writing, so what it wrote is restored too.
-    uninstallStarted = true;
+    session.begin();
     if (flow !== null) {
         const running = flow;
         flow = null;
@@ -555,6 +613,13 @@ ipcMain.handle("uninstall:run", async (
         const message = appManagementSummary("not-writable");
         return refused(refusedReport(
             [{ code: "NOT_WRITABLE", message, path: installs[0]?.resourcesPath }],
+            `${message} Nothing has been changed.`
+        ));
+    }
+    if (status !== "granted" && status !== "not-required" && !interactive) {
+        const message = appManagementSummary(status);
+        return refused(refusedReport(
+            [{ code: "PERMISSION_DENIED", message, path: installs[0]?.resourcesPath }],
             `${message} Nothing has been changed.`
         ));
     }
@@ -647,7 +712,8 @@ ipcMain.handle("uninstall:run", async (
                 }
             },
             removeHelper: () => removeHelperFor(helperWiring(), process.platform, app.getPath("home")),
-            restoreHelper: () => installHelperFor(helperWiring(), process.platform, app.getPath("home"))
+            restoreHelper: () => installHelperFor(helperWiring(), process.platform, app.getPath("home")),
+            forgetInstalls: stableIds => releaseRestoredInstalls(productDirFor(), stableIds)
         },
         {
             installs,
@@ -664,7 +730,7 @@ ipcMain.handle("uninstall:run", async (
         code: report.problems[0]?.code ?? null
     });
     return refused(report);
-});
+}
 
 /**
  * unpatchInstall with our own loader known by path, so a stub whose marker
@@ -673,7 +739,16 @@ ipcMain.handle("uninstall:run", async (
  */
 function unpatchOurs(install: DiscordInstall, opts: { removeForeignMod?: boolean; dryRun?: boolean }) {
     const modDir = uninstallPaths().modBundleDir;
-    return unpatchInstall(install, { ...opts, ownLoaderPaths: modDir === null ? [] : [loaderPathFor(modDir)] });
+    // macOS shares /Applications/Discord.app between accounts: a Discord
+    // another account set up is never restored from this one (audit #5).
+    const home = app.getPath("home");
+    return unpatchInstall(install, {
+        ...opts,
+        ownLoaderPaths: modDir === null ? [] : [loaderPathFor(modDir)],
+        ...(process.platform === "darwin"
+            ? { isOtherAccountLoader: (loaderPath: string) => isOtherAccountLoader(loaderPath, home, "darwin") }
+            : {})
+    });
 }
 
 /** Discord processes of the given branches, right now. */
@@ -688,8 +763,7 @@ async function runningDiscord(branches: readonly DiscordInstall["branch"][]): Pr
  * 2026-10-06: after a refused uninstall nothing could be pressed).
  */
 function refused(report: UninstallReport): UninstallReport {
-    if (report.nothingChanged === true) uninstallStarted = false;
-    return report;
+    return session.finish(report);
 }
 
 /**
@@ -715,7 +789,8 @@ ipcMain.handle("uninstall:check", async (): Promise<{ discordRunning: boolean; p
 ipcMain.handle("shell:open", async (_event, url: string) => {
     // Only ever our own deep links and documentation. A renderer that could open
     // an arbitrary URL through the main process is a phishing primitive.
-    if (!/^(https:\/\/|x-apple\.systempreferences:)/.test(url)) return false;
+    // And exactly one mailto: Subline's support address (field test I8).
+    if (!/^(https:\/\/|x-apple\.systempreferences:)/.test(url) && url !== RESET_HELP_URL) return false;
     await shell.openExternal(url);
     return true;
 });

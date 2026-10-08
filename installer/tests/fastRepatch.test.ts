@@ -263,6 +263,34 @@ describe("a run with nothing to do", () => {
         expect(isIdleRun(report({ health: { status: "broken" } as never }))).toBe(false);
         expect(isIdleRun(report({ health: { status: "healthy" } as never }))).toBe(true);
     });
+
+    // Audit #32: a problem status that merely persists is not news.
+    it("a persisting erroring, suspect or broken health is idle; the first run of it, a change, or the escalation is not", () => {
+        for (const status of ["erroring", "suspect", "broken"] as const) {
+            expect(isIdleRun(report({ health: { status, changed: false, escalated: false } as never }))).toBe(true);
+            expect(isIdleRun(report({ health: { status, changed: true, escalated: false } as never }))).toBe(false);
+        }
+        expect(isIdleRun(report({ health: { status: "broken", changed: false, escalated: true } as never }))).toBe(false);
+    });
+
+    // Audit #43: found and not managed is the abandonment signature.
+    it("a skipped Discord is not idle the first time, and idle when the same set is skipped again", () => {
+        expect(isIdleRun(report({ found: 1, managed: 0 }))).toBe(false);
+        expect(isIdleRun(report({ found: 1, managed: 0, repeatUnmanaged: false }))).toBe(false);
+        expect(isIdleRun(report({ found: 1, managed: 0, repeatUnmanaged: true }))).toBe(true);
+    });
+
+    it("the one idle line still carries found and managed", () => {
+        const lines: { event: string; fields?: Record<string, unknown> }[] = [];
+        const target = {
+            info: (event: string, fields?: Record<string, unknown>) => lines.push({ event, fields }),
+            warn: () => undefined,
+            error: () => undefined
+        };
+        concludeHelperLog(report({ found: 2, managed: 1, repeatUnmanaged: true }), bufferedLogger(target), target, () => undefined);
+        expect(lines[0]?.event).toBe("helper.idle");
+        expect(lines[0]?.fields).toMatchObject({ found: 2, managed: 1 });
+    });
 });
 
 describe("which Discords are watched", () => {

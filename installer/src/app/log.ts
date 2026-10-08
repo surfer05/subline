@@ -22,7 +22,7 @@
  * did not think about it.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -102,6 +102,8 @@ export interface DiagnosticsLogOptions {
 export const LOG_FILENAME = "subline.log";
 export const DEFAULT_MAX_BYTES = 512 * 1024;
 export const DEFAULT_MAX_FILES = 3;
+/** A rotation claim older than this was left by a writer that died mid-rotation. */
+export const ROTATION_CLAIM_STALE_MS = 30_000;
 
 function isSensitiveKey(key: string): boolean {
     const lower = key.toLowerCase();
@@ -150,6 +152,32 @@ export class DiagnosticsLog {
     private readonly maxFiles: number;
     private readonly clock: () => number;
     private readonly home: string;
+    /**
+     * Lines that could not be written, and why (audit 2026-10-06 #20). The
+     * next line that lands is preceded by one "subline.log.lost" entry with
+     * the count and the errno, so a full disk or a locked folder is visible
+     * in the very log it interrupted.
+     */
+    private lost: { count: number; code: string | null; path: string } | null = null;
+
+    /** The last write failure, or null once a line has landed again. For tests and the header. */
+    get lastWriteError(): { count: number; code: string | null; path: string } | null {
+        return this.lost === null ? null : { ...this.lost };
+    }
+
+    private noteLost(cause: unknown, path: string): void {
+        const code = typeof (cause as { code?: unknown } | null)?.code === "string" ? (cause as { code: string }).code : null;
+        if (this.lost === null) {
+            this.lost = { count: 0, code, path };
+            try {
+                process.stderr.write(`subline: could not write the diagnostics log at ${path} (${code ?? String(cause)})\n`);
+            } catch {
+                // stderr itself may be gone; nothing more to do.
+            }
+        }
+        this.lost.count += 1;
+        this.lost.code = code ?? this.lost.code;
+    }
     /** Kept so the copied bundle can restate what version wrote it. */
     private header: DiagnosticsHeader | null = null;
 
@@ -209,10 +237,63 @@ export class DiagnosticsLog {
         this.log("error", event, fields ?? {});
     }
 
+    /**
+     * NEVER THROWS (audit 2026-10-06 #39). A log line must never stop an
+     * install or a helper run: the installer and the helper write this file at
+     * the same moment on macOS (WatchPaths fires on the patch), and a throw
+     * from a rotation they raced on escaped from a log call inside the patch
+     * and left the installer stuck with no helper registered.
+     */
     private append(line: string): void {
-        mkdirSync(this.dir, { recursive: true });
-        this.rotateIfNeeded(line.length);
-        appendFileSync(this.path, line, "utf8");
+        try {
+            mkdirSync(this.dir, { recursive: true });
+        } catch (cause) {
+            this.noteLost(cause, this.dir);
+            return; // Nowhere to write. Losing a line beats stopping the caller.
+        }
+        try {
+            this.rotateIfNeeded(line.length);
+        } catch {
+            // A rotation that failed leaves an oversized file, which is fine.
+        }
+        const lost = this.lost;
+        const text = lost === null
+            ? line
+            : formatEntry(this.clock(), "warn", "subline.log.lost", { lines: lost.count, code: lost.code, path: lost.path }) + line;
+        try {
+            appendFileSync(this.path, text, "utf8");
+            this.lost = null;
+        } catch (cause) {
+            // Same rule: never let a log line stop the caller.
+            this.noteLost(cause, this.path);
+        }
+    }
+
+    private get claimPath(): string {
+        return `${this.path}.rotating`;
+    }
+
+    /**
+     * Claim the rotation for this process. mkdir is atomic, so of two writers
+     * that both saw the file over the cap, only one shifts the generations;
+     * the other appends to whatever file is active. A claim older than
+     * ROTATION_CLAIM_STALE_MS was left by a crash and is broken.
+     */
+    private claimRotation(): boolean {
+        try {
+            mkdirSync(this.claimPath);
+            return true;
+        } catch {
+            // Held by another writer, or left behind by a crash.
+        }
+        try {
+            if (Date.now() - statSync(this.claimPath).mtimeMs < ROTATION_CLAIM_STALE_MS) return false;
+            rmdirSync(this.claimPath);
+            mkdirSync(this.claimPath);
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     /**
@@ -231,18 +312,37 @@ export class DiagnosticsLog {
             return; // No active file yet — nothing to rotate.
         }
         if (size + incomingBytes <= this.maxBytes) return;
+        if (!this.claimRotation()) return;
 
-        // Drop the oldest generation, then shift each one down.
-        const oldest = this.rotatedPath(this.maxFiles);
-        if (existsSync(oldest)) rmSync(oldest, { force: true });
-        for (let generation = this.maxFiles - 1; generation >= 1; generation -= 1) {
-            const from = this.rotatedPath(generation);
-            if (existsSync(from)) renameSync(from, this.rotatedPath(generation + 1));
-        }
-        renameSync(this.path, this.rotatedPath(1));
+        try {
+            // Re-read under the claim: another writer may have rotated between
+            // our first look and the claim, and its fresh file must not be
+            // shifted over generation 1.
+            try {
+                size = statSync(this.path).size;
+            } catch {
+                return;
+            }
+            if (size + incomingBytes <= this.maxBytes) return;
 
-        if (this.header !== null) {
-            appendFileSync(this.path, this.renderHeader(this.header), "utf8");
+            // Drop the oldest generation, then shift each one down.
+            const oldest = this.rotatedPath(this.maxFiles);
+            if (existsSync(oldest)) rmSync(oldest, { force: true });
+            for (let generation = this.maxFiles - 1; generation >= 1; generation -= 1) {
+                const from = this.rotatedPath(generation);
+                if (existsSync(from)) renameSync(from, this.rotatedPath(generation + 1));
+            }
+            renameSync(this.path, this.rotatedPath(1));
+
+            if (this.header !== null) {
+                appendFileSync(this.path, this.renderHeader(this.header), "utf8");
+            }
+        } finally {
+            try {
+                rmdirSync(this.claimPath);
+            } catch {
+                // Already gone: a stale-claim breaker took it. Harmless.
+            }
         }
     }
 

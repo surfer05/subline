@@ -11,7 +11,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { InstallFlow, isConfirmedSuccess } from "../src/app/flow.js";
@@ -26,6 +26,8 @@ import {
     requestQuit,
     uninstallPaths
 } from "../src/main/ports.js";
+import { createHelperPorts, scratchRootOf, unpackArchive } from "../src/helper/ports.js";
+import { launchAgentPlistPath } from "../src/helper/launchAgent.js";
 import { readMarker } from "../src/patcher/marker.js";
 import { readStub } from "../src/patcher/stub.js";
 import { makeDiscordFixture, makeFakeLaunchctl, makeModBundleFixture } from "./fixture.js";
@@ -444,9 +446,174 @@ describe("worst cases in the real ports", () => {
         expect(p.isOtherAccountLoader?.(join(home, "Library", "Application Support", "Subline", "mod", "patcher.js"))).toBe(false);
     });
 
+    // Audit #49: the helper's memory is seeded with the install, merged.
+    it("seeds the helper's memory beside the record, keeping what is already there, and lifts a release", () => {
+        const p = ports();
+        const productDir = join(home, "Library", "Application Support", "Subline");
+        mkdirSync(productDir, { recursive: true });
+        writeFileSync(join(productDir, "helper-state.json"), JSON.stringify({ format: 1, lastRunAt: 42, installs: { other: { discordVersion: "1", buildId: "b", patchedAt: 1, failures: 3 } }, released: [discord.install.stableId] }), "utf8");
+        p.rememberPatchedInstall?.(discord.install, { discordVersion: "0.0.406", buildId: "abcdabcdabcdabcd" });
+        const state = JSON.parse(readFileSync(join(productDir, "helper-state.json"), "utf8")) as { lastRunAt: number; installs: Record<string, { buildId: string; failures: number }>; released: string[] };
+        expect(state.lastRunAt).toBe(42);
+        expect(state.installs.other?.failures).toBe(3);
+        expect(state.installs[discord.install.stableId]?.buildId).toBe("abcdabcdabcdabcd");
+        expect(state.released).toEqual([]);
+    });
+
     it("macOS process list for the helper is this user's only", async () => {
         const seen: string[][] = [];
         await listProcesses("darwin", async (_file, args) => { seen.push(args); return { stdout: "" }; }, undefined, 501);
         expect(seen[0]).toEqual(["-x", "-U", "501", "-o", "pid=,comm="]);
+    });
+});
+
+describe("discarding an unpacked update (audit 2026-10-06 #25)", () => {
+    const fakeUnpack = (root: boolean) => async (_file: string, args: string[]): Promise<{ stdout: string }> => {
+        // ditto -x -k <archive> <target>, or tar -xf <archive> -C <target>
+        const target = args[args.length - 1]!;
+        const dir = root ? target : join(target, "mod");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "subline-mod.json"), "{}");
+        writeFileSync(join(dir, "patcher.js"), "");
+        return { stdout: "" };
+    };
+    const helperPorts = (exec: (file: string, args: string[]) => Promise<{ stdout: string }>) => createHelperPorts({
+        productVersion: "0.1.0",
+        log: { info: () => {}, warn: () => {}, error: () => {} },
+        platform: "darwin",
+        home: mkdtempSync(join(tmpdir(), "subline-ports-home-")),
+        exec
+    });
+
+    it("a release zip with the bundle at its root removes only the scratch folder, never the temp folder", async () => {
+        const sentinel = join(tmpdir(), `subline-sentinel-${process.pid}-${Date.now()}`);
+        writeFileSync(sentinel, "keep me");
+        try {
+            const p = helperPorts(fakeUnpack(true));
+            const unpacked = await unpackArchive(new Uint8Array([1]), "mod.zip", fakeUnpack(true), "darwin");
+            expect(unpacked.ok).toBe(true);
+            if (!unpacked.ok) return;
+            const scratch = scratchRootOf(unpacked.value);
+            expect(scratch).not.toBeNull();
+            p.discardUnpacked(unpacked.value);
+            expect(existsSync(scratch!)).toBe(false);
+            expect(existsSync(sentinel)).toBe(true);
+            expect(existsSync(tmpdir())).toBe(true);
+        } finally {
+            rmSync(sentinel, { force: true });
+        }
+    });
+
+    it("a wrapped release zip removes the whole scratch folder", async () => {
+        const p = helperPorts(fakeUnpack(false));
+        const unpacked = await unpackArchive(new Uint8Array([1]), "mod.zip", fakeUnpack(false), "darwin");
+        expect(unpacked.ok).toBe(true);
+        if (!unpacked.ok) return;
+        const scratch = scratchRootOf(unpacked.value);
+        expect(scratch).not.toBeNull();
+        expect(unpacked.value.startsWith(scratch!)).toBe(true);
+        p.discardUnpacked(unpacked.value);
+        expect(existsSync(scratch!)).toBe(false);
+    });
+
+    it("finds no scratch root for a path outside a subline-update folder in the temp folder", () => {
+        expect(scratchRootOf(tmpdir())).toBeNull();
+        expect(scratchRootOf(join(tmpdir(), "unpacked"))).toBeNull();
+        expect(scratchRootOf("/Users/x/Documents/subline-update-abc/unpacked")).toBeNull();
+        expect(scratchRootOf(join(tmpdir(), "subline-update-abc", "unpacked", "mod"))).toBe(join(tmpdir(), "subline-update-abc"));
+    });
+
+    it("discardUnpacked removes nothing when the path is not inside a scratch folder", () => {
+        const outside = mkdtempSync(join(tmpdir(), "subline-not-scratch-"));
+        const inner = join(outside, "a", "b");
+        mkdirSync(inner, { recursive: true });
+        helperPorts(fakeUnpack(true)).discardUnpacked(inner);
+        expect(existsSync(inner)).toBe(true);
+        rmSync(outside, { recursive: true, force: true });
+    });
+});
+
+describe("the macOS helper knows when Subline was removed (audit 2026-10-06 #46)", () => {
+    it("stillRegistered follows the LaunchAgent plist", async () => {
+        const home = mkdtempSync(join(tmpdir(), "subline-ports-home-"));
+        try {
+            const ports = createHelperPorts({
+                productVersion: "0.2.3",
+                log: { info: () => {}, warn: () => {}, error: () => {} },
+                platform: "darwin",
+                home,
+                exec: async () => ({ stdout: "" })
+            });
+            expect(ports.stillRegistered).toBeDefined();
+            expect(await ports.stillRegistered!()).toBe(false);
+            mkdirSync(dirname(launchAgentPlistPath(home)), { recursive: true });
+            writeFileSync(launchAgentPlistPath(home), "<plist/>");
+            expect(await ports.stillRegistered!()).toBe(true);
+        } finally {
+            rmSync(home, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("Windows: Discord's own updater, by its path (audit 2026-10-06 #23)", () => {
+    it("only an Update.exe under this Discord's folder counts", async () => {
+        const home = mkdtempSync(join(tmpdir(), "subline-ports-home-"));
+        try {
+            let cim = "";
+            const p = createFlowPorts({
+                appResourcesPath: home,
+                productVersion: "0.2.3",
+                log: { info: () => {}, warn: () => {}, error: () => {} },
+                platform: "win32",
+                env: { LOCALAPPDATA: join(home, "AppData", "Local") },
+                home,
+                searchRoots: [],
+                helper: { appPath: home, uid: 0, launchctl: makeFakeLaunchctl() },
+                exec: async (file: string) => ({ stdout: file === "powershell.exe" ? cim : "" })
+            });
+            const install = {
+                branch: "stable" as const,
+                rootPath: "C:\\Users\\x\\AppData\\Local\\Discord\\app-1.0.2",
+                stableId: "C:\\Users\\x\\AppData\\Local\\Discord",
+                resourcesPath: "r", asarPath: "a", backupPath: "b", buildInfoPath: "i", fromExplicitPath: false
+            };
+            cim = "C:\\Users\\x\\AppData\\Local\\Slack\\Update.exe\r\n";
+            expect(await p.discordUpdaterRunning!(install)).toBe(false);
+            cim = "C:\\Users\\x\\AppData\\Local\\Discord\\Update.exe\r\n";
+            expect(await p.discordUpdaterRunning!(install)).toBe(true);
+            cim = "?\r\n";
+            expect(await p.discordUpdaterRunning!(install)).toBe(false);
+        } finally {
+            rmSync(home, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("the installer finds a Discord it patched by hand again (audit 2026-10-06 #15)", () => {
+    it("locate() includes a remembered Discord outside the search, and leaves an explicit pick alone", async () => {
+        const home = mkdtempSync(join(tmpdir(), "subline-ports-home-"));
+        const discord = makeDiscordFixture({ appName: "Discord PTB.app" });
+        try {
+            const { rememberPatchedInstall } = await import("../src/app/patchedInstalls.js");
+            const productDir = join(home, "Library", "Application Support", "Subline");
+            expect(rememberPatchedInstall(productDir, { ...discord.install, branch: "ptb" }).ok).toBe(true);
+            const p = createFlowPorts({
+                appResourcesPath: home,
+                productVersion: "0.2.3",
+                log: { info: () => {}, warn: () => {}, error: () => {} },
+                platform: "darwin",
+                home,
+                searchRoots: [join(home, "nowhere")],
+                helper: { appPath: home, uid: 0, launchctl: makeFakeLaunchctl() },
+                exec: async () => ({ stdout: "" })
+            });
+            const found = p.locate();
+            expect(found.ok && found.value.map(install => install.rootPath)).toEqual([discord.install.rootPath]);
+            const picked = p.locate([join(home, "nowhere")]);
+            expect(picked.ok).toBe(false);
+        } finally {
+            discord.cleanup();
+            rmSync(home, { recursive: true, force: true });
+        }
     });
 });

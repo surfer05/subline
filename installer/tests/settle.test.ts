@@ -261,3 +261,37 @@ describe("waiting for Discord's updater to settle", () => {
         expect(report.version).toBeNull();
     });
 });
+
+// Audit 2026-10-06 #47: right after "quit Discord", wait for the quit.
+describe("waiting for Discord to close (bounded)", () => {
+    it("waits through a running Discord and settles once it closes", async () => {
+        const ports = makePorts({ running: [true, true, false], ageMs: 60_000 });
+        const report = await awaitDiscordSettled(INSTALL, ports, { ...OPTIONS, waitForCloseMs: 60_000, closePollMs: 10_000 });
+        expect(report.settled).toBe(true);
+    });
+
+    it("defers once the wait is spent, after a bounded number of looks, even with a frozen clock", async () => {
+        let looks = 0;
+        const report = await awaitDiscordSettled(INSTALL, {
+            now: () => 0,
+            sleep: async () => undefined,
+            discordRunning: async () => { looks += 1; return true; },
+            mtimeOf: () => 0,
+            readDiscordVersion: () => ok({ version: "1" } as never)
+        }, { ...OPTIONS, waitForCloseMs: 60_000, closePollMs: 10_000 });
+        expect(report.status).toBe("discord-running");
+        expect(looks).toBe(7);
+    });
+
+    it("without the option a running Discord is one look, as before", async () => {
+        let looks = 0;
+        await awaitDiscordSettled(INSTALL, {
+            now: () => 0,
+            sleep: async () => undefined,
+            discordRunning: async () => { looks += 1; return true; },
+            mtimeOf: () => 0,
+            readDiscordVersion: () => ok({ version: "1" } as never)
+        }, OPTIONS);
+        expect(looks).toBe(1);
+    });
+});

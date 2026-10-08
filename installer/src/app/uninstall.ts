@@ -40,6 +40,7 @@ import { join } from "node:path";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "../patcher/realFs.js";
 
 import { removeModBundle } from "../bundle/bundle.js";
+import { recoverModBundle } from "./modInstall.js";
 import { MARKER_FILENAME } from "../patcher/marker.js";
 import type { DiscordBranch, DiscordInstall } from "../patcher/locate.js";
 import type { UnpatchReport } from "../patcher/patch.js";
@@ -117,6 +118,13 @@ export interface UninstallSystemPorts {
      * was stopped, so no Discord that still loads Subline is left without it.
      */
     restoreHelper(): Promise<Result<unknown>>;
+    /**
+     * Stop managing these Discords (stable ids): Uninstall put them back to
+     * normal. Removes them from the helper's memory and the installer's
+     * record, and marks them released, so a helper brought back for another
+     * Discord never puts Subline back into them.
+     */
+    forgetInstalls?(stableIds: readonly string[]): Result<unknown>;
 }
 
 export interface UninstallOptions {
@@ -151,7 +159,9 @@ export interface RestoreOutcome {
 export type LeftAloneReason =
     | { kind: "foreign"; mod: string | null }
     | { kind: "unreadable" }
-    | { kind: "not-ours" };
+    | { kind: "not-ours" }
+    /** Another account on this Mac set Subline up here (audit #5). Only that account may remove it. */
+    | { kind: "other-account" };
 
 export type TranslationCacheDisposition =
     /** Left where it is — inside Discord's own storage, orphaned and unread. */
@@ -303,6 +313,10 @@ export async function uninstall(
             }
             continue;
         }
+        if (verdict.error.code === "OTHER_ACCOUNT") {
+            leftAlone.set(install, { kind: "other-account" });
+            continue;
+        }
         if (verdict.error.code === "BROKEN_INSTALL" && !existsSync(join(install.resourcesPath, MARKER_FILENAME))) {
             leftAlone.set(install, { kind: "unreadable" });
             continue;
@@ -355,6 +369,20 @@ export async function uninstall(
         return back ? report : { ...report, nothingChanged: false };
     }
     ports.log.info("uninstall.helper-stopped", { applicable: helper.applicable, removed: helper.removed });
+
+    // 3b. A BUNDLE AN INTERRUPTED SWAP LEFT ASIDE goes back first (audit
+    //     2026-10-06 #45). If a restore below fails, the bundle is kept for
+    //     the Discord that still loads it, and it must be really there. The
+    //     helper that would have put it back at its next run was just stopped.
+    if (ports.modBundleDir !== null) {
+        const recovered = recoverModBundle(ports.modBundleDir, ports.platform);
+        if (!recovered.ok) {
+            problems.push(recovered.error);
+            ports.log.error("uninstall.bundle-recover-failed", { code: recovered.error.code, path: recovered.error.path ?? null, cause: recovered.error.cause ?? null });
+        } else if (recovered.value) {
+            ports.log.info("uninstall.bundle-recovered", { dir: ports.modBundleDir });
+        }
+    }
 
     // 4. Every Discord (§8 steps 1–2: restore the archive, remove the sidecar
     //    — a stale one makes the NEXT install misread a foreign or absent patch
@@ -409,6 +437,27 @@ export async function uninstall(
     // to be kept forever, "for safety", with no Discord to keep them for).
     const nothingLoadsSubline = restores.every(entry => entry.ok) && stillMarked.length === 0;
     const discordRestored = nothingLoadsSubline;
+
+    // 5a. THE DISCORDS PUT BACK ARE RELEASED. A partial uninstall brings the
+    //     helper back for the Discord that kept Subline, and its memory still
+    //     named the ones just restored: an unpatched Discord it remembers is
+    //     "an update wiped the injection", and it patched Subline straight
+    //     back in. A branch with any failed restore stays managed (on Windows
+    //     the stable id is the branch folder, shared by its app-x folders).
+    const failedIds = new Set(restores.filter(entry => !entry.ok).map(entry => entry.install.stableId));
+    const releasedIds = [...new Set(restores
+        .filter(entry => entry.ok && entry.leftAlone === null)
+        .map(entry => entry.install.stableId))]
+        .filter(id => !failedIds.has(id));
+    if (releasedIds.length > 0 && ports.forgetInstalls !== undefined) {
+        try {
+            const forgot = ports.forgetInstalls(releasedIds);
+            if (forgot.ok) ports.log.info("uninstall.released", { installs: releasedIds.length });
+            else ports.log.error("uninstall.release-failed", { code: forgot.error.code, message: forgot.error.message });
+        } catch (cause) {
+            ports.log.error("uninstall.release-failed", { cause: String(cause) });
+        }
+    }
 
     // 5. A DISCORD STILL LOADS SUBLINE: the helper comes back. Without it the
     //    next Discord update ends translation silently and nothing repairs it.
@@ -510,7 +559,8 @@ export async function uninstall(
             settingsRemoved,
             productDataRemoved,
             settingsAskedToGo: !keepSettings,
-            helperBack
+            helperBack,
+            bundlePresent: ports.modBundleDir === null || existsSync(ports.modBundleDir)
         })
     };
 }
@@ -550,6 +600,7 @@ function leftAloneLine(restores: readonly RestoreOutcome[]): string | null {
         if (reason === null || reason.kind === "not-ours") return [];
         const name = BRANCH_NAMES[entry.install.branch];
         if (reason.kind === "unreadable") return [`${name}, ${UNINSTALL_COPY.leftAloneUnreadable}`];
+        if (reason.kind === "other-account") return [`${name}, ${UNINSTALL_COPY.leftAloneOtherAccount}`];
         return [`${name}, ${UNINSTALL_COPY.leftAloneForeign}${reason.mod === null ? "" : ` (${reason.mod})`}`];
     });
     return items.length === 0 ? null : `${UNINSTALL_COPY.leftAlone} ${items.join("; ")}.`;
@@ -567,6 +618,8 @@ function summarize(input: {
     settingsAskedToGo: boolean;
     /** null: the helper was not stopped or did not need to come back. */
     helperBack: boolean | null;
+    /** The mod bundle is on disk (or there is no bundle folder on this platform). */
+    bundlePresent: boolean;
 }): string {
     const aside = leftAloneLine(input.restores);
     const withAside = (parts: string[]): string => [...parts, ...(aside === null ? [] : [aside])].join(" ");
@@ -582,7 +635,9 @@ function summarize(input: {
             done > 0 && done < total
                 ? `Subline was removed from ${done} of ${total} Discords, but not from the rest.`
                 : UNINSTALL_COPY.couldNotRemove,
-            input.helperBack === true ? UNINSTALL_COPY.staysInstalledUpdating : UNINSTALL_COPY.staysInstalled
+            !input.bundlePresent
+                ? UNINSTALL_COPY.bundleMissing
+                : input.helperBack === true ? UNINSTALL_COPY.staysInstalledUpdating : UNINSTALL_COPY.staysInstalled
         ];
         if (input.helperBack === false) parts.push(UNINSTALL_COPY.helperNotBack);
         if (input.settingsAskedToGo) parts.push(UNINSTALL_COPY.settingsKept);
@@ -593,14 +648,19 @@ function summarize(input: {
 
     if (ours.length === 0) {
         // No Discord had Subline in it. Say what of Subline's own did go.
+        // A Discord another account set up is that account's, said first.
+        const lead = input.restores.some(entry => entry.leftAlone?.kind === "other-account")
+            ? [UNINSTALL_COPY.otherAccount]
+            : [];
         const removed = [
             ...(input.filesRemoved ? [UNINSTALL_COPY.itsFiles] : []),
             ...(input.helperRemoved ? [UNINSTALL_COPY.itsUpdater] : [])
         ];
         if (removed.length === 0 && !input.settingsRemoved) {
-            return withAside([UNINSTALL_COPY.nothingToRemove]);
+            return withAside([...lead, ...(lead.length > 0 ? [] : [UNINSTALL_COPY.nothingToRemove])]);
         }
         return withAside([
+            ...lead,
             UNINSTALL_COPY.noDiscordWithSubline,
             ...(removed.length > 0 ? [`Subline removed ${removed.join(" and ")}.`] : []),
             ...(input.settingsRemoved ? [UNINSTALL_COPY.settingsRemoved] : [])

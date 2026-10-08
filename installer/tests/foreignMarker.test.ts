@@ -12,7 +12,7 @@
  * patcher.js is ours, marker or not, and a genuine foreign stub is still not.
  */
 
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -22,8 +22,8 @@ import type { DiscordInstall } from "../src/patcher/locate.js";
 import { isSublineLoaderPath, normaliseLoaderPath, sameLoaderPath } from "../src/patcher/ownership.js";
 import { adoptPatch, patchInstall, unpatchInstall } from "../src/patcher/patch.js";
 import { identifyModFromLoaderPath, inspectInstall } from "../src/patcher/state.js";
-import { buildStubAsar, legacyStubIndexSource, readStub } from "../src/patcher/stub.js";
-import { buildOriginalDiscordAsar, makeDiscordFixture, makeModBundleFixture, REAL_VENCORD_LOADER_PATH } from "./fixture.js";
+import { buildStubAsar, readStub } from "../src/patcher/stub.js";
+import { buildOriginalDiscordAsar, FIXTURE_BUILD_INFO, makeDiscordFixture, makeModBundleFixture, REAL_VENCORD_LOADER_PATH } from "./fixture.js";
 import type { Fixture, ModBundleFixture } from "./fixture.js";
 
 const WIN_LOADER = "C:\\Users\\Ada\\AppData\\Local\\Subline\\mod\\patcher.js";
@@ -53,7 +53,7 @@ function marker(f: Fixture, loaderPath: string, buildId = "0123456789abcdef"): v
         productVersion: "0.2.1",
         loaderPath,
         pluginBuildId: buildId,
-        discordVersion: "1.0.9259",
+        discordVersion: FIXTURE_BUILD_INFO.version,
         backupPath: f.install.backupPath,
         patchedAt: "2026-10-04T12:00:00.000Z"
     });
@@ -113,13 +113,18 @@ describe("which loaders are Subline's", () => {
     });
 });
 
+/** These loaders are Windows paths that do not exist on the test machine: loader-missing is right and beside the point here. */
+function withoutLoaderMissing(warnings: readonly string[]): string[] {
+    return warnings.filter(w => w !== "loader-missing");
+}
+
 describe("classifying our stub with the marker missing or wrong", () => {
     it("our loader, a backup, no marker: patched by us, with marker-missing", () => {
         const f = fixture({ stubLoaderPath: WIN_LOADER, withBackup: true });
         const state = inspectInstall(f.install, WIN);
         expect(state.ok && state.value.kind).toBe("patched-by-us");
         expect(state.ok && state.value.mod).toBe("subline");
-        expect(state.ok && state.value.warnings).toEqual(["marker-missing"]);
+        expect(state.ok && withoutLoaderMissing(state.value.warnings)).toEqual(["marker-missing"]);
     });
 
     it("a marker that spells the loader differently (case, slashes, trailing slash): still ours, marker-mismatch", () => {
@@ -127,7 +132,7 @@ describe("classifying our stub with the marker missing or wrong", () => {
         marker(f, "c:/users/ada/appdata/local/subline/mod/patcher.js/");
         const state = inspectInstall(f.install, WIN);
         expect(state.ok && state.value.kind).toBe("patched-by-us");
-        expect(state.ok && state.value.warnings).toEqual(["marker-mismatch"]);
+        expect(state.ok && withoutLoaderMissing(state.value.warnings)).toEqual(["marker-mismatch"]);
     });
 
     it("a marker naming another path while the stub loads ours: still ours, marker-mismatch", () => {
@@ -135,14 +140,14 @@ describe("classifying our stub with the marker missing or wrong", () => {
         marker(f, "C:\\Old\\place\\patcher.js");
         const state = inspectInstall(f.install, WIN);
         expect(state.ok && state.value.kind).toBe("patched-by-us");
-        expect(state.ok && state.value.warnings).toEqual(["marker-mismatch"]);
+        expect(state.ok && withoutLoaderMissing(state.value.warnings)).toEqual(["marker-mismatch"]);
     });
 
     it("the exact marker gives no warning (unchanged behaviour)", () => {
         const f = fixture({ stubLoaderPath: WIN_LOADER, withBackup: true });
         marker(f, WIN_LOADER);
         const state = inspectInstall(f.install, WIN);
-        expect(state.ok && state.value.warnings).toEqual([]);
+        expect(state.ok && withoutLoaderMissing(state.value.warnings)).toEqual([]);
     });
 
     it("our loader with NO backup is our-patch-without-backup, never 'another client mod'", () => {
@@ -212,15 +217,17 @@ describe("patch and adopt rewrite the marker", () => {
     it("patchInstall over our marker-less stub writes the marker and leaves app.asar's bytes alone", () => {
         const b = bundle();
         const f = fixture({ withBackup: true });
-        // The one-line form an older Subline wrote: a full patch would rewrite
-        // it to the current form, so unchanged bytes prove app.asar was not
-        // touched (on Windows a rename over it fails while Discord runs).
-        writeFileSync(f.install.asarPath, buildStubAsar(b.loaderPath, legacyStubIndexSource));
+        // The current stub form. A full patch writes a temp file and renames it
+        // over app.asar (a new inode); the marker-only path leaves the very same
+        // file in place (on Windows a rename over it fails while Discord runs).
+        writeFileSync(f.install.asarPath, buildStubAsar(b.loaderPath));
         const before = readFileSync(f.install.asarPath);
+        const inode = statSync(f.install.asarPath).ino;
         const result = patchInstall(f.install, { modBundleDir: b.dir, productVersion: "0.2.2" });
         expect(result.ok).toBe(true);
         expect(result.ok && result.value.alreadyPatched).toBe(false);
         expect(readFileSync(f.install.asarPath).equals(before)).toBe(true);
+        expect(statSync(f.install.asarPath).ino).toBe(inode);
         const m = readMarker(f.install.resourcesPath);
         expect(m.ok && m.value?.loaderPath).toBe(b.loaderPath);
         expect(m.ok && m.value?.pluginBuildId).toBe(b.buildId);

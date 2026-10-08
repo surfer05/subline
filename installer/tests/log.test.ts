@@ -3,7 +3,8 @@
  * what it writes, so most of these tests are about the refusal.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -257,4 +258,113 @@ describe("failure logs carry more than a code", () => {
         expect(body).toContain("cause: error.cause");
         expect(body).toContain("path: error.path");
     });
+});
+
+describe("two writers, one log (audit 2026-10-06 #39)", () => {
+    const fill = (log: DiagnosticsLog, count: number): void => {
+        for (let i = 0; i < count; i += 1) log.info("fill", { i });
+    };
+
+    it("a rotation that cannot rename never throws, and the line still lands in the active file", () => {
+        const log = makeLog({ maxBytes: 300, maxFiles: 1 });
+        fill(log, 7);
+        expect(existsSync(log.rotatedPath(1))).toBe(false);
+        // Generation 1 is a non-empty folder: removing or renaming over it throws.
+        mkdirSync(log.rotatedPath(1));
+        writeFileSync(join(log.rotatedPath(1), "inside"), "x");
+        expect(() => log.info("after.failed.rotation", { ok: true })).not.toThrow();
+        expect(log.read()).toContain("after.failed.rotation");
+    });
+
+    it("writeHeader never throws either", () => {
+        const log = makeLog({ maxBytes: 300, maxFiles: 1 });
+        fill(log, 7);
+        expect(existsSync(log.rotatedPath(1))).toBe(false);
+        mkdirSync(log.rotatedPath(1));
+        writeFileSync(join(log.rotatedPath(1), "inside"), "x");
+        expect(() => log.writeHeader({ productVersion: "1.0.0", os: "darwin" })).not.toThrow();
+        expect(log.read()).toContain("subline.session");
+    });
+
+    it("a lost line is recorded with its errno, and the next line that lands says so (audit #20)", () => {
+        const blocker = join(dir, "blocker2");
+        writeFileSync(blocker, "a file where the folder should be");
+        const log = new DiagnosticsLog({ dir: blocker, clock: () => clockValue });
+        log.info("lost.one");
+        log.info("lost.two");
+        expect(log.lastWriteError?.count).toBe(2);
+        expect(["EEXIST", "ENOTDIR"]).toContain(log.lastWriteError?.code);
+        rmSync(blocker);
+        log.info("landed");
+        expect(log.lastWriteError).toBeNull();
+        const text = log.read();
+        expect(text).toContain("subline.log.lost");
+        expect(text.indexOf("subline.log.lost")).toBeLessThan(text.indexOf("landed"));
+        expect(text).not.toContain("lost.one");
+    });
+
+    it("a missing log folder that cannot be made never throws", () => {
+        const blocker = join(dir, "blocker");
+        writeFileSync(blocker, "a file where the folder should be");
+        const log = new DiagnosticsLog({ dir: join(blocker, "logs"), clock: () => clockValue });
+        expect(() => log.info("nowhere")).not.toThrow();
+    });
+
+    it("another writer rotating right now: skip the rotation, still append", () => {
+        const log = makeLog({ maxBytes: 300 });
+        fill(log, 7);
+        mkdirSync(`${log.path}.rotating`);
+        log.info("while.claimed");
+        expect(existsSync(log.rotatedPath(1))).toBe(false);
+        expect(log.read()).toContain("while.claimed");
+        expect(existsSync(`${log.path}.rotating`)).toBe(true);
+    });
+
+    it("a claim left by a crash more than 30s ago is broken, and the rotation happens", () => {
+        const log = makeLog({ maxBytes: 300 });
+        fill(log, 7);
+        const claim = `${log.path}.rotating`;
+        mkdirSync(claim);
+        const old = new Date(Date.now() - 60_000);
+        utimesSync(claim, old, old);
+        log.info("after.stale.claim");
+        expect(existsSync(log.rotatedPath(1))).toBe(true);
+        expect(existsSync(claim)).toBe(false);
+        expect(log.read()).toContain("after.stale.claim");
+    });
+
+    it("the claim is released after a rotation", () => {
+        const log = makeLog({ maxBytes: 300 });
+        fill(log, 8);
+        expect(existsSync(log.rotatedPath(1))).toBe(true);
+        expect(existsSync(`${log.path}.rotating`)).toBe(false);
+    });
+
+    it("two processes writing across the cap at once: neither throws, no generation is empty", async () => {
+        const writer = join(dir, "writer.mts");
+        const logModule = join(import.meta.dirname, "..", "src", "app", "log.ts");
+        writeFileSync(writer, [
+            `import { DiagnosticsLog } from ${JSON.stringify(logModule)};`,
+            "const [, , target, name] = process.argv;",
+            "const log = new DiagnosticsLog({ dir: target, maxBytes: 300, maxFiles: 3 });",
+            "let threw = 0;",
+            "for (let i = 0; i < 4000; i += 1) { try { log.info(\"w\", { name, i }); } catch { threw += 1; } }",
+            "process.stdout.write(String(threw));"
+        ].join("\n"));
+        const target = join(dir, "shared");
+        const spawn = (name: string): Promise<string> => new Promise((resolve, reject) => {
+            execFile(process.execPath, ["--experimental-strip-types", "--no-warnings", writer, target, name], (error, stdout) => {
+                if (error) reject(error);
+                else resolve(stdout);
+            });
+        });
+        const [a, b] = await Promise.all([spawn("a"), spawn("b")]);
+        expect(a).toBe("0");
+        expect(b).toBe("0");
+        for (const name of readdirSync(target)) {
+            if (!name.startsWith("subline.log.")) continue;
+            if (name.endsWith(".rotating")) continue;
+            expect(readFileSync(join(target, name), "utf8").length, name).toBeGreaterThan(0);
+        }
+    }, 20_000);
 });

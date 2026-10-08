@@ -20,6 +20,8 @@ import { join } from "node:path";
 import type { DiscordBranch, DiscordInstall } from "../patcher/locate.js";
 import type { Result } from "../patcher/result.js";
 import { fsError, ok } from "../patcher/result.js";
+import { releaseHelperInstalls } from "../helper/state.js";
+import { existsSync } from "node:fs";
 
 export const PATCHED_INSTALLS_FILENAME = "patched-installs.json";
 
@@ -70,4 +72,37 @@ export function rememberPatchedInstall(productDir: string | null, install: Disco
         return fsError<boolean>(cause, path, "remember which Discord Subline changed");
     }
     return ok(true);
+}
+
+/**
+ * Drop Discords from the record (Uninstall put them back to normal). Every
+ * other entry is kept. A missing file is nothing to do.
+ */
+export function forgetPatchedInstalls(productDir: string | null, stableIds: readonly string[]): Result<boolean> {
+    if (productDir === null || stableIds.length === 0) return ok(false);
+    const current = readPatchedInstalls(productDir);
+    const next = current.filter(entry => !stableIds.includes(entry.stableId));
+    if (next.length === current.length) return ok(false);
+    const path = patchedInstallsPathFor(productDir);
+    const temp = `${path}.tmp`;
+    try {
+        writeFileSync(temp, `${JSON.stringify({ format: 1, installs: next }, null, 4)}\n`, "utf8");
+        renameSync(temp, path);
+    } catch (cause) {
+        return fsError<boolean>(cause, path, "forget the Discords Subline was removed from");
+    }
+    return ok(true);
+}
+
+/**
+ * Uninstall put these Discords back to normal: drop them from the record and
+ * the helper's memory, and mark them released (see HelperState.released).
+ * Never creates Subline's folder just to write that down.
+ */
+export function releaseRestoredInstalls(productDir: string | null, stableIds: readonly string[]): Result<boolean> {
+    if (productDir === null || stableIds.length === 0 || !existsSync(productDir)) return ok(false);
+    const record = forgetPatchedInstalls(productDir, stableIds);
+    if (!record.ok) return record;
+    const memory = releaseHelperInstalls(productDir, stableIds);
+    return memory.ok ? ok(true) : memory;
 }

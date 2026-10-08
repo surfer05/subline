@@ -63,7 +63,10 @@ export const usingOriginalFs = impl !== nodeFs;
 
 export const {
     closeSync,
+    copyFileSync,
     existsSync,
+    fsyncSync,
+    linkSync,
     openSync,
     readdirSync,
     readFileSync,

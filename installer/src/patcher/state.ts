@@ -10,7 +10,8 @@
 // realFs, NOT node:fs: Electron treats any ".asar" path as a virtual archive,
 // so even existsSync/statSync on app.asar answer about a mount rather than the
 // file. See realFs.ts.
-import { existsSync, statSync } from "./realFs.js";
+import { existsSync, readFileSync, statSync } from "./realFs.js";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { DiscordInstall } from "./locate.js";
@@ -18,10 +19,11 @@ import { readMarker } from "./marker.js";
 import type { PatchMarker } from "./marker.js";
 import type { Result } from "./result.js";
 import { err, ok } from "./result.js";
-import { isSublineLoaderPath, sameLoaderPath } from "./ownership.js";
+import { isOtherAccountLoader, isSublineLoaderPath, sameLoaderPath } from "./ownership.js";
 import type { LoaderPathContext } from "./ownership.js";
-import { readStub } from "./stub.js";
-import type { StubContents } from "./stub.js";
+import { classifyAsar, stubFormOf } from "./stub.js";
+import type { StubContents, StubForm } from "./stub.js";
+import { readDiscordVersion } from "./version.js";
 
 export type InstallStateKind =
     /** Discord's own `app.asar` is in place and nothing has injected into it. */
@@ -54,7 +56,13 @@ export type BrokenReason =
     /** Someone else's stub is present but the original was not preserved. */
     | "foreign-patch-without-backup"
     /** A marker file exists but is unreadable. */
-    | "marker-unreadable";
+    | "marker-unreadable"
+    /**
+     * `app.asar` reads as an archive but is neither Discord's code nor a
+     * loader stub: no package.json, or its main entry is missing (audit
+     * 2026-10-06 #6). Never treated as Discord's original.
+     */
+    | "asar-unrecognised";
 
 export type StateWarning =
     /** A leftover `_app.asar` next to a genuine Discord `app.asar` — typically a Discord update that orphaned a patch (spec §7). */
@@ -69,7 +77,25 @@ export type StateWarning =
      */
     | "marker-missing"
     /** The stub loads Subline's loader, but the marker spells it differently or names another path. Still ours; rewritten. */
-    | "marker-mismatch";
+    | "marker-mismatch"
+    /**
+     * The marker names the right loader but describes another folder: its
+     * backupPath is not this folder's _app.asar, or its Discord version is not
+     * this folder's. A marker carried across a Windows host update (or copied
+     * by hand). Still ours; only the marker is rewritten.
+     */
+    | "marker-stale"
+    /**
+     * Our stub loads a loader that is not on disk (the bundle was deleted,
+     * quarantined or left aside). Discord still starts (the stub fails open),
+     * but without Subline. Still ours; the installer reinstalls the bundle.
+     */
+    | "loader-missing"
+    /**
+     * Our stub is in place, but an unpacked resources/app folder (BetterDiscord,
+     * Replugged, Moonlight) loads in front of it, so Discord ignores Subline.
+     */
+    | "shadowed-by-unpacked-app";
 
 export interface InstallState {
     kind: InstallStateKind;
@@ -94,6 +120,12 @@ export interface InstallState {
     warnings: StateWarning[];
     /** One sentence the GUI can show verbatim. */
     summary: string;
+    /** Which of OUR stub forms app.asar is (see stubFormOf); null when it is not ours or not a stub. */
+    stubForm?: StubForm | null;
+    /** For our stub: whether its loader file exists. */
+    loaderPresent?: boolean | null;
+    /** For our stub: the mod whose unpacked resources/app loads in front of it. */
+    shadowedBy?: KnownMod | null;
 }
 
 const MOD_NAMES: Record<KnownMod, string> = {
@@ -132,6 +164,16 @@ export function identifyModFromLoaderPath(loaderPath: string | null, context: In
     return "unknown";
 }
 
+/**
+ * What the user can do about a broken Discord (audit 2026-10-06 #13). Every
+ * broken screen names one, so nobody is left on "Discord needs repairing" with
+ * a button that cannot repair it.
+ */
+export const BROKEN_REMEDY = {
+    reinstall: "Reinstall Discord from discord.com, then run Subline again.",
+    uninstall: "Press Uninstall at the bottom to put Discord's original files back."
+} as const;
+
 function broken(
     install: DiscordInstall,
     reason: BrokenReason,
@@ -164,6 +206,25 @@ export interface InspectOptions extends LoaderPathContext {
 }
 
 /**
+ * Which mod an unpacked resources/app folder belongs to, from its own files.
+ * Never assumes BetterDiscord: Replugged and Moonlight use the same folder.
+ */
+export function identifyUnpackedAppMod(resourcesPath: string): KnownMod {
+    const dir = join(resourcesPath, "app");
+    for (const name of ["package.json", "index.js"]) {
+        try {
+            const text = readFileSync(join(dir, name), "utf8").slice(0, 4096).toLowerCase();
+            if (text.includes("betterdiscord")) return "betterdiscord";
+            if (text.includes("equicord")) return "equicord";
+            if (text.includes("vencord")) return "vencord";
+        } catch {
+            // Not there or unreadable: the other file may still say.
+        }
+    }
+    return "unknown";
+}
+
+/**
  * Inspect one installation. Only genuinely unusable situations (the path is
  * not a Discord install at all) come back as an error — everything else is a
  * *reported state*, because the GUI has to explain it rather than fail.
@@ -191,18 +252,34 @@ export function inspectInstall(install: DiscordInstall, options: InspectOptions 
                 : broken(
                       install,
                       "asar-and-backup-missing",
-                      "Discord's app.asar and its backup are both missing. Reinstall Discord to repair it."
+                      `Discord's app.asar and its backup are both missing. ${BROKEN_REMEDY.reinstall}`
                   )
         );
     }
 
     const markerResult = readMarker(install.resourcesPath);
     if (!markerResult.ok) {
-        return ok(broken(install, "marker-unreadable", markerResult.error.message));
+        // Our marker is there, so the backup beside it is ours: Uninstall
+        // puts it back (patch.ts unpatchBroken).
+        return ok(broken(
+            install,
+            "marker-unreadable",
+            `${markerResult.error.message} ${hasBackup ? BROKEN_REMEDY.uninstall : BROKEN_REMEDY.reinstall}`
+        ));
     }
     const marker = markerResult.value;
 
-    const stubResult = readStub(install.asarPath);
+    const stubResult = classifyAsar(install.asarPath);
+    if (stubResult.ok && stubResult.value.kind === "unrecognised") {
+        return ok(
+            broken(
+                install,
+                "asar-unrecognised",
+                `Discord's app.asar is neither Discord's own code nor a loader Subline knows (${stubResult.value.why}). Subline will not move it. ${BROKEN_REMEDY.reinstall}`,
+                { marker }
+            )
+        );
+    }
     if (!stubResult.ok) {
         // Two very different failures, and collapsing them into one told a user
         // with a perfectly healthy Vencord install that Discord "needs
@@ -219,11 +296,11 @@ export function inspectInstall(install: DiscordInstall, options: InspectOptions 
                     ? "Subline could not open Discord's app.asar. Discord itself is "
                       + "probably fine. This is normally a permissions problem. "
                       + `(${stubResult.error.message})`
-                    : `Discord's app.asar could not be read as an archive (${stubResult.error.message})`
+                    : `Discord's app.asar could not be read as an archive (${stubResult.error.message}). ${marker !== null && hasBackup ? BROKEN_REMEDY.uninstall : BROKEN_REMEDY.reinstall}`
             )
         );
     }
-    const stub = stubResult.value;
+    const stub = stubResult.value.kind === "stub" ? stubResult.value.stub : null;
 
     if (stub === null) {
         // A real Discord archive. BetterDiscord can still own the install via
@@ -265,6 +342,20 @@ export function inspectInstall(install: DiscordInstall, options: InspectOptions 
     return classifyStub(install, stub, marker, hasBackup, options);
 }
 
+/**
+ * A marker for the right loader that describes another folder: a backup that
+ * is not this folder's _app.asar, or a Discord version that is not this
+ * folder's. Only judged when both sides are known.
+ */
+function markerIsStale(install: DiscordInstall, marker: PatchMarker, options: InspectOptions): boolean {
+    if (marker.backupPath && !sameLoaderPath(marker.backupPath, install.backupPath, options)) return true;
+    if (marker.discordVersion !== null && marker.discordVersion !== undefined) {
+        const version = readDiscordVersion(install);
+        if (version.ok && version.value.version !== marker.discordVersion) return true;
+    }
+    return false;
+}
+
 function classifyStub(
     install: DiscordInstall,
     stub: StubContents,
@@ -283,16 +374,48 @@ function classifyStub(
     if (isOurs) {
         const warnings: StateWarning[] = marker === null
             ? ["marker-missing"]
-            : marker.loaderPath !== loaderPath ? ["marker-mismatch"] : [];
+            : marker.loaderPath !== loaderPath
+                ? ["marker-mismatch"]
+                : markerIsStale(install, marker, options) ? ["marker-stale"] : [];
+        const stubForm = stubFormOf(stub.indexSource, loaderPath);
+        // An unreadable loader under ANOTHER account's home is healthy for that
+        // account: existsSync is false only because this one cannot look.
+        const loaderPresent = existsSync(loaderPath);
+        const platform = options.platform ?? process.platform;
+        const env = options.env ?? process.env;
+        const home = options.home ?? (platform === "win32" ? env.USERPROFILE : env.HOME) ?? homedir();
+        if (!loaderPresent && !isOtherAccountLoader(loaderPath, home, platform)) {
+            warnings.push("loader-missing");
+        }
+        const shadowedBy = hasUnpackedAppDir(install.resourcesPath) ? identifyUnpackedAppMod(install.resourcesPath) : null;
+        if (shadowedBy !== null) warnings.push("shadowed-by-unpacked-app");
+        const extra = { stubForm, loaderPresent, shadowedBy };
         if (!hasBackup) {
             return ok(
                 broken(
                     install,
                     "our-patch-without-backup",
-                    "Subline's patch is installed but Discord's original app.asar backup is missing, so it cannot be restored.",
-                    { mod: "subline", modName: MOD_NAMES.subline, loaderPath, marker, asarIsStub: true, warnings }
+                    `Subline's patch is installed but Discord's original app.asar backup is missing, so it cannot be restored. ${BROKEN_REMEDY.reinstall}`,
+                    { mod: "subline", modName: MOD_NAMES.subline, loaderPath, marker, asarIsStub: true, warnings, ...extra }
                 )
             );
+        }
+        if (shadowedBy !== null) {
+            const name = shadowedBy === "unknown" ? "Another client mod" : MOD_NAMES[shadowedBy];
+            return ok({
+                kind: "patched-by-us",
+                install,
+                mod: "subline",
+                modName: MOD_NAMES.subline,
+                loaderPath,
+                asarIsStub: true,
+                hasBackup,
+                marker,
+                reason: null,
+                warnings,
+                summary: `Subline is installed, but ${name}'s resources/app folder loads in front of it, so Discord ignores it.`,
+                ...extra
+            });
         }
         return ok({
             kind: "patched-by-us",
@@ -305,7 +428,8 @@ function classifyStub(
             marker,
             reason: null,
             warnings,
-            summary: "Subline is installed and Discord's original app.asar is backed up."
+            summary: "Subline is installed and Discord's original app.asar is backed up.",
+            ...extra
         });
     }
 
@@ -321,7 +445,7 @@ function classifyStub(
             broken(
                 install,
                 "foreign-patch-without-backup",
-                `${modName} has patched Discord here, but the original app.asar was not preserved. Reinstall Discord before continuing.`,
+                `${modName} has patched Discord here, but the original app.asar was not preserved. ${BROKEN_REMEDY.reinstall}`,
                 { mod, modName, loaderPath, warnings, asarIsStub: true }
             )
         );

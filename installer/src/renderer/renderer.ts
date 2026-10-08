@@ -13,11 +13,13 @@
  */
 
 import { ACTION_LABELS, IS_PRIMARY } from "../app/actions.js";
-import { CODE_SCREEN_COPY, codeScreenView } from "../app/codeScreen.js";
+import { CODE_SCREEN_COPY, codeScreenView, showsDiagnostics } from "../app/codeScreen.js";
+import { UNEXPECTED_FAILURE_COPY, unexpectedFailureState } from "../app/failure.js";
 import type { FlowAction, FlowActionType, FlowState } from "../app/flow.js";
 import type { LanguageOption } from "../app/language.js";
+import { pendingAlertLines } from "../app/pendingAlerts.js";
 import type { UninstallReport } from "../app/uninstall.js";
-import { UNINSTALL_COPY, uninstallReportTitle, uninstallStartView } from "../app/uninstallScreen.js";
+import { deleteAppLine, UNINSTALL_COPY, uninstallReportTitle, uninstallStartView } from "../app/uninstallScreen.js";
 import { emphasisParts } from "./emphasis.js";
 
 interface SublineApi {
@@ -31,6 +33,7 @@ interface SublineApi {
     cancelUninstall(): Promise<void>;
     checkUninstall(): Promise<{ discordRunning: boolean; platform: NodeJS.Platform }>;
     openUrl(url: string): Promise<boolean>;
+    pendingAlerts(): Promise<{ code: string; firstAt: number; count: number }[]>;
     onState(handler: (state: FlowState) => void): () => void;
     onUninstallPhase(handler: (phase: UninstallPhase) => void): () => void;
 }
@@ -83,6 +86,7 @@ const STEP_TITLES: Record<FlowState["step"], string> = {
     "permission-explain": "macOS needs your permission",
     "permission-waiting": "Turn on Subline",
     "permission-failed": "Could not check permission",
+    "move-to-applications": "Move Subline to Applications first",
     patching: "Installing",
     "patch-failed": "Could not install",
     "installing-helper": "Setting up background updates",
@@ -91,7 +95,8 @@ const STEP_TITLES: Record<FlowState["step"], string> = {
     "launch-failed": "Could not start Discord",
     verifying: "Checking it works",
     done: "Finished",
-    cancelled: "Cancelled"
+    cancelled: "Cancelled",
+    failed: UNEXPECTED_FAILURE_COPY.title
 };
 
 
@@ -178,16 +183,39 @@ function render(state: FlowState | null): void {
         detail.prepend(spinner, document.createTextNode(" "));
     }
 
-    errorBox.hidden = state.error === null;
+    // A wrong or claimed code is a sentence to read, not a failure to
+    // diagnose: no "What went wrong" box for the relay's answers (I5).
+    errorBox.hidden = !showsDiagnostics(state.error);
     errorBox.replaceChildren();
-    if (state.error !== null) renderError(state.error);
+    if (state.error !== null && showsDiagnostics(state.error)) renderError(state.error);
 
     extra.replaceChildren();
     renderExtra(state);
     renderActions(state);
 }
 
+/**
+ * What the helper raised while the app was closed (alerts.json), read once at
+ * start. A missed notification is gone; this is the record that survives it.
+ */
+let pendingAlerts: readonly { code: string }[] = [];
+
+function renderPendingAlerts(state: FlowState): void {
+    if (state.step !== "welcome" && state.step !== "already-installed") return;
+    const lines = pendingAlertLines(pendingAlerts, state.step);
+    if (lines.length === 0) return;
+    const list = document.createElement("ul");
+    list.className = "rows panel";
+    for (const line of lines) {
+        const item = document.createElement("li");
+        item.textContent = line;
+        list.append(item);
+    }
+    extra.append(list);
+}
+
 function renderExtra(state: FlowState): void {
+    renderPendingAlerts(state);
     if (state.step === "choose-install" && state.installs) {
         const list = document.createElement("ul");
         list.className = "rows panel pick";
@@ -284,13 +312,13 @@ function renderExtra(state: FlowState): void {
             field.append(find);
         }
         if (state.helpUrl !== undefined) {
-            // The computer-limit reset request. Its text is the address, so
-            // "ask for a reset on GitHub" in the line above has a place to go.
+            // The computer-limit reset request: an email to support. Its text
+            // is the address, the same one the line above names.
             const helpUrl = state.helpUrl;
             const help = document.createElement("a");
             help.className = "note";
             help.href = helpUrl;
-            help.textContent = helpUrl.replace(/^https:\/\//, "");
+            help.textContent = helpUrl.replace(/^(https:\/\/|mailto:)/, "");
             help.onclick = event => { event.preventDefault(); void api.openUrl(helpUrl); };
             field.append(help);
         }
@@ -551,7 +579,14 @@ async function onAction(action: FlowActionType): Promise<void> {
 }
 
 async function act(action: FlowAction): Promise<void> {
-    render(await api.send(action));
+    // A rejected call must still leave a screen with a button (audit #20).
+    let next: FlowState | null;
+    try {
+        next = await api.send(action);
+    } catch (cause) {
+        next = unexpectedFailureState(cause) as unknown as FlowState;
+    }
+    render(next);
 }
 
 document.getElementById("copy-diagnostics")?.addEventListener("click", () => {
@@ -613,6 +648,13 @@ function showUninstall(report: UninstallReport, mayRetry: boolean): void {
         if (footerUninstall !== null) footerUninstall.disabled = true;
     }
     extra.replaceChildren();
+    if (report.clean) {
+        // The app is the last thing to go, and only now (audit #42).
+        const note = document.createElement("p");
+        note.className = "note";
+        note.textContent = deleteAppLine(IS_MAC ? "darwin" : "win32");
+        extra.append(note);
+    }
     actionBar.replaceChildren();
 
     errorBox.hidden = report.problems.length === 0;
@@ -810,3 +852,8 @@ api.onState(state => {
     else lastState = state;
 });
 void api.start().then(render);
+// Never in the way of the flow: a missing or unreadable file shows nothing.
+void api.pendingAlerts?.().then(alerts => {
+    pendingAlerts = Array.isArray(alerts) ? alerts : [];
+    if (pendingAlerts.length > 0 && lastState !== null && !uninstalling) render(lastState);
+}).catch(() => undefined);

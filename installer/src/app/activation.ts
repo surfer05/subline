@@ -50,7 +50,7 @@ export function staticCheckoutAllowed(productId: string = AUTOMATIC_PRODUCT_ID):
  * installer" view. The relay's own checkout is asked for the same page with
  * `return: "installer"`; this constant is the static link's version of it.
  */
-export const CHECKOUT_RETURN_URL = "https://surfer05.github.io/subline/?from=installer";
+export const CHECKOUT_RETURN_URL = "https://subline.page/?from=installer";
 
 /** After this long on the finish-paying screen, a hint says a late purchase still lands. */
 export const WAITING_HINT_AFTER_MS = 10 * 60_000;

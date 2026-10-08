@@ -44,6 +44,12 @@ export type PatcherErrorCode =
     | "FOREIGN_MOD_PRESENT"
     /** Our stub is present but `_app.asar` is gone — we cannot restore Discord. */
     | "BACKUP_MISSING"
+    /**
+     * Another account on this Mac set up Subline for this Discord: its stub
+     * loads a loader inside that account's home. Only that account may
+     * remove it (audit 2026-10-06 #5).
+     */
+    | "OTHER_ACCOUNT"
     /** Our stub is present but cannot be re-adopted by writing the marker alone; a full patch is needed. */
     | "NOT_ADOPTABLE"
     /** `_app.asar` exists but is not a usable original asar. */
@@ -86,6 +92,12 @@ export type PatcherErrorCode =
     /** The release feed answered, but with something we cannot read as a release. */
     | "RELEASE_MALFORMED"
     /**
+     * The feed is a well-formed Subline manifest in a format this build cannot
+     * read. NEVER transient: only a newer Subline reads it. Kept apart from
+     * RELEASE_MALFORMED so a captive-portal page is not mistaken for it.
+     */
+    | "RELEASE_FORMAT_UNSUPPORTED"
+    /**
      * A downloaded artefact did not match the digest published with it. NEVER
      * transient: it means the bytes are not the bytes that were published, and
      * the helper surfaces it at once rather than retrying quietly.
@@ -93,6 +105,23 @@ export type PatcherErrorCode =
     | "RELEASE_UNVERIFIED"
     /** `launchctl` refused to register (or unregister) the background helper. */
     | "HELPER_REGISTRATION_FAILED"
+    /**
+     * macOS: Subline runs from the mounted disk image or a translocated copy,
+     * so a helper registered now would point at a path that soon disappears.
+     */
+    | "HELPER_APP_LOCATION_TEMPORARY"
+    /**
+     * The relay's answer about a code: it does not exist, is fully claimed,
+     * is at its computer limit, too many tries. Not a failure of Subline, so
+     * the screen shows the sentence alone, with no diagnostics box.
+     */
+    | "CODE_REFUSED"
+    /** Discord changed under the installer (its folder went away before the patch). */
+    | "DISCORD_MOVED"
+    /** Windows: Discord's own updater is still installing a new version. Nothing was written. */
+    | "DISCORD_UPDATING"
+    /** Something the installer did not expect threw. The cause is in the log. */
+    | "UNEXPECTED"
     /** Anything else that came back from the filesystem. */
     | "IO_ERROR";
 
