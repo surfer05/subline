@@ -240,13 +240,13 @@ describe("quitDiscord", () => {
         expect(h.quitRequests).toBe(0);
     });
 
-    it("names the system tray on Windows instead of blaming the user for not quitting", async () => {
+    it("names where Discord hides on Windows (the ^ near the clock) instead of blaming the user", async () => {
         const h = harness({ tables: [[WINDOWS_DISCORD]], platform: "win32" });
         const report = await quitDiscord(h.options);
         expect(report.outcome).toBe("still-running");
         // The old wording said "right-click its Dock icon", on Windows, about a
         // window the user had already closed.
-        expect(report.summary).toMatch(/tray/i);
+        expect(report.summary).toContain("behind the ^ near the clock");
         expect(report.summary).not.toMatch(/dock/i);
     });
 });

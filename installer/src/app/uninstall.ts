@@ -46,9 +46,13 @@ import type { UnpatchReport } from "../patcher/patch.js";
 import type { PatcherError, Result } from "../patcher/result.js";
 import { err, fsError, ok } from "../patcher/result.js";
 import { PLUGIN_SETTINGS_KEY } from "./language.js";
+import { UNINSTALL_COPY, discordRunningSummary, helperStopFailedSummary } from "./uninstallScreen.js";
 
 export interface UninstallPorts {
-    unpatch(install: DiscordInstall, options: { removeForeignMod?: boolean }): Result<UnpatchReport>;
+    /** `dryRun`: decide and write nothing (see UnpatchOptions.dryRun). */
+    unpatch(install: DiscordInstall, options: { removeForeignMod?: boolean; dryRun?: boolean }): Result<UnpatchReport>;
+    /** For the copy only: where Discord hides when it is "closed" differs. */
+    platform: NodeJS.Platform;
     /** Where the runtime mod bundle lives, or `null` on an unsupported platform. */
     modBundleDir: string | null;
     /** Subline's per-user directory — the beacon and anything else we own. */
@@ -71,19 +75,12 @@ export interface UninstallPorts {
     };
 }
 
+
 /**
- * What happened when the caller stopped the background helper (§8 step 3).
+ * What happened when the helper was stopped (§8 step 3).
  *
- * REQUIRED, and for the same reason `VerifyOptions.expectedBuildId` is: the
- * invariant is an ORDERING, and an ordering a caller can forget is one that will
- * be forgotten. The helper re-patches Discord silently (spec §6). Restore
- * Discord's original `app.asar` while the agent is still registered and the next
- * interval puts the patch straight back — an uninstalled product that keeps
- * modifying Discord. So the helper is removed FIRST, by the caller (only it can
- * talk to `launchctl`), and its outcome is handed in here as a precondition.
- *
- * `applicable: false` is the honest answer on a platform with no helper, or when
- * one was never installed.
+ * `applicable: false` is the honest answer on a platform with no helper, or
+ * when one was never installed.
  */
 export interface HelperRemoval {
     applicable: boolean;
@@ -91,20 +88,40 @@ export interface HelperRemoval {
     error: PatcherError | null;
 }
 
+/**
+ * The steps of an uninstall that talk to the system, as ports.
+ *
+ * THE ORDERING LIVES IN `uninstall()`, NOT IN ITS CALLER. It used to be split:
+ * main.ts removed the helper first and handed the outcome in, and only then
+ * did anything check whether Discord was running or whether its files could be
+ * put back. Field logs (2026-10-06, 2026-10-08) show the result five times: the
+ * helper gone, the uninstall refused (DISCORD_RUNNING, FOREIGN_MOD_PRESENT),
+ * and Discord left patched with nothing to repair it. An ordering only one
+ * function enforces is one a test can hold it to.
+ */
+export interface UninstallSystemPorts {
+    /** Discord processes running now, for every branch being removed. */
+    listDiscordProcesses(): Promise<readonly { pid: number }[]>;
+    /**
+     * Close Discord on the user's behalf (ask, then force). Only called when
+     * the user pressed the button that says so.
+     */
+    quitDiscord(mode: "ask" | "force"): Promise<void>;
+    /** Stop the background helper. Called only once every check has passed. */
+    removeHelper(): Promise<HelperRemoval>;
+    /**
+     * Register the helper again. Called when a restore failed after the helper
+     * was stopped, so no Discord that still loads Subline is left without it.
+     */
+    restoreHelper(): Promise<Result<unknown>>;
+}
+
 export interface UninstallOptions {
     installs: readonly DiscordInstall[];
     /** §8 step 5: the user's answer. Defaults to keeping, which is the safe direction. */
     keepSettings?: boolean;
-    /** The result of stopping the background helper, which must already have happened. */
-    helper: HelperRemoval;
-    /**
-     * Discord processes seen just before this call, if the caller looked.
-     *
-     * Computed by the caller for the same reason `helper` is: this function does
-     * no I/O of its own. Undefined means "not checked", which is how every
-     * existing caller behaved and stays valid.
-     */
-    discordRunning?: readonly { pid: number }[];
+    /** The user pressed "Quit Discord and remove": close Discord before anything else. */
+    closeDiscord?: "ask" | "force";
     /**
      * Resources folders of every Discord Subline remembers patching
      * (patched-installs.json), checked again before the shared bundle is
@@ -142,11 +159,35 @@ export interface UninstallReport {
     problems: PatcherError[];
     /** True when nothing is left of Subline and Discord is untouched. */
     clean: boolean;
+    /**
+     * True when the uninstall was refused before it wrote anything: the
+     * helper, Discord, the settings and Subline's files are exactly as they
+     * were. The install flow may carry on from here (see main.ts).
+     */
+    nothingChanged?: boolean;
     /** True when the user pressed Cancel before anything was changed. */
     cancelled?: boolean;
     /** True when the App Management check itself kept failing, before anything was changed. */
     permissionCheckFailed?: boolean;
     summary: string;
+}
+
+/** A report for a refusal that changed nothing. */
+export function refusedReport(problems: PatcherError[], summary: string): UninstallReport {
+    return {
+        restores: [],
+        helperStopped: false,
+        discordRestored: false,
+        modBundleRemoved: false,
+        modBundleKeptForSafety: false,
+        settingsRemoved: false,
+        productDataRemoved: false,
+        translationCache: "left-in-discord-storage",
+        problems,
+        clean: false,
+        nothingChanged: true,
+        summary
+    };
 }
 
 /**
@@ -194,84 +235,84 @@ export function removePluginSettings(settingsPath: string | null): Result<boolea
     return ok(true);
 }
 
+
 /**
  * Uninstall Subline.
  *
  * Returns a report rather than throwing, because §8's hardest case — the backup
  * is gone — is a sentence the user has to read, not an exception.
+ *
+ * THE RULE (field test 2026-10-08, I1): a refused or failed uninstall changes
+ * nothing the user would miss. Every check that can refuse runs BEFORE the
+ * first write, in this order:
+ *
+ *   1. dry run of every restore (another mod, a missing or damaged backup),
+ *   2. close Discord, if the user asked, and check it is really gone,
+ *   3. stop the helper (a live helper would put the patch straight back).
+ *
+ * Only then is anything restored. A restore that still fails (a file held
+ * open) brings the helper back, and the settings, the code and Subline's own
+ * files are removed only once no Discord loads Subline any more. Observed on
+ * Windows: the uninstall was refused with FOREIGN_MOD_PRESENT, the settings
+ * (with the code) were already gone, and Discord kept running Subline as
+ * "Not activated".
  */
-export function uninstall(ports: UninstallPorts, options: UninstallOptions): UninstallReport {
+export async function uninstall(
+    ports: UninstallPorts & UninstallSystemPorts,
+    options: UninstallOptions
+): Promise<UninstallReport> {
     const problems: PatcherError[] = [];
     const restores: RestoreOutcome[] = [];
     const keepSettings = options.keepSettings ?? true;
 
-    // 0. THE PRECONDITION. Nothing is restored while a helper that re-patches
-    //    Discord may still be registered — it would undo the uninstall at its
-    //    next interval, and the user would be left with software they removed
-    //    still modifying another application. Refusing here leaves everything
-    //    exactly as it was, which is a state the user can retry from.
-    const helperStopped = !options.helper.applicable || options.helper.error === null;
-    if (!helperStopped) {
-        const error = options.helper.error as PatcherError;
-        ports.log.error("uninstall.helper-stop-failed", { code: error.code });
-        return {
-            restores: [],
-            helperStopped: false,
-            discordRestored: false,
-            modBundleRemoved: false,
-            modBundleKeptForSafety: true,
-            settingsRemoved: false,
-            productDataRemoved: false,
-            translationCache: "left-in-discord-storage",
-            problems: [error],
-            clean: false,
-            summary:
-                "Subline could not stop its background updater, so nothing was removed. Removing Subline while "
-                + "that is still running would put the changes to Discord straight back. Nothing has been changed; "
-                + "restart your Mac and try again."
-        };
+    // 1. THE DRY RUN. Everything a read can tell, before Discord is closed and
+    //    before the helper is touched. Another mod, a missing backup, a
+    //    damaged one: each refuses here with nothing changed, rather than
+    //    after the helper is gone and half the Discords are restored.
+    for (const install of options.installs) {
+        const verdict = ports.unpatch(install, { dryRun: true });
+        if (verdict.ok) continue;
+        ports.log.error("uninstall.refused", {
+            code: verdict.error.code,
+            branch: install.branch,
+            path: install.rootPath
+        });
+        return refusedReport([verdict.error], refusalSummary(verdict.error));
     }
-    // 0b. THE SECOND PRECONDITION. Restoring Discord means renaming _app.asar
-    //     back over app.asar, and Windows refuses to rename a file a running
-    //     process holds open. Without this the attempt got as far as touching
-    //     Discord's folder and failed with FILE_IN_USE — a filesystem error
-    //     standing in for a fact the user could have been told plainly, and
-    //     acted on, before anything was tried.
-    //
-    //     The install flow checks this twice. Uninstall did not check at all.
-    const running = options.discordRunning ?? [];
+
+    // 2. DISCORD MUST BE CLOSED. Restoring Discord renames _app.asar back over
+    //    app.asar, and Windows refuses to rename a file a running process holds
+    //    open. Checked again after a quit, because a quit can fail and Discord
+    //    can start itself again.
+    if (options.closeDiscord !== undefined) await ports.quitDiscord(options.closeDiscord);
+    const running = await ports.listDiscordProcesses();
     if (running.length > 0) {
-        const error: PatcherError = {
-            code: "DISCORD_RUNNING",
-            message: "Discord is running, so its files cannot be changed back."
-        };
-        ports.log.error("uninstall.discord-running", { pids: running.map(p => p.pid).join(",") });
-        return {
-            restores: [],
-            helperStopped,
-            discordRestored: false,
-            modBundleRemoved: false,
-            modBundleKeptForSafety: true,
-            settingsRemoved: false,
-            productDataRemoved: false,
-            translationCache: "left-in-discord-storage",
-            problems: [error],
-            clean: false,
-            summary:
-                "Quit Discord first. On Windows, check the system tray near the clock. Its files cannot be "
-                + "put back while it is using them. Nothing has been changed, so Discord keeps working exactly "
-                + "as it does now."
-        };
+        ports.log.error("uninstall.discord-running", {
+            pids: running.map(p => p.pid).join(","),
+            afterQuit: options.closeDiscord !== undefined
+        });
+        return refusedReport(
+            [{ code: "DISCORD_RUNNING", message: "Discord is running, so its files cannot be changed back." }],
+            discordRunningSummary(ports.platform, options.closeDiscord !== undefined)
+        );
     }
 
-    ports.log.info("uninstall.helper-stopped", {
-        applicable: options.helper.applicable,
-        removed: options.helper.removed
-    });
+    // 3. THE HELPER. Nothing is restored while a helper that re-patches Discord
+    //    may still be registered: it would undo the uninstall at its next
+    //    interval.
+    const helper = await ports.removeHelper();
+    if (helper.applicable && helper.error !== null) {
+        ports.log.error("uninstall.helper-stop-failed", { code: helper.error.code, message: helper.error.message });
+        // Whatever half of the removal happened, put it back.
+        const back = await restoreHelperLogged(ports);
+        const report = refusedReport([helper.error], helperStopFailedSummary(ports.platform));
+        return back ? report : { ...report, nothingChanged: false };
+    }
+    ports.log.info("uninstall.helper-stopped", { applicable: helper.applicable, removed: helper.removed });
 
-    // 1. Every Discord first (§8 steps 1–2: restore the archive, remove the
-    //    sidecar — a stale one makes the NEXT install misread a foreign or
-    //    absent patch as ours).
+    // 4. Every Discord (§8 steps 1–2: restore the archive, remove the sidecar
+    //    — a stale one makes the NEXT install misread a foreign or absent patch
+    //    as ours).
     for (const install of options.installs) {
         const result = ports.unpatch(install, {});
         if (!result.ok) {
@@ -293,14 +334,10 @@ export function uninstall(ports: UninstallPorts, options: UninstallOptions): Uni
         restores.push({ install, ok: true, restored: result.value.restored, error: null });
     }
 
-    // 2. The shared bundle — ONLY once no Discord still requires it. Deleting it
-    //    under a still-patched Discord stops that Discord from starting at all.
-    let modBundleRemoved = false;
-    let modBundleKeptForSafety = false;
-    // "Every target restored" is not "no Discord needs the bundle": an
-    // unrelated clean Stable restores fine while a hand-picked PTB elsewhere
-    // still loads Subline. Every Discord we remember patching that was NOT
-    // just restored is checked by its marker.
+    // "Every target restored" is not "no Discord needs Subline": an unrelated
+    // clean Stable restores fine while a hand-picked PTB elsewhere still loads
+    // Subline. Every Discord we remember patching that was NOT just restored
+    // is checked by its marker.
     const restoredHere = new Set(restores.filter(entry => entry.ok).map(entry => entry.install.resourcesPath));
     const stillMarked = [...new Set(options.rememberedResources ?? [])]
         .filter(resources => !restoredHere.has(resources) && existsSync(join(resources, MARKER_FILENAME)));
@@ -310,7 +347,24 @@ export function uninstall(ports: UninstallPorts, options: UninstallOptions): Uni
             paths: stillMarked.join(", ")
         });
     }
-    const discordRestored = restores.length > 0 && restores.every(entry => entry.ok) && stillMarked.length === 0;
+    // True for an empty list: with no Discord at all, nothing loads Subline.
+    const nothingLoadsSubline = restores.every(entry => entry.ok) && stillMarked.length === 0;
+    const discordRestored = restores.length > 0 && nothingLoadsSubline;
+
+    // 5. A DISCORD STILL LOADS SUBLINE: the helper comes back. Without it the
+    //    next Discord update ends translation silently and nothing repairs it.
+    let helperStopped = true;
+    let helperBack: boolean | null = null;
+    if (!nothingLoadsSubline && helper.applicable && helper.removed) {
+        helperBack = await restoreHelperLogged(ports);
+        if (helperBack) helperStopped = false;
+        else problems.push({ code: "HELPER_REGISTRATION_FAILED", message: UNINSTALL_COPY.helperNotBack });
+    }
+
+    // 6. The shared bundle — ONLY once no Discord still requires it. Deleting it
+    //    under a still-patched Discord stops that Discord from starting at all.
+    let modBundleRemoved = false;
+    let modBundleKeptForSafety = false;
     if (!discordRestored) {
         modBundleKeptForSafety = true;
         ports.log.warn("uninstall.bundle-kept", { reason: "a Discord is still patched and needs it to start" });
@@ -325,25 +379,28 @@ export function uninstall(ports: UninstallPorts, options: UninstallOptions): Uni
         }
     }
 
-    // 3. Settings and our own per-user data (§8 step 5), only if asked.
+    // 7. Settings and our own per-user data (§8 step 5), only if asked, and
+    //    ONLY ONCE NO DISCORD LOADS SUBLINE. The settings hold the code: a
+    //    Subline still running in Discord without them is "Not activated".
     let settingsRemoved = false;
     let productDataRemoved = false;
-    if (!keepSettings) {
+    if (!keepSettings && !nothingLoadsSubline) {
+        ports.log.warn("uninstall.settings-kept", { reason: "a Discord still loads Subline" });
+    } else if (!keepSettings) {
         const removed = removePluginSettings(ports.vencordSettingsPath);
         if (!removed.ok) problems.push(removed.error);
         else settingsRemoved = removed.value;
+        ports.log.info("uninstall.settings", { removed: settingsRemoved, ok: removed.ok });
 
         // THE BUNDLE LIVES INSIDE THIS DIRECTORY. `modBundleDirFor` is
         // `productDir/mod`, so removing the product directory wholesale
-        // deletes the very thing step 2 has just decided to keep.
+        // deletes the very thing step 6 has just decided to keep.
         //
-        // That is not hypothetical. A restore failed with the file in use, step
-        // 2 kept the bundle so the still-patched Discord could start, and then
+        // That is not hypothetical. A restore failed with the file in use, the
+        // bundle was kept so the still-patched Discord could start, and then
         // this ran and deleted it — leaving a stub in Discord's app.asar
         // pointing at a module that no longer existed. Discord refused to start
-        // at all, with "Cannot find module .../Subline/mod/patcher.js". An
-        // uninstall that fails must leave things working; this one broke the
-        // application it had failed to release.
+        // at all, with "Cannot find module .../Subline/mod/patcher.js".
         if (modBundleKeptForSafety) {
             ports.log.warn("uninstall.product-data-kept", {
                 reason: "the mod bundle inside it is still required by a patched Discord"
@@ -354,17 +411,9 @@ export function uninstall(ports: UninstallPorts, options: UninstallOptions): Uni
                 //
                 // On Windows the diagnostics log lives INSIDE this folder
                 // (%LOCALAPPDATA%\Subline\logs), so removing it wholesale
-                // deleted the record of the very run doing the removing. The
-                // folder reappeared empty on the next append, and "Copy
-                // diagnostics" then returned only the lines written after the
-                // deletion — with the uninstall's own account of itself gone.
-                //
-                // Same shape as the bug that stopped Discord starting: a
-                // containment relationship that no interface stated, found by
-                // deleting a parent.
+                // deleted the record of the very run doing the removing.
                 if (ports.logDir === null) {
-                    // Nothing of ours lives inside it that outlives this run —
-                    // macOS keeps the log under ~/Library/Logs — so the folder
+                    // macOS keeps the log under ~/Library/Logs, so the folder
                     // goes too.
                     rmSync(ports.productDir, { recursive: true, force: true });
                 } else {
@@ -393,18 +442,41 @@ export function uninstall(ports: UninstallPorts, options: UninstallOptions): Uni
         translationCache: "left-in-discord-storage",
         problems,
         clean,
+        nothingChanged: false,
         summary: summarize({
             restores,
             stillMarked: stillMarked.length,
             discordRestored,
-            problems,
             // Either counts: a machine with no settings file still had its
             // product folder removed, and "nothing was there to delete" is not
             // the same statement as "we kept your settings".
             settingsRemoved: settingsRemoved || productDataRemoved,
-            modBundleKeptForSafety
+            settingsAskedToGo: !keepSettings,
+            helperBack
         })
     };
+}
+
+async function restoreHelperLogged(ports: UninstallPorts & UninstallSystemPorts): Promise<boolean> {
+    try {
+        const back = await ports.restoreHelper();
+        if (back.ok) ports.log.info("uninstall.helper-restored", {});
+        else ports.log.error("uninstall.helper-restore-failed", { code: back.error.code, message: back.error.message });
+        return back.ok;
+    } catch (cause) {
+        ports.log.error("uninstall.helper-restore-failed", { cause: String(cause) });
+        return false;
+    }
+}
+
+/** What a refusal found by the dry run says. Nothing was changed. */
+function refusalSummary(error: PatcherError): string {
+    const unchanged = `${UNINSTALL_COPY.nothingChanged} ${UNINSTALL_COPY.keepsWorking}`;
+    // §8's explicit instruction: if the backup is missing, say so and point at
+    // Discord's own repair rather than leaving a broken client behind.
+    if (error.code === "BACKUP_MISSING") return `${UNINSTALL_COPY.backupGone} ${unchanged}`;
+    if (error.code === "BACKUP_CORRUPT" || error.code === "BROKEN_INSTALL") return `${UNINSTALL_COPY.damaged} ${unchanged}`;
+    return `${UNINSTALL_COPY.couldNotRemove} ${unchanged} ${UNINSTALL_COPY.tryAgain}`;
 }
 
 function summarize(input: {
@@ -412,27 +484,31 @@ function summarize(input: {
     /** Discords that still carry Subline's marker after the restores. */
     stillMarked: number;
     discordRestored: boolean;
-    problems: PatcherError[];
     /** What ACTUALLY happened, not what was asked for. */
     settingsRemoved: boolean;
-    modBundleKeptForSafety: boolean;
+    settingsAskedToGo: boolean;
+    /** null: the helper was not stopped or did not need to come back. */
+    helperBack: boolean | null;
 }): string {
     if (input.restores.length === 0 && input.stillMarked === 0) {
         return "There was nothing to remove. Subline is not installed in any Discord we can find.";
     }
 
     if (!input.discordRestored) {
-        // §8's explicit instruction: if the backup is missing, say so and point
-        // at Discord's own repair rather than leaving a broken client behind.
-        const missingBackup = input.problems.some(problem => problem.code === "BACKUP_MISSING");
-        if (missingBackup) {
-            return "Subline could not put Discord's original files back, because the backup copy is gone. "
-                + "something other than Subline removed it. Discord will keep working as it is, but to return it "
-                + "to normal you will need to reinstall Discord from discord.com. Subline's own files have been "
-                + "left in place so Discord keeps starting until you do.";
-        }
-        return "Subline could not fully remove itself from Discord. Nothing has been deleted, so Discord "
-            + "keeps working exactly as it does now. The diagnostics log has the details.";
+        // Read from the outcomes. This used to say "Nothing has been deleted"
+        // after the helper was gone and, sometimes, after the settings were.
+        const total = input.restores.length;
+        const done = input.restores.filter(entry => entry.ok).length;
+        const parts = [
+            done > 0 && done < total
+                ? `Subline was removed from ${done} of ${total} Discords, but not from the rest.`
+                : UNINSTALL_COPY.couldNotRemove,
+            input.helperBack === true ? UNINSTALL_COPY.staysInstalledUpdating : UNINSTALL_COPY.staysInstalled
+        ];
+        if (input.helperBack === false) parts.push(UNINSTALL_COPY.helperNotBack);
+        if (input.settingsAskedToGo) parts.push(UNINSTALL_COPY.settingsKept);
+        parts.push(UNINSTALL_COPY.tryAgain);
+        return parts.join(" ");
     }
 
     // Reads the OUTCOME, not the request. It used to read `keepSettings`, so a

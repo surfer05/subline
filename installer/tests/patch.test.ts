@@ -669,6 +669,77 @@ describe("unpatchInstall", () => {
     });
 });
 
+/**
+ * The dry run uninstall runs over every Discord before it stops the helper.
+ * Two properties: it writes nothing, and it refuses with the SAME code the
+ * real call would, so a refusal is found before anything is changed.
+ */
+describe("unpatchInstall dry run", () => {
+    function snapshot(): Record<string, string> {
+        const dir = fixture!.install.resourcesPath;
+        return Object.fromEntries(readdirSync(dir).sort().map(name => {
+            const path = join(dir, name);
+            let hash = "dir";
+            try { hash = sha256(path); } catch { /* a directory */ }
+            return [name, hash];
+        }));
+    }
+
+    const CASES: { name: string; setup: () => void; code: string | null }[] = [
+        { name: "our patch, backup present", setup: () => { expect(patchInstall(fixture!.install, options()).ok).toBe(true); }, code: null },
+        {
+            name: "our patch, backup gone",
+            setup: () => { expect(patchInstall(fixture!.install, options()).ok).toBe(true); unlinkSync(fixture!.install.backupPath); },
+            code: "BACKUP_MISSING"
+        },
+        {
+            name: "our patch, backup is another stub",
+            setup: () => {
+                expect(patchInstall(fixture!.install, options()).ok).toBe(true);
+                writeFileSync(fixture!.install.backupPath, buildStubAsar("/some/other/stub.js"));
+            },
+            code: "BACKUP_CORRUPT"
+        },
+        { name: "an untouched Discord", setup: () => {}, code: null }
+    ];
+
+    for (const entry of CASES) {
+        it(`${entry.name}: writes nothing and agrees with the real call`, () => {
+            fixture = makeDiscordFixture();
+            entry.setup();
+            const before = snapshot();
+
+            const dry = unpatchInstall(fixture.install, { dryRun: true });
+            expect(snapshot()).toEqual(before);
+
+            const real = unpatchInstall(fixture.install);
+            expect(dry.ok).toBe(real.ok);
+            expect(dry.ok ? null : dry.error.code).toBe(entry.code);
+            expect(real.ok ? null : real.error.code).toBe(entry.code);
+        });
+    }
+
+    it("another mod: FOREIGN_MOD_PRESENT, nothing written", () => {
+        fixture = makeDiscordFixture({ withBackup: true, stubLoaderPath: VENCORD_LOADER });
+        const before = snapshot();
+        const dry = unpatchInstall(fixture.install, { dryRun: true });
+        expect(dry.ok).toBe(false);
+        if (dry.ok) return;
+        expect(dry.error.code).toBe("FOREIGN_MOD_PRESENT");
+        expect(snapshot()).toEqual(before);
+    });
+
+    it("a leftover backup and marker of ours are not swept by a dry run", () => {
+        fixture = makeDiscordFixture();
+        expect(patchInstall(fixture.install, options()).ok).toBe(true);
+        writeFileSync(fixture.install.asarPath, fixture.originalAsar);
+        const before = snapshot();
+        expect(unpatchInstall(fixture.install, { dryRun: true }).ok).toBe(true);
+        expect(snapshot()).toEqual(before);
+        expect(existsSync(fixture.install.backupPath)).toBe(true);
+    });
+});
+
 describe("patch → unpatch → patch cycle", () => {
     it("returns Discord to byte-identical state each time round", () => {
         fixture = makeDiscordFixture();
@@ -696,15 +767,22 @@ describe("fsError", () => {
         Object.assign(new Error(`${code}: something, rename 'a' -> 'b'`), { code });
 
     it("names a locked file as its own failure, not a permission problem", () => {
-        const result = fsError(thrown("EBUSY"), "C:\\app.asar", "back up Discord's original app.asar");
+        const result = fsError(thrown("EBUSY"), "C:\\app.asar", "back up Discord's original app.asar", "win32");
         expect(result.ok).toBe(false);
         if (result.ok) return;
         // The remedy is the opposite of PERMISSION_DENIED's: nothing to grant,
         // something to close. Sending a Windows user to System Settings' App
         // Management — which does not exist there — is a dead end.
         expect(result.error.code).toBe("FILE_IN_USE");
-        expect(result.error.message).toMatch(/tray/i);
+        expect(result.error.message).toContain("behind the ^ near the clock");
         expect(result.error.message).not.toMatch(/App Management/i);
+
+        // A Mac has no ^ and no tray: its wording must stay a Mac's.
+        const mac = fsError(thrown("EBUSY"), "/Applications/Discord.app/x", "back up Discord's original app.asar", "darwin");
+        expect(mac.ok).toBe(false);
+        if (mac.ok) return;
+        expect(mac.error.code).toBe("FILE_IN_USE");
+        expect(mac.error.message).not.toMatch(/\^|clock|tray/);
     });
 
     it("puts the errno in the message when it has no named case", () => {

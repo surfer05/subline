@@ -17,6 +17,7 @@ import { CODE_SCREEN_COPY, codeScreenView } from "../app/codeScreen.js";
 import type { FlowAction, FlowActionType, FlowState } from "../app/flow.js";
 import type { LanguageOption } from "../app/language.js";
 import type { UninstallReport } from "../app/uninstall.js";
+import { UNINSTALL_COPY, uninstallReportTitle, uninstallStartView } from "../app/uninstallScreen.js";
 import { emphasisParts } from "./emphasis.js";
 
 interface SublineApi {
@@ -28,6 +29,7 @@ interface SublineApi {
     readDiagnostics(): Promise<string>;
     uninstall(options: { keepSettings: boolean; closeDiscord?: "ask" | "force" }): Promise<UninstallReport>;
     cancelUninstall(): Promise<void>;
+    checkUninstall(): Promise<{ discordRunning: boolean; platform: NodeJS.Platform }>;
     openUrl(url: string): Promise<boolean>;
     onState(handler: (state: FlowState) => void): () => void;
     onUninstallPhase(handler: (phase: UninstallPhase) => void): () => void;
@@ -155,9 +157,13 @@ function setDetail(el: HTMLElement, text: string): void {
     }
 }
 
+/** The last flow screen drawn, so Cancel on the first uninstall screen can put it back. */
+let lastState: FlowState | null = null;
+
 function render(state: FlowState | null): void {
     // null: the main process refused (Uninstall has started). Nothing to draw.
     if (state === null || uninstalling) return;
+    lastState = state;
     stepName.textContent = headingFor(state);
     // The footer Uninstall stays live wherever the user may stop, and is off
     // while Subline is writing to Discord (patching, the helper, the launch):
@@ -569,6 +575,21 @@ const CLOSING_DISCORD_WOULD_HELP = ["DISCORD_RUNNING", "FILE_IN_USE"];
 /** The renderer is sandboxed and has no process.platform; the user agent says Mac on macOS only. */
 const IS_MAC = /Macintosh|Mac OS X/.test(navigator.userAgent);
 
+/** A secondary button that hands the window back to the install flow. */
+function backToFlowButton(): HTMLButtonElement {
+    const back = document.createElement("button");
+    back.className = "btn btn-secondary";
+    back.textContent = UNINSTALL_COPY.back;
+    back.onclick = () => {
+        back.disabled = true;
+        void api.restart().then(state => {
+            uninstalling = false;
+            render(state);
+        });
+    };
+    return back;
+}
+
 /**
  * Show what an uninstall did, and — when the obstacle is a running Discord —
  * offer to remove it rather than describing it.
@@ -582,7 +603,7 @@ const IS_MAC = /Macintosh|Mac OS X/.test(navigator.userAgent);
  */
 function showUninstall(report: UninstallReport, mayRetry: boolean): void {
     detail.textContent = report.summary;
-    stepName.textContent = report.clean ? "Removed" : "Not fully removed";
+    stepName.textContent = uninstallReportTitle(report);
     // A clean removal retires the footer Uninstall button. Leaving it live
     // offered "Uninstall" on the very screen saying everything was removed -
     // and pressing it re-ran the entire quit-Discord cycle against a Discord
@@ -602,7 +623,7 @@ function showUninstall(report: UninstallReport, mayRetry: boolean): void {
     // Cancel on the permission screen. Nothing was changed, so this is not a
     // failure and gets no error and no button: the footer Uninstall is still there.
     if (report.cancelled === true) {
-        stepName.textContent = "Cancelled";
+        actionBar.append(backToFlowButton());
         return;
     }
 
@@ -619,24 +640,26 @@ function showUninstall(report: UninstallReport, mayRetry: boolean): void {
             void runUninstall(lastKeepSettings, null, mayRetry);
         };
         actionBar.append(button);
+        if (report.nothingChanged === true) actionBar.append(backToFlowButton());
         return;
     }
 
-    if (first === undefined || !CLOSING_DISCORD_WOULD_HELP.includes(first.code)) return;
     // Offered ONCE. The main process escalates from a polite request to a
     // forced close inside that single press, so a second failure means
     // something other than an open Discord is holding the files, and another
     // button would only repeat work that has already been done.
-    if (!mayRetry) return;
-
-    const button = document.createElement("button");
-    button.className = "btn btn-primary";
-    button.textContent = "Quit Discord and remove";
-    button.onclick = () => {
-        button.disabled = true;
-        void runUninstall(lastKeepSettings, "ask", false);
-    };
-    actionBar.append(button);
+    if (first !== undefined && CLOSING_DISCORD_WOULD_HELP.includes(first.code) && mayRetry) {
+        const button = document.createElement("button");
+        button.className = "btn btn-primary";
+        button.textContent = UNINSTALL_COPY.quitAndRemove;
+        button.onclick = () => {
+            button.disabled = true;
+            void runUninstall(lastKeepSettings, "ask", false);
+        };
+        actionBar.append(button);
+    }
+    // Nothing was changed, so the install flow is still there to go back to.
+    if (report.nothingChanged === true) actionBar.append(backToFlowButton());
 }
 
 let lastKeepSettings = true;
@@ -717,12 +740,73 @@ function runUninstall(
         .finally(stopPhases);
 }
 
+/**
+ * The first uninstall screen. Nothing is changed until its main button is
+ * pressed, and Cancel puts the last install screen back.
+ *
+ * It used to be confirm("Remove your settings as well?"), whose Cancel meant
+ * "keep my settings" and still uninstalled. And an open Discord was found only
+ * after the press, as a failure. Now the screen asks first and, like the
+ * install's "Quit Discord for me", offers to quit Discord in the same press.
+ */
+async function showUninstallStart(): Promise<void> {
+    // Flow states that arrive meanwhile are kept (see onState) but not drawn
+    // over this screen.
+    uninstalling = true;
+    const footerUninstall = document.getElementById("uninstall") as HTMLButtonElement | null;
+    if (footerUninstall !== null) footerUninstall.disabled = true;
+    let check: { discordRunning: boolean; platform: NodeJS.Platform };
+    try {
+        check = await api.checkUninstall();
+    } catch {
+        // Unknown: offer the plain Remove. A Discord that is open is then
+        // reported with its own button, before anything is changed.
+        check = { discordRunning: false, platform: IS_MAC ? "darwin" : "win32" };
+    }
+    if (footerUninstall !== null) footerUninstall.disabled = false;
+    const view = uninstallStartView(check);
+
+    stepName.textContent = view.title;
+    detail.textContent = view.detail;
+    errorBox.hidden = true;
+    errorBox.replaceChildren();
+    extra.replaceChildren();
+    actionBar.replaceChildren();
+
+    const label = document.createElement("label");
+    label.className = "note check";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    label.append(box, document.createTextNode(` ${view.settingsLabel}`));
+    extra.append(label);
+
+    const cancel = document.createElement("button");
+    cancel.className = "btn btn-secondary";
+    cancel.textContent = view.cancel;
+    cancel.onclick = () => {
+        uninstalling = false;
+        if (lastState !== null) render(lastState);
+        else void api.start().then(render);
+    };
+    const go = document.createElement("button");
+    go.className = "btn btn-primary";
+    go.textContent = view.primary.label;
+    go.onclick = () => {
+        go.disabled = true;
+        cancel.disabled = true;
+        // The quit already escalates inside this one press, so a second
+        // "Quit Discord and remove" would repeat what just failed.
+        void runUninstall(!box.checked, view.primary.closeDiscord, view.primary.closeDiscord === null);
+    };
+    actionBar.append(go, cancel);
+}
+
 document.getElementById("uninstall")?.addEventListener("click", () => {
-    const keepSettings = !confirm(
-        "Remove your settings as well?\n\nOK removes them. Cancel keeps them, so reinstalling picks up where you left off."
-    );
-    void runUninstall(keepSettings, null, true);
+    void showUninstallStart();
 });
 
-api.onState(state => { if (!uninstalling) render(state); });
+api.onState(state => {
+    if (!uninstalling) render(state);
+    else lastState = state;
+});
 void api.start().then(render);

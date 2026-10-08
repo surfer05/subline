@@ -23,7 +23,9 @@ import type { LaunchctlPort } from "../src/helper/launchAgent.js";
 import type { SchtasksPort } from "../src/helper/scheduledTask.js";
 import { taskCommandFromXml, taskIntervalFromXml } from "../src/helper/scheduledTask.js";
 import { buildAsar } from "../src/patcher/asar.js";
+import type { HelperRemoval, UninstallSystemPorts } from "../src/app/uninstall.js";
 import type { DiscordInstall } from "../src/patcher/locate.js";
+import type { Result } from "../src/patcher/result.js";
 import { stableIdFor } from "../src/patcher/locate.js";
 import { buildStubAsar } from "../src/patcher/stub.js";
 
@@ -563,4 +565,47 @@ export function makeModBundleFixture(options: ModBundleOptions = {}): ModBundleF
         cleanup: () => rmSync(dir, { recursive: true, force: true })
     };
     return fixture;
+}
+
+/* ------------------------------------------------------------------------ *
+ * Fakes for uninstall()'s system ports. Nothing real is listed, quit or
+ * unregistered: every call is recorded in `calls`, in order.
+ * ------------------------------------------------------------------------ */
+
+export interface UninstallSystemFake {
+    ports: UninstallSystemPorts & { platform: NodeJS.Platform };
+    calls: string[];
+}
+
+export function uninstallSystemFake(options: {
+    /** Discord processes per listDiscordProcesses call; the last entry repeats. Default: none. */
+    running?: readonly (readonly { pid: number }[])[];
+    helper?: HelperRemoval;
+    restoreHelper?: Result<unknown>;
+    platform?: NodeJS.Platform;
+} = {}): UninstallSystemFake {
+    const calls: string[] = [];
+    const running = options.running ?? [[]];
+    let listed = 0;
+    return {
+        calls,
+        ports: {
+            platform: options.platform ?? "darwin",
+            listDiscordProcesses: async () => {
+                calls.push("list");
+                const table = running[Math.min(listed, running.length - 1)] ?? [];
+                listed += 1;
+                return table;
+            },
+            quitDiscord: async mode => { calls.push(`quit:${mode}`); },
+            removeHelper: async () => {
+                calls.push("removeHelper");
+                return options.helper ?? { applicable: true, removed: true, error: null };
+            },
+            restoreHelper: async () => {
+                calls.push("restoreHelper");
+                return options.restoreHelper ?? { ok: true, value: null };
+            }
+        }
+    };
 }

@@ -664,22 +664,79 @@ describe("a Discord we already patched", () => {
         expect(h.patchCalls.length).toBeGreaterThan(0);
     });
 
-    // PAID ONLY, and an update is not the gate. Discord already runs Subline;
-    // the new mod asks for activation inside Discord, where the relay knows
-    // the plugin's own install id (early users get Automatic there).
-    it("an update over an install with NO saved code is not gated: it patches without asking", async () => {
+    // I2 (field test 2026-10-08). An update with no saved code used to skip
+    // activation and install a Subline that said "Not activated" in Discord,
+    // with no screen anywhere in the installer to fix it. Same gate as a
+    // fresh install now; the language is still never asked twice.
+    it("an update with NO saved code and no known purchase shows Activate Subline, and patches nothing", async () => {
         const marker = { pluginBuildId: "0000000000000000" } as unknown as InstallState["marker"];
         const st = { ...installState("patched-by-us", "subline"), marker };
-        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: false });
+        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: false, savedInstallId: null });
         const seen: string[] = [];
         h.flow.onChange = st => seen.push(st.step);
 
         const after = await h.flow.start();
+        expect(after.step).toBe("choose-code");
+        expect(after.actions).toEqual(["buy-automatic", "set-code"]);
+        expect(seen).not.toContain("choose-language");
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("an update with NO saved code continues without the screen when the relay confirms this install", async () => {
+        const marker = { pluginBuildId: "0000000000000000" } as unknown as InstallState["marker"];
+        const st = { ...installState("patched-by-us", "subline"), marker };
+        const h = harness({
+            inspect: { ok: true, value: st },
+            hasSublineCode: false,
+            savedInstallId: "fedcba9876543210fedcba9876543210",
+            relayStatus: { kind: "ok", automatic: true, ai: false, code: "slp_early" }
+        });
+        const seen: string[] = [];
+        h.flow.onChange = st => seen.push(st.step);
+
+        const after = await h.flow.start();
+        expect(h.relayCalls[0]?.kind).toBe("status");
         expect(seen).not.toContain("choose-code");
         expect(seen).not.toContain("choose-language");
-        expect(h.patchCalls.length).toBeGreaterThan(0);
-        expect(h.relayCalls).toEqual([]);
+        expect(h.codeWrites).toEqual(["slp_early"]);
+        expect(h.patchCalls).toHaveLength(1);
         expect(after.step).toBe("done");
+    });
+
+    it("an update with NO saved code and the relay unreachable waits on Try again, and patches nothing", async () => {
+        const marker = { pluginBuildId: "0000000000000000" } as unknown as InstallState["marker"];
+        const st = { ...installState("patched-by-us", "subline"), marker };
+        const h = harness({
+            inspect: { ok: true, value: st },
+            hasSublineCode: false,
+            savedInstallId: "fedcba9876543210fedcba9876543210",
+            relayStatus: { kind: "unreachable", cause: "fetch failed" }
+        });
+        const after = await h.flow.start();
+        expect(after.step).toBe("activation-check-failed");
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("our stub with its marker missing and NO saved code also shows Activate Subline", async () => {
+        const st = { ...installState("patched-by-us", "subline"), marker: null, warnings: ["marker-missing" as const] };
+        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: false, savedInstallId: null });
+        const after = await h.flow.start();
+        expect(after.step).toBe("choose-code");
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("an update with a saved code and the relay offline still updates: the relay is not asked", async () => {
+        const marker = { pluginBuildId: "0000000000000000" } as unknown as InstallState["marker"];
+        const st = { ...installState("patched-by-us", "subline"), marker };
+        const h = harness({ inspect: { ok: true, value: st }, hasSublineCode: true, relayStatus: { kind: "unreachable", cause: "offline" } });
+        const seen: string[] = [];
+        h.flow.onChange = st => seen.push(st.step);
+        const state = await h.flow.start();
+        expect(seen).not.toContain("choose-code");
+        expect(seen).not.toContain("activation-check-failed");
+        expect(h.relayCalls).toEqual([]);
+        expect(h.patchCalls).toHaveLength(1);
+        expect(state.step).toBe("done");
     });
 
     it("an update with a saved code is not gated either: the plugin checks the code inside Discord", async () => {
@@ -1198,15 +1255,29 @@ describe("the order: find Discord, language, activate, quit Discord, patch", () 
 });
 
 describe("a machine that used Subline before (treated as an update)", () => {
-    it("is patched without the paid gate, without the language step, and without a new install id", async () => {
+    // I2: no code saved means the same gate as a fresh install, without the
+    // language step (its answer is saved) and without a new install id.
+    it("with no code and no known purchase, shows Activate Subline and patches nothing", async () => {
         const h = harness({ priorUse: true, relayStatus: { kind: "ok", automatic: false, ai: false, code: null } });
+        const state = await toDetection(h);
+        expect(state.step).toBe("choose-code");
+        expect(h.steps).not.toContain("choose-language");
+        expect(h.installIdWrites).toBe(0);
+        expect(h.languageWrites).toEqual([]);
+        expect(h.patchCalls).toHaveLength(0);
+    });
+
+    it("with no code but an install id the relay confirms, is patched without the screen or the language step", async () => {
+        const h = harness({
+            priorUse: true,
+            savedInstallId: "fedcba9876543210fedcba9876543210",
+            relayStatus: { kind: "ok", automatic: true, ai: false, code: null }
+        });
         const state = await toDetection(h);
         const settled = state.step === "done" ? await h.flow.settled() : state;
         expect(h.steps).not.toContain("choose-language");
         expect(h.steps).not.toContain("choose-code");
-        expect(h.relayCalls).toEqual([]);
         expect(h.installIdWrites).toBe(0);
-        expect(h.languageWrites).toEqual([]);
         expect(h.patchCalls).toHaveLength(1);
         expect(settled.step).toBe("done");
     });
@@ -1220,10 +1291,25 @@ describe("a machine that used Subline before (treated as an update)", () => {
     });
 
     it("still asks Discord to quit on a fresh patch (it is not a running-Discord update)", async () => {
-        const h = harness({ priorUse: true, processes: [[DISCORD_PROCESS]] });
+        const h = harness({ priorUse: true, hasSublineCode: true, processes: [[DISCORD_PROCESS]] });
         const state = await toDetection(h);
         expect(state.step).toBe("discord-running");
         expect(h.steps).not.toContain("choose-code");
+    });
+
+    // I3: on Windows a "closed" Discord hides behind the ^ near the clock.
+    it("Windows: the close-Discord screen says where Discord is", async () => {
+        const h = harness({ priorUse: true, hasSublineCode: true, platform: "win32", processes: [[WINDOWS_DISCORD_PROCESS]] });
+        const state = await toDetection(h);
+        expect(state.step).toBe("discord-running");
+        expect(state.detail).toContain("Discord is still open in the background, behind the ^ near the clock.");
+        expect(state.actions[0]).toBe("quit-discord");
+    });
+
+    it("Mac: the close-Discord screen keeps Mac wording", async () => {
+        const h = harness({ priorUse: true, hasSublineCode: true, processes: [[DISCORD_PROCESS]] });
+        const state = await toDetection(h);
+        expect(state.detail).not.toMatch(/\^|clock|tray/);
     });
 });
 

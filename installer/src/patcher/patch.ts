@@ -570,6 +570,15 @@ export interface UnpatchOptions {
      * `…/Subline/mod/patcher.js` is recognised without it.
      */
     ownLoaderPaths?: readonly string[];
+    /**
+     * Decide, but write nothing. Returns the exact error the real call would
+     * return for every refusal that can be known before a write (another mod,
+     * a missing or damaged backup, an unrecoverable broken install), and ok
+     * otherwise. Uninstall runs this over every Discord before it stops the
+     * helper, so a refusal leaves everything exactly as it was. Failures only
+     * a write can find (a file held open) still surface from the real call.
+     */
+    dryRun?: boolean;
 }
 
 export interface UnpatchReport {
@@ -589,12 +598,13 @@ export function unpatchInstall(install: DiscordInstall, options: UnpatchOptions 
     if (!stateResult.ok) return stateResult;
     const state = stateResult.value;
 
+    const dryRun = options.dryRun === true;
     switch (state.kind) {
         case "unpatched":
-            return cleanUpUnpatched(install, state);
+            return dryRun ? wouldSucceed(install, state) : cleanUpUnpatched(install, state);
 
         case "broken":
-            return unpatchBroken(install, state);
+            return unpatchBroken(install, state, dryRun);
 
         case "patched-by-other":
             if (!options.removeForeignMod) {
@@ -604,11 +614,23 @@ export function unpatchInstall(install: DiscordInstall, options: UnpatchOptions 
                     { path: install.rootPath }
                 );
             }
-            return restoreOriginal(install, state);
+            return restoreOriginal(install, state, dryRun);
 
         case "patched-by-us":
-            return restoreOriginal(install, state);
+            return restoreOriginal(install, state, dryRun);
     }
+}
+
+/** A dry run that found nothing to refuse. Nothing was written. */
+function wouldSucceed(install: DiscordInstall, state: InstallState): Result<UnpatchReport> {
+    return ok({
+        install,
+        restored: false,
+        alreadyClean: false,
+        removedArtifacts: [],
+        previousState: state.kind,
+        summary: "Dry run: Subline can be removed from this Discord."
+    });
 }
 
 function cleanUpUnpatched(install: DiscordInstall, state: InstallState): Result<UnpatchReport> {
@@ -643,7 +665,7 @@ function cleanUpUnpatched(install: DiscordInstall, state: InstallState): Result<
     });
 }
 
-function unpatchBroken(install: DiscordInstall, state: InstallState): Result<UnpatchReport> {
+function unpatchBroken(install: DiscordInstall, state: InstallState, dryRun = false): Result<UnpatchReport> {
     switch (state.reason) {
         // All three are "put the original back if it is there". restoreOriginal
         // finishes an interrupted patch when `_app.asar` survived, and reports
@@ -651,13 +673,13 @@ function unpatchBroken(install: DiscordInstall, state: InstallState): Result<Unp
         case "asar-missing-backup-present":
         case "our-patch-without-backup":
         case "asar-and-backup-missing":
-            return restoreOriginal(install, state);
+            return restoreOriginal(install, state, dryRun);
         default:
             return err<UnpatchReport>("BROKEN_INSTALL", state.summary, { path: install.rootPath });
     }
 }
 
-function restoreOriginal(install: DiscordInstall, state: InstallState): Result<UnpatchReport> {
+function restoreOriginal(install: DiscordInstall, state: InstallState, dryRun = false): Result<UnpatchReport> {
     if (!existsSync(install.backupPath)) {
         return err<UnpatchReport>(
             "BACKUP_MISSING",
@@ -682,6 +704,8 @@ function restoreOriginal(install: DiscordInstall, state: InstallState): Result<U
             { path: install.backupPath }
         );
     }
+    // Every check a read can make has passed. The rest needs the write.
+    if (dryRun) return wouldSucceed(install, state);
 
     try {
         renameSync(install.backupPath, install.asarPath);

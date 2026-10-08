@@ -860,17 +860,42 @@ export class InstallFlow {
      * working Discord the whole time.
      *
      * A machine whose settings show Subline was used before is an UPDATE (see
-     * `priorSublineUse`): no language question, no paid gate, no new install
-     * id. The plugin settles activation inside Discord with the relay.
+     * `priorSublineUse`): no language question and no new install id. It
+     * still needs activation when no code is saved (see `updateGate`).
      */
     private beforeQuit(): FlowState | Promise<FlowState> {
         if (this.ports.priorSublineUse()) {
             this.priorUse = true;
             this.ports.log.info("flow.prior-use", { reason: "settings show Subline was used here before" });
-            if (this.ports.hasSublineCode()) this.useSavedCode();
-            return this.checkRunning();
+            return this.updateGate();
         }
         return this.languageStep();
+    }
+
+    /**
+     * THE PAID GATE ON AN UPDATE (field test 2026-10-08, I2).
+     *
+     * An update used to skip activation entirely, on the theory that the
+     * plugin settles it inside Discord. On a machine with no saved code that
+     * installed a product that then said "Not activated" in Discord, with no
+     * screen in the installer to fix it. Now:
+     *
+     *   - a saved code: carry on as before. The relay is NOT asked here, so an
+     *     update offline still updates (the plugin checks the code itself);
+     *   - no code: the same gate as a fresh install. A saved install id is
+     *     asked about first (an early user, or a purchase made from Discord,
+     *     is let through by the relay); otherwise "Activate Subline".
+     *
+     * The language is never asked again: it is the user's saved setting.
+     */
+    private updateGate(): FlowState | Promise<FlowState> {
+        if (this.ports.hasSublineCode()) {
+            // An update re-asserts the engine once Discord is closed (afterDiscordClosed).
+            if (!this.updating) this.useSavedCode();
+            return this.checkRunning();
+        }
+        this.ports.log.info("flow.update-needs-activation", { savedInstallId: this.ports.savedInstallId() !== null });
+        return this.codeStepUnlessSaved();
     }
 
     /**
@@ -916,15 +941,15 @@ export class InstallFlow {
         // THIS installer is the only updater there is. Same id: done.
         // Different id: continue as an update - straight to the quit gate,
         // skipping the language step, whose answer is the user's saved setting
-        // and must not be asked twice. The code screen is skipped only when a
-        // code is already saved — see afterDiscordClosed.
+        // and must not be asked twice. The activation screen is skipped only
+        // when a code is saved or the relay confirms this install (updateGate).
         // OUR STUB WITHOUT OUR MARKER (Windows: a Discord update copied the
         // stub into a new app folder and left the marker behind). Not "already
         // set up": continue as an update, whose patch rewrites the marker.
         if (installState.warnings.includes("marker-missing") || installState.warnings.includes("marker-mismatch")) {
             this.ports.log.info("flow.marker-rewrite", { path: install.rootPath, warnings: installState.warnings.join(",") });
             this.updating = true;
-            return this.checkRunning();
+            return this.updateGate();
         }
 
         const installedId = installState.marker?.pluginBuildId ?? null;
@@ -932,7 +957,7 @@ export class InstallFlow {
         if (shipped.ok && installedId !== null && shipped.value.buildId !== installedId) {
             this.ports.log.info("flow.update-detected", { from: installedId, to: shipped.value.buildId });
             this.updating = true;
-            return this.checkRunning();
+            return this.updateGate();
         }
 
         // "Already set up" must include the thing that KEEPS it set up. Field
@@ -1014,7 +1039,12 @@ export class InstallFlow {
 
             return this.set(state({
                 step: "discord-running",
-                detail: "Discord is running and has to close before it can be changed. Subline can ask it to quit for you.",
+                // Windows: closing Discord's window only hides it, behind the ^
+                // near the clock (field test 2026-10-08), so say where it is.
+                detail: this.ports.platform === "win32"
+                    ? "Discord is still open in the background, behind the ^ near the clock. It has to close before "
+                      + "Subline can change it. Subline can quit it for you."
+                    : "Discord is running and has to close before it can be changed. Subline can ask it to quit for you.",
                 install,
                 processes: running,
                 actions: ["quit-discord", "recheck", "cancel"]
@@ -1039,14 +1069,11 @@ export class InstallFlow {
      */
     private afterDiscordClosed(): FlowState | Promise<FlowState> {
         // Language and activation were settled before Discord was closed (see
-        // beforeQuit). AN UPDATE IS NOT GATED: Discord already runs Subline,
-        // the new mod asks for activation inside Discord itself, and it is the
-        // plugin (with its own install id) that the relay recognises as an
-        // early user. Gating here would make an early user updating by hand
-        // pay for what the relay gives them for free.
+        // beforeQuit and updateGate). An early user updating by hand is let
+        // through by the relay, which knows the plugin's own install id.
         if (this.updating && this.ports.hasSublineCode()) this.useSavedCode();
         if (this.updating || this.priorUse) {
-            this.ports.log.info("flow.update-not-gated", { withCode: this.ports.hasSublineCode(), priorUse: this.priorUse });
+            this.ports.log.info("flow.update-continues", { withCode: this.ports.hasSublineCode(), priorUse: this.priorUse });
         }
         return this.permissionStep();
     }

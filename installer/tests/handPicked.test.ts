@@ -18,7 +18,7 @@ import { locateDiscordInstalls, rememberedResourcesPath, uninstallTargets } from
 import { MARKER_FILENAME } from "../src/patcher/marker.js";
 import { patchInstall, unpatchInstall } from "../src/patcher/patch.js";
 import { isOtherAccountLoader } from "../src/patcher/ownership.js";
-import { makeDiscordFixture, makeModBundleFixture } from "./fixture.js";
+import { makeDiscordFixture, makeModBundleFixture, uninstallSystemFake } from "./fixture.js";
 import type { Fixture, ModBundleFixture } from "./fixture.js";
 
 let ptb: Fixture;
@@ -57,18 +57,17 @@ function patchPickedPtb() {
 }
 
 describe("a hand-picked Discord", () => {
-    it("is found again by Uninstall, through the remembered list, and restored", () => {
+    it("is found again by Uninstall, through the remembered list, and restored", async () => {
         const install = patchPickedPtb();
         expect(install.branch).toBe("ptb");
         const remembered = readPatchedInstalls(productDir);
         const targets = uninstallTargets({ platform: "darwin", searchRoots: [] }, remembered);
         expect(targets.map(t => t.rootPath)).toContain(ptb.install.rootPath);
 
-        const report = uninstall(
-            { unpatch: (target, opts) => unpatchInstall(target, opts), modBundleDir: modDir, productDir, logDir: null, vencordSettingsPath: null, log: quiet },
+        const report = await uninstall(
+            { ...uninstallSystemFake({ helper: { applicable: false, removed: false, error: null } }).ports, unpatch: (target, opts) => unpatchInstall(target, opts), modBundleDir: modDir, productDir, logDir: null, vencordSettingsPath: null, log: quiet },
             {
                 installs: targets,
-                helper: { applicable: false, removed: false, error: null },
                 rememberedResources: remembered.map(entry => rememberedResourcesPath(entry, "darwin"))
             }
         );
@@ -77,16 +76,15 @@ describe("a hand-picked Discord", () => {
         expect(report.modBundleRemoved).toBe(true);
     });
 
-    it("keeps the bundle while a remembered Discord still carries Subline, even when every target restored", () => {
+    it("keeps the bundle while a remembered Discord still carries Subline, even when every target restored", async () => {
         patchPickedPtb();
         const remembered = readPatchedInstalls(productDir);
         // Only the (clean) Stable is a target: the PTB was not restored.
-        const report = uninstall(
-            { unpatch: (target, opts) => unpatchInstall(target, opts), modBundleDir: modDir, productDir, logDir: null, vencordSettingsPath: null, log: quiet },
+        const report = await uninstall(
+            { ...uninstallSystemFake({ helper: { applicable: false, removed: false, error: null } }).ports, unpatch: (target, opts) => unpatchInstall(target, opts), modBundleDir: modDir, productDir, logDir: null, vencordSettingsPath: null, log: quiet },
             {
                 installs: [stable.install],
                 keepSettings: false,
-                helper: { applicable: false, removed: false, error: null },
                 rememberedResources: remembered.map(entry => rememberedResourcesPath(entry, "darwin"))
             }
         );
