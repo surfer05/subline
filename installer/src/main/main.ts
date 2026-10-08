@@ -50,6 +50,7 @@ import { isOtherAccountLoader } from "../patcher/ownership.js";
 import type { DiscordInstall } from "../patcher/locate.js";
 import { hiddenExec } from "../patcher/exec.js";
 import { readPatchedInstalls, releaseRestoredInstalls } from "../app/patchedInstalls.js";
+import { readMarker } from "../patcher/marker.js";
 import { unpatchInstall } from "../patcher/patch.js";
 import { loaderPathFor } from "../bundle/spec.js";
 import { usingOriginalFs } from "../patcher/realFs.js";
@@ -684,6 +685,10 @@ async function runUninstall(
             // Our own loader by path too, so a stub whose marker went missing (a
             // Windows Discord update copies app.asar without it) is still restored.
             unpatch: (install, opts) => unpatchOurs(install, opts),
+            hasOurMarker: install => {
+                const marker = readMarker(install.resourcesPath);
+                return marker.ok && marker.value !== null;
+            },
             ...uninstallPaths(),
             platform: process.platform,
             log,

@@ -55,8 +55,6 @@ export type BrokenReason =
     | "our-patch-without-backup"
     /** Someone else's stub is present but the original was not preserved. */
     | "foreign-patch-without-backup"
-    /** A marker file exists but is unreadable. */
-    | "marker-unreadable"
     /**
      * `app.asar` reads as an archive but is neither Discord's code nor a
      * loader stub: no package.json, or its main entry is missing (audit
@@ -69,6 +67,16 @@ export type StateWarning =
     | "stale-backup"
     /** Our marker says one loader, the stub `require()`s another. */
     | "marker-loader-mismatch"
+    /**
+     * A subline-patch.json is there but is not a marker of ours: empty,
+     * truncated, hand-edited, another product's, too big, or unreadable. It
+     * proves nothing, so the state is judged by app.asar alone, exactly as with
+     * no marker (marker is null): beside our stub it is still ours and is
+     * rewritten ("marker-missing" too), beside another mod's stub it is that
+     * mod's, beside Discord's own archive it is unpatched. NEVER "broken": that
+     * refused every install, alerted every helper run and refused uninstall.
+     */
+    | "marker-unreadable"
     /**
      * The stub loads Subline's own loader but no marker sits beside it. On
      * Windows this is what Vencord's host-update repatch leaves in a new
@@ -126,6 +134,8 @@ export interface InstallState {
     loaderPresent?: boolean | null;
     /** For our stub: the mod whose unpacked resources/app loads in front of it. */
     shadowedBy?: KnownMod | null;
+    /** Why a subline-patch.json was set aside as not ours (see "marker-unreadable"), for the log. */
+    markerProblem?: string | null;
 }
 
 const MOD_NAMES: Record<KnownMod, string> = {
@@ -230,6 +240,24 @@ export function identifyUnpackedAppMod(resourcesPath: string): KnownMod {
  * *reported state*, because the GUI has to explain it rather than fail.
  */
 export function inspectInstall(install: DiscordInstall, options: InspectOptions = {}): Result<InstallState> {
+    const markerResult = readMarker(install.resourcesPath);
+    const marker = markerResult.ok ? markerResult.value : null;
+    const result = inspectWithMarker(install, options, marker, !markerResult.ok);
+    if (markerResult.ok || !result.ok) return result;
+    // A bad marker: judged as if absent, and said so.
+    return ok({
+        ...result.value,
+        warnings: [...result.value.warnings, "marker-unreadable"],
+        markerProblem: markerResult.error.message
+    });
+}
+
+function inspectWithMarker(
+    install: DiscordInstall,
+    options: InspectOptions,
+    marker: PatchMarker | null,
+    markerFileBad: boolean
+): Result<InstallState> {
     if (!existsSync(install.resourcesPath)) {
         return err<InstallState>(
             "NOT_A_DISCORD_INSTALL",
@@ -256,18 +284,6 @@ export function inspectInstall(install: DiscordInstall, options: InspectOptions 
                   )
         );
     }
-
-    const markerResult = readMarker(install.resourcesPath);
-    if (!markerResult.ok) {
-        // Our marker is there, so the backup beside it is ours: Uninstall
-        // puts it back (patch.ts unpatchBroken).
-        return ok(broken(
-            install,
-            "marker-unreadable",
-            `${markerResult.error.message} ${hasBackup ? BROKEN_REMEDY.uninstall : BROKEN_REMEDY.reinstall}`
-        ));
-    }
-    const marker = markerResult.value;
 
     const stubResult = classifyAsar(install.asarPath);
     if (stubResult.ok && stubResult.value.kind === "unrecognised") {
@@ -296,7 +312,7 @@ export function inspectInstall(install: DiscordInstall, options: InspectOptions 
                     ? "Subline could not open Discord's app.asar. Discord itself is "
                       + "probably fine. This is normally a permissions problem. "
                       + `(${stubResult.error.message})`
-                    : `Discord's app.asar could not be read as an archive (${stubResult.error.message}). ${marker !== null && hasBackup ? BROKEN_REMEDY.uninstall : BROKEN_REMEDY.reinstall}`
+                    : `Discord's app.asar could not be read as an archive (${stubResult.error.message}). ${(marker !== null || markerFileBad) && hasBackup ? BROKEN_REMEDY.uninstall : BROKEN_REMEDY.reinstall}`
             )
         );
     }

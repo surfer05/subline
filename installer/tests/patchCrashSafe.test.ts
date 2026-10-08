@@ -248,8 +248,7 @@ describe("Uninstall repairs an unreadable app.asar from our backup (audit #13)",
     it.each([
         ["our-patch-without-backup", (f: Fixture) => { patchInstall(f.install, options()); unlinkSync(f.install.backupPath); }, /Reinstall Discord from discord\.com/],
         ["foreign-patch-without-backup", (f: Fixture) => { writeFileSync(f.install.asarPath, buildStubAsar("/Users/someone/dev/Vencord/dist/patcher.js")); }, /Reinstall Discord from discord\.com/],
-        ["asar-unrecognised", (f: Fixture) => { writeFileSync(f.install.asarPath, buildAsar([{ name: "index.js", content: Buffer.from("x") }])); }, /Reinstall Discord from discord\.com/],
-        ["marker-unreadable", (f: Fixture) => { patchInstall(f.install, options()); writeFileSync(markerPathFor(f.install.resourcesPath), "{ not json"); }, /Press Uninstall/]
+        ["asar-unrecognised", (f: Fixture) => { writeFileSync(f.install.asarPath, buildAsar([{ name: "index.js", content: Buffer.from("x") }])); }, /Reinstall Discord from discord\.com/]
     ] as const)("%s names its remedy", (reason, setup, remedy) => {
         const { reason: seen, summary } = summaryOf(setup);
         expect(seen).toBe(reason);

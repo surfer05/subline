@@ -254,7 +254,9 @@ describe("inspectInstall", () => {
         expect(result.value.summary).not.toContain("could not be read as an archive");
     });
 
-    it("reports a mangled marker as broken rather than silently ignoring it", () => {
+    it("a mangled marker is set aside and said so, never a broken install (badMarker.test.ts has every case)", () => {
+        // It used to be "broken": the patch refused, the helper alerted every
+        // run and uninstall refused, all for a sidecar file that proves nothing.
         fixture = makeDiscordFixture({ withBackup: true });
         markAsOurs(fixture);
         writeFileSync(join(fixture.install.resourcesPath, "subline-patch.json"), "{oops");
@@ -262,8 +264,10 @@ describe("inspectInstall", () => {
         const result = inspectInstall(fixture.install);
         expect(result.ok).toBe(true);
         if (!result.ok) return;
-        expect(result.value.kind).toBe("broken");
-        expect(result.value.reason).toBe("marker-unreadable");
+        expect(result.value.kind).not.toBe("broken");
+        expect(result.value.marker).toBeNull();
+        expect(result.value.warnings).toContain("marker-unreadable");
+        expect(result.value.markerProblem).toMatch(/not readable JSON/);
     });
 
     it("keeps the build identity the marker records", () => {

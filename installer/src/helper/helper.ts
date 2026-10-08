@@ -621,7 +621,7 @@ function collectManaged(run: Run): ManagedInstall[] {
             run.decide("scan", "re-adopt", "the stub loads Subline's loader but its marker is missing or wrong, so Subline takes it back", {
                 ...evidence,
                 path: install.rootPath,
-                marker: state.marker === null ? "missing" : "mismatch"
+                marker: markerWord(state) === "present" ? "mismatch" : markerWord(state)
             });
         }
 
@@ -638,6 +638,12 @@ function collectManaged(run: Run): ManagedInstall[] {
     return managed;
 }
 
+/** "present", "missing", or "unreadable" (a subline-patch.json that is not a marker of ours). */
+function markerWord(state: InstallState): "present" | "missing" | "unreadable" {
+    if (state.marker !== null) return "present";
+    return state.warnings.includes("marker-unreadable") ? "unreadable" : "missing";
+}
+
 /**
  * What decided "ours or not", for the log (audit #43): the next marker loss
  * must be diagnosable from the log alone, not from reading Vencord's source.
@@ -647,8 +653,11 @@ function evidenceOf(state: InstallState, remembered: boolean): Record<string, st
         kind: state.kind,
         mod: state.mod,
         loader: state.loaderPath,
-        marker: state.marker === null ? "missing" : "present",
+        marker: markerWord(state),
         markerPresent: state.marker !== null,
+        // Why a subline-patch.json there was set aside as not ours (empty,
+        // truncated, another product's, unreadable): the cause, never a guess.
+        markerProblem: state.markerProblem ?? null,
         markerLoader: state.marker?.loaderPath ?? null,
         backup: state.hasBackup,
         stub: state.asarIsStub,

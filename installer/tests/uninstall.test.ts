@@ -897,7 +897,10 @@ describe("uninstall — no Discord with Subline in it (audit #40)", () => {
             ports({ unpatch: (install, options) => { if (options.dryRun !== true) writes.push(install.branch); return foreign(install); } }),
             { installs: [INSTALL, CANARY] }
         );
-        expect(writes).toEqual([]);
+        // One real call each, and it is the foreign case of unpatchInstall:
+        // it removes only a subline-patch.json of ours beside the other mod
+        // (patch.ts leaveForeign; badMarker.test.ts runs it for real).
+        expect(writes).toEqual(["stable", "canary"]);
         expect(report.clean).toBe(true);
         expect(report.modBundleRemoved).toBe(true);
         expect(sys.branches).toEqual([]);

@@ -323,11 +323,13 @@ export function adoptPatch(install: DiscordInstall, options: AdoptOptions): Resu
     }
 
     const markerPath = markerPathFor(install.resourcesPath);
+    // A marker this process cannot read is not ours (state "marker-unreadable"):
+    // it is replaced, and an undo removes ours rather than failing to put it back.
     let previousMarker: Buffer | null = null;
     try {
         if (existsSync(markerPath)) previousMarker = readFileSync(markerPath);
-    } catch (cause) {
-        return fsError<AdoptReport>(cause, markerPath, "read the patch marker");
+    } catch {
+        previousMarker = null;
     }
 
     const buildInfo = readDiscordVersion(install);
@@ -458,7 +460,13 @@ function applyPatch(
     };
 
     try {
+        // An unreadable marker is not ours (state "marker-unreadable") and is
+        // simply replaced; a rollback then removes ours.
         if (undo.markerExisted) undo.previousMarker = readFileSync(markerPath);
+    } catch {
+        undo.previousMarker = null;
+    }
+    try {
         if (!currentIsOriginal) undo.previousAsar = readFileSync(asarPath);
     } catch (cause) {
         return fsError<PatchReport>(cause, asarPath, "read the current Discord files");
@@ -867,9 +875,10 @@ function wouldSucceed(install: DiscordInstall, state: InstallState): Result<Unpa
     return ok({
         install,
         restored: false,
-        // An untouched Discord with no marker of ours: the real call would
-        // find nothing of Subline's to remove (see cleanUpUnpatched).
-        alreadyClean: state.kind === "unpatched" && state.marker === null,
+        // An untouched Discord with no marker file: the real call would find
+        // nothing of Subline's to remove (see cleanUpUnpatched). A bad marker
+        // file is removed by it, so that is not "already clean".
+        alreadyClean: state.kind === "unpatched" && state.marker === null && !state.warnings.includes("marker-unreadable"),
         removedArtifacts: [],
         previousState: state.kind,
         summary: "Dry run: Subline can be removed from this Discord."
@@ -917,12 +926,11 @@ function unpatchBroken(install: DiscordInstall, state: InstallState, dryRun = fa
         case "our-patch-without-backup":
         case "asar-and-backup-missing":
             return restoreOriginal(install, state, dryRun, hooks);
-        // app.asar unreadable (a truncated write) or our marker unreadable,
-        // with OUR marker file beside it and a backup: the backup is ours, and
-        // putting Discord's original back is the repair (audit #13).
-        // restoreOriginal refuses a backup that is not Discord's original.
+        // app.asar unreadable (a truncated write), with a marker file beside
+        // it and a backup: the backup is ours, and putting Discord's original
+        // back is the repair (audit #13). restoreOriginal refuses a backup
+        // that is not Discord's original.
         case "asar-unreadable":
-        case "marker-unreadable":
             if (existsSync(markerPathFor(install.resourcesPath)) && existsSync(install.backupPath)) {
                 return restoreOriginal(install, state, dryRun, hooks);
             }

@@ -53,6 +53,13 @@ import { UNINSTALL_COPY, discordRunningSummary, helperStopFailedSummary } from "
 export interface UninstallPorts {
     /** `dryRun`: decide and write nothing (see UnpatchOptions.dryRun). */
     unpatch(install: DiscordInstall, options: { removeForeignMod?: boolean; dryRun?: boolean }): Result<UnpatchReport>;
+    /**
+     * True when a readable marker of OURS sits beside this Discord (marker.ts
+     * readMarker). A missing port falls back to "a subline-patch.json exists".
+     * A bad marker (empty, truncated, another product's) is not ours, so a
+     * Discord whose files cannot be read is left alone rather than refused.
+     */
+    hasOurMarker?(install: DiscordInstall): boolean;
     /** For the copy only: where Discord hides when it is "closed" differs. */
     platform: NodeJS.Platform;
     /** Where the runtime mod bundle lives, or `null` on an unsupported platform. */
@@ -287,6 +294,34 @@ export function removePluginSettings(settingsPath: string | null): Result<boolea
 }
 
 
+/** A readable marker of ours beside this Discord. A bad one (see state "marker-unreadable") is not. */
+function carriesOurMarker(ports: UninstallPorts, install: DiscordInstall): boolean {
+    if (ports.hasOurMarker !== undefined) return ports.hasOurMarker(install);
+    return existsSync(join(install.resourcesPath, MARKER_FILENAME));
+}
+
+/**
+ * Another mod's Discord is left as it is, all but OUR sidecar beside it: a
+ * subline-patch.json there (ours from before that mod was installed, or a bad
+ * one) is stale by definition, and keeping it made every later uninstall and
+ * the helper believe this Discord still needs Subline. The real unpatch of a
+ * foreign Discord removes only that file (patch.ts leaveForeign), never its
+ * stub or backup, so Discord need not be closed for it. A failure is logged,
+ * never a blocker.
+ */
+function clearOurMarkerBesideForeign(ports: UninstallPorts, install: DiscordInstall): void {
+    const cleared = ports.unpatch(install, {});
+    if (!cleared.ok) {
+        ports.log.warn("uninstall.foreign-marker-kept", { code: cleared.error.code, path: install.rootPath, cause: cleared.error.message });
+    } else if (cleared.value.foreignMod === undefined) {
+        // The real call found something other than a foreign Discord; it did
+        // whatever unpatch does for that state. Logged, so it can be told apart.
+        ports.log.warn("uninstall.foreign-changed", { path: install.rootPath, previousState: cleared.value.previousState });
+    } else {
+        ports.log.info("uninstall.foreign-marker-removed", { path: install.rootPath, removed: cleared.value.removedArtifacts.length });
+    }
+}
+
 /**
  * Uninstall Subline.
  *
@@ -344,7 +379,10 @@ export async function uninstall(
             leftAlone.set(install, { kind: "other-account" });
             continue;
         }
-        if (verdict.error.code === "BROKEN_INSTALL" && !existsSync(join(install.resourcesPath, MARKER_FILENAME))) {
+        // A marker that is not one of ours (empty, truncated, another
+        // product's) proves nothing: only a real marker makes a Discord whose
+        // files cannot be read a reason to refuse.
+        if (verdict.error.code === "BROKEN_INSTALL" && !carriesOurMarker(ports, install)) {
             leftAlone.set(install, { kind: "unreadable" });
             continue;
         }
@@ -417,6 +455,7 @@ export async function uninstall(
     for (const install of options.installs) {
         const reason = leftAlone.get(install);
         if (reason !== undefined) {
+            if (reason.kind === "foreign") clearOurMarkerBesideForeign(ports, install);
             restores.push({ install, ok: true, restored: false, error: null, leftAlone: reason });
             continue;
         }

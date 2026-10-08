@@ -14,7 +14,7 @@
  * "unpatched" state rather than a marker pointing at nothing).
  */
 
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "./realFs.js";
+import { existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "./realFs.js";
 import { join } from "node:path";
 
 import type { Result } from "./result.js";
@@ -61,9 +61,34 @@ export function markerPathFor(resourcesPath: string): string {
     return join(resourcesPath, MARKER_FILENAME);
 }
 
+/**
+ * The largest marker read. A real one is well under 1 KB; anything bigger is
+ * not ours, and is never read whole into memory.
+ */
+export const MAX_MARKER_BYTES = 64 * 1024;
+
+/**
+ * Read our marker. ok(null) when there is none; an error when there is a file
+ * but it is not a marker of ours (empty, truncated, hand-edited, another
+ * product's, wrong types, too big, unreadable).
+ *
+ * A BAD MARKER IS NOT A BROKEN INSTALL (audit 2026-10-06, missed high item).
+ * It proves nothing, either way: inspectInstall then judges ownership by what
+ * app.asar is, exactly as with no marker, and every write path replaces it.
+ * Callers must never turn this error into "refuse" on its own.
+ */
 export function readMarker(resourcesPath: string): Result<PatchMarker | null> {
     const path = markerPathFor(resourcesPath);
     if (!existsSync(path)) return ok(null);
+
+    try {
+        const size = statSync(path).size;
+        if (size > MAX_MARKER_BYTES) {
+            return err<PatchMarker | null>("BROKEN_INSTALL", `${MARKER_FILENAME} is ${size} bytes, far too big to be one of ours.`, { path });
+        }
+    } catch (cause) {
+        return fsError<PatchMarker | null>(cause, path, `read ${MARKER_FILENAME}`);
+    }
 
     let raw: string;
     try {
@@ -107,12 +132,25 @@ export function readMarker(resourcesPath: string): Result<PatchMarker | null> {
     });
 }
 
+/**
+ * Staged and renamed, so the marker is the old file or the new one, never a
+ * truncated one (a kill mid-write used to leave half a JSON file). The rename
+ * also replaces a marker this process cannot read (EACCES): replacing a file
+ * needs the folder's permission, not the file's.
+ */
 export function writeMarker(resourcesPath: string, marker: PatchMarker): Result<string> {
     const path = markerPathFor(resourcesPath);
+    const temp = `${path}.tmp`;
     try {
-        writeFileSync(path, `${JSON.stringify(marker, null, 4)}\n`, "utf8");
+        writeFileSync(temp, `${JSON.stringify(marker, null, 4)}\n`, "utf8");
+        renameSync(temp, path);
         return ok(path);
     } catch (cause) {
+        try {
+            if (existsSync(temp)) unlinkSync(temp);
+        } catch {
+            // A stranded temp file is harmless: the next write replaces it.
+        }
         return fsError<string>(cause, path, `write ${MARKER_FILENAME}`);
     }
 }

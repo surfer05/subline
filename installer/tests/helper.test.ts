@@ -490,6 +490,63 @@ describe("our stub without our marker (Windows field bug, 2026-10-04)", () => {
     });
 });
 
+describe("a bad subline-patch.json (truncated, another product's): never a broken install", () => {
+    const markerPath = (): string => join(harness.fixture.install.resourcesPath, "subline-patch.json");
+
+    it("beside our stub: re-adopted on the first run, no alert, and quiet after", async () => {
+        patchForReal(harness);
+        await harness.run();
+        writeFileSync(markerPath(), '{"format":2,"product":"subl');
+        const before = readFileSync(harness.fixture.install.asarPath);
+
+        const report = await harness.run();
+        const scan = report.decisions.find(d => d.kind === "scan" && d.outcome === "re-adopt");
+        expect(scan?.fields.marker).toBe("unreadable");
+        expect(String(scan?.fields.markerProblem)).toMatch(/not readable JSON/);
+        expect(report.decisions.some(d => d.kind === "repatch" && d.outcome === "re-adopted")).toBe(true);
+        expect(readMarker(harness.fixture.install.resourcesPath).ok).toBe(true);
+        expect(readFileSync(harness.fixture.install.asarPath).equals(before)).toBe(true);
+        expect(harness.notifications.filter(n => n.code !== "update-failed")).toEqual([]);
+
+        for (let i = 0; i < 3; i += 1) {
+            harness.advance(DEFAULT_REPEAT_MS);
+            const again = await harness.run();
+            expect(again.decisions.some(d => d.outcome === "re-adopt")).toBe(false);
+        }
+        expect(harness.notifications.filter(n => n.code !== "update-failed")).toEqual([]);
+    });
+
+    it("beside Discord's own archive after an update: repaired like any wiped injection, no broken alert", async () => {
+        patchForReal(harness);
+        await harness.run();
+        simulateDiscordUpdate(harness.fixture.install, "0.0.407");
+        writeFileSync(markerPath(), JSON.stringify({ product: "other" }));
+
+        const report = await harness.run();
+        expect(report.repatched).toHaveLength(1);
+        expect(report.decisions.some(d => d.outcome === "broken-install")).toBe(false);
+        const marker = readMarker(harness.fixture.install.resourcesPath);
+        expect(marker.ok && marker.value?.discordVersion).toBe("0.0.407");
+        expect(harness.notifications.map(n => n.code)).not.toContain("repatch-failed");
+    });
+
+    it("beside another mod's stub: left to that mod, never an alert", async () => {
+        patchForReal(harness);
+        await harness.run();
+        writeFileSync(harness.fixture.install.asarPath, buildStubAsar("/Users/someone/dev/Vencord/dist/patcher.js"));
+        writeFileSync(markerPath(), "");
+
+        for (let i = 0; i < 3; i += 1) {
+            const report = await harness.run();
+            expect(report.managed).toBe(0);
+            const scan = report.decisions.find(d => d.kind === "scan" && d.outcome === "foreign-mod");
+            expect(scan?.fields.marker).toBe("unreadable");
+            harness.advance(DEFAULT_REPEAT_MS);
+        }
+        expect(harness.notifications.filter(n => n.code !== "update-failed")).toEqual([]);
+    });
+});
+
 describe("not racing Discord's own updater", () => {
     it("repairs a running Discord on macOS, where the rename is allowed", async () => {
         // CHANGED, and this is the whole point of the change. Waiting for
