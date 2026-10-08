@@ -23,7 +23,8 @@
  * without one is a suite people stop running.
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -136,4 +137,29 @@ describe("the branding step itself", () => {
         // because delete-if-present is idempotent; an anchored rewrite cannot be.
         expect(script).toContain('run("git", ["checkout", "--force", "--", "."], VENCORD_DIR)');
     });
+});
+
+/*
+ * THE TAB TYPE-CHECKS AGAINST THE PINNED VENCORD. esbuild strips types, so a
+ * prop Vencord made required (closePluginSettings, 1.15.x) or a component it
+ * retyped as `never` (Forms.FormDivider) builds and ships without a word.
+ * This runs Vencord's own tsc over the build tree with the CURRENT tab copied
+ * in (exactly what brandSettings does) and requires no diagnostic in it.
+ * Skipped when no build tree is there (`pnpm build:mod` makes one).
+ */
+const VENCORD_TREE = join(INSTALLER_DIR, "build", "vencord");
+const VENCORD_TSC = join(VENCORD_TREE, "node_modules", ".bin", "tsc");
+const haveTree = existsSync(VENCORD_TSC) && existsSync(join(VENCORD_TREE, "src", "components", "settings", "tabs", "subline"));
+
+describe.skipIf(!haveTree)("the Subline tab against the pinned Vencord", () => {
+    it("has no type errors", () => {
+        const tabSource = join(INSTALLER_DIR, "packaging", "branding", "sublineTab.tsx");
+        const tabInTree = join(VENCORD_TREE, "src", "components", "settings", "tabs", "subline", "index.tsx");
+        copyFileSync(tabSource, tabInTree);
+        const run = spawnSync(VENCORD_TSC, ["--noEmit", "-p", "."], { cwd: VENCORD_TREE, encoding: "utf8" });
+        const tabErrors = `${run.stdout}\n${run.stderr}`
+            .split("\n")
+            .filter(line => line.includes("tabs/subline/"));
+        expect(tabErrors).toEqual([]);
+    }, 120_000);
 });

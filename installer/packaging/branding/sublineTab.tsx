@@ -25,6 +25,7 @@
 
 import { hasAnyVisibleSettings, isSettingHidden } from "@api/PluginManager";
 import { useSettings } from "@api/Settings";
+import { Divider } from "@components/Divider";
 import ErrorBoundary from "@components/ErrorBoundary";
 import { debounce } from "@shared/debounce";
 import { Margins } from "@utils/margins";
@@ -61,6 +62,9 @@ function RestartNotice({ onRestart }: { onRestart: () => void; }) {
         </Forms.FormText>
     );
 }
+
+/** See closePluginSettings below. */
+function closeNothing() { }
 
 function SublineSettings() {
     const plugin: Plugin | undefined = Vencord.Plugins.plugins[PLUGIN_NAME];
@@ -113,6 +117,10 @@ function SublineSettings() {
                     onChange={debounce(onChange)}
                     pluginSettings={pluginSettings}
                     definedSettings={settings}
+                    // A tab, not a modal: there is nothing to close. Vencord's
+                    // PluginModal passes its own onClose here; a COMPONENT
+                    // setting that calls it from this pane does nothing.
+                    closePluginSettings={closeNothing}
                 />
             </ErrorBoundary>
         );
@@ -140,7 +148,8 @@ function SublineSettings() {
                 />
             )}
 
-            <Forms.FormDivider className={Margins.top16} />
+            {/* Vencord's own Divider: Forms.FormDivider is the same component typed as never (a Vesktop compat alias). */}
+            <Divider className={Margins.top16} />
             <Forms.FormText className={Margins.top8} style={{ color: "var(--text-muted)" }}>
                 Subline v{PLUGIN_VERSION} · build {BUILD_ID}
             </Forms.FormText>
