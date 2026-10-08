@@ -1,5 +1,6 @@
 import type { IpcMainInvokeEvent } from "electron";
 
+import { type AppSignals, readAppSignalsSync } from "./appSignals";
 import { translateWithClaude, TRUNCATED_ERROR } from "./engines/claude";
 import { translateWithGemini } from "./engines/gemini";
 import { translateWithGoogle } from "./engines/google";
@@ -450,4 +451,13 @@ export async function readStagedBuildId(_: IpcMainInvokeEvent): Promise<string |
 export async function relayPatchHealth(_: IpcMainInvokeEvent, install: string, json: string): Promise<boolean> {
     if (typeof install !== "string" || typeof json !== "string" || json.length > 8_192) return false;
     return postPatchHealth(install, json, fetch);
+}
+
+/**
+ * What the installed Subline app says about itself (see appSignals.ts): its
+ * version and whether its helper could not repair Discord. Same channel and
+ * same "never throws" contract as `readStagedBuildId`. Read by appNotice.ts.
+ */
+export async function readAppSignals(_: IpcMainInvokeEvent): Promise<AppSignals> {
+    return readAppSignalsSync();
 }

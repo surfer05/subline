@@ -38,6 +38,8 @@ import { productDirFor } from "../bundle/layout.js";
 import { inspectModBundle } from "../bundle/bundle.js";
 import { shippedModDirFor } from "../app/modInstall.js";
 import { shouldRelaunchForNewerBundle } from "../app/relaunch.js";
+import { writeAppVersionFile } from "../app/appVersionFile.js";
+import type { AppVersionWriter } from "../app/appVersionFile.js";
 import { findDiscordProcesses, quitDiscord } from "../app/discordProcess.js";
 import { rememberedResourcesPath, uninstallTargets } from "../patcher/locate.js";
 import type { DiscordInstall } from "../patcher/locate.js";
@@ -129,6 +131,26 @@ const RELEASE_MANIFEST_URL: string | null = releaseManifestUrl();
 const isHelperRun = process.argv.includes(HELPER_FLAG);
 
 /**
+ * Record which app version is installed, for the plugin (app/appVersionFile.ts).
+ * Every app launch and every helper run. A failure is logged with its cause and
+ * never stops either; a helper run logs only the failure, so an idle run stays
+ * one line.
+ */
+function recordAppVersion(writtenBy: AppVersionWriter): void {
+    const written = writeAppVersionFile(productDirFor(), app.getVersion(), writtenBy);
+    if (!written.ok) {
+        log.warn("app-version.write-failed", {
+            writtenBy,
+            code: written.error.code,
+            path: written.error.path ?? null,
+            cause: written.error.cause ?? null
+        });
+    } else if (writtenBy === "app") {
+        log.info("app-version.written", { version: app.getVersion(), path: written.value });
+    }
+}
+
+/**
  * The Start Menu shortcut, self-healed on every app launch.
  *
  * Observed 2026-09-03: after a full install cycle, Windows search could not
@@ -158,6 +180,9 @@ if (isHelperRun) {
     // No window, no dock icon, no IPC. Run once, write the log, exit.
     app.dock?.hide();
     void (async () => {
+        // First, before anything that can fail, so the plugin sees this
+        // helper's version even on a run that crashes later.
+        recordAppVersion("helper");
         // HELD BACK until the run is over. Since 0.2.1 the helper runs far more
         // often (launchd WatchPaths on macOS, every 5 minutes on Windows), and
         // nearly every run finds nothing to do: such a run writes ONE line
@@ -323,6 +348,8 @@ if (!isHelperRun) app.whenReady().then(() => {
         arch: process.arch,
             originalFs: usingOriginalFs
     });
+
+    recordAppVersion("app");
 
     startedWithBuildId = modBuildIdOnDisk();
 

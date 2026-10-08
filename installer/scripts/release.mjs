@@ -83,6 +83,7 @@ import {
 } from "../packaging/manifest.ts";
 import { isNotarizationRequested, notarizeAndStaple, NOTARIZE_FLAG_VAR } from "../packaging/notarize.ts";
 import { removeUnpackedOutputs } from "../packaging/unpacked.ts";
+import { minAppVersionProblem } from "../packaging/minAppVersion.ts";
 
 /**
  * The env var `electron-builder.js` reads to decide whether to sign at all.
@@ -186,6 +187,10 @@ async function main() {
     }
     say(`   commit ${capture("git", ["rev-parse", "HEAD"])}`);
     sh("node", [join(REPO_ROOT, "scripts", "stampBuild.mjs"), "--check"], REPO_ROOT);
+    // An app below the plugin's MIN_APP_VERSION would tell every user to
+    // download it again (packaging/minAppVersion.ts).
+    const minProblem = minAppVersionProblem(version, REPO_ROOT);
+    if (minProblem !== null) fail(minProblem);
 
     if (!options.skipTests) {
         sh("pnpm", ["typecheck"]);
