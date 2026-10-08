@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { PLUGIN_SETTINGS_KEY } from "../src/app/language.js";
+import { PLUGIN_SETTINGS_KEY, readInstallId, readPriorUse, readSublineCode } from "../src/app/language.js";
 import { removePluginSettings, uninstall } from "../src/app/uninstall.js";
 import type { HelperRemoval, UninstallPorts, UninstallSystemPorts } from "../src/app/uninstall.js";
 import { manifestPathFor } from "../src/bundle/spec.js";
@@ -564,11 +564,56 @@ describe("removePluginSettings", () => {
         expect(written.autoUpdate).toBe(false);
     });
 
-    it("removing settings also removes the install id and any code, so a reinstall starts clean", async () => {
-        writeSettings({ plugins: { [PLUGIN_SETTINGS_KEY]: { installId: "0".repeat(32), sublineCode: "", clearedPurchaseCode: "LICENSE-OLD" } } });
-        removePluginSettings(settingsPath);
+    // Owner decision (audit 2026-10-06 #38): the install id is never removed.
+    // The relay ties the purchase and a computer slot to it; a reinstall is
+    // recognised by it and the plan comes back without a code.
+    it("removing settings keeps the install id (and a cleared code), and removes the code and everything else", async () => {
+        writeSettings({
+            plugins: {
+                [PLUGIN_SETTINGS_KEY]: {
+                    enabled: true, installId: "0".repeat(32), sublineCode: "slp_paid", engine: "relay",
+                    targetLang: "tr", clearedPurchaseCode: "LICENSE-OLD"
+                }
+            }
+        });
+        const result = removePluginSettings(settingsPath);
+        expect(result).toEqual({ ok: true, value: true });
+        const written = JSON.parse(readFileSync(settingsPath, "utf8"));
+        expect(written.plugins[PLUGIN_SETTINGS_KEY]).toEqual({ installId: "0".repeat(32), clearedPurchaseCode: "LICENSE-OLD" });
+    });
+
+    it("an id-only block is left as it is and reports nothing removed", async () => {
+        writeSettings({ plugins: { [PLUGIN_SETTINGS_KEY]: { installId: "a".repeat(32) } } });
+        const before = readFileSync(settingsPath, "utf8");
+        expect(removePluginSettings(settingsPath)).toEqual({ ok: true, value: false });
+        expect(readFileSync(settingsPath, "utf8")).toBe(before);
+    });
+
+    it("a malformed install id is not kept: with nothing else to keep, the key goes", async () => {
+        writeSettings({ plugins: { [PLUGIN_SETTINGS_KEY]: { installId: "not-an-id", sublineCode: "slp_x", clearedPurchaseCode: "  " } } });
+        expect(removePluginSettings(settingsPath)).toEqual({ ok: true, value: true });
         const written = JSON.parse(readFileSync(settingsPath, "utf8"));
         expect(written.plugins[PLUGIN_SETTINGS_KEY]).toBeUndefined();
+    });
+
+    it("an uninstall with the box ticked keeps the install id, and removes the code and the product folder", async () => {
+        writeSettings({ plugins: { [PLUGIN_SETTINGS_KEY]: { installId: "b".repeat(32), sublineCode: "slp_paid", targetLang: "tr" } } });
+        const report = await uninstall(ports(), { installs: [INSTALL], keepSettings: false });
+        expect(report.clean).toBe(true);
+        expect(report.settingsRemoved).toBe(true);
+        expect(report.productDataRemoved).toBe(true);
+        expect(readInstallId(settingsPath)).toBe("b".repeat(32));
+        expect(readSublineCode(settingsPath)).toBeNull();
+        expect(readPriorUse(settingsPath)).toBe(false);
+        expect(report.summary).not.toMatch(/forgot|forget/i);
+    });
+
+    it("an uninstall with the box unticked leaves the settings file byte for byte", async () => {
+        writeSettings({ plugins: { [PLUGIN_SETTINGS_KEY]: { installId: "b".repeat(32), sublineCode: "slp_paid", targetLang: "tr" } } });
+        const before = readFileSync(settingsPath, "utf8");
+        const report = await uninstall(ports(), { installs: [INSTALL], keepSettings: true });
+        expect(report.settingsRemoved).toBe(false);
+        expect(readFileSync(settingsPath, "utf8")).toBe(before);
     });
 
     it("never deletes the settings file itself", async () => {

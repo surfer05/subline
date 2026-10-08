@@ -44,7 +44,7 @@ A fresh Discord install does not prove this. Wait for the next real Discord upda
 1. Open the Subline app, Uninstall. With Discord open, the first screen offers to quit it.
 2. Keep "Also remove my settings and code" unticked. Remove. Discord opens without Subline.
 3. Reinstall from the site. No activation screen; the same code and plan are back.
-4. Uninstall again with the box ticked. Reinstall: the activation screen shows.
+4. Uninstall again with the box ticked. Reinstall: your plan comes back by itself (this computer is remembered). On a computer that never had Subline, the activation screen shows.
 
 ## G. After release
 - The daily patch check on GitHub is green.

@@ -218,7 +218,13 @@ describe("the install id in Vencord's settings", () => {
         expect(readPriorUse(path)).toBe(true);
         writeFileSync(path, JSON.stringify({ plugins: { VcTranslate: { targetLang: "tr" } } }));
         expect(readPriorUse(path)).toBe(true);
+        // What an uninstall with "Also remove my settings and code" leaves (the
+        // install id and a cleared code) is not use: a fresh install again.
         writeFileSync(path, JSON.stringify({ plugins: { VcTranslate: { clearedPurchaseCode: "X" } } }));
+        expect(readPriorUse(path)).toBe(false);
+        writeFileSync(path, JSON.stringify({ plugins: { VcTranslate: { installId: ID, clearedPurchaseCode: "X" } } }));
+        expect(readPriorUse(path)).toBe(false);
+        writeFileSync(path, JSON.stringify({ plugins: { VcTranslate: { installId: ID, clearedPurchaseCode: "X", targetLang: "tr" } } }));
         expect(readPriorUse(path)).toBe(true);
         writeFileSync(path, JSON.stringify({ plugins: { Other: { targetLang: "tr" } } }));
         expect(readPriorUse(path)).toBe(false);

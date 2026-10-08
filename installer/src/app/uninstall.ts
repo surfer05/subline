@@ -46,7 +46,8 @@ import type { DiscordBranch, DiscordInstall } from "../patcher/locate.js";
 import type { UnpatchReport } from "../patcher/patch.js";
 import type { PatcherError, Result } from "../patcher/result.js";
 import { err, fsError, ok } from "../patcher/result.js";
-import { PLUGIN_SETTINGS_KEY } from "./language.js";
+import { isInstallId } from "./activation.js";
+import { CLEARED_CODE_KEY, INSTALL_ID_KEY, PLUGIN_SETTINGS_KEY } from "./language.js";
 import { UNINSTALL_COPY, discordRunningSummary, helperStopFailedSummary } from "./uninstallScreen.js";
 
 export interface UninstallPorts {
@@ -215,9 +216,10 @@ export function refusedReport(problems: PatcherError[], summary: string): Uninst
 }
 
 /**
- * Remove our plugin's settings from Vencord's `settings.json`.
+ * Remove our plugin's settings from Vencord's `settings.json`, all but the install id
+ * (and a cleared code, see below).
  *
- * Removes ONE KEY. Deleting the file would take every other plugin's settings
+ * Touches ONE KEY. Deleting the file would take every other plugin's settings
  * with it, and a user who had Vencord before us keeps their setup on the way out
  * exactly as they kept it on the way in.
  */
@@ -247,7 +249,32 @@ export function removePluginSettings(settingsPath: string | null): Result<boolea
     if (typeof plugins !== "object" || plugins === null || Array.isArray(plugins)) return ok(false);
     const table = plugins as Record<string, unknown>;
     if (!(PLUGIN_SETTINGS_KEY in table)) return ok(false);
-    delete table[PLUGIN_SETTINGS_KEY];
+
+    // THE INSTALL ID STAYS (owner decision, audit 2026-10-06 #38). The relay
+    // ties a purchase and one of the account's three computer slots to it, so
+    // deleting it made every reinstall a new computer: a paying user who
+    // uninstalled with the box ticked a few times was locked out for 30 days.
+    // Kept, a reinstall is recognised and the plan comes back by itself. It is
+    // 16 random bytes tied to nothing else, so keeping it costs nothing.
+    // `clearedPurchaseCode` stays with it: it is the reader's own "do not bring
+    // this code back" (flow.ts checkSavedInstall), and the kept id is exactly
+    // what lets the relay offer that code again. Everything else goes: the
+    // code, the language, the engine. readPriorUse ignores both kept keys, so
+    // the reinstall is a fresh install again (language asked, paid gate).
+    const block = table[PLUGIN_SETTINGS_KEY];
+    const kept: Record<string, unknown> = {};
+    let removedSomething = true;
+    if (typeof block === "object" && block !== null && !Array.isArray(block)) {
+        const entries = block as Record<string, unknown>;
+        if (isInstallId(entries[INSTALL_ID_KEY])) kept[INSTALL_ID_KEY] = entries[INSTALL_ID_KEY];
+        const cleared = entries[CLEARED_CODE_KEY];
+        if (typeof cleared === "string" && cleared.trim() !== "") kept[CLEARED_CODE_KEY] = cleared;
+        removedSomething = Object.keys(entries).some(key => !(key in kept));
+    }
+    // Only what is kept was there: nothing to remove, and nothing to rewrite.
+    if (!removedSomething) return ok(false);
+    if (Object.keys(kept).length === 0) delete table[PLUGIN_SETTINGS_KEY];
+    else table[PLUGIN_SETTINGS_KEY] = kept;
 
     try {
         const temp = `${settingsPath}.subline-tmp`;

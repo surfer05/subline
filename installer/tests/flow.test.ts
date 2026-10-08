@@ -5,6 +5,9 @@
  * because the happy path is the one thing that gets exercised by hand anyway.
  */
 
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { CheckoutAnswer, RedeemAnswer, StatusAnswer } from "../src/app/activation.js";
@@ -12,6 +15,8 @@ import type { AppManagementStatus } from "../src/app/appManagement.js";
 import { ACTION_LABELS, IS_PRIMARY } from "../src/app/actions.js";
 import { CODE_SCREEN_COPY, RESET_HELP_URL } from "../src/app/codeScreen.js";
 import { InstallFlow, isConfirmedSuccess } from "../src/app/flow.js";
+import { PLUGIN_SETTINGS_KEY, readClearedCode, readInstallId, readPriorUse, readSublineCode } from "../src/app/language.js";
+import { removePluginSettings } from "../src/app/uninstall.js";
 import type { FlowPorts, FlowState, FlowStep, HelperEnsureReport, HelperInstallOutcome } from "../src/app/flow.js";
 import type { InstalledModBundle } from "../src/app/modInstall.js";
 import type { ModBundle } from "../src/bundle/bundle.js";
@@ -1739,6 +1744,53 @@ describe("the activation screen (paid only)", () => {
         expect(seen).not.toContain("choose-code");
         expect(h.codeWrites).toEqual(["slp_early"]);
         expect(next.step).toBe("done");
+    });
+
+    // Owner decision (audit 2026-10-06 #38): "Also remove my settings and code"
+    // keeps the install id, so a reinstall is this computer again. The settings
+    // file is the real one the uninstall left, read by the real readers.
+    describe("a reinstall after an uninstall with the box ticked", () => {
+        const ID = "fedcba9876543210fedcba9876543210";
+        function afterTickedRemoval(): string {
+            const dir = mkdtempSync(join(tmpdir(), "subline-flow-reinstall-"));
+            const path = join(dir, "settings.json");
+            writeFileSync(path, JSON.stringify({ plugins: { [PLUGIN_SETTINGS_KEY]: {
+                enabled: true, installId: ID, sublineCode: "slp_paid", engine: "relay", targetLang: "tr"
+            } } }));
+            const removed = removePluginSettings(path);
+            expect(removed).toEqual({ ok: true, value: true });
+            return path;
+        }
+        const fromFile = (path: string) => ({
+            savedInstallId: readInstallId(path),
+            savedCode: readSublineCode(path),
+            clearedCode: readClearedCode(path),
+            priorUse: readPriorUse(path)
+        });
+
+        it("is recognised: the relay says entitled, so no activation screen and no new install id", async () => {
+            const path = afterTickedRemoval();
+            const h = harness({ ...fromFile(path), relayStatus: { kind: "ok", automatic: true, ai: false, code: "slp_paid" } });
+            const seen: string[] = [];
+            h.flow.onChange = st => seen.push(st.step);
+            await toDetection(h);
+            // A fresh install again: the language is asked (it was removed).
+            const next = await h.flow.send({ type: "set-language", code: "tr" });
+            expect(h.relayCalls[0]).toEqual({ kind: "status", credential: `free_${ID}`, installId: ID });
+            expect(seen).not.toContain("choose-code");
+            expect(h.installIdWrites).toBe(0);
+            expect(h.codeWrites).toEqual(["slp_paid"]);
+            expect(next.step).toBe("done");
+        });
+
+        it("still shows the activation screen when the relay does not know the install as entitled", async () => {
+            const path = afterTickedRemoval();
+            const h = harness({ ...fromFile(path), relayStatus: { kind: "ok", automatic: false, ai: false, code: null } });
+            await toDetection(h);
+            const next = await h.flow.send({ type: "set-language", code: "tr" });
+            expect(next.step).toBe("choose-code");
+            expect(h.patchCalls).toHaveLength(0);
+        });
     });
 
     it("a reinstall never brings back a code the reader cleared, and shows the activation screen", async () => {

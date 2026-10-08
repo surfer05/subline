@@ -596,7 +596,7 @@ export function readClearedCode(settingsPath: string | null): string | null {
  * Whether Vencord's settings show that Subline was used on this computer
  * before: the `plugins.VcTranslate` block holds anything besides the install
  * id. The plugin writes its settings there as soon as it runs (a reading
- * language, a trial start, a code, a cleared code...), and the installer
+ * language, a trial start, a code...), and the installer
  * itself writes nothing but the install id before activation (the reading
  * language is saved only once the install is activated), so an abandoned
  * first run does not count.
@@ -616,7 +616,10 @@ export function readPriorUse(settingsPath: string | null): boolean {
         const block = plugin as Record<string, unknown>;
         const started = block.freeTrialStartedAt;
         if (typeof started === "number" && started > 0) return true;
-        return Object.keys(block).some(key => key !== INSTALL_ID_KEY);
+        // The two keys an uninstall with "Also remove my settings and code" keeps
+        // (uninstall.ts removePluginSettings) are not use: that machine is a
+        // fresh install again, recognised by the relay through the kept id.
+        return Object.keys(block).some(key => key !== INSTALL_ID_KEY && key !== CLEARED_CODE_KEY);
     } catch {
         return false;
     }
