@@ -12,7 +12,10 @@
  *  - Never blocks translation. This only ever shows a notice.
  *  - Once per mod version. Recorded BEFORE it is shown, so a Discord restart,
  *    an ignored notice or a crash never shows it twice. A later mod version
- *    shows it again only if the app is still old (or still cannot repair).
+ *    shows it again only if the app is still old.
+ *  - Only the app version decides. A "could not repair" alert in alerts.json
+ *    can outlive the fix (the app's install flow does not clear it), and this
+ *    mod running at all shows Discord is patched. It is logged, never shown.
  *  - Only on a Subline-managed install (signals.managed). A Vencord-only or
  *    hand-built install has no Subline app to update.
  *
@@ -69,7 +72,7 @@ export function shouldShowAppNotice(
 ): boolean {
     if (!signals.managed) return false;
     if (lastShownFor === modVersion) return false;
-    return appTooOld(signals.appVersion, min) || signals.cannotRepair;
+    return appTooOld(signals.appVersion, min);
 }
 
 export interface AppNoticeDeps {

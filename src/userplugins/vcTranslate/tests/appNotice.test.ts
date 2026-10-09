@@ -117,10 +117,11 @@ describe("the decision", () => {
     it("never on an install Subline does not manage", () => {
         expect(shouldShowAppNotice(sig({ managed: false, appVersion: null, cannotRepair: true }), "0.2.3", undefined)).toBe(false);
     });
-    it("shows for an old app, or a helper that could not repair", () => {
+    it("shows for an old app only; a stale repair alert on a current app does not show it", () => {
         expect(shouldShowAppNotice(sig({ appVersion: null }), "0.2.3", undefined)).toBe(true);
         expect(shouldShowAppNotice(sig({ appVersion: "0.1.3" }), "0.2.3", undefined)).toBe(true);
-        expect(shouldShowAppNotice(sig({ cannotRepair: true }), "0.2.3", undefined)).toBe(true);
+        expect(shouldShowAppNotice(sig({ appVersion: "0.1.3", cannotRepair: true }), "0.2.3", undefined)).toBe(true);
+        expect(shouldShowAppNotice(sig({ cannotRepair: true }), "0.2.3", undefined)).toBe(false);
         expect(shouldShowAppNotice(sig({}), "0.2.3", undefined)).toBe(false);
     });
 });
@@ -163,7 +164,7 @@ describe("checkAppNotice, start to start", () => {
         expect(await startOnce(store)).toBe(0);
     });
 
-    it("new app, but the helper could not repair after a Discord update: the notice shows", async () => {
+    it("new app with a stale 'could not repair' alert: no notice, and the once-mark is not spent", async () => {
         stageMod();
         writeFileSync(join(dir, "app-version.json"), JSON.stringify({ appVersion: "0.2.3" }));
         writeFileSync(join(dir, "alerts.json"), JSON.stringify({
@@ -171,8 +172,8 @@ describe("checkAppNotice, start to start", () => {
             alerts: [{ code: "repatch-failed", firstAt: 1, lastNotifiedAt: 1, count: 2 }]
         }));
         const store = memoryStore();
-        expect(await startOnce(store)).toBe(1);
         expect(await startOnce(store)).toBe(0);
+        expect(store.mem.has(APP_NOTICE_SHOWN_KEY)).toBe(false);
     });
 
     it("a hand-built install (no staged mod) is never told to download", async () => {

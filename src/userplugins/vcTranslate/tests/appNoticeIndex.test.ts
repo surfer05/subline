@@ -110,11 +110,12 @@ describe("the app-too-old notice in Discord", () => {
         expect(mine()).toHaveLength(0);
     });
 
-    it("the helper could not repair: the notice shows even on a new app", async () => {
+    it("a stale 'could not repair' alert on a new app: no notice, and the once-mark is not spent", async () => {
         native.readAppSignals.mockResolvedValue({ managed: true, appVersion: "0.2.3", cannotRepair: true });
         await plugin.start!();
         await flush();
-        expect(mine()).toHaveLength(1);
+        expect(mine()).toHaveLength(0);
+        expect(await DataStore.get(APP_NOTICE_SHOWN_KEY)).toBeUndefined();
     });
 
     it("a bridge without the reader (an older main process) shows nothing and start() still succeeds", async () => {
