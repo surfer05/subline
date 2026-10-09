@@ -27,9 +27,11 @@ export function clipParentText(text: string): string {
 /**
  * After a split: a reply whose parent went to ANOTHER part would lose its
  * link (the batcher dropped the parent's copy because the parent was in the
- * batch). Give it a clipped copy of the parent instead.
+ * batch). Give it a clipped copy of the parent instead. The same holds when
+ * the parent was taken out to be sent in parts (runLongMessage): the relay
+ * sees only "<id>~p<n>" rows and would say the parent is not shown.
  */
-function withParentCopies(part: BatchRequest["messages"], all: BatchRequest["messages"]): BatchRequest["messages"] {
+export function withParentCopies(part: BatchRequest["messages"], all: BatchRequest["messages"]): BatchRequest["messages"] {
     return part.map(m => {
         if (m.replyToId === undefined || m.replyTo !== undefined) return m;
         if (part.some(x => x.id === m.replyToId)) return m;

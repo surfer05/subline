@@ -135,6 +135,20 @@ describe("G2: an AI subscriber and a message over the relay's per-text limit", (
         expect(getTranslation(makeKey("m1", "en"))).toMatchObject({ via: "relay", text: "<m1~p0>\n\n<m1~p1>" });
     });
 
+    it("a reply to a long message in the same batch keeps a clipped copy of its parent", async () => {
+        await startAi();
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("m1", LONG) });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: { ...msg("m2", "Stimmt, es regnet seit Tagen."), message_reference: { message_id: "m1" } } });
+        await advance(30_000);
+        const sent = native.translateBatch.mock.calls.filter(c => c[0] === "relay").flatMap(c => JSON.parse(c[2]).messages as any[]);
+        const reply = sent.find(m => m.id === "m2");
+        expect(reply).toBeDefined();
+        expect(reply.replyToId).toBe("m1");
+        expect(reply.replyTo).toMatchObject({ author: "ana" });
+        expect(LONG.startsWith(String(reply.replyTo.text).replace(/…$/, ""))).toBe(true);
+        expect(Array.from(reply.replyTo.text as string).length).toBeLessThanOrEqual(201);
+    });
+
     it("a failed part keeps the ≈ line of the whole text: no partial ✦", async () => {
         await startAi();
         failParts.add("m1~p1");

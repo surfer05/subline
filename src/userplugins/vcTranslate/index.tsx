@@ -15,7 +15,7 @@ import type { Message } from "@vencord/discord-types";
 
 import { CONTEXT_RING_SIZE, createBatcher, type Batcher } from "./batcher";
 import { forgetNotices, putNotice, takeNotice } from "./sublineNotice";
-import { clipParentText, fitLlmRequest, joinParts, LLM_TEXT_MAX, partId, shrinkAfterRefusal, splitTextToLimit } from "./fitRequest";
+import { clipParentText, fitLlmRequest, joinParts, LLM_TEXT_MAX, partId, shrinkAfterRefusal, splitTextToLimit, withParentCopies } from "./fitRequest";
 import { cleanTranslation, dropCustomEmoji } from "./customEmoji";
 import { renderDiscordMarkup, type MarkupResolvers } from "./discordMarkup";
 import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel, toggleChannelOptOut } from "./channels";
@@ -2297,7 +2297,9 @@ async function runTier(
             if (sink === undefined) {
                 const long = req.messages.filter(m => m.text.length > LLM_TEXT_MAX);
                 if (long.length > 0) {
-                    req = { ...req, messages: req.messages.filter(m => m.text.length <= LLM_TEXT_MAX) };
+                    // A reply to a long message keeps its parent: as a clipped
+                    // copy, since the parent goes out as "<id>~p<n>" rows.
+                    req = { ...req, messages: withParentCopies(req.messages.filter(m => m.text.length <= LLM_TEXT_MAX), req.messages) };
                     for (const m of long) await runLongMessage(engine, m, req, myGeneration, channelId, report, sentEpoch);
                 }
             }
