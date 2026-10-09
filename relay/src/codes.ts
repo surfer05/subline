@@ -768,6 +768,7 @@ export async function refundGroup(
             body: JSON.stringify({
                 day: dayRowKey(code, now), charge: parts.charge, group: parts.group,
                 ...(parts.chars ? { chars: parts.chars } : {}),
+                ...(parts.shown ? { shown: parts.shown } : {}),
                 ...(parts.refunds ? { refunds: parts.refunds, maxRefunds: parts.maxRefunds ?? 0 } : {}),
                 rows: [...new Set(parts.keys)].map(key => ({ key, sub: 1 }))
             })

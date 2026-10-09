@@ -803,6 +803,59 @@ describe("long messages sent in parts: one preview per message (plugin 1d52243, 
         expect(counts.slice(PREVIEW_GROUP_REFUNDS)).toEqual([1, 2, 3]);
     });
 
+    /** Use up the day's capped part-group refunds with the abuse loop (p0 shown, junk p1 fails). */
+    async function useCappedRefunds(e: Env) {
+        for (let i = 0; i < PREVIEW_GROUP_REFUNDS; i++) {
+            model([`g${i}~p1`]);
+            expect((await send(e, [{ id: `g${i}~p0`, text: `real text ${i}` }])).status).toBe(200);
+            await send(e, [{ id: `g${i}~p1`, text: `junk ${i}` }]);
+        }
+        await new Promise(res => setTimeout(res, 0));
+        expect(await used(e)).toBe(0);
+    }
+
+    it("a failed part of a message never shown, after the capped refunds are used, is still given back", async () => {
+        const e = await owner();
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        await useCappedRefunds(e);
+        model(["out~p1"]);
+        const r = await send(e, parts("out"));
+        expect(r.status).toBe(200);
+        expect(r.body.results.every((x: any) => x.failed === true)).toBe(true);
+        expect(r.body.used).toBe(0);
+        expect(await used(e)).toBe(0);
+        // The retry once the model is back costs the message exactly 1.
+        model();
+        expect((await send(e, parts("out"))).body.used).toBe(1);
+        expect(await used(e)).toBe(1);
+    });
+
+    it("an upstream throw (catch path) after the capped refunds are used is still given back", async () => {
+        const e = await owner();
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        await useCappedRefunds(e);
+        vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("upstream down"); }));
+        const r = await send(e, parts("out"));
+        expect(r.status).not.toBe(200);
+        await new Promise(res => setTimeout(res, 0));
+        expect(await used(e)).toBe(0);
+        model();
+        expect((await send(e, parts("out"))).body.used).toBe(1);
+        expect(await used(e)).toBe(1);
+    });
+
+    it("a part that fails after an earlier part of the SAME message was shown stays capped", async () => {
+        const e = await owner();
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        await useCappedRefunds(e);
+        model(["h~p1"]);
+        expect((await send(e, [{ id: "h~p0", text: "shown text" }])).body.used).toBe(1);
+        expect((await send(e, [{ id: "h~p1", text: "junk" }])).status).not.toBe(200);
+        await new Promise(res => setTimeout(res, 0));
+        expect(await used(e)).toBe(1);
+    });
+
     it("a preview row with empty text is refused before any spend", async () => {
         const e = await owner();
         const m = model();

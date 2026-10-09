@@ -588,9 +588,11 @@ export const PREVIEW_MAX_PARTS = 32;
  */
 export const PREVIEW_PART_UNIT = 2 * MAX_TEXT_CHARS;
 
-/** Part-group refunds an account may have in a day (budget.ts /refund-group).
- *  A failed part is rare for an honest message; past this, the retry of the
- *  same parts is still free under the repeat rule. */
+/** Part-group refunds an account may have in a day (budget.ts /refund-group),
+ *  counted only for a message some part of which may have been shown (its
+ *  `shown` row): a message nothing of which was shown (an upstream outage) is
+ *  always given back. A failed part is rare for an honest message; past this,
+ *  the retry of the same parts is still free under the repeat rule. */
 export const PREVIEW_GROUP_REFUNDS = 3;
 
 /**
@@ -660,6 +662,7 @@ export async function previewPlan(acctId: string, norm: NormalizedBatch, now: nu
             parts: {
                 group: dayRowKey(`pvg:${acctId}:${g}`, now), charge: dayRowKey(`pvc:${acctId}:${g}`, now),
                 chars: dayRowKey(`pvs:${acctId}:${g}`, now), sizes, unit: PREVIEW_PART_UNIT,
+                shown: dayRowKey(`pvh:${acctId}:${g}`, now),
                 keys, maxFree: PREVIEW_FREE_REPEATS, maxNew: PREVIEW_MAX_PARTS,
                 refunds: dayRowKey(`pvr:${acctId}`, now), maxRefunds: PREVIEW_GROUP_REFUNDS
             }

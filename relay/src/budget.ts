@@ -85,10 +85,19 @@ export interface ReserveReq {
      * (`sizes[i]` is the length of `keys[i]`'s text, `chars` the group's
      * running total). One honest long message (up to `unit` characters) still
      * costs 1; 32 unrelated 4,000-character texts under one id cost 16.
+     *
+     * SHOWN (`shown`). A row per message, never reset by /refund-group: each
+     * reserve adds 1 and each refund of a request takes its own 1 back, so it
+     * stays above 0 while a request of the message is in flight or one has
+     * returned translated text (that request was never refunded). /refund-group
+     * caps only a message whose row is still above 0 after taking this
+     * request's 1 back; a message nothing of which can have been shown is
+     * given back in full, outside the cap. A refund that never arrives leaves
+     * the row up, so the message stays capped (the safe side).
      */
     parts?: {
         group: string; charge: string; keys: string[]; maxFree: number; maxNew: number;
-        chars?: string; sizes?: number[]; unit?: number;
+        chars?: string; sizes?: number[]; unit?: number; shown?: string;
     };
 }
 
@@ -162,6 +171,7 @@ export function applyReserve(st: CounterState, r: ReserveReq): ReserveRes {
         st.counters.set(p.charge, (st.counters.get(p.charge) ?? 0) + dayAdd);
         // A fresh charge (a new group) covers the whole request's text.
         if (sized) st.counters.set(p.chars!, group === 0 ? reqChars : charsBefore + newChars);
+        if (p.shown) st.counters.set(p.shown, (st.counters.get(p.shown) ?? 0) + 1);
     }
     if (r.month) st.counters.set(r.month.key, monthUsed! + r.month.add);
     if (r.rpm) st.rpm.set(r.rpm.key, (st.rpm.get(r.rpm.key) ?? 0) + 1);
@@ -247,7 +257,7 @@ export class Budget {
         if (path === "/reserve") {
             const r = await req.json() as ReserveReq;
             const now = typeof r.now === "number" ? r.now : Date.now();
-            await this.load([r.day?.key, r.month?.key, r.once?.key, r.parts?.group, r.parts?.charge, r.parts?.chars, ...(r.parts?.keys ?? [])]
+            await this.load([r.day?.key, r.month?.key, r.once?.key, r.parts?.group, r.parts?.charge, r.parts?.chars, r.parts?.shown, ...(r.parts?.keys ?? [])]
                 .filter((k): k is string => typeof k === "string" && k !== ""), now);
             const minute = Math.floor(now / 60_000);
             if (minute !== this.rpmMinute) { this.st.rpm.clear(); this.rpmMinute = minute; }
@@ -260,7 +270,7 @@ export class Budget {
                 if (r.month) rows[r.month.key] = this.st.counters.get(r.month.key)!;
                 if (r.once) rows[r.once.key] = this.st.counters.get(r.once.key)!;
                 if (r.parts) {
-                    for (const k of [r.parts.group, r.parts.charge, ...(r.parts.chars ? [r.parts.chars] : []), ...r.parts.keys]) rows[k] = this.st.counters.get(k)!;
+                    for (const k of [r.parts.group, r.parts.charge, ...(r.parts.chars ? [r.parts.chars] : []), ...(r.parts.shown ? [r.parts.shown] : []), ...r.parts.keys]) rows[k] = this.st.counters.get(k)!;
                 }
                 await this.ctx.storage.put(rows);
                 if (r.day || r.month) await this.ensureAlarm(now);
@@ -300,8 +310,14 @@ export class Budget {
             // then a junk p1" would be free AI text without end. Past the bound
             // nothing changes: the charge stays, and a retry of the same parts
             // is still free under the repeat rule (the group is not reset).
+            //
+            // NOTHING SHOWN, NO CAP (`shown`, see ReserveReq.parts). When no
+            // other request of the message is in flight and none returned text,
+            // the reader has seen nothing of it (an upstream outage): it is
+            // given back in full and does not count toward `maxRefunds`.
+            // Without `shown` every refund is capped (the old rule).
             const r = await req.json() as {
-                day?: unknown; charge?: unknown; group?: unknown; chars?: unknown; refunds?: unknown; maxRefunds?: unknown;
+                day?: unknown; charge?: unknown; group?: unknown; chars?: unknown; refunds?: unknown; maxRefunds?: unknown; shown?: unknown;
                 rows?: { key: string; sub: number }[];
             };
             if (typeof r.day !== "string" || typeof r.charge !== "string" || typeof r.group !== "string") {
@@ -311,19 +327,28 @@ export class Budget {
             const chars = typeof r.chars === "string" ? r.chars : null;
             const refunds = typeof r.refunds === "string" ? r.refunds : null;
             const maxRefunds = typeof r.maxRefunds === "number" ? r.maxRefunds : Infinity;
+            const shown = typeof r.shown === "string" && r.shown !== "" ? r.shown : null;
             const rows = Array.isArray(r.rows) ? r.rows.filter(x => x && typeof x.key === "string" && Number.isFinite(x.sub)) : [];
-            await this.load([day, charge, group, ...(chars ? [chars] : []), ...(refunds ? [refunds] : []), ...rows.map(x => x.key)], Date.now());
-            if (refunds && (this.st.counters.get(refunds) ?? 0) >= maxRefunds) {
+            await this.load([day, charge, group, ...(chars ? [chars] : []), ...(refunds ? [refunds] : []), ...(shown ? [shown] : []), ...rows.map(x => x.key)], Date.now());
+            const put: Record<string, number> = {};
+            const set = (k: string, n: number) => { this.st.counters.set(k, n); put[k] = n; };
+            // This request showed nothing: take its own mark back first.
+            let capped = true;
+            if (shown) {
+                const left = Math.max(0, (this.st.counters.get(shown) ?? 0) - 1);
+                set(shown, left);
+                capped = left > 0;
+            }
+            if (capped && refunds && (this.st.counters.get(refunds) ?? 0) >= maxRefunds) {
+                if (Object.keys(put).length) await this.ctx.storage.put(put);
                 return Response.json({ ok: true, refunded: 0, denied: true });
             }
             const c = this.st.counters.get(charge) ?? 0;
-            const put: Record<string, number> = {};
-            const set = (k: string, n: number) => { this.st.counters.set(k, n); put[k] = n; };
             set(day, Math.max(0, (this.st.counters.get(day) ?? 0) - c));
             set(charge, 0);
             set(group, 0);
             if (chars) set(chars, 0);
-            if (refunds) set(refunds, (this.st.counters.get(refunds) ?? 0) + 1);
+            if (capped && refunds) set(refunds, (this.st.counters.get(refunds) ?? 0) + 1);
             for (const x of rows) set(x.key, Math.max(0, (this.st.counters.get(x.key) ?? 0) - x.sub));
             await this.ctx.storage.put(put);
             return Response.json({ ok: true, refunded: c });
