@@ -162,16 +162,27 @@ interface Dodo {
     grants: Record<string, any[]>;
     list?: any[];
     down?: boolean;
+    /** The deprecated GET /license_keys, per customer. */
+    legacy?: Record<string, any[]>;
+    /** Status GET /license_keys answers with instead (e.g. 500, 410). */
+    legacyStatus?: number;
+    /** Every grants page is full (100 items): an endless list. */
+    endlessGrants?: boolean;
+    /** Each call "takes" this long (the system clock moves on). */
+    callMs?: number;
     calls: string[];
     auth: string[];
+    signals: unknown[];
 }
 let dodo: Dodo;
 function installDodo(d: Partial<Dodo> = {}) {
-    dodo = { payments: {}, grants: {}, calls: [], auth: [], ...d };
+    dodo = { payments: {}, grants: {}, calls: [], auth: [], signals: [], ...d };
     vi.stubGlobal("fetch", vi.fn(async (input: any, init: any) => {
         const u = new URL(String(input));
         dodo.calls.push(u.pathname + u.search);
         dodo.auth.push(String(init?.headers?.authorization ?? ""));
+        dodo.signals.push(init?.signal);
+        if (dodo.callMs) vi.setSystemTime(Date.now() + dodo.callMs);
         if (dodo.down) return new Response("upstream", { status: 503 });
         if ((init?.method ?? "GET") !== "GET") return new Response("no", { status: 405 });
         let m = u.pathname.match(/^\/payments\/([^/]+)$/);
@@ -182,10 +193,16 @@ function installDodo(d: Partial<Dodo> = {}) {
         m = u.pathname.match(/^\/customers\/([^/]+)\/entitlement-grants$/);
         if (m) {
             const page = Number(u.searchParams.get("page_number") ?? 0);
+            if (dodo.endlessGrants) return Response.json({ items: Array.from({ length: 100 }, (_, i) => grant(`LK-FILL-${page}-${i}`, `pay_0TestFill${page}x${i}`)) });
             const items = page === 0 ? dodo.grants[decodeURIComponent(m[1]!)] ?? [] : [];
             return Response.json({ items });
         }
-        if (u.pathname === "/license_keys") return Response.json({ items: [] });
+        if (u.pathname === "/license_keys") {
+            if (dodo.legacyStatus) return new Response("gone", { status: dodo.legacyStatus });
+            const page = Number(u.searchParams.get("page_number") ?? 0);
+            const cid = u.searchParams.get("customer_id") ?? "";
+            return Response.json({ items: page === 0 ? dodo.legacy?.[cid] ?? [] : [] });
+        }
         if (u.pathname === "/payments") {
             const size = Number(u.searchParams.get("page_size") ?? 10);
             const page = Number(u.searchParams.get("page_number") ?? 0);
@@ -277,6 +294,7 @@ describe("arrival order: payment.succeeded first, then license_key.created", () 
         installDodo({ grants: {} });
         await applyMorEvent(e, paymentSucceeded(payment({ metadata: { install: hash } })), NOW);
         expect(kv._dump()[`order:${PAY}`]).toBeUndefined();
+        expect(dodo.calls).toHaveLength(0); // payment.succeeded never asks Dodo
         expect(await purchaseStatus(e, PAY)).toBe("pending");
         // The key lands with no payment id; the grant now names the payment.
         installDodo({ grants: { [CUS]: [grant(KEY, PAY)] } });
@@ -297,20 +315,21 @@ describe("arrival order: payment.succeeded first, then license_key.created", () 
         expect(await purchaseStatus(e, PAY)).toBe("active");
     });
 
-    it("a code already made WITHOUT its index (the live state): payment.succeeded indexes it from Dodo", async () => {
+    it("payment.succeeded never asks Dodo, even for a code made without its index (hot path; backfill and refunds fill it)", async () => {
         const hash = await installHash(FREE);
         installDodo({ grants: { [CUS]: [grant(KEY, PAY)] } });
         const kv = fakeKV({ [`code:${KEY}`]: codeRec({ plan: "automatic", dailyCap: 5, createdAt: NOW }) });
         const e = env(kv);
-        expect(await purchaseStatus(e, PAY)).toBe("unknown");
-        await applyMorEvent(e, paymentSucceeded(payment({ metadata: { install: hash } })), NOW);
-        expect(kv._dump()[`order:${PAY}`]).toBe(KEY);
-        expect(recOf(kv).mor_order_id).toBe(PAY);
-        expect(kv._dump()[`paid:${hash}`]).toBe(KEY);
-        expect(await purchaseStatus(e, PAY)).toBe("active");
+        const r = await applyMorEvent(e, paymentSucceeded(payment({ metadata: { install: hash } })), NOW);
+        expect(r.action).toBe("ignored");
+        expect(dodo.calls).toHaveLength(0);
+        expect(kv._dump()[`order:${PAY}`]).toBeUndefined();
+        // A refund of it still reaches the code (it asks Dodo itself).
+        await applyMorEvent(e, refundSucceeded(), NOW);
+        expect(recOf(kv)).toMatchObject({ status: "revoked", terminal: true });
     });
 
-    it("payment.succeeded for an AI subscription never writes or moves order:<sub_id>", async () => {
+    it("payment.succeeded for an AI subscription never writes or moves an order: row", async () => {
         installDodo({ grants: { [CUS]: [grant(KEY_AI, PAY_AI, SUB)] } });
         const kv = fakeKV({
             [`code:${KEY_AI}`]: codeRec({ plan: "monthly", dailyCap: 2000, mor_subscription_id: SUB, orderRef: SUB, expiresAt: NOW + 30 * 86_400_000 }),
@@ -318,8 +337,8 @@ describe("arrival order: payment.succeeded first, then license_key.created", () 
         });
         await applyMorEvent(env(kv), paymentSucceeded(payment({ payment_id: PAY_AI, subscription_id: SUB, product_cart: [{ product_id: MONTH, quantity: 1 }] })), NOW);
         expect(kv._dump()[`order:${SUB}`]).toBe(KEY_AI);
-        expect(kv._dump()[`order:${PAY_AI}`]).toBe(KEY_AI);
-        expect(recOf(kv, KEY_AI)).toMatchObject({ orderRef: SUB, mor_subscription_id: SUB, mor_order_id: PAY_AI });
+        expect(kv._dump()[`order:${PAY_AI}`]).toBeUndefined();
+        expect(dodo.calls).toHaveLength(0);
     });
 });
 
@@ -506,5 +525,195 @@ describe("POST /admin/backfill-orders", () => {
         const res = await worker.fetch(admin({ apply: true }), env(kv), ctx);
         expect(res.status).toBe(503);
         expect(JSON.stringify(kv._dump())).toBe(before);
+    });
+});
+
+// ===========================================================================
+describe("worst cases (review of the missing-index fallback)", () => {
+    const seedUnindexed = (extra: Record<string, string> = {}) =>
+        fakeKV({ [`code:${KEY}`]: codeRec({ plan: "automatic", dailyCap: 5, createdAt: NOW }), ...extra });
+
+    it("every Dodo GET carries a timeout signal", async () => {
+        installDodo({ payments: { [PAY]: payment() }, grants: { [CUS]: [grant(KEY, PAY)] } });
+        await applyMorEvent(env(seedUnindexed()), disputeLost(), NOW);
+        expect(dodo.signals.length).toBeGreaterThan(0);
+        for (const s of dodo.signals) expect(s).toBeInstanceOf(AbortSignal);
+    });
+
+    it("a slow Dodo: the look-up stops at its time budget, the refund is staged and retried (500), never concluded", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(NOW);
+        try {
+            installDodo({ grants: { [CUS]: [] }, callMs: 11_000, legacy: { [CUS]: [{ key: KEY, id: "lic_x", payment_id: PAY }] } });
+            const kv = seedUnindexed();
+            await expect(applyMorEvent(env(kv), refundSucceeded(), NOW)).rejects.toThrow();
+            expect(dodo.calls).toHaveLength(1); // the key list is not asked past the budget
+            expect(kv._dump()[`pending:${PAY}`]).toBeDefined();
+        } finally { vi.useRealTimers(); }
+    });
+
+    it("an endless grants list is never read as 'no key': unavailable, so license_key.created is retried", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        installDodo({ endlessGrants: true, legacyStatus: 500 });
+        const kv = fakeKV();
+        await expect(applyMorEvent(env(kv), licenseKeyCreated(), NOW)).rejects.toThrow();
+        expect(recOf(kv)).toBeUndefined();
+        expect(dodo.calls.filter(c => c.includes("entitlement-grants")).length).toBeLessThanOrEqual(10);
+    });
+
+    it("a key on the deprecated list only (customer has other grants): the refund still finds and revokes it", async () => {
+        installDodo({
+            grants: { [CUS]: [grant(KEY_AI, PAY_AI, SUB)] },
+            legacy: { [CUS]: [{ key: KEY, id: "lic_0TestKey00000000001", payment_id: PAY, subscription_id: null }] }
+        });
+        const kv = seedUnindexed();
+        await applyMorEvent(env(kv), refundSucceeded(), NOW);
+        expect(recOf(kv)).toMatchObject({ status: "revoked", terminal: true });
+        expect(kv._dump()[`order:${PAY}`]).toBe(KEY);
+        expect(recOf(kv, KEY_AI)).toBeUndefined();
+    });
+
+    it("a renewal refund (no key for that payment) with the deprecated list down: staged, 2xx, no retry loop", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        installDodo({ grants: { [CUS]: [grant(KEY_AI, PAY_AI, SUB)] }, legacyStatus: 500 });
+        const kv = fakeKV({
+            [`code:${KEY_AI}`]: codeRec({ plan: "monthly", dailyCap: 2000, mor_subscription_id: SUB, mor_order_id: PAY_AI, orderRef: SUB, expiresAt: NOW + 30 * 86_400_000 }),
+            [`order:${SUB}`]: KEY_AI, [`order:${PAY_AI}`]: KEY_AI
+        });
+        const r = await applyMorEvent(env(kv), refundSucceeded("pay_0TestRenewal00000002"), NOW);
+        expect(r.action).toBe("staged");
+        expect(recOf(kv, KEY_AI).status).toBe("active");
+    });
+
+    it("no grants and the deprecated list down: unavailable, so the refund is retried (500) with the revoke staged", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        installDodo({ grants: { [CUS]: [] }, legacyStatus: 500 });
+        const kv = seedUnindexed();
+        await expect(applyMorEvent(env(kv), refundSucceeded(), NOW)).rejects.toThrow();
+        expect(kv._dump()[`pending:${PAY}`]).toBeDefined();
+        expect(recOf(kv).status).toBe("active");
+    });
+
+    it("refund pending / failed / partial and open or won disputes never ask Dodo and never revoke", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        installDodo({ payments: { [PAY]: payment() }, grants: { [CUS]: [grant(KEY, PAY)] } });
+        const kv = seedUnindexed();
+        const e = env(kv);
+        for (const evt of [
+            refundSucceeded(PAY, { status: "pending" }), refundSucceeded(PAY, { status: "failed" }),
+            refundSucceeded(PAY, { status: "review" }), refundSucceeded(PAY, { is_partial: true }),
+            { ...refundSucceeded(), type: "refund.failed" },
+            { ...disputeLost(), type: "dispute.opened" }, { ...disputeLost(), type: "dispute.challenged" },
+            { ...disputeLost(), type: "dispute.won" }, { ...disputeLost(), type: "dispute.cancelled" }, { ...disputeLost(), type: "dispute.expired" }
+        ]) await applyMorEvent(e, evt, NOW);
+        expect(dodo.calls).toHaveLength(0);
+        expect(recOf(kv)).toMatchObject({ status: "active" });
+        expect(recOf(kv).terminal).toBeUndefined();
+        expect(kv._dump()[`order:${PAY}`]).toBeUndefined();
+    });
+
+    it("dispute.accepted on an unindexed code revokes it, like dispute.lost", async () => {
+        installDodo({ payments: { [PAY]: payment() }, grants: { [CUS]: [grant(KEY, PAY)] } });
+        const kv = seedUnindexed();
+        await applyMorEvent(env(kv), { ...disputeLost(), type: "dispute.accepted" }, NOW);
+        expect(recOf(kv)).toMatchObject({ status: "revoked", terminal: true });
+    });
+
+    it("two keys bought by one payment (quantity 2), both unindexed: a full refund revokes both, nothing else", async () => {
+        const KEY2 = "LK-TEST-AUTO-0009";
+        const KEY_OTHER = "LK-TEST-AUTO-0010";
+        installDodo({ grants: { [CUS]: [grant(KEY, PAY), grant(KEY2, PAY), grant(KEY_OTHER, "pay_0TestOtherPurchase001")] } });
+        const kv = fakeKV({
+            [`code:${KEY}`]: codeRec({ plan: "automatic", dailyCap: 5 }),
+            [`code:${KEY2}`]: codeRec({ plan: "automatic", dailyCap: 5 }),
+            [`code:${KEY_OTHER}`]: codeRec({ plan: "automatic", dailyCap: 5 })
+        });
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        await applyMorEvent(env(kv), refundSucceeded(), NOW);
+        expect(recOf(kv)).toMatchObject({ status: "revoked", terminal: true });
+        expect(recOf(kv, KEY2)).toMatchObject({ status: "revoked", terminal: true });
+        expect(recOf(kv, KEY_OTHER)).toMatchObject({ status: "active" });
+        expect(recOf(kv, KEY_OTHER).terminal).toBeUndefined();
+    });
+
+    it("refund replayed after it revoked: idempotent, Dodo not asked again", async () => {
+        installDodo({ grants: { [CUS]: [grant(KEY, PAY, null, "Revoked")] } });
+        const kv = seedUnindexed();
+        await applyMorEvent(env(kv), refundSucceeded(), NOW);
+        const n = dodo.calls.length;
+        const r = await applyMorEvent(env(kv), refundSucceeded(), NOW + 1000);
+        expect(r.action).toBe("terminal_noop");
+        expect(dodo.calls.length).toBe(n);
+        expect(recOf(kv)).toMatchObject({ status: "revoked", terminal: true, revokedAt: NOW });
+    });
+
+    it("license_key.created replayed without payment_id keeps the recorded payment and asks Dodo nothing", async () => {
+        installDodo({ grants: { [CUS]: [grant(KEY, PAY)] } });
+        const kv = fakeKV();
+        await applyMorEvent(env(kv), licenseKeyCreated({ payment_id: PAY }), NOW);
+        installDodo({ down: true });
+        const r = await applyMorEvent(env(kv), licenseKeyCreated(), NOW + 1000);
+        expect(r.action).toBe("created");
+        expect(dodo.calls).toHaveLength(0);
+        expect(recOf(kv)).toMatchObject({ mor_order_id: PAY, orderRef: PAY, status: "active" });
+        expect(kv._dump()[`order:${PAY}`]).toBe(KEY);
+    });
+
+    it("license_key.created with no payment id, a refund staged first, Dodo up: the code is born revoked", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        installDodo({ down: true });
+        const kv = fakeKV();
+        await expect(applyMorEvent(env(kv), refundSucceeded(), NOW)).rejects.toThrow();
+        installDodo({ grants: { [CUS]: [grant(KEY, PAY, null, "Revoked")] } });
+        await applyMorEvent(env(kv), licenseKeyCreated(), NOW);
+        expect(recOf(kv)).toMatchObject({ status: "revoked", terminal: true });
+        expect((await authCode(env(kv), KEY)).ok).toBe(false);
+    });
+
+    it("entitlement_grant: never retargets a row, never claims a code of another payment, ignores other integrations", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const kv = fakeKV({
+            [`code:${KEY}`]: codeRec({ plan: "automatic", dailyCap: 5, mor_order_id: "pay_0TestOtherPayment0001" }),
+            [`code:${KEY2_G}`]: codeRec({ plan: "automatic", dailyCap: 5 }),
+            [`order:${PAY_AI}`]: KEY_AI,
+            [`code:${KEY_AI}`]: codeRec({ plan: "monthly", dailyCap: 2000 })
+        });
+        const ev = (data: any, type = "entitlement_grant.delivered") => ({ business_id: "bus_0TestBusiness000001", type, timestamp: iso(NOW), data });
+        const before = JSON.stringify(kv._dump());
+        expect((await applyMorEvent(env(kv), ev(grant(KEY, PAY)), NOW)).action).toBe("grant_conflict");
+        expect((await applyMorEvent(env(kv), ev(grant(KEY2_G, PAY_AI)), NOW)).action).toBe("grant_conflict");
+        expect((await applyMorEvent(env(kv), ev({ ...grant(KEY2_G, PAY), integration_type: "discord" }), NOW)).action).toBe("ignored");
+        expect((await applyMorEvent(env(kv), ev(grant(KEY2_G, PAY), "entitlement_grant.revoked"), NOW)).action).toBe("ignored");
+        expect(JSON.stringify(kv._dump())).toBe(before);
+        expect(dodo.calls).toHaveLength(0);
+    });
+
+    it("backfill dry run writes nothing, even for a code with a staged refund", async () => {
+        installDodo({
+            list: [payment({ refund_status: "full", has_license_key: true })],
+            grants: { [CUS]: [grant(KEY, PAY, null, "Revoked")] }
+        });
+        const kv = fakeKV({
+            [`code:${KEY}`]: codeRec({ plan: "automatic", dailyCap: 5, expiresAt: NOW }),
+            [`pending:${PAY}`]: JSON.stringify({ revoked: true, terminal: true, revokedAt: NOW, expiresAt: NOW })
+        });
+        const before = JSON.stringify(kv._dump());
+        const res = await worker.fetch(new Request("https://relay/admin/backfill-orders", {
+            method: "POST", headers: { authorization: "Bearer admintok", "content-type": "application/json" }, body: "{}"
+        }), env(kv), ctx);
+        expect(res.status).toBe(200);
+        expect(JSON.stringify(kv._dump())).toBe(before);
+    });
+});
+const KEY2_G = "LK-TEST-AUTO-0011";
+
+describe("reissued key", () => {
+    it("license_key.created replayed for a reissued key with no payment id: no-op, Dodo not asked, even when Dodo is down", async () => {
+        installDodo({ down: true });
+        const kv = fakeKV({ [`code:${KEY}`]: codeRec({ plan: "automatic", dailyCap: 5, status: "revoked", reissuedTo: "LK-NEW" } as any) });
+        const r = await applyMorEvent(env(kv), licenseKeyCreated(), NOW);
+        expect(r.action).toBe("reissued_noop");
+        expect(dodo.calls).toHaveLength(0);
     });
 });

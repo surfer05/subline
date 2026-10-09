@@ -15,7 +15,7 @@
  * One page per call keeps each call well inside the Worker's subrequest limit;
  * scripts/backfill-orders.mjs loops the pages.
  */
-import { authCode, indexPayment, type Env, type IndexResult } from "./codes";
+import { followReissue, indexPayment, type Env, type IndexResult } from "./codes";
 import { keysOfCustomer, succeededPayments, type IssuedKey, type Lookup } from "./orders";
 
 export interface BackfillCounts {
@@ -47,7 +47,12 @@ export async function backfillOrders(env: Env, body: any): Promise<Response> {
         noCode: 0, notFoundAtDodo: 0, dodoUnavailable: 0, refundedButLive: 0
     };
     const byCustomer = new Map<string, Lookup<IssuedKey[]>>();
-    const refundedLive = async (key: string) => (await authCode(env, key)).ok;
+    // Read-only (authCode could fold a pending row, a write in a dry run).
+    const now = Date.now();
+    const refundedLive = async (key: string) => {
+        const { rec } = await followReissue(env, key);
+        return !!rec && rec.status === "active" && !rec.terminal && !(rec.expiresAt && now > rec.expiresAt);
+    };
 
     for (const p of list.value) {
         const payId = typeof p?.payment_id === "string" ? p.payment_id : "";
@@ -65,7 +70,9 @@ export async function backfillOrders(env: Env, body: any): Promise<Response> {
         const cid = typeof p?.customer?.customer_id === "string" ? p.customer.customer_id : "";
         if (!cid) { c.notFoundAtDodo++; continue; }
         let keys = byCustomer.get(cid);
-        if (!keys) { keys = await keysOfCustomer(env, cid); byCustomer.set(cid, keys); }
+        // Both sources (grants and the deprecated key list): a key issued before
+        // Entitlements may be on the list alone.
+        if (!keys) { keys = await keysOfCustomer(env, cid, () => false); byCustomer.set(cid, keys); }
         if (!keys.ok) { c.dodoUnavailable++; continue; }
         const mine = keys.value.filter(k => k.paymentId === payId);
         if (mine.length === 0) { c.notFoundAtDodo++; continue; }

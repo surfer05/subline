@@ -869,7 +869,6 @@ export function mintCode(): string {
 // source that ties the payment to the key (indexPayment, never retargeting):
 //   • license_key.created asks Dodo for the payment of this key (the customer's
 //     license-key grants; orders.ts). One-time + Dodo down → 500, Dodo retries.
-//   • payment.succeeded, when its row is missing, asks Dodo for the key(s) it issued.
 //   • entitlement_grant.created/delivered carries both (license_key grants).
 //   • refund.succeeded / dispute.lost|accepted, when the row is missing, ask Dodo
 //     before staging (Dodo down → staged AND 500, so the retry asks again).
@@ -1149,40 +1148,6 @@ export async function indexPayment(env: Env, paymentId: string, key: string, opt
     return "indexed";
 }
 
-/** The paid plans a payment-id index matters for (never free/unmapped). */
-function isPaidProduct(env: Env, productId: string): boolean {
-    const cfg = variantConfig(env, productId);
-    return cfg.mapped && cfg.plan !== "free";
-}
-
-/** A Payment's product (product_cart[0].product_id, else product_id). */
-function productOfPayment(data: any): string {
-    if (Array.isArray(data?.product_cart) && typeof data.product_cart[0]?.product_id === "string") return data.product_cart[0].product_id;
-    return asStr(data?.product_id);
-}
-
-/**
- * payment.succeeded: make sure order:<payment_id> exists. Usually
- * license_key.created already wrote it (nothing to do, one KV read). When it
- * did not (no payment id on the key), ask Dodo which key this payment issued
- * and index it if that code exists. If the key is not made yet,
- * license_key.created indexes it when it lands (it resolves the payment
- * itself), so either arrival order converges. Never throws for Dodo trouble:
- * this event's real work (the install link) is already done.
- */
-async function indexFromPayment(env: Env, data: any): Promise<void> {
-    const payId = asStr(data?.payment_id);
-    if (!payId) return;
-    if (await env.CODES.get(`order:${payId}`) !== null) return;
-    if (!isPaidProduct(env, productOfPayment(data))) return;
-    const r = await keysForPayment(env, payId, asStr(data?.customer?.customer_id));
-    if (!r.ok) {
-        if (r.reason === "unavailable") console.warn("payment index: dodo unavailable, left to license_key.created", { payment: payId.slice(0, 40) });
-        return;
-    }
-    for (const key of r.value) await indexPayment(env, payId, key);
-}
-
 // Dispute states in which the merchant has DEFINITIVELY lost the funds → revoke.
 // dispute.opened/challenged are still IN FLIGHT (revoking terminally on `opened`
 // would permanently strand a customer the merchant may go on to win, since
@@ -1221,6 +1186,15 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
         const subId = asStr(data.subscription_id);   // subscription join key (empty for one-time)
         let payId = asStr(data.payment_id);          // payment join key (optional + nullable in Dodo's LicenseKey)
         const cfg = variantConfig(env, asStr(data.product_id));
+        // UPSERT (never a second code for one purchase); read first so a replay
+        // keeps the payment id an earlier delivery or indexPayment recorded.
+        const rawExisting = await env.CODES.get(`code:${key}`);
+        const existing = safeParse(rawExisting);
+        // A REISSUED key (admin reissue after a leak) stays dead: a replayed
+        // create must not revive it or point its order: rows back at it. The
+        // rows already name the new code, so renewals and refunds reach that.
+        if (existing?.reissuedTo) return { action: "reissued_noop" };
+        if (!payId && existing?.mor_order_id) payId = existing.mor_order_id;
         // No payment id on the key: ask Dodo which payment issued it (orders.ts),
         // so refunds, disputes and the purchase status can find this code. A
         // one-time code has no other join id, so an outage here answers 500 and
@@ -1257,12 +1231,6 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
         // subscription id / revocation an out-of-order lifecycle event already
         // wrote, so a replay of this create can't wipe a live renewal or
         // un-revoke a refunded purchase.
-        const rawExisting = await env.CODES.get(`code:${key}`);
-        const existing = safeParse(rawExisting);
-        // A REISSUED key (admin reissue after a leak) stays dead: a replayed
-        // create must not revive it or point its order: rows back at it. The
-        // rows already name the new code, so renewals and refunds reach that.
-        if (existing?.reissuedTo) return { action: "reissued_noop" };
         // #2: a subscription code must NEVER be born without an expiry, or a
         // missed/absent subscription event would leave it valid forever (the
         // authCode expiry net is skipped when expiresAt is undefined). Stamp a
@@ -1318,10 +1286,6 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
     if (name.startsWith("payment.") || name.startsWith("subscription.")) {
         await recordPurchaseState(env, name, data);
         await linkFromLifecycle(env, name, data);
-        if (name === "payment.succeeded") {
-            await indexFromPayment(env, data);
-            return { action: "ignored" };
-        }
     }
 
     // ---- entitlement_grant.* (Dodo Entitlements): a license-key grant names
