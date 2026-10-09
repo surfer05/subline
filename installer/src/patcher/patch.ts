@@ -518,7 +518,7 @@ function applyPatch(
         backupPath,
         patchedAt: new Date().toISOString()
     };
-    const markerWrite = writeMarker(resourcesPath, marker);
+    const markerWrite = writeMarker(resourcesPath, marker, hooks);
     if (!markerWrite.ok) {
         const rolled = rollback(install, undo, tempPath, hooks);
         if (!rolled.ok) return rolled;
@@ -683,7 +683,7 @@ function rollback(install: DiscordInstall, undo: Undo, tempPath: string, hooks: 
         if (undo.markerExisted && undo.previousMarker !== null) {
             writeFileSync(markerPathFor(install.resourcesPath), undo.previousMarker);
         } else {
-            const removed = removeMarker(install.resourcesPath);
+            const removed = removeMarker(install.resourcesPath, hooks);
             if (!removed.ok) return removed;
         }
     } catch (cause) {
@@ -975,7 +975,7 @@ function restoreOriginal(install: DiscordInstall, state: InstallState, dryRun = 
     }
 
     const removed: string[] = [];
-    const markerRemoved = removeMarker(install.resourcesPath);
+    const markerRemoved = removeMarker(install.resourcesPath, hooks);
     if (!markerRemoved.ok) return markerRemoved;
     if (markerRemoved.value) removed.push(markerPathFor(install.resourcesPath));
 

@@ -109,6 +109,33 @@ describe("antivirus locks are retried on Windows (audit #16)", () => {
         expect(readFileSync(fixture.install.backupPath).equals(fixture.originalAsar)).toBe(true);
     });
 
+    it("EBUSY once on the marker rename, then success: patched, no rollback", () => {
+        fixture = makeDiscordFixture();
+        let failures = 0;
+        const sleeps: number[] = [];
+        const markerPath = markerPathFor(fixture.install.resourcesPath);
+        const result = patchInstall(fixture.install, options({
+            hooks: {
+                platform: "win32",
+                sleepSync: ms => sleeps.push(ms),
+                rename: (from, to) => {
+                    if (to === markerPath && failures === 0) {
+                        failures += 1;
+                        throw Object.assign(new Error("EBUSY: resource busy or locked, rename"), { code: "EBUSY" });
+                    }
+                    renameSync(from, to);
+                }
+            }
+        }));
+        expect(result.ok).toBe(true);
+        expect(failures).toBe(1);
+        expect(sleeps).toEqual([100]);
+        expect(existsSync(markerPath)).toBe(true);
+        expect(readFileSync(fixture.install.backupPath).equals(fixture.originalAsar)).toBe(true);
+        const state = inspectInstall(fixture.install, { ownLoaderPaths: [bundle.loaderPath] });
+        expect(state.ok && state.value.kind).toBe("patched-by-us");
+    });
+
     it("a lock that never clears: the write error, not ROLLBACK_FAILED, with Discord's original in place, even when the rollback is held once", () => {
         fixture = makeDiscordFixture();
         let unlinkFailures = 0;

@@ -14,8 +14,10 @@
  * "unpatched" state rather than a marker pointing at nothing).
  */
 
-import { existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "./realFs.js";
+import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "./realFs.js";
 import { join } from "node:path";
+
+import { renameRetrying, unlinkRetrying, type RetryHooks } from "./retry.js";
 
 import type { Result } from "./result.js";
 import { err, fsError, ok } from "./result.js";
@@ -138,12 +140,14 @@ export function readMarker(resourcesPath: string): Result<PatchMarker | null> {
  * also replaces a marker this process cannot read (EACCES): replacing a file
  * needs the folder's permission, not the file's.
  */
-export function writeMarker(resourcesPath: string, marker: PatchMarker): Result<string> {
+export function writeMarker(resourcesPath: string, marker: PatchMarker, hooks: RetryHooks = {}): Result<string> {
     const path = markerPathFor(resourcesPath);
     const temp = `${path}.tmp`;
     try {
         writeFileSync(temp, `${JSON.stringify(marker, null, 4)}\n`, "utf8");
-        renameSync(temp, path);
+        // Retried on Windows: an antivirus opening the fresh temp file to scan
+        // it makes the rename fail for a moment (audit #16, as for the stub).
+        renameRetrying(temp, path, hooks);
         return ok(path);
     } catch (cause) {
         try {
@@ -155,11 +159,11 @@ export function writeMarker(resourcesPath: string, marker: PatchMarker): Result<
     }
 }
 
-export function removeMarker(resourcesPath: string): Result<boolean> {
+export function removeMarker(resourcesPath: string, hooks: RetryHooks = {}): Result<boolean> {
     const path = markerPathFor(resourcesPath);
     if (!existsSync(path)) return ok(false);
     try {
-        unlinkSync(path);
+        unlinkRetrying(path, hooks);
         return ok(true);
     } catch (cause) {
         return fsError<boolean>(cause, path, `remove ${MARKER_FILENAME}`);
