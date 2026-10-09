@@ -13,7 +13,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { APP_VERSION_FILENAME, appVersionPathFor, writeAppVersionFile } from "../src/app/appVersionFile.js";
+import { APP_VERSION_FILENAME, appVersionPathFor, writeAppVersionFile, writeAppVersionFromLaunch } from "../src/app/appVersionFile.js";
+import { temporaryAppLocation } from "../src/helper/launchAgent.js";
 import { raiseAlert } from "../src/helper/alerts.js";
 import { emptyHelperState } from "../src/helper/state.js";
 import { minAppVersionProblem, readMinAppVersion, versionAtLeast } from "../packaging/minAppVersion.js";
@@ -70,6 +71,43 @@ describe("writeAppVersionFile", () => {
         const result = writeAppVersionFile(blocked, "0.2.3", "app");
         expect(result.ok).toBe(false);
         if (!result.ok) expect(result.error.cause).toBeTruthy();
+    });
+});
+
+describe("the app launch records its version only from an installed copy", () => {
+    const onImage = () => temporaryAppLocation("/Volumes/Subline 0.2.3/Subline.app", async () => ({ ok: true, value: ["/Volumes/Subline 0.2.3"] }));
+    const translocated = () => temporaryAppLocation("/private/var/folders/x/AppTranslocation/ABC/d/Subline.app");
+    const installed = () => temporaryAppLocation("/Applications/Subline.app");
+
+    it("run off the disk image with no file yet: the file stays absent", async () => {
+        expect(await writeAppVersionFromLaunch(dir, "0.2.3", onImage)).toEqual({ kind: "skipped", reason: "disk-image" });
+        expect(existsSync(appVersionPathFor(dir))).toBe(false);
+    });
+
+    it("a translocated copy leaves the installed app's 0.2.2 as it is", async () => {
+        writeAppVersionFile(dir, "0.2.2", "helper", 1);
+        const before = readFileSync(appVersionPathFor(dir), "utf8");
+        expect(await writeAppVersionFromLaunch(dir, "0.2.3", translocated)).toEqual({ kind: "skipped", reason: "translocated" });
+        expect(readFileSync(appVersionPathFor(dir), "utf8")).toBe(before);
+    });
+
+    it("a location check that fails writes nothing", async () => {
+        writeAppVersionFile(dir, "0.2.2", "helper", 1);
+        const outcome = await writeAppVersionFromLaunch(dir, "0.2.3", () => Promise.reject(new Error("hdiutil gone")));
+        expect(outcome.kind).toBe("location-failed");
+        expect(JSON.parse(readFileSync(appVersionPathFor(dir), "utf8")).appVersion).toBe("0.2.2");
+    });
+
+    it("the installed app writes its version", async () => {
+        const outcome = await writeAppVersionFromLaunch(dir, "0.2.3", installed, 5);
+        expect(outcome).toEqual({ kind: "written", result: { ok: true, value: appVersionPathFor(dir) } });
+        expect(JSON.parse(readFileSync(appVersionPathFor(dir), "utf8"))).toMatchObject({ appVersion: "0.2.3", writtenBy: "app" });
+    });
+
+    it("main.ts writes at launch only through the location check", () => {
+        const main = readFileSync(join(REPO_ROOT, "installer", "src", "main", "main.ts"), "utf8");
+        expect(main).not.toMatch(/recordAppVersion\("app"\)/);
+        expect(main).toMatch(/writeAppVersionFromLaunch\(productDirFor\(\), app\.getVersion\(\), \(\) => appLocationFor\(helperWiring\(\)\)\)/);
     });
 });
 

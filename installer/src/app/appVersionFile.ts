@@ -8,10 +8,11 @@
  * appSignals.ts). Apps from before this file write nothing, and the plugin
  * reads that absence as "old".
  *
- * WRITTEN ON EVERY RUN, by the app at launch and by the helper on each of its
- * runs. The helper is the same binary as the app (same bundle, different flag),
- * so both write the same version. Writing on every helper run is what keeps
- * the file true after the app is replaced in place.
+ * WRITTEN ON EVERY RUN, by the app at launch (only from an installed copy, not
+ * the disk image or a temporary one: writeAppVersionFromLaunch) and by the
+ * helper on each of its runs. The helper is the same binary as the app (same
+ * bundle, different flag), so both write the same version. Writing on every
+ * helper run is what keeps the file true after the app is replaced in place.
  *
  * A small file of its own, not a field in `helper-state.json`: the plugin must
  * read it cheaply and the helper state is the helper's private memory.
@@ -23,6 +24,7 @@
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import type { AppLocationVerdict, TemporaryLocationReason } from "../helper/launchAgent.js";
 import type { Result } from "../patcher/result.js";
 import { fsError, ok } from "../patcher/result.js";
 
@@ -72,4 +74,36 @@ export function writeAppVersionFile(
         return fsError<string | null>(cause, path, `write ${APP_VERSION_FILENAME}`);
     }
     return ok(path);
+}
+
+export type AppLaunchVersionOutcome =
+    | { kind: "written"; result: Result<string | null> }
+    | { kind: "skipped"; reason: TemporaryLocationReason }
+    | { kind: "location-failed"; cause: string };
+
+/**
+ * The APP LAUNCH's write: only from a copy the helper can run from.
+ *
+ * A Subline opened off the disk image, from a translocated copy or from the
+ * Trash is not the installed app. Its version must not be recorded: the
+ * installed (older) app and its helper keep running, and an old helper from
+ * before this file never rewrites it, so the plugin would believe the app is
+ * new for good and never say "download the new Subline". `locate` is the same
+ * test the helper registration uses (appLocationFor). If it fails, nothing is
+ * written: the helper's own runs write the file from the registered path.
+ */
+export async function writeAppVersionFromLaunch(
+    productDir: string | null,
+    appVersion: string,
+    locate: () => Promise<AppLocationVerdict>,
+    now: number = Date.now()
+): Promise<AppLaunchVersionOutcome> {
+    let location: AppLocationVerdict;
+    try {
+        location = await locate();
+    } catch (cause) {
+        return { kind: "location-failed", cause: String(cause) };
+    }
+    if (location.temporary) return { kind: "skipped", reason: location.reason };
+    return { kind: "written", result: writeAppVersionFile(productDir, appVersion, "app", now) };
 }

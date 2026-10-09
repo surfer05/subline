@@ -42,7 +42,7 @@ import { productDirFor } from "../bundle/layout.js";
 import { inspectModBundle } from "../bundle/bundle.js";
 import { shippedModDirFor } from "../app/modInstall.js";
 import { shouldRelaunchForNewerBundle } from "../app/relaunch.js";
-import { writeAppVersionFile } from "../app/appVersionFile.js";
+import { writeAppVersionFile, writeAppVersionFromLaunch } from "../app/appVersionFile.js";
 import type { AppVersionWriter } from "../app/appVersionFile.js";
 import { findDiscordProcesses, quitDiscord } from "../app/discordProcess.js";
 import { rememberedResourcesPath, uninstallTargets } from "../patcher/locate.js";
@@ -55,7 +55,7 @@ import { unpatchInstall } from "../patcher/patch.js";
 import { loaderPathFor } from "../bundle/spec.js";
 import { asarHookProblem, usingOriginalFs } from "../patcher/realFs.js";
 import {
-    createDiskImageMounts, createFlowPorts, ensureHelperFromHelper, forceQuit, installHelperFor, listProcesses, logDirFor, removeHelperFor,
+    appLocationFor,    createDiskImageMounts, createFlowPorts, ensureHelperFromHelper, forceQuit, installHelperFor, listProcesses, logDirFor, removeHelperFor,
     requestQuit, uninstallPaths
 } from "./ports.js";
 import type { HelperWiring } from "./ports.js";
@@ -140,12 +140,15 @@ const isUninstallRun = !isHelperRun && isHeadlessUninstall(process.argv);
 
 /**
  * Record which app version is installed, for the plugin (app/appVersionFile.ts).
- * Every app launch and every helper run. A failure is logged with its cause and
- * never stops either; a helper run logs only the failure, so an idle run stays
- * one line.
+ * Every helper run (the app launch uses recordLaunchAppVersion). A failure is
+ * logged with its cause and never stops either; a helper run logs only the
+ * failure, so an idle run stays one line.
  */
 function recordAppVersion(writtenBy: AppVersionWriter): void {
-    const written = writeAppVersionFile(productDirFor(), app.getVersion(), writtenBy);
+    logAppVersionWrite(writtenBy, writeAppVersionFile(productDirFor(), app.getVersion(), writtenBy));
+}
+
+function logAppVersionWrite(writtenBy: AppVersionWriter, written: ReturnType<typeof writeAppVersionFile>): void {
     if (!written.ok) {
         log.warn("app-version.write-failed", {
             writtenBy,
@@ -156,6 +159,17 @@ function recordAppVersion(writtenBy: AppVersionWriter): void {
     } else if (writtenBy === "app") {
         log.info("app-version.written", { version: app.getVersion(), path: written.value });
     }
+}
+
+/** The app launch's write of app-version.json (writeAppVersionFromLaunch). Never throws. */
+function recordLaunchAppVersion(): void {
+    void writeAppVersionFromLaunch(productDirFor(), app.getVersion(), () => appLocationFor(helperWiring()))
+        .then(outcome => {
+            if (outcome.kind === "skipped") log.info("app-version.skipped", { reason: outcome.reason });
+            else if (outcome.kind === "location-failed") log.warn("app-version.location-failed", { cause: outcome.cause });
+            else logAppVersionWrite("app", outcome.result);
+        })
+        .catch((cause: unknown) => log.warn("app-version.location-failed", { cause: String(cause) }));
 }
 
 /**
@@ -391,7 +405,10 @@ if (!isHelperRun && !isUninstallRun) app.whenReady().then(() => {
             originalFsCause: asarHookProblem()
     });
 
-    recordAppVersion("app");
+    // Only from an installed copy. A run off the disk image or a translocated
+    // copy is not the app the helper runs, and recording its version would
+    // hide the "download the new Subline" notice for good. Never awaited.
+    recordLaunchAppVersion();
 
     startedWithBuildId = modBuildIdOnDisk();
 
