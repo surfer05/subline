@@ -53,6 +53,11 @@ describe("the ✦ preview ledger", () => {
         expect(parseLedger([["1", { text: 5, src: "s" }], ["", { text: "a", src: "s" }], ["2", { text: "a" }], ["3", { text: "ok", src: "s", lang: 7 }]]))
             .toEqual([["3", { text: "ok", src: "s" }]]);
     });
+
+    it("keeps the reading language a preview was made in", () => {
+        expect(parseLedger([["1", { text: "a", src: "s", targetLang: "es" }], ["2", { text: "b", src: "s", targetLang: 3 }]]))
+            .toEqual([["1", { text: "a", src: "s", targetLang: "es" }], ["2", { text: "b", src: "s" }]]);
+    });
 });
 
 describe("the weekly note", () => {

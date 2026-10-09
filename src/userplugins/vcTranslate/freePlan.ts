@@ -25,6 +25,9 @@ export interface PreviewResult {
     text: string | null;
     lang?: string;
     src: string;
+    /** The reading language it was made in. Shown only while that is still
+     *  the reading language. A legacy row has none and is never shown. */
+    targetLang?: string;
 }
 
 /** Where the previews shown are kept. */
@@ -57,7 +60,8 @@ export function parseLedger(raw: unknown): [string, PreviewResult][] {
         if (typeof p.src !== "string") continue;
         if (p.text !== null && typeof p.text !== "string") continue;
         const lang = typeof p.lang === "string" ? p.lang : undefined;
-        out.push([id, { text: p.text, src: p.src, ...(lang !== undefined ? { lang } : {}) }]);
+        const targetLang = typeof p.targetLang === "string" && p.targetLang !== "" ? p.targetLang : undefined;
+        out.push([id, { text: p.text, src: p.src, ...(lang !== undefined ? { lang } : {}), ...(targetLang !== undefined ? { targetLang } : {}) }]);
     }
     return out.slice(-MAX_PREVIEWS_KEPT);
 }

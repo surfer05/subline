@@ -500,6 +500,40 @@ describe("one ✦ preview per message", () => {
         });
     }
 
+    it("a cut preview (an older relay's `truncated` row) is never stored or shown as the full ✦ line", async () => {
+        await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
+        rough();
+        answer({ relay: m => ({ id: m.id, lang: "ar", text: "I don't want", skip: false, truncated: true }), relayQuota: { used: 1, cap: 5 } });
+        popover()!.onClick!();
+        await flush();
+        const shown = text(render(msg("1", ROMANIZED)));
+        expect(shown).not.toContain("✦ ar");
+        expect(shown).toContain("I want to walk");
+        expect(popover()).not.toBeNull();
+        expect(link()).toBeDefined();
+    });
+
+    it("a preview made in another reading language is not shown, and is offered again; switching back shows it", async () => {
+        await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
+        rough();
+        answer({ relay: m => ({ id: m.id, lang: "ar", text: "I don't want to go", skip: false }), relayQuota: { used: 1, cap: 5 } });
+        popover()!.onClick!();
+        await flush();
+        expect(text(render(msg("1", ROMANIZED)))).toBe("✦ ar · I don't want to go · Add AI");
+        settings.store.targetLang = "es";
+        try {
+            setTranslation(makeKey("1", "es"), { lang: "ar", text: "Quiero caminar", via: "google", conf: 1 });
+            const shown = text(render(msg("1", ROMANIZED)));
+            expect(shown).not.toContain("I don't want to go");
+            expect(shown).toContain("Quiero caminar");
+            expect(popover()).not.toBeNull();
+        } finally {
+            settings.store.targetLang = "en";
+        }
+        expect(text(render(msg("1", ROMANIZED)))).toBe("✦ ar · I don't want to go · Add AI");
+        expect(popover()).toBeNull();
+    });
+
     it("when ✦ reads it the same as ≈, the ✦ line simply replaces ≈", async () => {
         await startAutomatic({ automatic: true, previews: { used: 0, cap: 5 } });
         rough("1", "I want to walk");

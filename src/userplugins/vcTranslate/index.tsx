@@ -2916,8 +2916,18 @@ const previewPending = new Set<string>();
  */
 function previewTaken(message: Message): boolean {
     if (previewPending.has(message.id)) return true;
-    const p = previews.get(message.id);
-    return p !== undefined && p.src === contentHash(message.content ?? "");
+    return previewMatches(previews.get(message.id), message);
+}
+
+/**
+ * Does this stored preview describe the message as it reads now, in the
+ * reading language set now? A preview made in another reading language is
+ * kept (switching back shows it again) but never shown in place of the
+ * ≈ line of the new language. A row stored before the language was kept
+ * has none, so it never matches.
+ */
+function previewMatches(p: PreviewResult | undefined, message: Message): p is PreviewResult {
+    return p !== undefined && p.src === contentHash(message.content ?? "") && p.targetLang === settings.store.targetLang;
 }
 
 /**
@@ -2929,8 +2939,7 @@ function previewTaken(message: Message): boolean {
 function previewFor(message: Message): PreviewResult | undefined {
     if (!isAutomaticOnly()) return undefined;
     const p = previews.get(message.id);
-    if (p === undefined || p.src !== contentHash(message.content ?? "")) return undefined;
-    return p;
+    return previewMatches(p, message) ? p : undefined;
 }
 
 /**
@@ -3036,12 +3045,20 @@ async function sendPreview(message: Message): Promise<boolean> {
         tasteLog(`${message.id}: no preview (the relay returned no translation)`);
         return false;
     }
+    // A cut preview (an older or rolled-back relay cuts previews to their
+    // first words) is never stored or shown as the full ✦ line. The ≈ line
+    // stays and the press is offered again, as joinParts does for a part.
+    if (!r.skip && r.truncated === true) {
+        tasteLog(`${message.id}: no preview (the relay sent a cut preview)`);
+        return false;
+    }
     const text = r.skip ? "" : cleanTranslation(r.text.trim(), content);
     noteTasteSpent();
     rememberPreview(previews, message.id, {
         text: text === "" ? null : text,
         ...(!r.skip && r.lang ? { lang: r.lang } : {}),
-        src: contentHash(content)
+        src: contentHash(content),
+        targetLang: base.targetLang
     });
     return true;
 }

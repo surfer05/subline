@@ -564,7 +564,7 @@ describe("an Automatic owner", () => {
         await startAutomatic({ automatic: true, previews: { used: 0, cap: 3 } });
         answer({
             google: { lang: "ar", text: "I want to walk the house now", conf: 1 },
-            relay: m => ({ id: m.id, lang: "ar", text: "I don't want to go", skip: false, truncated: true }),
+            relay: m => ({ id: m.id, lang: "ar", text: "I don't want to go", skip: false }),
             relayQuota: { used: 1, cap: 3 }
         });
         setTranslation(key("1"), { lang: "ar", text: "I want to walk the house now", via: "google", conf: 1 });
