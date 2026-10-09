@@ -676,6 +676,21 @@ export function chunkBatch(req: BatchRequest): BatchRequest[] {
 }
 
 /**
+ * The prompt characters the chunks of a batch really send upstream: each
+ * chunk's context (every chunk carries all of it), its messages' text and
+ * author, the reply-parent copies (chunkBatch adds some), and the target.
+ * serveBatch charges the spend guard from this, so nothing chunking adds is
+ * sent unpaid.
+ */
+export function promptCharsOf(chunks: BatchRequest[]): number {
+    return chunks.reduce((n, c) =>
+        n + c.context.reduce((k, x) => k + x.text.length + x.author.length, 0)
+        + c.messages.reduce((k, m) => k + m.text.length + (m.author?.length ?? 0)
+            + (m.replyTo ? m.replyTo.text.length + m.replyTo.author.length : 0), 0)
+        + c.targetLang.length, 0);
+}
+
+/**
  * Translate a whole batch: a long one is split into chunks that run AT THE
  * SAME TIME, each with its own primary deadline and fallback
  * (translateWithFallback). A long batch's wait is then about one chunk's, not
@@ -688,9 +703,9 @@ export function chunkBatch(req: BatchRequest): BatchRequest[] {
  * one call). The results come back in the batch's own message order.
  */
 export async function translateBatch(
-    req: BatchRequest, primary: Provider, fallback: Provider | null, signal?: AbortSignal, opts: FallbackOptions = {}
+    req: BatchRequest, primary: Provider, fallback: Provider | null, signal?: AbortSignal, opts: FallbackOptions = {},
+    chunks: BatchRequest[] = chunkBatch(req)
 ): Promise<Result[]> {
-    const chunks = chunkBatch(req);
     if (chunks.length === 1) return translateWithFallback(req, primary, fallback, signal, opts);
     const stop = new AbortController();
     const onOuter = () => stop.abort();

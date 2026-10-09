@@ -23,7 +23,7 @@ import {
     isTasteBearer, isNewClient, resolveFreePlan, startTrial, tasteRecord, freezeAtFor,
     type Env, type CodeRecord, type FreePlan
 } from "./codes";
-import { translateBatch, toPreview, clipParent, type BatchRequest, type FallbackError, type Provider, type Result } from "./translate";
+import { translateBatch, toPreview, clipParent, chunkBatch, promptCharsOf, type BatchRequest, type FallbackError, type Provider, type Result } from "./translate";
 import { record, type Outcome } from "./metrics";
 import { installOf, isApiV2, legacyFreeAllowed, PREVIEW_DAILY_CAP, resolveEntitlement } from "./entitle";
 import { adminReissue, adminResetInstalls, createPromo, handleRedeem, handleStatusV2, promoStats } from "./v2";
@@ -302,18 +302,20 @@ async function serveBatch(
         const ok = { ok: true, results: withRefused(order, [], tooLong), rpmLimit: rpmLimitFor(rec) };
         return done(json(newClient ? { ...ok, now } : ok), "too_large", code, 0, plan);
     }
-    const promptChars =
-        batch.context.reduce((n, c) => n + c.text.length + c.author.length, 0) +
-        batch.messages.reduce((n, m) => n + m.text.length + (m.author?.length ?? 0)
-            + (m.replyTo ? m.replyTo.text.length + m.replyTo.author.length : 0), 0) +
-        batch.targetLang.length;
+    const promptChars = promptCharsOf([batch]);
+    // What really goes upstream: a long batch is sent as chunks, each with all
+    // the context and with reply-parent copies chunkBatch adds. The spend
+    // units (global guard, monthly allowance, per-IP cost cap) are charged
+    // from that; the daily count the reader sees stays per request.
+    const chunks = chunkBatch(batch);
+    const upstreamChars = chunks.length === 1 ? promptChars : promptCharsOf(chunks);
     // Two units: `cost` is the per-bearer daily count the client sees
     // (messages only for taste/trial, one per ordinary message for a code),
     // `budgetCost` is the real spend the global guard, the monthly allowance
     // and the trial's per-IP cost cap are charged.
     // An account preview counts MESSAGES, a message sent in parts once (see previewPlan).
     const cost = pv ? pv.cost : costFor(rec, batch.messages.length, promptChars);
-    const budgetCost = budgetCostFor(batch.messages.length, promptChars);
+    const budgetCost = budgetCostFor(batch.messages.length, upstreamChars);
     // The per-IP taste/trial ceiling needs the caller's address, and ONLY
     // for a keyless request: no other plan grows an ip counter, and a
     // request with no cf-connecting-ip (not fronted by Cloudflare) just
@@ -374,7 +376,7 @@ async function serveBatch(
         const { primary, fallback } = providers(env);
         const full = await translateBatch(batch, primary, fallback, controller.signal, {
             onPrimaryFail: s => { primaryFail = s ?? "throw"; }
-        });
+        }, chunks);
         clearTimeout(timer);
         // The primary failed and the fallback saved the request: still worth
         // a row, so a primary that is out of credit (402) or has a dead key

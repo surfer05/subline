@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import worker from "../src/index";
+import worker, { normalizeBatch } from "../src/index";
 import { applyMorEvent, costFor, reserve, type CodeRecord, type Env } from "../src/codes";
 import { installHash } from "../src/checkout";
 import { resolveEntitlement } from "../src/entitle";
 import { applyBudget } from "../src/budget";
-import { chunkBatch, MAX_PARALLEL_CHUNKS, translate, translateBatch, translateWithFallback, type BatchRequest, type Provider } from "../src/translate";
+import { chunkBatch, MAX_PARALLEL_CHUNKS, promptCharsOf, translate, translateBatch, translateWithFallback, type BatchRequest, type Provider } from "../src/translate";
 import { Promo } from "../src/promo";
 import { codeRec, fakeBudget, fakeDOStorage, fakeKV } from "./kv-mock";
 
@@ -918,5 +918,40 @@ describe("19. AI is never sold twice, and no checkout is paid twice before the f
         keys.length = 0;
         await checkout(e, "monthly");
         expect(keys.filter(k => k.startsWith("cko:") || k.startsWith("checkout:"))).toHaveLength(0);
+    });
+});
+
+// ---------------------------------------------------------------------------
+describe("chunked batches are charged what really goes upstream", () => {
+    it("40 cross-chunk replies with full context: the spend guard is charged every chunk's context and parent copies", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(T0);
+        const kv = fakeKV() as any;
+        const e = env(kv);
+        await buy(e, A, "KEY-AUTO", "pdt_auto", "pay_a");
+        await buy(e, A, "KEY-AI", "pdt_month", "pay_m", "sub_m");
+        const body = {
+            messages: Array.from({ length: 40 }, (_, i) => ({
+                id: String(1000 + i), author: "a", text: `message ${i} `.padEnd(400, "y"),
+                ...(i > 0 ? { replyToId: String(1000 + i - 1) } : {})
+            })),
+            context: Array.from({ length: 8 }, (_, i) => ({ author: "c", text: `context ${i} `.padEnd(700, "z") })),
+            targetLang: "en"
+        };
+        vi.stubGlobal("fetch", vi.fn(async (_u: unknown, init?: any) => {
+            const ids = [...String(init?.body ?? "").matchAll(/\[id=\\"([^\\]*)\\"\]/g)].map(m => m[1]!);
+            return okModel(ids.map(id => ({ id, lang: "es", text: "ok", skip: false })));
+        }));
+        const before = budgetOf(kv).state.total;
+        const res = await worker.fetch(new Request("https://relay/v1/translate", {
+            method: "POST", headers: v2Headers(A, "KEY-AUTO"), body: JSON.stringify(body)
+        }), e, ctx);
+        expect(res.status).toBe(200);
+        await settle();
+        const batch = normalizeBatch(body)!.batch;
+        const chunks = chunkBatch(batch);
+        expect(chunks.length).toBeGreaterThan(1);
+        expect(chunks.flatMap(c => c.messages).some(m => m.replyTo !== undefined)).toBe(true);
+        expect(budgetOf(kv).state.total - before).toBe(40 + Math.ceil(promptCharsOf(chunks) / 1000));
     });
 });
