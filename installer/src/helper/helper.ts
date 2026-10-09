@@ -328,6 +328,8 @@ class Run {
     readonly deferralKeys: string[] = [];
     /** What this run skipped, as stable keys (see HelperState.lastUnmanagedKey). */
     readonly unmanagedKeys: string[] = [];
+    /** Stable ids this run took out of `released` (see collectManaged). */
+    readonly unreleased: string[] = [];
     /** The bundle installed right now (after any update this run made). */
     bundle: ModBundle | null = null;
 
@@ -398,6 +400,33 @@ class Run {
 }
 
 /**
+ * The app writes `released` and `installs` in helper-state.json too (a new
+ * install lifts a release and seeds its memory, an uninstall releases). A run
+ * read the file at its start; written back whole, it put an old `released`
+ * back and Uninstall's release outranked the user's new install. So just
+ * before the write: `released` is taken from disk (minus what this run
+ * lifted), and every install memory this run did not change is taken from
+ * disk. A file with nothing in it (missing, unreadable) changes nothing.
+ */
+function mergeOutsideChanges(run: Run, disk: HelperState, startInstalls: ReadonlyMap<string, string>): void {
+    const empty = disk.lastRunAt === null && Object.keys(disk.installs).length === 0 && disk.released.length === 0;
+    if (empty) return;
+    run.state.released = disk.released.filter(id => !run.unreleased.includes(id));
+    const touched = new Set<string>();
+    for (const [id, memory] of Object.entries(run.state.installs)) {
+        if (startInstalls.get(id) !== JSON.stringify(memory)) touched.add(id);
+    }
+    for (const id of startInstalls.keys()) if (run.state.installs[id] === undefined) touched.add(id);
+    const merged: HelperState["installs"] = {};
+    for (const [id, memory] of Object.entries(disk.installs)) if (!touched.has(id)) merged[id] = memory;
+    for (const id of touched) {
+        const memory = run.state.installs[id];
+        if (memory !== undefined) merged[id] = memory;
+    }
+    run.state.installs = merged;
+}
+
+/**
  * Do one pass. Called at login and on every interval, and never concurrently
  * with itself (launchd will not start a second copy of a running agent).
  */
@@ -405,6 +434,7 @@ export async function runHelperOnce(ports: HelperPorts, options: HelperRunOption
     const run = new Run(ports, options);
     const at = ports.now();
     run.state = ports.readState();
+    const startInstalls = new Map(Object.entries(run.state.installs).map(([id, memory]) => [id, JSON.stringify(memory)] as const));
     // A memory that exists and cannot be read is not "Subline was never here".
     const unreadable = ports.stateUnreadable?.() ?? null;
     if (unreadable !== null) {
@@ -440,6 +470,7 @@ export async function runHelperOnce(ports: HelperPorts, options: HelperRunOption
     // removed Subline come back.
     if (await run.stillRegistered("state")) {
         run.state.lastRunAt = at;
+        mergeOutsideChanges(run, ports.readState(), startInstalls);
         const written = ports.writeState(run.state);
         if (!written.ok) {
             // Not fatal, but it makes the NEXT run amnesiac — and an amnesiac run
@@ -596,6 +627,19 @@ function collectManaged(run: Run): ManagedInstall[] {
             // them, and their helper patches it back. Never touched, never alerted.
             skip("other-account", "another account on this computer set up Subline for this Discord, so this account leaves it alone");
             continue;
+        }
+
+        if (oursNow && released) {
+            // Uninstall put this Discord back to normal, and only the installer
+            // writes Subline's stub and marker into it. Patched by us again
+            // means the user installed again: the release is over. Lifted here
+            // too, so a failed or overwritten seed (seedHelperMemory) never
+            // leaves it released, and the next Discord update is put back.
+            run.state.released = run.state.released.filter(id => id !== install.stableId);
+            run.unreleased.push(install.stableId);
+            run.decide("scan", "unreleased", "Subline is in this Discord again after an uninstall, so the helper looks after it again", {
+                path: install.rootPath
+            });
         }
 
         if (state.kind === "patched-by-other") {

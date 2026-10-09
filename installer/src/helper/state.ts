@@ -25,11 +25,12 @@
  * costs at most one extra observation.
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { Result } from "../patcher/result.js";
 import { fsError, ok } from "../patcher/result.js";
+import { renameWithRetry } from "../app/modInstall.js";
 
 export const HELPER_STATE_FILENAME = "helper-state.json";
 export const HELPER_STATE_FORMAT = 1;
@@ -290,7 +291,10 @@ export function writeHelperState(path: string, state: HelperState): Result<strin
     try {
         mkdirSync(join(path, ".."), { recursive: true });
         writeFileSync(temp, `${JSON.stringify({ ...state, format: HELPER_STATE_FORMAT }, null, 4)}\n`, "utf8");
-        renameSync(temp, path);
+        // Retried while Windows antivirus holds the just-written file for a
+        // moment: a lost write here once left an uninstall's release in place
+        // after the user installed again.
+        renameWithRetry(temp, path);
     } catch (cause) {
         return fsError<string>(cause, path, `write ${HELPER_STATE_FILENAME}`);
     }

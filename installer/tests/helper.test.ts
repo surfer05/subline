@@ -1582,6 +1582,45 @@ describe("audit: the helper never abandons, never nags for nothing, and never un
         expect(report.repatched).toEqual([harness.fixture.install.rootPath]);
     });
 
+    it("a seed that never landed: Subline patched again after Uninstall is unreleased by the helper, and survives a Discord update", async () => {
+        patchForReal(harness);
+        await harness.run();
+        releaseHelperInstalls(harness.productDir, [harness.fixture.install.stableId]);
+        // The user installed again, but the seed's write was lost: the Discord
+        // is patched by us while the memory still says released.
+        harness.advance(5 * 60_000);
+        const healed = await harness.run();
+        expect(healed.decisions.some(d => d.outcome === "unreleased")).toBe(true);
+        expect(readHelperState(stateFile()).released).toEqual([]);
+        simulateDiscordUpdate(harness.fixture.install, "0.0.407");
+        harness.advance(5 * 60_000);
+        const report = await harness.run();
+        expect(report.repatched).toEqual([harness.fixture.install.rootPath]);
+    });
+
+    it("a run that started before the installer lifted a release does not write the old release back", async () => {
+        patchForReal(harness);
+        await harness.run();
+        expect(unpatchInstall(harness.fixture.install).ok).toBe(true);
+        releaseHelperInstalls(harness.productDir, [harness.fixture.install.stableId]);
+        const read = harness.ports.readState;
+        let first = true;
+        harness.ports.readState = () => {
+            const state = read();
+            if (first) {
+                first = false;
+                // The installer's seed lands while this run is going.
+                seedHelperMemory(harness.productDir, harness.fixture.install.stableId, { discordVersion: "0.0.406", buildId: harness.shipped.buildId, patchedAt: START });
+            }
+            return state;
+        };
+        harness.advance(5 * 60_000);
+        await harness.run();
+        const after = readHelperState(stateFile());
+        expect(after.released).toEqual([]);
+        expect(after.installs[harness.fixture.install.stableId]).toBeDefined();
+    });
+
     // #34 / #49
     it("#34: a lost helper memory plus a Discord update: the installer's record keeps it ours", async () => {
         patchForReal(harness);
