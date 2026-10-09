@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import {
     PatchHealth, validateReport, applyReport, emptyDay, alertMime,
-    MAX_BUILDS_PER_INSTALL, MAX_REPORTS_PER_ADDRESS, MAX_EMAILS_PER_DAY, MAX_FAILED_PER_REPORT, KEEP_MS
+    MAX_BUILDS_PER_INSTALL, MAX_REPORTS_PER_ADDRESS, MAX_EMAILS_PER_DAY, MAX_FAILED_PER_REPORT, KEEP_MS,
+    MAX_PATCHES_PER_DAY, MAX_NEW_PATCHES_PER_ADDRESS, PATCH_PLUGINS, RESERVED_EMAILS
 } from "../src/patchHealth";
+const { readFileSync } = await import("node:" + "fs") as { readFileSync: (p: URL, enc: string) => string };
 import { fakeDOStorage, fakeKV } from "./kv-mock";
 
 /** A PatchHealth namespace running the REAL class, one instance per name. */
@@ -125,7 +127,7 @@ describe("POST /v1/patch-health", () => {
     it("the largest valid report (20 rows of 160-char finds, longest names) fits the body limit and is accepted", async () => {
         const { env } = envWith();
         const big = report({ discordBuild: 99_999_999, channel: "canary", failed: Array.from({ length: MAX_FAILED_PER_REPORT }, (_, i) => ({
-            plugin: "M".repeat(40), find: String(i).padStart(3, "0") + "~".repeat(157), state: "nomatch"
+            plugin: "MessageAccessoriesAPI", find: String(i).padStart(3, "0") + "~".repeat(157), state: "nomatch"
         })) });
         expect(JSON.stringify(big).length).toBeLessThan(8_192);
         expect((await call(env, post(big))).status).toBe(200);
@@ -270,6 +272,64 @@ describe("POST /v1/patch-health", () => {
         expect(view.reports).toBe(1);
         expect(view.patches[0].installs).toBe(1);
         expect(mail.sent).toHaveLength(0);
+    });
+});
+
+describe("junk from one address cannot spend the alerts or hide a real breakage", () => {
+    const junk = (tag: string) => Array.from({ length: MAX_FAILED_PER_REPORT }, (_, i) => ({ plugin: "VcTranslate", find: `junk-${tag}-${i}`, state: "nofind" }));
+
+    it("3 made-up installs from one address with 20 junk rows send no email; a real row from 3 addresses still alerts", async () => {
+        const { env, mail } = envWith();
+        for (let n = 1; n <= 3; n++) expect((await call(env, post(report({ failed: junk("a") }), install(n), "192.0.2.50"))).status).toBe(200);
+        expect(mail.sent).toHaveLength(0);
+        // More junk from the same address: it cannot open more rows than its share.
+        for (let n = 4; n <= 10; n++) await call(env, post(report({ failed: junk(`b${n}`) }), install(n), "192.0.2.50"));
+        expect(mail.sent).toHaveLength(0);
+        for (let n = 1; n <= 3; n++) await call(env, post(report(), install(100 + n), `198.51.100.${n}`));
+        expect(mail.sent).toHaveLength(1);
+        expect(mail.sent[0]!.raw).toContain("Subject: Subline patch failing: MessageAccessoriesAPI (3 installs)");
+    });
+
+    it("refuses a plugin name the client never reports", async () => {
+        const { env } = envWith();
+        const res = await call(env, post(report({ failed: [{ plugin: "FreeMoneyClickHere", find: "x", state: "nofind" }] })));
+        expect(res.status).toBe(400);
+        // The relay's list is the client's list.
+        const client = readFileSync(new URL("../../src/userplugins/vcTranslate/patchHealth.ts", import.meta.url), "utf8");
+        const listed = /HEALTH_PLUGINS = \[([^\]]*)\]/.exec(client)![1]!.match(/"([^"]+)"/g)!.map(x => x.slice(1, -1));
+        expect([...PATCH_PLUGINS].sort()).toEqual(listed.sort());
+    });
+
+    it("a full table makes room by dropping a one-address row, never by dropping a real patch", () => {
+        const day = emptyDay();
+        let a = 0;
+        // Many addresses fill the table with junk, each within its own share.
+        while (day.patches.size < MAX_PATCHES_PER_DAY) {
+            applyReport(day, { inst: `j${a}`, addr: `junk${a}`, discordKey: "stable:1", failed: junk(`t${a}`).map(f => ({ ...f, state: "nofind" as const })), minInstalls: 3 });
+            a++;
+        }
+        for (let n = 0; n < 3; n++) {
+            const out = applyReport(day, { inst: `r${n}`, addr: `real${n}`, discordKey: "stable:1", failed: [{ plugin: "MessagePopoverAPI", find: "real-find", state: "nomatch" }], minInstalls: 3 });
+            if (n === 0) expect(out.result === "accepted" && out.deletes.length).toBe(1);
+            if (n === 2) expect(out.alerts).toHaveLength(1);
+        }
+        expect(day.patches.size).toBe(MAX_PATCHES_PER_DAY);
+        expect(day.patches.get("MessagePopoverAPI|real-find")?.addrs).toHaveLength(3);
+        expect(MAX_NEW_PATCHES_PER_ADDRESS).toBeLessThan(MAX_PATCHES_PER_DAY);
+    });
+
+    it("keeps reserved emails for a patch many addresses report after the day's cap is spent", () => {
+        const day = emptyDay();
+        for (let i = 0; i < MAX_EMAILS_PER_DAY; i++) {
+            applyReport(day, { inst: `i${i}`, addr: `a${i}`, discordKey: "stable:1", failed: [{ plugin: "VcTranslate", find: `f${i}`, state: "nofind" }], minInstalls: 1 });
+        }
+        expect(day.emails).toBe(MAX_EMAILS_PER_DAY);
+        let alerts = 0;
+        for (let n = 0; n < 2; n++) {
+            alerts += applyReport(day, { inst: `w${n}`, addr: `w${n}`, discordKey: "stable:1", failed: [{ plugin: "NoticesAPI", find: "wide", state: "nofind" }], minInstalls: 1 }).alerts.length;
+        }
+        expect(alerts).toBe(1);
+        expect(day.emails).toBeLessThanOrEqual(MAX_EMAILS_PER_DAY + RESERVED_EMAILS);
     });
 });
 

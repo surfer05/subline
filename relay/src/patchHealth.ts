@@ -28,12 +28,19 @@
  *   - an address (hashed /64 or IPv4) may add MAX_REPORTS_PER_ADDRESS reports
  *     a day;
  *   - at most MAX_PATCHES_PER_DAY distinct patches are tracked a day;
- *   - at most MAX_EMAILS_PER_DAY emails go out a day, ONE per patch.
+ *   - at most MAX_EMAILS_PER_DAY emails go out a day, ONE per patch, plus
+ *     RESERVED_EMAILS kept for a patch that 2 x the threshold of distinct
+ *     ADDRESSES report, so junk cannot use up the day's emails;
+ *   - an address may open MAX_NEW_PATCHES_PER_ADDRESS new patch rows a day,
+ *     and a full table evicts a row only one address reported (never one
+ *     several addresses agree on) to make room;
+ *   - `plugin` must be one of PATCH_PLUGINS, the plugins the client checks.
  * The email text is built only from validated printable ASCII, so a report can
  * never add a header line.
  *
  * THE ALERT. When at least PATCH_ALERT_MIN_INSTALLS (default 3) distinct
- * installs report the same patch (plugin + find) on one day, one email goes to
+ * installs FROM AS MANY DISTINCT ADDRESSES report the same patch (plugin +
+ * find) on one day, one email goes to
  * PATCH_ALERT_TO through the `ALERT_EMAIL` send_email binding. If the send
  * fails, the patch is marked unsent again so the next report retries it.
  */
@@ -50,6 +57,16 @@ export const MAX_BUILDS_PER_INSTALL = 3;
 export const MAX_REPORTS_PER_ADDRESS = 20;
 export const MAX_PATCHES_PER_DAY = 200;
 export const MAX_EMAILS_PER_DAY = 10;
+/** Emails above MAX_EMAILS_PER_DAY, only for a patch with 2 x the threshold of distinct addresses. */
+export const RESERVED_EMAILS = 2;
+/** New patch rows one address may open a day (two full reports). */
+export const MAX_NEW_PATCHES_PER_ADDRESS = 2 * MAX_FAILED_PER_REPORT;
+/**
+ * The only plugin names a report may carry: the client's HEALTH_PLUGINS
+ * (src/userplugins/vcTranslate/patchHealth.ts). Anything else is a 400, so the
+ * alert's Subject is never a name a stranger picked.
+ */
+export const PATCH_PLUGINS: readonly string[] = ["VcTranslate", "MessageAccessoriesAPI", "MessagePopoverAPI", "NoticesAPI", "Settings"];
 /** Distinct installs kept per patch. Past this the count stops growing. */
 export const MAX_INSTALLS_PER_PATCH = 500;
 export const DEFAULT_MIN_INSTALLS = 3;
@@ -101,7 +118,7 @@ export function validateReport(v: unknown): PatchReport | null {
         if (!f || typeof f !== "object" || Array.isArray(f)) return null;
         const r = f as Record<string, unknown>;
         if (!exactKeys(r, ["plugin", "find", "state"])) return null;
-        if (typeof r.plugin !== "string" || !PLUGIN_NAME_RE.test(r.plugin)) return null;
+        if (typeof r.plugin !== "string" || !PLUGIN_NAME_RE.test(r.plugin) || !PATCH_PLUGINS.includes(r.plugin)) return null;
         if (typeof r.find !== "string" || r.find.length > MAX_FIND_CHARS || !PRINTABLE_RE.test(r.find)) return null;
         if (typeof r.state !== "string" || !(PATCH_STATES as readonly string[]).includes(r.state)) return null;
         const key = `${r.plugin}|${r.find}|${r.state}`;
@@ -119,6 +136,9 @@ export interface PatchRow {
     find: string;
     /** Distinct install fingerprints (16 hex), at most MAX_INSTALLS_PER_PATCH. */
     installs: string[];
+    /** Distinct address fingerprints, at most MAX_INSTALLS_PER_PATCH. A row
+     *  stored before this field was kept has none. */
+    addrs?: string[];
     /** "<channel>:<build>" → state → reports. */
     builds: Record<string, Partial<Record<PatchState, number>>>;
     emailed: boolean;
@@ -129,11 +149,13 @@ export interface DayState {
     emails: number;
     installs: Map<string, string[]>;
     addresses: Map<string, number>;
+    /** New patch rows each address opened today. */
+    newRows: Map<string, number>;
     patches: Map<string, PatchRow>;
 }
 
 export function emptyDay(): DayState {
-    return { reports: 0, emails: 0, installs: new Map(), addresses: new Map(), patches: new Map() };
+    return { reports: 0, emails: 0, installs: new Map(), addresses: new Map(), newRows: new Map(), patches: new Map() };
 }
 
 export interface ReportInput {
@@ -153,8 +175,8 @@ export interface Alert {
 }
 
 export type ApplyResult =
-    | { result: "accepted"; writes: Record<string, unknown>; alerts: Alert[] }
-    | { result: "duplicate" | "install_limited" | "address_limited"; writes: null; alerts: [] };
+    | { result: "accepted"; writes: Record<string, unknown>; deletes: string[]; alerts: Alert[] }
+    | { result: "duplicate" | "install_limited" | "address_limited"; writes: null; deletes?: undefined; alerts: [] };
 
 export function patchId(plugin: string, find: string): string {
     return `${plugin}|${find}`;
@@ -182,18 +204,42 @@ export function applyReport(day: DayState, input: ReportInput): ApplyResult {
     writes.n = day.reports;
 
     const alerts: Alert[] = [];
+    const deletes: string[] = [];
     for (const f of input.failed) {
         const id = patchId(f.plugin, f.find);
         let row = day.patches.get(id);
         if (!row) {
-            if (day.patches.size >= MAX_PATCHES_PER_DAY) continue;
-            row = { plugin: f.plugin, find: f.find, installs: [], builds: {}, emailed: false };
+            // One address cannot fill the table: it opens a bounded number of rows.
+            const opened = day.newRows.get(input.addr) ?? 0;
+            if (opened >= MAX_NEW_PATCHES_PER_ADDRESS) continue;
+            if (day.patches.size >= MAX_PATCHES_PER_DAY) {
+                // Full: make room by dropping a row only ONE address reported and
+                // never emailed. A patch several addresses agree on is kept.
+                const victim = [...day.patches.entries()].find(([, r]) => !r.emailed && (r.addrs?.length ?? 0) <= 1);
+                if (!victim) continue;
+                day.patches.delete(victim[0]);
+                delete writes[`p:${victim[0]}`];
+                deletes.push(`p:${victim[0]}`);
+            }
+            day.newRows.set(input.addr, opened + 1);
+            writes[`r:${input.addr}`] = opened + 1;
+            row = { plugin: f.plugin, find: f.find, installs: [], addrs: [], builds: {}, emailed: false };
             day.patches.set(id, row);
+            const at = deletes.indexOf(`p:${id}`);
+            if (at >= 0) deletes.splice(at, 1);
         }
+        const addrs = row.addrs ?? (row.addrs = []);
         if (!row.installs.includes(input.inst) && row.installs.length < MAX_INSTALLS_PER_PATCH) row.installs.push(input.inst);
+        if (!addrs.includes(input.addr) && addrs.length < MAX_INSTALLS_PER_PATCH) addrs.push(input.addr);
         const perBuild = row.builds[input.discordKey] ?? (row.builds[input.discordKey] = {});
         perBuild[f.state] = (perBuild[f.state] ?? 0) + 1;
-        if (!row.emailed && row.installs.length >= input.minInstalls && day.emails < MAX_EMAILS_PER_DAY) {
+        // Distinct installs AND distinct addresses: one address minting install
+        // ids never sends an email. Past the day's cap, a reserved slot is kept
+        // for a patch that twice the threshold of addresses agree on.
+        const agreed = row.installs.length >= input.minInstalls && addrs.length >= input.minInstalls;
+        const slot = day.emails < MAX_EMAILS_PER_DAY
+            || (day.emails < MAX_EMAILS_PER_DAY + RESERVED_EMAILS && addrs.length >= 2 * input.minInstalls);
+        if (!row.emailed && agreed && slot) {
             row.emailed = true;
             day.emails += 1;
             writes.e = day.emails;
@@ -201,7 +247,7 @@ export function applyReport(day: DayState, input: ReportInput): ApplyResult {
         }
         writes[`p:${id}`] = row;
     }
-    return { result: "accepted", writes, alerts };
+    return { result: "accepted", writes, deletes, alerts };
 }
 
 /** Pure: an alert whose email did not go out may be sent by a later report. */
@@ -242,6 +288,7 @@ export class PatchHealth {
                 else if (k === "e") this.day.emails = Number(v) || 0;
                 else if (k.startsWith("i:") && Array.isArray(v)) this.day.installs.set(k.slice(2), v as string[]);
                 else if (k.startsWith("a:")) this.day.addresses.set(k.slice(2), Number(v) || 0);
+                else if (k.startsWith("r:")) this.day.newRows.set(k.slice(2), Number(v) || 0);
                 else if (k.startsWith("p:") && v && typeof v === "object") this.day.patches.set(k.slice(2), v as PatchRow);
             }
         });
@@ -259,6 +306,7 @@ export class PatchHealth {
             const out = applyReport(this.day, body);
             if (out.writes) {
                 await this.ctx.storage.put(out.writes);
+                if (out.deletes && out.deletes.length > 0) await this.ctx.storage.delete(out.deletes);
                 await this.armCleanup();
             }
             return Response.json({ result: out.result, alerts: out.alerts });
