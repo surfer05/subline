@@ -803,3 +803,17 @@ describe("the v0.2.0 release day checklist", () => {
         ]) expect(day, must).toContain(must);
     });
 });
+
+describe("the v0.2.3 release day checklist", () => {
+    it("deploys and smoke-tests the relay before the GitHub release that the live feed pushes", () => {
+        const doc = readFileSync(join(ROOT, "docs", "RELEASING.md"), "utf8");
+        const start = doc.indexOf("## v0.2.3 release day");
+        expect(start).toBeGreaterThanOrEqual(0);
+        const day = doc.slice(start, doc.indexOf("## v0.2.0 release day"));
+        for (const must of ["Email Routing", "npx wrangler deploy", "v3", "/v1/patch-health", "/v1/purchase-status", "Preview ✦",
+            "--notes-file ../docs/release-notes/v0.2.3.md", "buy/index.html", "CNAME", ".nojekyll"]) expect(day, must).toContain(must);
+        expect(day.indexOf("npx wrangler deploy")).toBeLessThan(day.indexOf("gh release create v0.2.3"));
+        // The helper's own words (helper.ts), quoted right.
+        expect(doc).not.toContain("Get the new Subline from surfer05.github.io/subline");
+    });
+});

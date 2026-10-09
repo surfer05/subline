@@ -45,6 +45,47 @@ SUBLINE_SIGN=1 SUBLINE_NOTARIZE=1 pnpm dist:mac
 
 ---
 
+## v0.2.3 release day
+
+The 0.2.3 plugin needs the 0.2.3 relay. The feed is live
+(`RELEASE_FEED_ENABLED=true`), so publishing the GitHub release pushes the new
+mod to every install within hours. **Deploy the relay first.** An old relay
+cuts every preview to its first words, sends no purchase status, and answers
+`/v1/patch-health` with 404, so patch reports are lost. Do these in order.
+
+1. **Turn on Email Routing for subline.page.** Cloudflare dashboard →
+   subline.page → Email → Email Routing. Under Destination addresses, verify
+   the `ALERT_EMAIL` address in `relay/wrangler.jsonc`. Without this the patch
+   alert email cannot be sent (see relay/README.md).
+2. **Test and deploy the relay:**
+
+   ```sh
+   cd relay && npm test && npm run typecheck && npx wrangler deploy
+   ```
+
+   This deploy creates the `PatchHealth` Durable Object (migration `v3`).
+3. **Smoke-test the live relay.**
+   - `POST /v1/patch-health` with an empty body must answer 400, not 404.
+   - `GET /v1/purchase-status?payment_id=pay_00000000` must answer 200 with
+     `{"state":"unknown"}`.
+   - On the owner Mac (Automatic, no AI), press Preview ✦ on a rough line.
+     The ✦ line must be the whole translation, not the first few words.
+4. **Only then publish the GitHub release.** From `installer/`:
+
+   ```sh
+   gh release create v0.2.3 --repo surfer05/subline --title "Subline 0.2.3" \
+     --notes-file ../docs/release-notes/v0.2.3.md \
+     release/subline-release.json release/SHA256SUMS \
+     release/Subline-0.2.3-arm64.dmg release/Subline-0.2.3-x64.dmg \
+     release/Subline-Setup-0.2.3.exe release/subline-mod-<build id>.zip
+   ```
+
+5. **Deploy the site** as in step 6 of the v0.2.0 list below: copy
+   `site/index.html` and `site/buy/index.html` (as `buy/index.html`) to
+   gh-pages, and keep its `CNAME` (subline.page) and `.nojekyll`.
+
+---
+
 ## v0.2.0 release day
 
 The paid-only release. Do these in order.
@@ -316,7 +357,7 @@ every helper ever shipped, and those helpers never update themselves. Never
 bump either format without keeping the old one served at the same feed URL. A
 helper that meets a format it cannot read raises `RELEASE_FORMAT_UNSUPPORTED`
 and tells the user, once a week at most: "This Subline can no longer read its
-update feed. Get the new Subline from surfer05.github.io/subline." That is the
+update feed. Get the new Subline from subline.page." That is the
 only remedy those users get, so a format bump strands everyone who has not
 downloaded the new app.
 
