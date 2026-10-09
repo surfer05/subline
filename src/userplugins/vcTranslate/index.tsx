@@ -2917,6 +2917,17 @@ const previews = new Map<string, PreviewResult>();
 const previewPending = new Set<string>();
 
 /**
+ * The preview ledger for THIS session. rememberPreview writes the whole map
+ * to disk, so a write before the ledger is read back, or after stop() cleared
+ * the map, would replace up to 200 stored previews with one row, and those
+ * messages would cost a second preview. So a press waits for the ledger, and
+ * an answer that lands after stop() is dropped (previewSession).
+ */
+let previewSession = 0;
+let previewLedgerLoaded = true;
+let previewLedgerReady: Promise<void> = Promise.resolve();
+
+/**
  * Has this message, AS IT READS NOW, had (or is it having) its one preview?
  * Then it is never offered again. An edit changes the content hash: the old
  * preview no longer describes the text (previewFor drops its line), so the
@@ -2980,6 +2991,11 @@ function googleUnsure(entry: { via: EngineId; lang: string; conf?: number }, con
  */
 async function previewPress(message: Message): Promise<void> {
     const id = message.id;
+    const mySession = previewSession;
+    if (!previewLedgerLoaded) {
+        await previewLedgerReady;
+        if (mySession !== previewSession) return;
+    }
     if (previewTaken(message) || forcedInFlight.has(id)) return;
     if (rolloverTasteIfNewUtcDay()) void refreshEntitlement();
     if (tasteExhausted()) {
@@ -2995,7 +3011,7 @@ async function previewPress(message: Message): Promise<void> {
     notifyForcedInFlight();
     let served = false;
     try {
-        served = await sendPreview(message);
+        served = await sendPreview(message, mySession);
     } catch {
         served = false;
     } finally {
@@ -3007,7 +3023,7 @@ async function previewPress(message: Message): Promise<void> {
 }
 
 /** previewPress's request. True once the relay served it and the ✦ line is stored. */
-async function sendPreview(message: Message): Promise<boolean> {
+async function sendPreview(message: Message, mySession: number): Promise<boolean> {
     const { credential, install } = await relayCredentials();
     const content = message.content ?? "";
     const base: BatchRequest = {
@@ -3063,6 +3079,9 @@ async function sendPreview(message: Message): Promise<boolean> {
         return false;
     }
     const text = r.skip ? "" : cleanTranslation(r.text.trim(), content);
+    // The plugin stopped while this was out: its map is empty, and writing it
+    // now would replace the stored ledger with this one row.
+    if (mySession !== previewSession) return false;
     noteTasteSpent();
     rememberPreview(previews, message.id, {
         text: text === "" ? null : text,
@@ -5235,6 +5254,10 @@ export default definePlugin({
     },
 
     async start() {
+        // The preview ledger is read first and awaited by any preview press, so
+        // a press during the awaits below can never overwrite it (previewSession).
+        previewLedgerLoaded = false;
+        previewLedgerReady = loadPreviewLedger(previews).finally(() => { previewLedgerLoaded = true; });
         // Every Activate / Add AI link opens the right panel while the plugin runs.
         registerUpgradeOpener(openUpgradeForLevel, openCodeEntryPanel);
         unsubscribePanels?.();
@@ -5329,7 +5352,7 @@ export default definePlugin({
         // The client's own count of today's five (a second guard; taste.ts).
         await loadLocalTasteCount();
         // The previews already shown: their ✦ lines, and never a second charge.
-        await loadPreviewLedger(previews);
+        await previewLedgerReady;
         showWeeklyNoteIfDue();
 
         await loadEnabledChannels();
@@ -5546,6 +5569,7 @@ export default definePlugin({
         if (statusRetryTimer !== null) clearTimeout(statusRetryTimer);
         statusRetryTimer = null;
         statusAttempts = 0;
+        previewSession++;
         // Read back from the ledger on the next start() (loadPreviewLedger).
         previews.clear();
         previewPending.clear();

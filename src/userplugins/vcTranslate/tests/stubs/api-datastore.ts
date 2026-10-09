@@ -27,7 +27,17 @@ function seed(): void {
 }
 seed();
 
+/** A read a test holds until it says so (see __holdGet). */
+const held = new Map<string, Promise<void>>();
+
+/** Make reads of `key` wait for `until` (to open a start() window in a test). */
+export function __holdGet(key: string, until: Promise<void>): void {
+    held.set(key, until);
+}
+
 export async function get<T>(key: string): Promise<T | undefined> {
+    const wait = held.get(key);
+    if (wait !== undefined) await wait;
     return mem.get(key) as T | undefined;
 }
 
@@ -49,6 +59,7 @@ export function clearEntitlementForTest(): void {
 
 export function __reset(): void {
     mem.clear();
+    held.clear();
     writes.length = 0;
     seed();
 }

@@ -63,7 +63,13 @@ const DELIBERATELY_KEPT: Record<string, string> = {
         + "and resurrect a batcher on a stopped plugin — the increment IS the mechanism.",
     fallbackKind:
         "Always assigned in fallBackToGoogle() before sessionFallback becomes true, and only ever "
-        + "read behind that flag, which stop() does reset. Unreachable while stale."
+        + "read behind that flag, which stop() does reset. Unreachable while stale.",
+    previewLedgerLoaded:
+        "Set by start() before its first await, together with previewLedgerReady. A load still "
+        + "out at stop() settles on its own; a press from the stopped session is dropped by previewSession.",
+    previewLedgerReady:
+        "Replaced by start() before its first await. The promise never rejects (loadPreviewLedger "
+        + "catches), so keeping the last one across stop() can only make a press wait for a finished read."
 };
 
 describe("stop() drops every piece of session state", () => {
