@@ -8,5 +8,8 @@ export default defineConfig({
         alias: {
             "cloudflare:email": fileURLToPath(new URL("test/stubs/cloudflare-email.ts", import.meta.url))
         }
+    },
+    test: {
+        setupFiles: ["test/setup-no-network.ts"]
     }
 });
