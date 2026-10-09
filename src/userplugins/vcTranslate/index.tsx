@@ -2658,7 +2658,9 @@ async function runTier(
             // Recorded from the SENT text, so the lookup in enqueue() keys on
             // exactly what a later identical message will present.
             const sent = req.messages.find(m => m.id === r.id);
-            if (sent !== undefined) rememberPhrase(sent.text, req.targetLang, value);
+            // P7: stored by the same rule it is reused by. A reply's line was
+            // read against its parent, so it must never answer a non-reply.
+            if (sent !== undefined && phraseReusable(sent)) rememberPhrase(sent.text, req.targetLang, value);
         }
 
         // THE RECOVERY SWEEP (see deferredChannels). Fast tier only, and only

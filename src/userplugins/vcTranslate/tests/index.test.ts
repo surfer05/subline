@@ -5181,6 +5181,18 @@ describe("conversation context reaches the ✦ tier (P6, P7, P8, R3)", () => {
         expect(geminiReqs().flatMap(r => r.messages.map((m: any) => m.id))).toContain("5004");
     });
 
+    it("P7: a long reply's ✦ line is never reused for a later non-reply with the same text", async () => {
+        const LONG = "on se retrouve demain matin devant la gare centrale";
+        FluxDispatcher.dispatch("MESSAGE_CREATE", {
+            message: { ...discordMessage("5101", LONG), message_reference: { message_id: "5100" } }
+        });
+        await settle();
+        expect(getTranslation(key("5101"))).toMatchObject({ via: "gemini" });
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: discordMessage("5102", LONG) });
+        await settle();
+        expect(geminiReqs().flatMap(r => r.messages.map((m: any) => m.id))).toContain("5102");
+    });
+
     it("R3: a reply whose parent is outside the ring carries a clipped copy of the parent", async () => {
         const parent = { id: "900", content: "coffee w no meals is prolly not a good idea", author: { id: "u9", username: "sara" } };
         FluxDispatcher.dispatch("MESSAGE_CREATE", {
