@@ -402,7 +402,7 @@ describe("G1. one checkout per install and kind, across Cloudflare locations", (
     const T0 = Date.UTC(2026, 9, 8, 12, 0, 0);
     /** Dodo: POST /checkouts makes cks_<n>; GET /checkouts/<id> answers `state[id]`
      *  (a payment_status, or "down" to throw). */
-    const dodo = (state: Record<string, string | null> = {}) => {
+    const dodo = (state: Record<string, string | null> = {}, payIds: Record<string, string> = {}) => {
         let n = 0;
         const posts: string[] = [];
         vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
@@ -411,7 +411,7 @@ describe("G1. one checkout per install and kind, across Cloudflare locations", (
                 const id = u.split("/").pop()!;
                 const st = id in state ? state[id] : null;
                 if (st === "down") throw new Error("network down");
-                return new Response(JSON.stringify({ id, payment_status: st }), { status: 200 });
+                return new Response(JSON.stringify({ id, payment_status: st, ...(id in payIds ? { payment_id: payIds[id] } : {}) }), { status: 200 });
             }
             n++;
             posts.push(u);
@@ -419,7 +419,7 @@ describe("G1. one checkout per install and kind, across Cloudflare locations", (
             await new Promise(r => setTimeout(r, 20));
             return new Response(JSON.stringify({ session_id: "cks_" + n, checkout_url: "https://checkout.dodopayments.com/session/cks_" + n }), { status: 200 });
         }));
-        return { posts, state };
+        return { posts, state, payIds };
     };
     /**
      * Two Cloudflare locations: one shared store, but a `cko:` / `checkout:`
@@ -496,10 +496,7 @@ describe("G1. one checkout per install and kind, across Cloudflare locations", (
         const d = dodo();
         expect((await checkout(ea, "monthly")).status).toBe(200);
         d.state.cks_1 = "succeeded";
-        await applyMorEvent(ea, { type: "payment.succeeded", data: { payment_id: PAY_AI, subscription_id: SUB, metadata: { install: hash } } }, T0);
-        await applyMorEvent(ea, { type: "license_key.created", data: { key: KEY_AI, product_id: "pdt_month", payment_id: PAY_AI, subscription_id: SUB } }, T0);
-        await applyMorEvent(ea, { type: "subscription.active", data: { subscription_id: SUB, next_billing_date: new Date(T0 + 30 * DAY).toISOString() } }, T0);
-        expect((await status(ea, A, KEY_AUTO)).body).toMatchObject({ ai: true });
+        await buyAiThrough(ea, hash, "cks_1");
         // The other kind's checkout row stays: it may be a payment in flight.
         await ea.CODES.put(`cko:${hash}:automatic`, "[]");
         await applyMorEvent(ea, { type: "refund.succeeded", data: refund(PAY_AI) }, T0);
@@ -509,6 +506,82 @@ describe("G1. one checkout per install and kind, across Cloudflare locations", (
         vi.setSystemTime(T0 + 60_000);
         const again = await checkout(ea, "annual");
         expect(again.status).toBe(200);
+        expect(d.posts).toHaveLength(2);
+    });
+
+    /** Buy AI through session `sess` (payment PAY_AI), as Dodo's webhooks report it. */
+    async function buyAiThrough(e: Env, hash: string, sess?: string) {
+        await applyMorEvent(e, { type: "payment.succeeded", data: { payment_id: PAY_AI, subscription_id: SUB, ...(sess ? { checkout_session_id: sess } : {}), metadata: { install: hash } } }, T0);
+        await applyMorEvent(e, { type: "license_key.created", data: { key: KEY_AI, product_id: "pdt_month", payment_id: PAY_AI, subscription_id: SUB } }, T0);
+        await applyMorEvent(e, { type: "subscription.active", data: { subscription_id: SUB, next_billing_date: new Date(T0 + 30 * DAY).toISOString() } }, T0);
+        expect((await status(e, A, KEY_AUTO)).body).toMatchObject({ ai: true });
+    }
+    const openIds = async (e: Env, promo: ReturnType<typeof fakePromo>, hash: string) => {
+        const kv = JSON.parse(await e.CODES.get(`cko:${hash}:ai`) ?? "[]").map((o: any) => o.s);
+        const lock = promo.objects.get(`cko:${hash}:ai`) as any;
+        return { kv, lock: (lock?.cko ?? []).map((o: any) => o.s) };
+    };
+
+    it("a refund of session A keeps session B (still payable) listed: B paid → no third session", async () => {
+        const { ea, promo, hash } = await setup();
+        const d = dodo();
+        expect((await checkout(ea, "monthly")).status).toBe(200); // cks_1 = A
+        vi.setSystemTime(T0 + 1000);
+        expect((await checkout(ea, "annual")).status).toBe(200); // cks_2 = B
+        expect(d.posts).toHaveLength(2);
+        d.state.cks_1 = "succeeded";
+        await buyAiThrough(ea, hash, "cks_1");
+        await applyMorEvent(ea, { type: "refund.succeeded", data: refund(PAY_AI) }, T0);
+        // Only A is gone; B stays on both lists.
+        expect(await openIds(ea, promo, hash)).toEqual({ kv: ["cks_2"], lock: ["cks_2"] });
+        // The buyer pays B; before B's webhook no third session is sold.
+        d.state.cks_2 = "succeeded";
+        vi.setSystemTime(T0 + 60_000);
+        const res = await checkout(ea, "monthly");
+        expect(res.status).toBe(409);
+        expect((await res.json() as any).error).toBe("purchase_pending");
+        expect(d.posts).toHaveLength(2);
+    });
+
+    it("a refund of session A while B is still unpaid: a new click reopens B (no new session)", async () => {
+        const { ea, hash } = await setup();
+        const d = dodo();
+        expect((await checkout(ea, "monthly")).status).toBe(200);
+        vi.setSystemTime(T0 + 1000);
+        const b = await (await checkout(ea, "annual")).json() as any;
+        d.state.cks_1 = "succeeded";
+        await buyAiThrough(ea, hash, "cks_1");
+        await applyMorEvent(ea, { type: "refund.succeeded", data: refund(PAY_AI) }, T0);
+        vi.setSystemTime(T0 + 60_000);
+        const again = await checkout(ea, "annual");
+        expect(again.status).toBe(200);
+        expect((await again.json() as any).url).toBe(b.url);
+        expect(d.posts).toHaveLength(2);
+    });
+
+    it("a refund with no session id on the payment finds it through Dodo and removes only it", async () => {
+        const { ea, promo, hash } = await setup();
+        const d = dodo();
+        expect((await checkout(ea, "monthly")).status).toBe(200);
+        vi.setSystemTime(T0 + 1000);
+        expect((await checkout(ea, "annual")).status).toBe(200);
+        d.state.cks_1 = "succeeded";
+        d.payIds.cks_1 = PAY_AI;
+        await buyAiThrough(ea, hash);
+        await applyMorEvent(ea, { type: "refund.succeeded", data: refund(PAY_AI) }, T0);
+        expect(await openIds(ea, promo, hash)).toEqual({ kv: ["cks_2"], lock: ["cks_2"] });
+    });
+
+    it("a refund whose session cannot be matched leaves the session list alone", async () => {
+        const { ea, promo, hash } = await setup();
+        const d = dodo();
+        expect((await checkout(ea, "monthly")).status).toBe(200);
+        vi.setSystemTime(T0 + 1000);
+        expect((await checkout(ea, "annual")).status).toBe(200);
+        // No checkout_session_id on the payment, and Dodo names no payment for either session.
+        await buyAiThrough(ea, hash);
+        await applyMorEvent(ea, { type: "refund.succeeded", data: refund(PAY_AI) }, T0);
+        expect(await openIds(ea, promo, hash)).toEqual({ kv: ["cks_2", "cks_1"], lock: ["cks_2", "cks_1"] });
         expect(d.posts).toHaveLength(2);
     });
 

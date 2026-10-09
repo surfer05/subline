@@ -241,6 +241,22 @@ export class Promo {
             }
             return Response.json({ released: applyCkoEnd(this.ckoLock, token) });
         }
+        if (path === "/cko/list") {
+            return Response.json({ open: this.cko });
+        }
+        if (path === "/cko/remove") {
+            // One refunded session leaves; the others (maybe paid, webhook not
+            // yet here) stay (checkout.ts clearBuying).
+            const body = await req.json().catch(() => ({})) as { s?: unknown };
+            const s = typeof body.s === "string" ? body.s : "";
+            const left = s ? this.cko.filter(o => !(o && typeof o === "object" && (o as { s?: unknown }).s === s)) : this.cko;
+            const removed = left.length !== this.cko.length;
+            if (removed) {
+                this.cko = left;
+                await this.ctx.storage.put("cko", this.cko);
+            }
+            return Response.json({ removed });
+        }
         if (path === "/cko/clear") {
             this.cko = [];
             await this.ctx.storage.put("cko", []);

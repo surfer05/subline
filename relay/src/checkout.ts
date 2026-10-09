@@ -295,6 +295,29 @@ async function releaseCheckoutLock(env: Env, hash: string, kind: PurchaseKind, t
     }
 }
 
+/** The lock object's session list, without taking the lock. Null when it cannot be read. */
+async function checkoutLockList(env: Env, hash: string, kind: PurchaseKind): Promise<OpenSession[] | null> {
+    if (!env.PROMO) return [];
+    try {
+        const res = await checkoutLockStub(env, hash, kind).fetch("https://promo.internal/cko/list", { method: "POST" });
+        const out = await res.json() as any;
+        return parseOpen(JSON.stringify(Array.isArray(out?.open) ? out.open : []));
+    } catch (e) {
+        console.warn("checkout: lock object list failed", { error: cause(e) });
+        return null;
+    }
+}
+
+/** Drop one session from the lock object's list (a refunded payment). Best-effort. */
+async function removeFromCheckoutLock(env: Env, hash: string, kind: PurchaseKind, sessionId: string): Promise<void> {
+    if (!env.PROMO) return;
+    try {
+        await checkoutLockStub(env, hash, kind).fetch("https://promo.internal/cko/remove", { method: "POST", body: JSON.stringify({ s: sessionId }) });
+    } catch (e) {
+        console.warn("checkout: lock object remove failed", { error: cause(e) });
+    }
+}
+
 /** Empty the lock object's session list (a failed or cancelled payment). Best-effort. */
 async function clearCheckoutLock(env: Env, hash: string, kind: PurchaseKind): Promise<void> {
     if (!env.PROMO) return;
@@ -549,6 +572,13 @@ export async function linkFromLifecycle(env: Env, name: string, data: any): Prom
         const ids = [data?.payment_id, data?.subscription_id]
             .filter((x: unknown): x is string => typeof x === "string" && x !== "");
         for (const id of ids) await env.CODES.put(`inst:${id}`, hash, { expirationTtl: INST_TTL_S });
+        // Which checkout session this payment paid, for a later refund
+        // (clearBuying removes that session alone from the open list).
+        const sess = typeof data?.checkout_session_id === "string" ? data.checkout_session_id : "";
+        const pay = typeof data?.payment_id === "string" ? data.payment_id : "";
+        if (name.startsWith("payment.") && sess && pay && !PURCHASE_ENDED.has(name)) {
+            await env.CODES.put(paymentSessionKey(pay), sess, { expirationTtl: INST_TTL_S });
+        }
         // Look for the key, then once more: license_key.created may be running
         // at the same moment, have read inst: before we wrote it, and written
         // order: after our first look. The same double-check as the pending
@@ -592,17 +622,24 @@ export async function linkFromKey(env: Env, key: string, joinIds: string[]): Pro
     }
 }
 
+/** `psess:<payment id>` → the checkout session it paid (from payment.* webhooks). */
+function paymentSessionKey(paymentId: string): string {
+    return `psess:${paymentId}`;
+}
+
 /**
  * A refund or a lost dispute: the purchase it paid for is over, so a new one
  * of either kind may be bought from that install at once. Best-effort: a
  * failure only keeps the pending marker until it expires.
  *
- * The refunded KIND's checkout rows go too (the cko: marker and the lock
- * object's session list). Otherwise the refunded session, which Dodo still
- * reports as paid, answers every new checkout of that kind with 409
- * purchase_pending for up to CKO_TTL_S. Only that kind: a session of the
- * other kind may be a payment still in flight, and clearing it could let the
- * buyer pay twice. A kind that cannot be found leaves the rows alone (the
+ * The refunded SESSION leaves the open list of its kind (the cko: marker and
+ * the lock object's list). Otherwise it, which Dodo still reports as paid,
+ * answers every new checkout of that kind with 409 purchase_pending for up to
+ * CKO_TTL_S. ONLY that session: another session of the same kind may be a
+ * payment still in flight (paid, webhook not yet here), and dropping it would
+ * let a third session be sold, a double charge. The session is found from the
+ * payment's `psess:` row, else by asking Dodo which listed session holds the
+ * payment. A kind or session that cannot be found leaves the lists alone (the
  * buyer then waits out the TTL, never pays twice).
  */
 export async function clearBuying(env: Env, paymentId: string): Promise<void> {
@@ -613,13 +650,51 @@ export async function clearBuying(env: Env, paymentId: string): Promise<void> {
         await env.CODES.delete(buyingKey(hash, "ai"));
         await env.CODES.delete(buyingKey(hash, "automatic"));
         const kind = await refundedKind(env, paymentId);
-        if (kind) {
-            await env.CODES.delete(checkoutOpenKey(hash, kind));
-            await clearCheckoutLock(env, hash, kind);
+        if (!kind) {
+            console.warn("refund: purchase kind unknown, open checkout sessions kept", { payment: paymentId.slice(0, 40) });
+            return;
         }
+        const ckoKey = checkoutOpenKey(hash, kind);
+        const kvOpen = parseOpen(await env.CODES.get(ckoKey));
+        const lockOpen = await checkoutLockList(env, hash, kind);
+        // Nothing listed (a lock list that cannot be read counts as maybe something).
+        if (kvOpen.length === 0 && lockOpen !== null && lockOpen.length === 0) return;
+        let sess = await env.CODES.get(paymentSessionKey(paymentId));
+        if (!sess) sess = await sessionOfPayment(env, paymentId, mergeOpen(lockOpen ?? [], kvOpen));
+        if (!sess) {
+            console.warn("refund: checkout session of the payment not found, open checkout sessions kept", { payment: paymentId.slice(0, 40), kind });
+            return;
+        }
+        const left = kvOpen.filter(o => o.s !== sess);
+        if (left.length !== kvOpen.length) {
+            if (left.length) await env.CODES.put(ckoKey, JSON.stringify(left), { expirationTtl: CKO_TTL_S });
+            else await env.CODES.delete(ckoKey);
+        }
+        await removeFromCheckoutLock(env, hash, kind, sess);
     } catch (e) {
         console.warn("purchase pending marker clear failed", { error: cause(e) });
     }
+}
+
+/** The listed session whose payment Dodo names as `paymentId` (GET /checkouts/{id}), or null. */
+async function sessionOfPayment(env: Env, paymentId: string, open: OpenSession[]): Promise<string | null> {
+    for (const o of open) {
+        try {
+            const res = await fetch(`${apiBase(env)}/checkouts/${encodeURIComponent(o.s)}`, {
+                method: "GET",
+                headers: { authorization: `Bearer ${env.DODO_API_KEY}` }
+            });
+            if (!res.ok) {
+                console.warn("refund: dodo session lookup refused", { status: res.status });
+                continue;
+            }
+            const out = await res.json() as any;
+            if (out && out.payment_id === paymentId) return o.s;
+        } catch (e) {
+            console.warn("refund: dodo session lookup failed", { error: cause(e) });
+        }
+    }
+    return null;
 }
 
 /** The kind a payment bought, from its key's code record (`order:` → `code:`). Null when unknown. */
