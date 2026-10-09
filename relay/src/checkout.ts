@@ -596,6 +596,14 @@ export async function linkFromKey(env: Env, key: string, joinIds: string[]): Pro
  * A refund or a lost dispute: the purchase it paid for is over, so a new one
  * of either kind may be bought from that install at once. Best-effort: a
  * failure only keeps the pending marker until it expires.
+ *
+ * The refunded KIND's checkout rows go too (the cko: marker and the lock
+ * object's session list). Otherwise the refunded session, which Dodo still
+ * reports as paid, answers every new checkout of that kind with 409
+ * purchase_pending for up to CKO_TTL_S. Only that kind: a session of the
+ * other kind may be a payment still in flight, and clearing it could let the
+ * buyer pay twice. A kind that cannot be found leaves the rows alone (the
+ * buyer then waits out the TTL, never pays twice).
  */
 export async function clearBuying(env: Env, paymentId: string): Promise<void> {
     if (!paymentId) return;
@@ -604,9 +612,26 @@ export async function clearBuying(env: Env, paymentId: string): Promise<void> {
         if (!hash || !HASH_RE.test(hash)) return;
         await env.CODES.delete(buyingKey(hash, "ai"));
         await env.CODES.delete(buyingKey(hash, "automatic"));
+        const kind = await refundedKind(env, paymentId);
+        if (kind) {
+            await env.CODES.delete(checkoutOpenKey(hash, kind));
+            await clearCheckoutLock(env, hash, kind);
+        }
     } catch (e) {
         console.warn("purchase pending marker clear failed", { error: cause(e) });
     }
+}
+
+/** The kind a payment bought, from its key's code record (`order:` → `code:`). Null when unknown. */
+async function refundedKind(env: Env, paymentId: string): Promise<PurchaseKind | null> {
+    const key = await env.CODES.get(`order:${paymentId}`);
+    if (!key) return null;
+    const raw = await env.CODES.get(`code:${key}`);
+    let plan: unknown;
+    try { plan = raw ? (JSON.parse(raw) as CodeRecord).plan : undefined; } catch { plan = undefined; }
+    if (plan === "automatic") return "automatic";
+    if (plan === "monthly" || plan === "annual") return "ai";
+    return null;
 }
 
 /* -------------------------------------------------------- purchase status -- */

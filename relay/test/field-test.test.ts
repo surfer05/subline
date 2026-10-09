@@ -491,6 +491,27 @@ describe("G1. one checkout per install and kind, across Cloudflare locations", (
         expect(d.posts).toHaveLength(1);
     });
 
+    it("after a refund the same install can buy that kind again at once (no 409 purchase_pending)", async () => {
+        const { ea, hash } = await setup();
+        const d = dodo();
+        expect((await checkout(ea, "monthly")).status).toBe(200);
+        d.state.cks_1 = "succeeded";
+        await applyMorEvent(ea, { type: "payment.succeeded", data: { payment_id: PAY_AI, subscription_id: SUB, metadata: { install: hash } } }, T0);
+        await applyMorEvent(ea, { type: "license_key.created", data: { key: KEY_AI, product_id: "pdt_month", payment_id: PAY_AI, subscription_id: SUB } }, T0);
+        await applyMorEvent(ea, { type: "subscription.active", data: { subscription_id: SUB, next_billing_date: new Date(T0 + 30 * DAY).toISOString() } }, T0);
+        expect((await status(ea, A, KEY_AUTO)).body).toMatchObject({ ai: true });
+        // The other kind's checkout row stays: it may be a payment in flight.
+        await ea.CODES.put(`cko:${hash}:automatic`, "[]");
+        await applyMorEvent(ea, { type: "refund.succeeded", data: refund(PAY_AI) }, T0);
+        expect((await status(ea, A, KEY_AUTO)).body).toMatchObject({ ai: false });
+        expect(await ea.CODES.get(`cko:${hash}:automatic`)).toBe("[]");
+        expect(await ea.CODES.get(`cko:${hash}:ai`)).toBeNull();
+        vi.setSystemTime(T0 + 60_000);
+        const again = await checkout(ea, "annual");
+        expect(again.status).toBe(200);
+        expect(d.posts).toHaveLength(2);
+    });
+
     it("keeps the 30-minute fallback: Dodo down → refused inside the window, allowed after it", async () => {
         const { ea, eb } = await setup();
         const d = dodo();
