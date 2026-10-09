@@ -599,6 +599,48 @@ describe("G1. one checkout per install and kind, across Cloudflare locations", (
         expect(d.posts).toHaveLength(2);
     });
 
+    const failEvent = (type: string, hash: string, over: Record<string, unknown>) =>
+        ({ type, data: { product_id: "pdt_month", metadata: { install: hash }, ...over } });
+
+    it("payment.failed of session A keeps session B listed: B paid → no third session", async () => {
+        const { ea, promo, hash } = await setup();
+        const d = dodo();
+        expect((await checkout(ea, "monthly")).status).toBe(200);
+        vi.setSystemTime(T0 + 1000);
+        expect((await checkout(ea, "annual")).status).toBe(200);
+        await applyMorEvent(ea, failEvent("payment.failed", hash, { payment_id: "pay_Failed000000000000000", checkout_session_id: "cks_1" }), T0);
+        expect(await openIds(ea, promo, hash)).toEqual({ kv: ["cks_2"], lock: ["cks_2"] });
+        d.state.cks_2 = "succeeded";
+        vi.setSystemTime(T0 + 60_000);
+        const res = await checkout(ea, "monthly");
+        expect(res.status).toBe(409);
+        expect(d.posts).toHaveLength(2);
+    });
+
+    it("payment.cancelled with no session id finds its session through Dodo and removes only it", async () => {
+        const { ea, promo, hash } = await setup();
+        const d = dodo();
+        expect((await checkout(ea, "monthly")).status).toBe(200);
+        vi.setSystemTime(T0 + 1000);
+        expect((await checkout(ea, "annual")).status).toBe(200);
+        d.payIds.cks_1 = "pay_Cancel000000000000000";
+        await applyMorEvent(ea, failEvent("payment.cancelled", hash, { payment_id: "pay_Cancel000000000000000" }), T0);
+        expect(await openIds(ea, promo, hash)).toEqual({ kv: ["cks_2"], lock: ["cks_2"] });
+    });
+
+    for (const type of ["payment.failed", "subscription.failed", "subscription.cancelled", "subscription.expired"]) {
+        it(`${type} that matches no listed session leaves both lists alone`, async () => {
+            const { ea, promo, hash } = await setup();
+            const d = dodo();
+            expect((await checkout(ea, "monthly")).status).toBe(200);
+            vi.setSystemTime(T0 + 1000);
+            expect((await checkout(ea, "annual")).status).toBe(200);
+            await applyMorEvent(ea, failEvent(type, hash, { payment_id: "pay_Other0000000000000000", subscription_id: "sub_Other0000000000000000" }), T0);
+            expect(await openIds(ea, promo, hash)).toEqual({ kv: ["cks_2", "cks_1"], lock: ["cks_2", "cks_1"] });
+            expect(d.posts).toHaveLength(2);
+        });
+    }
+
     it("payment.failed clears the lock object's sessions too, so a retry opens even with Dodo down", async () => {
         const { ea, eb, hash } = await setup();
         const d = dodo();

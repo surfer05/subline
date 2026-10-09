@@ -80,8 +80,8 @@ export const INST_TTL_S = 3 * 86_400;
  *     then let the buyer through (fail open after the window, so an outage
  *     never locks a buyer out for long).
  * The marker lives as long as a Dodo session can still be paid (24 h by
- * default; kept 48 h like the checkout: rows). A payment.failed / cancelled
- * webhook deletes it (linkFromLifecycle).
+ * default; kept 48 h like the checkout: rows). A failed, cancelled or refunded
+ * purchase removes only its own session from it (removeOpenSession).
  *
  * WINDOW = 30 min: it covers a buyer still on the payment page, 3DS and a slow
  * first webhook when Dodo's status call is down, and it caps how long a Dodo
@@ -315,17 +315,6 @@ async function removeFromCheckoutLock(env: Env, hash: string, kind: PurchaseKind
         await checkoutLockStub(env, hash, kind).fetch("https://promo.internal/cko/remove", { method: "POST", body: JSON.stringify({ s: sessionId }) });
     } catch (e) {
         console.warn("checkout: lock object remove failed", { error: cause(e) });
-    }
-}
-
-/** Empty the lock object's session list (a failed or cancelled payment). Best-effort. */
-async function clearCheckoutLock(env: Env, hash: string, kind: PurchaseKind): Promise<void> {
-    if (!env.PROMO) return;
-    try {
-        await checkoutLockStub(env, hash, kind).fetch("https://promo.internal/cko/clear", { method: "POST" });
-    } catch (e) {
-        // Not needed for safety: Dodo answers "ended" for that session anyway.
-        console.warn("checkout: lock object clear failed", { error: cause(e) });
     }
 }
 
@@ -563,10 +552,14 @@ export async function linkFromLifecycle(env: Env, name: string, data: any): Prom
         const lapsed = SUB_DUNNING_EVENTS.has(name) && subId !== "" && (await env.CODES.get(`order:${subId}`)) !== null;
         if (PURCHASE_ENDED.has(name) || lapsed) {
             await env.CODES.delete(buyingKey(hash, kind));
-            // The attempt is over: its checkout-open row must not hold a retry.
+            // The attempt is over: its own session must not hold a retry. Only
+            // that session leaves the open list; another one of the same kind
+            // may be paid with its webhook still on the way (see clearBuying).
             if (PURCHASE_ENDED.has(name)) {
-                await env.CODES.delete(checkoutOpenKey(hash, kind));
-                await clearCheckoutLock(env, hash, kind);
+                await removeOpenSession(env, hash, kind, {
+                    session: typeof data?.checkout_session_id === "string" ? data.checkout_session_id : "",
+                    payment: typeof data?.payment_id === "string" ? data.payment_id : ""
+                }, name);
             }
         } else await env.CODES.put(buyingKey(hash, kind), JSON.stringify({ plan, at: Date.now() }), { expirationTtl: INST_TTL_S });
         const ids = [data?.payment_id, data?.subscription_id]
@@ -654,26 +647,43 @@ export async function clearBuying(env: Env, paymentId: string): Promise<void> {
             console.warn("refund: purchase kind unknown, open checkout sessions kept", { payment: paymentId.slice(0, 40) });
             return;
         }
-        const ckoKey = checkoutOpenKey(hash, kind);
-        const kvOpen = parseOpen(await env.CODES.get(ckoKey));
-        const lockOpen = await checkoutLockList(env, hash, kind);
-        // Nothing listed (a lock list that cannot be read counts as maybe something).
-        if (kvOpen.length === 0 && lockOpen !== null && lockOpen.length === 0) return;
-        let sess = await env.CODES.get(paymentSessionKey(paymentId));
-        if (!sess) sess = await sessionOfPayment(env, paymentId, mergeOpen(lockOpen ?? [], kvOpen));
-        if (!sess) {
-            console.warn("refund: checkout session of the payment not found, open checkout sessions kept", { payment: paymentId.slice(0, 40), kind });
-            return;
-        }
-        const left = kvOpen.filter(o => o.s !== sess);
-        if (left.length !== kvOpen.length) {
-            if (left.length) await env.CODES.put(ckoKey, JSON.stringify(left), { expirationTtl: CKO_TTL_S });
-            else await env.CODES.delete(ckoKey);
-        }
-        await removeFromCheckoutLock(env, hash, kind, sess);
+        await removeOpenSession(env, hash, kind, { session: "", payment: paymentId }, "refund");
     } catch (e) {
         console.warn("purchase pending marker clear failed", { error: cause(e) });
     }
+}
+
+/**
+ * Take ONE checkout session out of the install+kind open list (the cko: KV
+ * marker and the lock object). The session is the event's own
+ * checkout_session_id, else the payment's `psess:` row, else the listed
+ * session Dodo names for the payment. Nothing matched → both lists stay and
+ * the cause is logged: never clear everything (another session may be paid,
+ * webhook still on the way). A KV error is thrown to the caller.
+ */
+async function removeOpenSession(
+    env: Env, hash: string, kind: PurchaseKind, ids: { session: string; payment: string }, why: string
+): Promise<void> {
+    const ckoKey = checkoutOpenKey(hash, kind);
+    const kvOpen = parseOpen(await env.CODES.get(ckoKey));
+    const lockOpen = await checkoutLockList(env, hash, kind);
+    // Nothing listed (a lock list that cannot be read counts as maybe something).
+    if (kvOpen.length === 0 && lockOpen !== null && lockOpen.length === 0) return;
+    let sess: string | null = ids.session || null;
+    if (!sess && ids.payment) sess = await env.CODES.get(paymentSessionKey(ids.payment));
+    if (!sess && ids.payment) sess = await sessionOfPayment(env, ids.payment, mergeOpen(lockOpen ?? [], kvOpen));
+    if (!sess) {
+        console.warn("checkout: session of the ended purchase not found, open checkout sessions kept", {
+            event: why, payment: ids.payment.slice(0, 40), kind
+        });
+        return;
+    }
+    const left = kvOpen.filter(o => o.s !== sess);
+    if (left.length !== kvOpen.length) {
+        if (left.length) await env.CODES.put(ckoKey, JSON.stringify(left), { expirationTtl: CKO_TTL_S });
+        else await env.CODES.delete(ckoKey);
+    }
+    await removeFromCheckoutLock(env, hash, kind, sess);
 }
 
 /** The listed session whose payment Dodo names as `paymentId` (GET /checkouts/{id}), or null. */
