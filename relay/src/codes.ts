@@ -863,10 +863,11 @@ export function mintCode(): string {
 // is written. It is still ONE index namespace feeding the SAME state machine —
 // applyLifecycle is unchanged; the adapter just picks the right join id per event.
 //
-// WHEN license_key.created HAS NO payment_id (live bug 2026-10-08: a real
-// Automatic purchase left no order:<payment_id>, so its refund could not revoke
-// it and purchase-status said "unknown"), the row is still written, from every
-// source that ties the payment to the key (indexPayment, never retargeting):
+// WHEN license_key.created HAS NO payment_id (hardening: Dodo's types allow it.
+// Live keys checked 2026-10-09 do carry it; a 2026-10-08 report of a missing
+// row was a misread payment id. Without it, no refund could revoke the code
+// and purchase-status would say "unknown"), the row is still written, from
+// every source that ties the payment to the key (indexPayment, never retargeting):
 //   • license_key.created asks Dodo for the payment of this key (the customer's
 //     license-key grants; orders.ts). One-time + Dodo down → 500, Dodo retries.
 //   • entitlement_grant.created/delivered carries both (license_key grants).
