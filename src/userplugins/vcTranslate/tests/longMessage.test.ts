@@ -233,3 +233,35 @@ describe("splitTextToLimit / joinParts", () => {
         expect(joinParts("m", ["a", "b"], ["\n"], rows)).toBeNull();
     });
 });
+
+describe("G2: a long message edited while its parts are out", () => {
+    it("is asked again on the ✦ tier with the new text once the old parts settle", async () => {
+        await startAi();
+        // Hold the relay's first answer until the edit has landed.
+        let release!: () => void;
+        const held = new Promise<void>(r => { release = r; });
+        const answer = native.translateBatch.getMockImplementation()!;
+        let first = true;
+        native.translateBatch.mockImplementation(async (engine: string, k: string, payload: string) => {
+            if (engine === "relay" && first) {
+                first = false;
+                await held;
+            }
+            return answer(engine, k, payload);
+        });
+
+        FluxDispatcher.dispatch("MESSAGE_CREATE", { message: msg("m1", LONG) });
+        await advance(30_000);
+        expect(relayRequests.length).toBe(0);   // the first part request is held
+
+        const EDITED = "Neu: " + LONG;
+        FluxDispatcher.dispatch("MESSAGE_UPDATE", { message: msg("m1", EDITED) });
+        await advance(30_000);
+        release();
+        await advance(30_000);
+
+        // The edited text went out in parts, and its ✦ line is written.
+        expect(sentParts().some(t => t.startsWith("Neu: "))).toBe(true);
+        expect(getTranslation(makeKey("m1", "en"))).toMatchObject({ via: "relay", text: "<m1~p0>\n\n<m1~p1>" });
+    });
+});

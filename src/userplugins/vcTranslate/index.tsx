@@ -2300,7 +2300,9 @@ async function runTier(
                     // A reply to a long message keeps its parent: as a clipped
                     // copy, since the parent goes out as "<id>~p<n>" rows.
                     req = { ...req, messages: withParentCopies(req.messages.filter(m => m.text.length <= LLM_TEXT_MAX), req.messages) };
-                    for (const m of long) await runLongMessage(engine, m, req, myGeneration, channelId, report, sentEpoch);
+                    for (const m of long) {
+                        if (await runLongMessage(engine, m, req, myGeneration, channelId, report, sentEpoch)) stale.add(m.id);
+                    }
                 }
             }
             if (req.messages.length === 0) return;
@@ -2751,12 +2753,14 @@ function partsRequest(m: BatchRequest["messages"][number], base: BatchRequest): 
  * requests when they do not fit one), and the ✦ line is written only when
  * every part came back. A part that failed leaves the ≈ line as it is: a ✦
  * of only part of the message never replaces a ≈ of all of it.
+ * Returns true when the message was edited while its parts were out, so the
+ * caller asks again with the new text.
  */
 async function runLongMessage(
     engine: EngineId, m: BatchRequest["messages"][number], base: BatchRequest, myGeneration: number,
     channelId: string | undefined, report: ((outcome: ForcedHint) => void) | undefined,
     epochs: ReadonlyMap<string, number>
-): Promise<void> {
+): Promise<boolean> {
     const key = makeKey(m.id, base.targetLang);
     markQualityAttempted(key);
     const { req, parts, seps } = partsRequest(m, base);
@@ -2764,24 +2768,26 @@ async function runLongMessage(
     await runTier(engine, req, myGeneration, channelId, report, undefined, results => {
         for (const r of results) rows.set(r.id, r);
     });
-    if (myGeneration !== batcherGeneration) return;
-    // Edited while out: these words no longer exist.
-    if ((editEpoch.get(m.id) ?? 0) !== (epochs.get(m.id) ?? 0)) return;
+    if (myGeneration !== batcherGeneration) return false;
+    // Edited while out: these words no longer exist. Told to the caller, so
+    // its finally asks again with the new text once this id is released.
+    if ((editEpoch.get(m.id) ?? 0) !== (epochs.get(m.id) ?? 0)) return true;
     // Nothing came back at all (a cooldown, a failed request): as the batch
     // path does, the message may be asked again while nothing readable shows.
     if (rows.size === 0 && !isRealTranslation(getTranslation(key))) qualityAttempted.delete(key);
     const whole = joinParts(m.id, parts, seps, rows);
     if (whole === null) {
         logger.info(`[flush] ${m.id}: ${parts.length} parts, not all came back; the ≈ line stays`);
-        return;
+        return false;
     }
-    if ("failed" in whole) return;
+    if ("failed" in whole) return false;
     if (whole.skip) {
         // A forced skip never takes a readable line away (as in runTier).
         if (!(base.force === true && isRealTranslation(getTranslation(key)))) writeResult(key, { skipped: true, via: engine });
-        return;
+        return false;
     }
     writeResult(key, { lang: whole.lang, text: whole.text, via: engine });
+    return false;
 }
 
 /**
