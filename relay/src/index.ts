@@ -393,13 +393,19 @@ async function serveBatch(
         // get the other parts translated for free.
         const allFailed = results.every(r => "failed" in r);
         if (preview && v2 && pv && !allFailed) {
-            const lost = failedMessages(results, tooLong, pv.baseOf);
+            const lostSet = failedMessages(results, tooLong, pv.baseOf);
+            const lost = lostSet.size;
             if (lost > 0) {
                 const back = pv.parts
                     ? await refundGroup(env, code!, now, pv.parts)
                     : Math.min(charged, lost);
                 if (!pv.parts && back > 0) ctx.waitUntil(refund(env, code!, back, now, tasteIp, plan, budgetCost, once?.key));
-                const partOk = { ok: true, results, used: Math.max(0, res.used - back), cap: res.cap, rpmLimit: rpmLimitFor(rec) };
+                // A message with a failed part is shown NOTHING: every row of it
+                // is answered failed. The plugin drops such a message anyway
+                // (joinParts), and a modified client must not keep the other
+                // parts' full ✦ text while the message is given back.
+                const shown = results.map(r => lostSet.has(pv.baseOf.get(r.id) ?? r.id) && !("failed" in r) ? { id: r.id, failed: true as const } : r);
+                const partOk = { ok: true, results: shown, used: Math.max(0, res.used - back), cap: res.cap, rpmLimit: rpmLimitFor(rec) };
                 return done(json(newClient ? { ...partOk, now } : partOk), "ok", code, Math.max(0, charged - back), plan);
             }
         }
@@ -487,6 +493,10 @@ async function translateV2(env: Env, ctx: ExecutionContext, done: Done, req: Req
     }
     if (!r.automatic || !r.acctId) return done(fail("not_activated", 402), "not_activated", credential, 0);
     if ((body as any).mode !== "preview") return done(fail("ai_required", 402), "ai_required", credential, 0);
+    // A preview row with no text is never sent by the plugin (it previews a
+    // message it could read). Refused before any spend: an empty row is the
+    // easiest way to make a part fail on purpose.
+    if (norm.batch.messages.some(m => m.text.trim() === "")) return done(fail("bad request", 400), "bad_payload", credential, 0);
     // The account's previews: a synthetic taste-shaped record on its own
     // counter ("pv:<account>", counted in the Budget object, see reserve).
     const pvRec: CodeRecord = { status: "active", plan: "taste", dailyCap: PREVIEW_DAILY_CAP };
@@ -567,6 +577,21 @@ export const PREVIEW_FREE_REPEATS = 2;
 export const PREVIEW_MAX_PARTS = 32;
 
 /**
+ * A message sent in parts is counted by SIZE: one preview per started
+ * PREVIEW_PART_UNIT characters of distinct part text (budget.ts
+ * ReserveReq.parts). The relay cannot check that the parts are one message,
+ * so without this one preview could carry 32 unrelated 4,000-character
+ * texts. Discord caps a message at 4,000 characters; mention names and
+ * UTF-16 counting can grow that, so an honest long message stays at 1.
+ */
+export const PREVIEW_PART_UNIT = 2 * MAX_TEXT_CHARS;
+
+/** Part-group refunds an account may have in a day (budget.ts /refund-group).
+ *  A failed part is rare for an honest message; past this, the retry of the
+ *  same parts is still free under the repeat rule. */
+export const PREVIEW_GROUP_REFUNDS = 3;
+
+/**
  * A row id the plugin made by splitting a long message (fitRequest.ts
  * splitTextToLimit): "<message id>~p<n>", n = 0..31 written plainly (no
  * leading zero). Anything else is an ordinary id, the whole of it.
@@ -583,8 +608,9 @@ export interface PreviewPlan {
     cost: number;
     /** A single ordinary message: its marker (budget.ts ReserveReq.once). */
     once?: { key: string; maxFree: number };
-    /** Every row is a part of ONE message: its group (budget.ts ReserveReq.parts). */
-    parts?: NonNullable<ReserveReq["parts"]>;
+    /** Every row is a part of ONE message: its group (budget.ts ReserveReq.parts),
+     *  with the account's refund row for /refund-group. */
+    parts?: NonNullable<ReserveReq["parts"]> & { refunds: string; maxRefunds: number };
     /** Row id → the message it belongs to. */
     baseOf: Map<string, string>;
 }
@@ -618,14 +644,22 @@ export async function previewPlan(acctId: string, norm: NormalizedBatch, now: nu
         const base = parsed[0]!.part!.base;
         const g = await hex12(`${base}\n${target}`);
         const keys: string[] = [];
+        const sizes: number[] = [];
         for (const { m, part } of parsed) {
             keys.push(dayRowKey(`pvp:${acctId}:${await hex12(`${base}\n${part!.n}\n${target}\n${m.text}`)}`, now));
+            sizes.push(m.text.length);
         }
+        // Distinct part texts only: a row repeated in one request is one part.
+        const seen = new Map<string, number>();
+        keys.forEach((k, i) => { if (!seen.has(k)) seen.set(k, sizes[i]!); });
+        const partChars = [...seen.values()].reduce((n, x) => n + x, 0);
         return {
-            cost: 1, baseOf,
+            cost: Math.max(1, Math.ceil(partChars / PREVIEW_PART_UNIT)), baseOf,
             parts: {
                 group: dayRowKey(`pvg:${acctId}:${g}`, now), charge: dayRowKey(`pvc:${acctId}:${g}`, now),
-                keys, maxFree: PREVIEW_FREE_REPEATS, maxNew: PREVIEW_MAX_PARTS
+                chars: dayRowKey(`pvs:${acctId}:${g}`, now), sizes, unit: PREVIEW_PART_UNIT,
+                keys, maxFree: PREVIEW_FREE_REPEATS, maxNew: PREVIEW_MAX_PARTS,
+                refunds: dayRowKey(`pvr:${acctId}`, now), maxRefunds: PREVIEW_GROUP_REFUNDS
             }
         };
     }
@@ -634,17 +668,24 @@ export async function previewPlan(acctId: string, norm: NormalizedBatch, now: nu
         const hex = await hex12(`${m.id}\n${target}\n${m.text}`);
         return { cost: 1, baseOf, once: { key: dayRowKey(`pvm:${acctId}:${hex}`, now), maxFree: PREVIEW_FREE_REPEATS } };
     }
-    return { cost: bases.size, baseOf };
+    // Several messages: one preview each, a message sent in parts counted by
+    // size like a parts group (PREVIEW_PART_UNIT), so mixing one ordinary row
+    // in cannot make 32 parts cost 1.
+    const charsOf = new Map<string, number>();
+    for (const { m, part } of parsed) if (part) charsOf.set(part.base, (charsOf.get(part.base) ?? 0) + m.text.length);
+    let cost = 0;
+    for (const b of bases) cost += charsOf.has(b) ? Math.max(1, Math.ceil(charsOf.get(b)! / PREVIEW_PART_UNIT)) : 1;
+    return { cost, baseOf };
 }
 
 /** Messages with a failed row (a too-long refusal aside, see serveBatch). */
-function failedMessages(results: Result[], tooLong: string[], baseOf: Map<string, string>): number {
+function failedMessages(results: Result[], tooLong: string[], baseOf: Map<string, string>): Set<string> {
     const skip = new Set(tooLong);
     const lost = new Set<string>();
     for (const r of results) {
         if ("failed" in r && !skip.has(r.id)) lost.add(baseOf.get(r.id) ?? r.id);
     }
-    return lost.size;
+    return lost;
 }
 
 /** Owner check for the /admin/* routes: null when allowed, else the refusal. */

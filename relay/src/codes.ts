@@ -760,13 +760,15 @@ export async function refund(
  *  today, reset its group and take back this call's part markers (budget.ts
  *  /refund-group). Never throws: a failure only leaves the count high. Returns what was given back. */
 export async function refundGroup(
-    env: Env, code: string, now: number, parts: NonNullable<ReserveReq["parts"]>
+    env: Env, code: string, now: number, parts: NonNullable<ReserveReq["parts"]> & { refunds?: string; maxRefunds?: number }
 ): Promise<number> {
     try {
         const res = await budgetStub(env).fetch("https://budget.internal/refund-group", {
             method: "POST",
             body: JSON.stringify({
                 day: dayRowKey(code, now), charge: parts.charge, group: parts.group,
+                ...(parts.chars ? { chars: parts.chars } : {}),
+                ...(parts.refunds ? { refunds: parts.refunds, maxRefunds: parts.maxRefunds ?? 0 } : {}),
                 rows: [...new Set(parts.keys)].map(key => ({ key, sub: 1 }))
             })
         });

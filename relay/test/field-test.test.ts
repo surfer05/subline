@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import worker, { partOf, PREVIEW_FREE_REPEATS, PREVIEW_MAX_PARTS } from "../src/index";
+import worker, { partOf, PREVIEW_FREE_REPEATS, PREVIEW_GROUP_REFUNDS, PREVIEW_MAX_PARTS, PREVIEW_PART_UNIT } from "../src/index";
 import { applyMorEvent, type Env } from "../src/codes";
 import { CKO_LOCK_WAIT_MS, DEFAULT_CHECKOUT_RETURN_URL, discordReturnUrl, installHash, PURCHASE_STATUS_PER_MINUTE } from "../src/checkout";
 import { CKO_LOCK_STALE_MS, Promo } from "../src/promo";
@@ -717,6 +717,78 @@ describe("long messages sent in parts: one preview per message (plugin 1d52243, 
         const r = await send(e, [...parts("a"), ...parts("b")]);
         expect(r.body.used).toBe(1);
         expect(await used(e)).toBe(1);
+    });
+
+    it("a failed part blanks EVERY row of that message: no full ✦ text comes with a refund", async () => {
+        const e = await owner();
+        model(["m1~p31"]);
+        const rows = Array.from({ length: 32 }, (_, n) => ({ id: `m1~p${n}`, text: `chat line ${n} of something else` }));
+        const r = await send(e, rows);
+        expect(r.status).toBe(200);
+        expect(r.body.results).toHaveLength(32);
+        expect(r.body.results.every((x: any) => x.failed === true && !("text" in x))).toBe(true);
+        expect(r.body.used).toBe(0);
+        expect(await used(e)).toBe(0);
+    });
+
+    it("parts are counted by size: 30 unrelated 4,000-character texts under one id are not 1 preview", async () => {
+        const e = await owner();
+        const m = model();
+        const big = (n: number, tag: string) => ({ id: `x~p${n}`, text: `${tag}${n} `.padEnd(4_000, "z") });
+        const r = await send(e, Array.from({ length: 30 }, (_, n) => big(n, "a")));
+        expect(r.status).toBe(429);
+        expect(m).not.toHaveBeenCalled();
+        // Five requests of fresh texts on one base stop at the cap.
+        const e2 = await owner();
+        const statuses: number[] = [];
+        for (let i = 0; i < 5; i++) statuses.push((await send(e2, Array.from({ length: 4 }, (_, n) => big(n + 4 * i, `r${i}`)))).status);
+        expect(statuses.filter(s => s === 200).length).toBeLessThanOrEqual(3);
+        expect(await used(e2)).toBeLessThanOrEqual(5);
+    });
+
+    it("one honest long message (7,000 characters in 2 parts) still costs 1, in one request or two", async () => {
+        const e = await owner();
+        model();
+        const p0 = "a".repeat(3_900), p1 = "b".repeat(3_100);
+        expect((await send(e, [{ id: "m1~p0", text: p0 }, { id: "m1~p1", text: p1 }])).body.used).toBe(1);
+        expect((await send(e, [{ id: "m2~p0", text: p0 }])).body.used).toBe(2);
+        expect((await send(e, [{ id: "m2~p1", text: p1 }])).body.used).toBe(2);
+        // A third part that takes the message past PREVIEW_PART_UNIT counts once more.
+        expect((await send(e, [{ id: "m2~p2", text: "c".repeat(PREVIEW_PART_UNIT - 7_000 + 1) }])).body.used).toBe(3);
+    });
+
+    it("parts mixed with an ordinary row are still counted by size", async () => {
+        const e = await owner();
+        const m = model();
+        const rows = [...Array.from({ length: 24 }, (_, n) => ({ id: `x~p${n}`, text: `${n} `.padEnd(4_000, "z") })), { id: "y", text: "hola" }];
+        expect((await send(e, rows)).status).toBe(429);
+        expect(m).not.toHaveBeenCalled();
+    });
+
+    it("p0 alone, then a junk part that fails: the refund is bounded per day (no endless free text)", async () => {
+        const e = await owner();
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const counts: number[] = [];
+        for (let i = 0; i < PREVIEW_GROUP_REFUNDS + 3; i++) {
+            model([`g${i}~p1`]);
+            const first = await send(e, [{ id: `g${i}~p0`, text: `real text ${i}` }]);
+            if (first.status !== 200) { counts.push(-1); continue; }
+            await send(e, [{ id: `g${i}~p1`, text: `junk ${i}` }]);
+            await new Promise(res => setTimeout(res, 0));
+            counts.push(await used(e));
+        }
+        // The first PREVIEW_GROUP_REFUNDS are given back; after that each p0 stays counted.
+        expect(counts.slice(0, PREVIEW_GROUP_REFUNDS).every(n => n === 0)).toBe(true);
+        expect(counts.slice(PREVIEW_GROUP_REFUNDS)).toEqual([1, 2, 3]);
+    });
+
+    it("a preview row with empty text is refused before any spend", async () => {
+        const e = await owner();
+        const m = model();
+        const r = await send(e, [{ id: "m1~p0", text: "hola" }, { id: "m1~p1", text: "  " }]);
+        expect(r.status).toBe(400);
+        expect(m).not.toHaveBeenCalled();
+        expect(await used(e)).toBe(0);
     });
 
     it("AI (non-preview) requests are unchanged: counted on the AI code per message", async () => {
