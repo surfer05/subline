@@ -156,10 +156,17 @@ describe.skipIf(!haveTree)("the Subline tab against the pinned Vencord", () => {
         const tabSource = join(INSTALLER_DIR, "packaging", "branding", "sublineTab.tsx");
         const tabInTree = join(VENCORD_TREE, "src", "components", "settings", "tabs", "subline", "index.tsx");
         copyFileSync(tabSource, tabInTree);
-        const run = spawnSync(VENCORD_TSC, ["--noEmit", "-p", "."], { cwd: VENCORD_TREE, encoding: "utf8" });
+        const run = spawnSync(VENCORD_TSC, ["--noEmit", "-p", "."], { cwd: VENCORD_TREE, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+        // A tsc that could not start, was killed, or overflowed the buffer prints
+        // nothing about the tab. That must fail, never pass as "no errors".
+        expect(run.error).toBeUndefined();
+        expect(run.signal).toBeNull();
         const tabErrors = `${run.stdout}\n${run.stderr}`
             .split("\n")
             .filter(line => line.includes("tabs/subline/"));
         expect(tabErrors).toEqual([]);
-    }, 120_000);
+        // Vencord's tsc over the whole tree takes about 50 s alone and well over
+        // 120 s while the other test files run in parallel. A timing failure here
+        // stops `pnpm release` at preflight, so the limit is generous.
+    }, 600_000);
 });
