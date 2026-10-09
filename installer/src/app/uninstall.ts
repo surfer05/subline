@@ -295,7 +295,7 @@ export function removePluginSettings(settingsPath: string | null): Result<boolea
 
 
 /** A readable marker of ours beside this Discord. A bad one (see state "marker-unreadable") is not. */
-function carriesOurMarker(ports: UninstallPorts, install: DiscordInstall): boolean {
+function carriesOurMarker(ports: Pick<UninstallPorts, "hasOurMarker">, install: DiscordInstall): boolean {
     if (ports.hasOurMarker !== undefined) return ports.hasOurMarker(install);
     return existsSync(join(install.resourcesPath, MARKER_FILENAME));
 }
@@ -320,6 +320,66 @@ function clearOurMarkerBesideForeign(ports: UninstallPorts, install: DiscordInst
     } else {
         ports.log.info("uninstall.foreign-marker-removed", { path: install.rootPath, removed: cleared.value.removedArtifacts.length });
     }
+}
+
+/**
+ * THE DRY RUN's verdict for every Discord uninstall was handed: which are
+ * Subline's (restored), which are left as they are (another mod's, another
+ * account's, unreadable with no marker of ours, never ours), or the first one
+ * that refuses the whole uninstall. Writes nothing.
+ *
+ * Shared by uninstall() and by the window's permission gate (main.ts
+ * runUninstall), so the Discords whose write access is checked are exactly
+ * the ones the restore writes to. A Discord another account owns must never
+ * refuse the uninstall of this account's own Discord (audit #2, #5).
+ */
+export function classifyUninstallTargets(
+    ports: Pick<UninstallPorts, "unpatch" | "hasOurMarker">,
+    installs: readonly DiscordInstall[]
+):
+    | { ok: true; ours: DiscordInstall[]; leftAlone: Map<DiscordInstall, LeftAloneReason> }
+    | { ok: false; install: DiscordInstall; error: PatcherError } {
+    const ours: DiscordInstall[] = [];
+    const leftAlone = new Map<DiscordInstall, LeftAloneReason>();
+    for (const install of installs) {
+        const verdict = ports.unpatch(install, { dryRun: true });
+        if (verdict.ok) {
+            if (verdict.value.foreignMod !== undefined) {
+                leftAlone.set(install, { kind: "foreign", mod: verdict.value.foreignMod });
+            } else if (verdict.value.alreadyClean) {
+                leftAlone.set(install, { kind: "not-ours" });
+            } else {
+                ours.push(install);
+            }
+            continue;
+        }
+        if (verdict.error.code === "OTHER_ACCOUNT") {
+            leftAlone.set(install, { kind: "other-account" });
+            continue;
+        }
+        // A marker that is not one of ours (empty, truncated, another
+        // product's) proves nothing: only a real marker makes a Discord whose
+        // files cannot be read a reason to refuse.
+        if (verdict.error.code === "BROKEN_INSTALL" && !carriesOurMarker(ports, install)) {
+            leftAlone.set(install, { kind: "unreadable" });
+            continue;
+        }
+        return { ok: false, install, error: verdict.error };
+    }
+    return { ok: true, ours, leftAlone };
+}
+
+/**
+ * The Discords the uninstall will write to, for the App Management probe.
+ * Empty when the dry run refuses: uninstall() then reports that refusal
+ * itself, before any write, so no permission is needed for it.
+ */
+export function uninstallWriteTargets(
+    ports: Pick<UninstallPorts, "unpatch" | "hasOurMarker">,
+    installs: readonly DiscordInstall[]
+): DiscordInstall[] {
+    const c = classifyUninstallTargets(ports, installs);
+    return c.ok ? c.ours : [];
 }
 
 /**
@@ -361,38 +421,16 @@ export async function uninstall(
     //    another mod owns, one whose files cannot be read and carry no marker
     //    of ours, or one Subline was never in, is left exactly as it is and
     //    listed. It never blocks the uninstall of the Discords that ARE ours.
-    const ours: DiscordInstall[] = [];
-    const leftAlone = new Map<DiscordInstall, LeftAloneReason>();
-    for (const install of options.installs) {
-        const verdict = ports.unpatch(install, { dryRun: true });
-        if (verdict.ok) {
-            if (verdict.value.foreignMod !== undefined) {
-                leftAlone.set(install, { kind: "foreign", mod: verdict.value.foreignMod });
-            } else if (verdict.value.alreadyClean) {
-                leftAlone.set(install, { kind: "not-ours" });
-            } else {
-                ours.push(install);
-            }
-            continue;
-        }
-        if (verdict.error.code === "OTHER_ACCOUNT") {
-            leftAlone.set(install, { kind: "other-account" });
-            continue;
-        }
-        // A marker that is not one of ours (empty, truncated, another
-        // product's) proves nothing: only a real marker makes a Discord whose
-        // files cannot be read a reason to refuse.
-        if (verdict.error.code === "BROKEN_INSTALL" && !carriesOurMarker(ports, install)) {
-            leftAlone.set(install, { kind: "unreadable" });
-            continue;
-        }
+    const classified = classifyUninstallTargets(ports, options.installs);
+    if (!classified.ok) {
         ports.log.error("uninstall.refused", {
-            code: verdict.error.code,
-            branch: install.branch,
-            path: install.rootPath
+            code: classified.error.code,
+            branch: classified.install.branch,
+            path: classified.install.rootPath
         });
-        return refusedReport([verdict.error], refusalSummary(verdict.error));
+        return refusedReport([classified.error], refusalSummary(classified.error));
     }
+    const { ours, leftAlone } = classified;
     for (const [install, reason] of leftAlone) {
         ports.log.info("uninstall.left-alone", {
             branch: install.branch,

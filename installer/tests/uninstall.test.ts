@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { PLUGIN_SETTINGS_KEY, readInstallId, readPriorUse, readSublineCode } from "../src/app/language.js";
-import { removePluginSettings, uninstall } from "../src/app/uninstall.js";
+import { removePluginSettings, uninstall, uninstallWriteTargets } from "../src/app/uninstall.js";
 import type { HelperRemoval, UninstallPorts, UninstallSystemPorts } from "../src/app/uninstall.js";
 import { manifestPathFor } from "../src/bundle/spec.js";
 import type { DiscordInstall } from "../src/patcher/locate.js";
@@ -1045,5 +1045,36 @@ describe("a bundle an interrupted swap left aside (audit 2026-10-06 #45)", () =>
         rmSync(modDir, { recursive: true, force: true });
         const report = await uninstall(ports({ unpatch: failsOnWrite("FILE_IN_USE") }), { installs: [INSTALL] });
         expect(report.summary).toContain("Subline's own files are missing, so Discord may not start.");
+    });
+});
+
+describe("the uninstall permission gate checks only the Discords the restore writes to (main.ts runUninstall)", () => {
+    it("another account's Canary is not probed, so it cannot refuse this account's uninstall", () => {
+        const targets = uninstallWriteTargets({
+            unpatch: install => install === CANARY ? unpatchFail("OTHER_ACCOUNT", "theirs") : unpatchOk(install)
+        }, [INSTALL, CANARY]);
+        expect(targets).toEqual([INSTALL]);
+    });
+
+    it("a foreign, a never-ours and an unreadable Discord without our marker are not probed either", () => {
+        const targets = uninstallWriteTargets({
+            unpatch: install => install === CANARY ? foreign(install)
+                : install === PTB ? unpatchFail("BROKEN_INSTALL", "unreadable")
+                : unpatchOk(install),
+            hasOurMarker: () => false
+        }, [INSTALL, CANARY, PTB]);
+        expect(targets).toEqual([INSTALL]);
+    });
+
+    it("a dry run that refuses needs no permission: uninstall() reports it before any write", () => {
+        expect(uninstallWriteTargets({ unpatch: () => unpatchFail("BACKUP_MISSING", "gone") }, [INSTALL])).toEqual([]);
+    });
+
+    it("main.ts probes the write targets, not every Discord with a mark", () => {
+        const main = readFileSync(join(__dirname, "..", "src", "main", "main.ts"), "utf8");
+        const body = main.slice(main.indexOf("async function runUninstall("), main.indexOf("phase(\"removing\");"));
+        expect(body).toContain("uninstallWriteTargets(");
+        expect(body).toMatch(/const probe = \(\) => worstAppManagementStatus\(writeTargets\.map/);
+        expect(body).not.toMatch(/installs\.map\(install =>\s*probeAppManagement/);
     });
 });

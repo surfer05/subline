@@ -29,7 +29,7 @@ import type { FlowAction, FlowState } from "../app/flow.js";
 import {
     APP_MANAGEMENT_SETTINGS_URL, appManagementSummary, awaitAppManagement, isLoggedAttempt, probeAppManagement, worstAppManagementStatus
 } from "../app/appManagement.js";
-import { refusedReport, uninstall } from "../app/uninstall.js";
+import { refusedReport, uninstall, uninstallWriteTargets } from "../app/uninstall.js";
 import { UninstallSession } from "../app/uninstallSession.js";
 import { isHeadlessUninstall, runHeadlessUninstall, UNINSTALL_EXIT } from "../app/headlessUninstall.js";
 import type { UninstallReport } from "../app/uninstall.js";
@@ -611,7 +611,20 @@ async function runUninstall(
     const phase = (name: "permission" | "removing"): void => {
         if (window !== null && !window.isDestroyed()) window.webContents.send("uninstall:phase", name);
     };
-    const probe = () => worstAppManagementStatus(installs.map(install =>
+    // Only the Discords the restore will write to (the dry run's "ours"). A
+    // Discord another account owns, another mod's, or one Subline was never
+    // in is left alone by uninstall(), so it must not refuse this one either.
+    const classifyPorts = {
+        // Our own loader by path too, so a stub whose marker went missing (a
+        // Windows Discord update copies app.asar without it) is still restored.
+        unpatch: (install: DiscordInstall, opts: { removeForeignMod?: boolean; dryRun?: boolean }) => unpatchOurs(install, opts),
+        hasOurMarker: (install: DiscordInstall) => {
+            const marker = readMarker(install.resourcesPath);
+            return marker.ok && marker.value !== null;
+        }
+    };
+    const writeTargets = uninstallWriteTargets(classifyPorts, installs);
+    const probe = () => worstAppManagementStatus(writeTargets.map(install =>
         probeAppManagement({ resourcesPath: install.resourcesPath, platform: process.platform })));
     const status = probe();
     log.info("uninstall.permission.probe", { status, installs: installs.length });
@@ -620,14 +633,14 @@ async function runUninstall(
         // is opened and nothing waits. Nothing has been changed.
         const message = appManagementSummary("not-writable");
         return refused(refusedReport(
-            [{ code: "NOT_WRITABLE", message, path: installs[0]?.resourcesPath }],
+            [{ code: "NOT_WRITABLE", message, path: writeTargets[0]?.resourcesPath }],
             `${message} Nothing has been changed.`
         ));
     }
     if (status !== "granted" && status !== "not-required" && !interactive) {
         const message = appManagementSummary(status);
         return refused(refusedReport(
-            [{ code: "PERMISSION_DENIED", message, path: installs[0]?.resourcesPath }],
+            [{ code: "PERMISSION_DENIED", message, path: writeTargets[0]?.resourcesPath }],
             `${message} Nothing has been changed.`
         ));
     }
@@ -652,7 +665,7 @@ async function runUninstall(
         if (!report.permitted && report.status === "not-writable") {
             const message = appManagementSummary("not-writable");
             return refused(refusedReport(
-                [{ code: "NOT_WRITABLE", message, path: installs[0]?.resourcesPath }],
+                [{ code: "NOT_WRITABLE", message, path: writeTargets[0]?.resourcesPath }],
                 `${message} Nothing has been changed.`
             ));
         }
@@ -664,7 +677,7 @@ async function runUninstall(
                 ...refusedReport(
                     report.cancelled
                         ? []
-                        : [{ code: "IO_ERROR", message: report.summary, path: installs[0]?.resourcesPath }],
+                        : [{ code: "IO_ERROR", message: report.summary, path: writeTargets[0]?.resourcesPath }],
                     report.cancelled
                         ? "Nothing was changed. Discord is exactly as it was."
                         : `${report.summary} Nothing has been changed. Discord keeps working exactly as it does now.`
@@ -689,13 +702,7 @@ async function runUninstall(
     });
     const report = await uninstall(
         {
-            // Our own loader by path too, so a stub whose marker went missing (a
-            // Windows Discord update copies app.asar without it) is still restored.
-            unpatch: (install, opts) => unpatchOurs(install, opts),
-            hasOurMarker: install => {
-                const marker = readMarker(install.resourcesPath);
-                return marker.ok && marker.value !== null;
-            },
+            ...classifyPorts,
             ...uninstallPaths(),
             platform: process.platform,
             log,
