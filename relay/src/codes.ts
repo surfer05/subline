@@ -13,6 +13,7 @@
 
 import { bumpStat } from "./stats";
 import { linkFromKey, linkFromLifecycle, clearBuying, recordPurchaseState } from "./checkout";
+import { keysForPayment, paymentForKey } from "./orders";
 import { dayRowKey, monthRowKey, type ReserveReq, type ReserveRes } from "./budget";
 
 export interface Env {
@@ -835,7 +836,10 @@ export function mintCode(): string {
 //       data.key             — the license key string == the Subline code
 //       data.product_id      — product → plan/cap map (VARIANTS is keyed by this)
 //       data.subscription_id — the subscription join key (null for one-time)
-//       data.payment_id      — the payment join key (present for every purchase)
+//       data.payment_id      — the payment join key. OPTIONAL AND NULLABLE in
+//                              Dodo's LicenseKey type ("if any"); when absent
+//                              the relay asks Dodo (orders.ts), see below.
+//       data.customer_id, data.id — used only for that look-up.
 //   • subscription.{active,renewed,plan_changed,cancelled,on_hold,failed,expired,…}
 //     (data.payload_type "Subscription"):
 //       data.subscription_id     — join key
@@ -858,6 +862,18 @@ export function mintCode(): string {
 // A one-time (lifetime) purchase has no subscription_id, so only order:<payment_id>
 // is written. It is still ONE index namespace feeding the SAME state machine —
 // applyLifecycle is unchanged; the adapter just picks the right join id per event.
+//
+// WHEN license_key.created HAS NO payment_id (live bug 2026-10-08: a real
+// Automatic purchase left no order:<payment_id>, so its refund could not revoke
+// it and purchase-status said "unknown"), the row is still written, from every
+// source that ties the payment to the key (indexPayment, never retargeting):
+//   • license_key.created asks Dodo for the payment of this key (the customer's
+//     license-key grants; orders.ts). One-time + Dodo down → 500, Dodo retries.
+//   • payment.succeeded, when its row is missing, asks Dodo for the key(s) it issued.
+//   • entitlement_grant.created/delivered carries both (license_key grants).
+//   • refund.succeeded / dispute.lost|accepted, when the row is missing, ask Dodo
+//     before staging (Dodo down → staged AND 500, so the retry asks again).
+//   • POST /admin/backfill-orders for codes made before this fix.
 //
 // ORDER-INDEPENDENCE. Webhook delivery order is NOT guaranteed, and only
 // license_key.created carries the key. A lifecycle event that arrives BEFORE the
@@ -1059,6 +1075,11 @@ async function applyLifecycle(env: Env, orderId: string, d: Lifecycle): Promise<
         await env.CODES.put(`code:${lateKey}`, JSON.stringify(lateRec));
         return "applied_after_stage";
     }
+    return applyToCode(env, orderKey, d);
+}
+
+/** Apply a derived lifecycle change to one code (following reissue links). */
+async function applyToCode(env: Env, orderKey: string, d: Lifecycle): Promise<string> {
     // A reissued code forwards to the code that replaced it (see reissuedTo).
     const followed = await followReissue(env, orderKey);
     const key = followed.key;
@@ -1087,6 +1108,79 @@ async function applyLifecycle(env: Env, orderId: string, d: Lifecycle): Promise<
     if (d.mor_subscription_id) rec.mor_subscription_id = d.mor_subscription_id;
     await env.CODES.put(`code:${key}`, JSON.stringify(rec));
     return "applied";
+}
+
+/**
+ * THE PAYMENT-ID INDEX, written late. Point `order:<paymentId>` at `key` for a
+ * code that already exists, when the license_key.created that made it did not
+ * carry the payment id (see orders.ts). The only callers are sources that tie
+ * the two together: Dodo's own grant/key records, an entitlement_grant event,
+ * the backfill. Never retargets a row: an `order:` row naming another live
+ * code, or a code whose record names another payment, is a conflict (logged,
+ * nothing written), so a refund can never reach the wrong code. Any lifecycle
+ * staged under pending:<paymentId> (a refund that came first) is folded in,
+ * and the buying install is handed the key. KV failures throw (webhook 500,
+ * Dodo retries; every write here is an idempotent overwrite).
+ */
+export type IndexResult = "indexed" | "exists" | "conflict" | "no_code";
+export async function indexPayment(env: Env, paymentId: string, key: string, opts: { dryRun?: boolean } = {}): Promise<IndexResult> {
+    if (!paymentId || !key) return "no_code";
+    const { key: liveKey, rec } = await followReissue(env, key);
+    if (!rec) return "no_code";
+    const cur = await env.CODES.get(`order:${paymentId}`);
+    if (cur !== null) {
+        if (cur === key || cur === liveKey || (await followReissue(env, cur)).key === liveKey) return "exists";
+        console.warn("payment index: row already names another code, left alone", { payment: paymentId.slice(0, 40) });
+        return "conflict";
+    }
+    if (rec.mor_order_id && rec.mor_order_id !== paymentId) {
+        console.warn("payment index: code belongs to another payment, left alone", { payment: paymentId.slice(0, 40) });
+        return "conflict";
+    }
+    if (opts.dryRun) return "indexed";
+    rec.mor_order_id = paymentId;
+    if (!rec.orderRef) rec.orderRef = paymentId;
+    await drainPending(env, rec, [paymentId]);
+    await env.CODES.put(`code:${liveKey}`, JSON.stringify(rec));
+    await env.CODES.put(`order:${paymentId}`, liveKey);
+    await linkFromKey(env, liveKey, [paymentId]);
+    // A refund that staged after our drain (concurrent delivery).
+    if (await drainPending(env, rec, [paymentId])) await env.CODES.put(`code:${liveKey}`, JSON.stringify(rec));
+    return "indexed";
+}
+
+/** The paid plans a payment-id index matters for (never free/unmapped). */
+function isPaidProduct(env: Env, productId: string): boolean {
+    const cfg = variantConfig(env, productId);
+    return cfg.mapped && cfg.plan !== "free";
+}
+
+/** A Payment's product (product_cart[0].product_id, else product_id). */
+function productOfPayment(data: any): string {
+    if (Array.isArray(data?.product_cart) && typeof data.product_cart[0]?.product_id === "string") return data.product_cart[0].product_id;
+    return asStr(data?.product_id);
+}
+
+/**
+ * payment.succeeded: make sure order:<payment_id> exists. Usually
+ * license_key.created already wrote it (nothing to do, one KV read). When it
+ * did not (no payment id on the key), ask Dodo which key this payment issued
+ * and index it if that code exists. If the key is not made yet,
+ * license_key.created indexes it when it lands (it resolves the payment
+ * itself), so either arrival order converges. Never throws for Dodo trouble:
+ * this event's real work (the install link) is already done.
+ */
+async function indexFromPayment(env: Env, data: any): Promise<void> {
+    const payId = asStr(data?.payment_id);
+    if (!payId) return;
+    if (await env.CODES.get(`order:${payId}`) !== null) return;
+    if (!isPaidProduct(env, productOfPayment(data))) return;
+    const r = await keysForPayment(env, payId, asStr(data?.customer?.customer_id));
+    if (!r.ok) {
+        if (r.reason === "unavailable") console.warn("payment index: dodo unavailable, left to license_key.created", { payment: payId.slice(0, 40) });
+        return;
+    }
+    for (const key of r.value) await indexPayment(env, payId, key);
 }
 
 // Dispute states in which the merchant has DEFINITIVELY lost the funds → revoke.
@@ -1125,19 +1219,39 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
         const key = asStr(data.key);
         if (!key) return { action: "ignored_no_key" }; // nothing to key on; a code we can't name is useless
         const subId = asStr(data.subscription_id);   // subscription join key (empty for one-time)
-        const payId = asStr(data.payment_id);        // payment join key (present for every purchase)
+        let payId = asStr(data.payment_id);          // payment join key (optional + nullable in Dodo's LicenseKey)
+        const cfg = variantConfig(env, asStr(data.product_id));
+        // No payment id on the key: ask Dodo which payment issued it (orders.ts),
+        // so refunds, disputes and the purchase status can find this code. A
+        // one-time code has no other join id, so an outage here answers 500 and
+        // Dodo retries rather than minting a code no refund could reach. A
+        // subscription code is still reachable by its sub id: log and go on.
+        if (!payId && cfg.mapped && cfg.plan !== "free") {
+            const r = await paymentForKey(env, key, asStr(data.id), asStr(data.customer_id));
+            if (r.ok && r.value) payId = r.value;
+            else if (!r.ok && r.reason === "unavailable") {
+                if (!subId) throw new Error("license key without payment id: dodo lookup unavailable");
+                console.warn("license key without payment id: dodo lookup unavailable, sub id only", { product: asStr(data.product_id).slice(0, 40) });
+            } else {
+                console.warn("license key without payment id: dodo names none", { product: asStr(data.product_id).slice(0, 40), sub: !!subId });
+            }
+        }
         // The join ids this code is reachable by. Both feed the SAME `order:`
         // index (see REVERSE-INDEX SCHEME): sub id for lifecycle, payment id for
         // refund/dispute (which carry ONLY payment_id).
         const joinIds = [...new Set([subId, payId].filter(Boolean))];
-        const cfg = variantConfig(env, asStr(data.product_id));
         if (!cfg.mapped) console.warn("license key for an unmapped product: created revoked, no entitlement", { product: asStr(data.product_id).slice(0, 40) });
         // #5: a PAID/subscription key with NO join id at all can be filed under
         // no order:<id> index, so a later refund/expire could never find it — an
-        // un-revokable paid code. Refuse to mint (Dodo retries; a well-formed
-        // license_key.created always carries a payment_id). Free/unmapped codes
-        // are harmless without one (already free-capped), so only paid is guarded.
-        if (cfg.plan !== "free" && joinIds.length === 0) return { action: "ignored_no_order" };
+        // un-revokable paid code. Refuse to mint. Free/unmapped codes are
+        // harmless without one (already free-capped), so only paid is guarded.
+        // With Dodo reachable (the look-up above answered "no payment"), this
+        // answers 500 so Dodo RETRIES: a 2xx here would drop a paid buyer's key
+        // for good, silently. Without a Dodo key nothing could ever resolve it.
+        if (cfg.plan !== "free" && joinIds.length === 0) {
+            if (env.DODO_API_KEY) throw new Error("paid license key with no payment or subscription id");
+            return { action: "ignored_no_order" };
+        }
         const isSubscription = SUBSCRIPTION_PLANS.has(cfg.plan as string);
         // UPSERT (never a second code for one purchase). Preserve any expiry /
         // subscription id / revocation an out-of-order lifecycle event already
@@ -1204,6 +1318,21 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
     if (name.startsWith("payment.") || name.startsWith("subscription.")) {
         await recordPurchaseState(env, name, data);
         await linkFromLifecycle(env, name, data);
+        if (name === "payment.succeeded") {
+            await indexFromPayment(env, data);
+            return { action: "ignored" };
+        }
+    }
+
+    // ---- entitlement_grant.* (Dodo Entitlements): a license-key grant names
+    // the key AND the payment that issued it. It only completes the payment-id
+    // index of a code license_key.created already made; it never makes a code
+    // (a grant has no product id to map to a plan) and never changes state.
+    if (name === "entitlement_grant.created" || name === "entitlement_grant.delivered") {
+        const key = asStr(data?.license_key?.key);
+        const payId = asStr(data?.payment_id);
+        if (data?.integration_type !== "license_key" || !key || !payId) return { action: "ignored" };
+        return { action: `grant_${await indexPayment(env, payId, key)}` };
     }
 
     // ---- SUBSCRIPTION lifecycle (join via data.subscription_id) -----------
@@ -1263,9 +1392,35 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
                 return { action: "ignored_partial_refund" };
             }
         }
+        const payId = asStr(data.payment_id);
+        const revoke: Lifecycle = { revoked: true, terminal: true, expiresAt: now, revokedAt: now };
+        // MISSING INDEX FALLBACK. A code whose license_key.created carried no
+        // payment id has no order:<payment_id> row. Before staging, ask Dodo
+        // which key(s) this payment issued (a Refund carries customer; a
+        // Dispute does not, so the payment is read first). indexPayment never
+        // retargets a row and refuses a code recorded under another payment,
+        // so only the code this payment bought is revoked.
+        let lookupDown = false;
+        const extra: string[] = [];
+        if (payId && await env.CODES.get(`order:${payId}`) === null) {
+            const r = await keysForPayment(env, payId, asStr(data?.customer?.customer_id));
+            if (r.ok) {
+                for (const key of r.value) {
+                    const res = await indexPayment(env, payId, key);
+                    // A second key for the same payment (quantity > 1) cannot share
+                    // the one order: row; it is revoked directly below.
+                    if (res === "conflict" && (await followReissue(env, key)).rec?.mor_order_id === undefined) extra.push(key);
+                }
+            } else if (r.reason === "unavailable") lookupDown = true;
+        }
         // The purchase is over: a new one may be bought from that install now.
-        await clearBuying(env, asStr(data.payment_id));
-        return { action: await applyLifecycle(env, asStr(data.payment_id), { revoked: true, terminal: true, expiresAt: now, revokedAt: now }) };
+        await clearBuying(env, payId);
+        const action = await applyLifecycle(env, payId, revoke);
+        for (const key of extra) await applyToCode(env, key, revoke);
+        // Dodo could not be asked and no code was found: the revoke is staged
+        // under pending:<payment_id>; answer 500 so Dodo retries the lookup.
+        if (lookupDown && action === "staged") throw new Error("refund: code not indexed and dodo lookup unavailable");
+        return { action };
     }
 
     // ---- Everything else (payment.*, in-flight/won disputes, credit.*, …):
