@@ -29,7 +29,6 @@
 import { followReissue, ipBucket, isNewClient, isTasteBearer, variantConfig, type CodeRecord, type Env } from "./codes";
 import { installOf, isApiV2, resolveEntitlement } from "./entitle";
 import { readCappedText, SMALL_BODY_BYTES } from "./body";
-import { CHECKOUT_STATUS_BUDGET_MS, deadlineIn, dodoFetch } from "./dodoFetch";
 
 export const DEFAULT_DODO_API_BASE = "https://live.dodopayments.com";
 export const DEFAULT_CHECKOUT_RETURN_URL = "https://subline.page/";
@@ -342,9 +341,8 @@ async function createSessionLocked(
         console.warn("checkout: open session lookup failed, refusing", { error: cause(e) });
         return fail("checkout unavailable", 503);
     }
-    const statusBy = deadlineIn(CHECKOUT_STATUS_BUDGET_MS);
     for (const o of open) {
-        const st = await sessionState(env, o.s, statusBy);
+        const st = await sessionState(env, o.s);
         const young = now - o.at < CKO_WINDOW_MS;
         if (st === "paying") return fail("purchase_pending", 409);
         if (st === "unknown" && young) {
@@ -376,19 +374,17 @@ async function createSessionLocked(
     };
 
     let res: Response;
-    let text: string;
     try {
-        res = await dodoFetch(`${apiBase(env)}/checkouts`, {
+        res = await fetch(`${apiBase(env)}/checkouts`, {
             method: "POST",
             headers: { authorization: `Bearer ${env.DODO_API_KEY}`, "content-type": "application/json" },
             body: JSON.stringify(payload)
         });
-        // Read inside the try: the timeout covers the body too.
-        text = await res.text();
     } catch (e) {
         console.warn("checkout: dodo request failed", { error: cause(e) });
         return fail("checkout unavailable", 503);
     }
+    const text = await res.text().catch(() => "");
     if (!res.ok) {
         console.warn("checkout: dodo refused", { status: res.status, body: text.slice(0, 200) });
         return fail("checkout unavailable", 503);
@@ -459,21 +455,19 @@ const ENDED = new Set(["failed", "cancelled"]);
  * (Dodo unreachable, refused, or a status this code does not know; the caller
  * time-boxes it). Never throws; never logs the API key.
  */
-async function sessionState(env: Env, sessionId: string, deadline?: number): Promise<"paying" | "open" | "ended" | "unknown"> {
+async function sessionState(env: Env, sessionId: string): Promise<"paying" | "open" | "ended" | "unknown"> {
     let res: Response;
-    let text: string;
     try {
-        res = await dodoFetch(`${apiBase(env)}/checkouts/${encodeURIComponent(sessionId)}`, {
+        res = await fetch(`${apiBase(env)}/checkouts/${encodeURIComponent(sessionId)}`, {
             method: "GET",
             headers: { authorization: `Bearer ${env.DODO_API_KEY}` }
-        }, deadline);
-        if (res.status === 404) return "ended";
-        // Read inside the try: the timeout covers the body too.
-        text = await res.text();
+        });
     } catch (e) {
         console.warn("checkout: dodo session status request failed", { error: cause(e) });
         return "unknown";
     }
+    if (res.status === 404) return "ended";
+    const text = await res.text().catch(() => "");
     if (!res.ok) {
         console.warn("checkout: dodo session status refused", { status: res.status, body: text.slice(0, 200) });
         return "unknown";
@@ -543,7 +537,7 @@ function purchaseKind(env: Env, name: string, data: any): { kind: PurchaseKind; 
  * buyer with nothing switched on. A missing or malformed install hash is not a
  * failure: there is simply nothing to link.
  */
-export async function linkFromLifecycle(env: Env, name: string, data: any, deadline?: number): Promise<void> {
+export async function linkFromLifecycle(env: Env, name: string, data: any): Promise<void> {
     try {
         let hash: string | null = null;
         const meta = data?.metadata?.install;
@@ -565,7 +559,7 @@ export async function linkFromLifecycle(env: Env, name: string, data: any, deadl
                 await removeOpenSession(env, hash, kind, {
                     session: typeof data?.checkout_session_id === "string" ? data.checkout_session_id : "",
                     payment: typeof data?.payment_id === "string" ? data.payment_id : ""
-                }, name, deadline);
+                }, name);
             }
         } else await env.CODES.put(buyingKey(hash, kind), JSON.stringify({ plan, at: Date.now() }), { expirationTtl: INST_TTL_S });
         const ids = [data?.payment_id, data?.subscription_id]
@@ -641,7 +635,7 @@ function paymentSessionKey(paymentId: string): string {
  * payment. A kind or session that cannot be found leaves the lists alone (the
  * buyer then waits out the TTL, never pays twice).
  */
-export async function clearBuying(env: Env, paymentId: string, deadline?: number): Promise<void> {
+export async function clearBuying(env: Env, paymentId: string): Promise<void> {
     if (!paymentId) return;
     try {
         const hash = await env.CODES.get(`inst:${paymentId}`);
@@ -653,7 +647,7 @@ export async function clearBuying(env: Env, paymentId: string, deadline?: number
             console.warn("refund: purchase kind unknown, open checkout sessions kept", { payment: paymentId.slice(0, 40) });
             return;
         }
-        await removeOpenSession(env, hash, kind, { session: "", payment: paymentId }, "refund", deadline);
+        await removeOpenSession(env, hash, kind, { session: "", payment: paymentId }, "refund");
     } catch (e) {
         console.warn("purchase pending marker clear failed", { error: cause(e) });
     }
@@ -668,7 +662,7 @@ export async function clearBuying(env: Env, paymentId: string, deadline?: number
  * webhook still on the way). A KV error is thrown to the caller.
  */
 async function removeOpenSession(
-    env: Env, hash: string, kind: PurchaseKind, ids: { session: string; payment: string }, why: string, deadline?: number
+    env: Env, hash: string, kind: PurchaseKind, ids: { session: string; payment: string }, why: string
 ): Promise<void> {
     const ckoKey = checkoutOpenKey(hash, kind);
     const kvOpen = parseOpen(await env.CODES.get(ckoKey));
@@ -677,7 +671,7 @@ async function removeOpenSession(
     if (kvOpen.length === 0 && lockOpen !== null && lockOpen.length === 0) return;
     let sess: string | null = ids.session || null;
     if (!sess && ids.payment) sess = await env.CODES.get(paymentSessionKey(ids.payment));
-    if (!sess && ids.payment) sess = await sessionOfPayment(env, ids.payment, mergeOpen(lockOpen ?? [], kvOpen), deadline);
+    if (!sess && ids.payment) sess = await sessionOfPayment(env, ids.payment, mergeOpen(lockOpen ?? [], kvOpen));
     if (!sess) {
         console.warn("checkout: session of the ended purchase not found, open checkout sessions kept", {
             event: why, payment: ids.payment.slice(0, 40), kind
@@ -693,13 +687,13 @@ async function removeOpenSession(
 }
 
 /** The listed session whose payment Dodo names as `paymentId` (GET /checkouts/{id}), or null. */
-async function sessionOfPayment(env: Env, paymentId: string, open: OpenSession[], deadline?: number): Promise<string | null> {
+async function sessionOfPayment(env: Env, paymentId: string, open: OpenSession[]): Promise<string | null> {
     for (const o of open) {
         try {
-            const res = await dodoFetch(`${apiBase(env)}/checkouts/${encodeURIComponent(o.s)}`, {
+            const res = await fetch(`${apiBase(env)}/checkouts/${encodeURIComponent(o.s)}`, {
                 method: "GET",
                 headers: { authorization: `Bearer ${env.DODO_API_KEY}` }
-            }, deadline);
+            });
             if (!res.ok) {
                 console.warn("refund: dodo session lookup refused", { status: res.status });
                 continue;
@@ -932,7 +926,7 @@ export async function createCoupon(env: Env, body: any): Promise<Response> {
     if (!monthly) return fail("coupons unavailable", 503);
     let res: Response;
     try {
-        res = await dodoFetch(`${apiBase(env)}/discounts`, {
+        res = await fetch(`${apiBase(env)}/discounts`, {
             method: "POST",
             headers: { authorization: `Bearer ${env.DODO_API_KEY}`, "content-type": "application/json" },
             body: JSON.stringify({

@@ -414,11 +414,6 @@ describe("G1. one checkout per install and kind, across Cloudflare locations", (
                 const id = u.split("/").pop()!;
                 const st = id in state ? state[id] : null;
                 if (st === "down") throw new Error("network down");
-                // Dodo never answers: only the caller's timeout signal ends the wait
-                // (without one the test itself times out).
-                if (st === "hang") return new Promise<Response>((_, reject) => {
-                    init?.signal?.addEventListener("abort", () => reject(init.signal.reason ?? new Error("aborted")));
-                });
                 return new Response(JSON.stringify({ id, payment_status: st, ...(id in payIds ? { payment_id: payIds[id] } : {}) }), { status: 200 });
             }
             n++;
@@ -605,48 +600,6 @@ describe("G1. one checkout per install and kind, across Cloudflare locations", (
         vi.setSystemTime(T0 + 30 * 60_000 + 1);
         expect((await checkout(eb, "monthly")).status).toBe(200);
         expect(d.posts).toHaveLength(2);
-    });
-
-    /** AbortSignal.timeout, recorded and shortened so a hanging Dodo costs the test ~30 ms. */
-    const fastTimeouts = () => {
-        const asked: number[] = [];
-        const real = AbortSignal.timeout.bind(AbortSignal);
-        vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => { asked.push(ms); return real(30); });
-        return asked;
-    };
-
-    it("Dodo hangs on the session status: each GET gives up (≤ 5 s); refused inside the window, allowed after it", async () => {
-        const { ea, eb } = await setup();
-        const d = dodo();
-        expect((await checkout(ea, "monthly")).status).toBe(200);
-        d.state.cks_1 = "hang";
-        const asked = fastTimeouts();
-        vi.setSystemTime(T0 + 10 * 60_000);
-        const inside = await checkout(eb, "monthly");
-        expect(inside.status).toBe(409);
-        expect((await inside.json() as any).error).toBe("purchase_pending");
-        vi.setSystemTime(T0 + 30 * 60_000 + 1);
-        expect((await checkout(eb, "monthly")).status).toBe(200);
-        expect(d.posts).toHaveLength(2);
-        expect(asked.length).toBeGreaterThanOrEqual(3); // 2 status GETs + 1 POST
-        for (const ms of asked) expect(ms).toBeLessThanOrEqual(15_000);
-        expect(asked.filter(ms => ms <= 5_000).length).toBeGreaterThanOrEqual(2);
-    });
-
-    it("Dodo hangs while a refund looks for its session: the webhook still finishes and the lists stay", async () => {
-        const { ea, promo, hash } = await setup();
-        const d = dodo();
-        expect((await checkout(ea, "monthly")).status).toBe(200);
-        vi.setSystemTime(T0 + 1000);
-        expect((await checkout(ea, "annual")).status).toBe(200);
-        await buyAiThrough(ea, hash);
-        d.state.cks_1 = "hang";
-        d.state.cks_2 = "hang";
-        const asked = fastTimeouts();
-        await applyMorEvent(ea, { type: "refund.succeeded", data: refund(PAY_AI) }, T0);
-        expect(await openIds(ea, promo, hash)).toEqual({ kv: ["cks_2", "cks_1"], lock: ["cks_2", "cks_1"] });
-        expect(asked.length).toBeGreaterThan(0);
-        for (const ms of asked) expect(ms).toBeLessThanOrEqual(5_000);
     });
 
     const failEvent = (type: string, hash: string, over: Record<string, unknown>) =>

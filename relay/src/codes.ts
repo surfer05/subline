@@ -14,7 +14,6 @@
 import { bumpStat } from "./stats";
 import { linkFromKey, linkFromLifecycle, clearBuying, recordPurchaseState } from "./checkout";
 import { keysForPayment, paymentForKey } from "./orders";
-import { deadlineIn, WEBHOOK_DODO_BUDGET_MS } from "./dodoFetch";
 import { dayRowKey, monthRowKey, type ReserveReq, type ReserveRes } from "./budget";
 
 export interface Env {
@@ -1180,8 +1179,6 @@ const SUB_ACTIVE = new Set(["subscription.active", "subscription.renewed", "subs
 export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ action: string }> {
     const name = asStr(evt?.type);          // Dodo event name lives in `type`, not `meta.event_name`
     const data = evt?.data ?? {};           // Dodo fields are FLAT on `data`, not `data.attributes`
-    // One time budget for every Dodo call this webhook makes (dodoFetch.ts).
-    const dodoBy = deadlineIn(WEBHOOK_DODO_BUDGET_MS);
 
     // ---- CREATE: the only event that carries the key value ----------------
     if (name === "license_key.created") {
@@ -1205,7 +1202,7 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
         // Dodo retries rather than minting a code no refund could reach. A
         // subscription code is still reachable by its sub id: log and go on.
         if (!payId && cfg.mapped && cfg.plan !== "free") {
-            const r = await paymentForKey(env, key, asStr(data.id), asStr(data.customer_id), dodoBy);
+            const r = await paymentForKey(env, key, asStr(data.id), asStr(data.customer_id));
             if (r.ok && r.value) payId = r.value;
             else if (!r.ok && r.reason === "unavailable") {
                 if (!subId) throw new Error("license key without payment id: dodo lookup unavailable");
@@ -1289,7 +1286,7 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
     // (500, Dodo retries): this is the only event that names the install.
     if (name.startsWith("payment.") || name.startsWith("subscription.")) {
         await recordPurchaseState(env, name, data);
-        await linkFromLifecycle(env, name, data, dodoBy);
+        await linkFromLifecycle(env, name, data);
     }
 
     // ---- entitlement_grant.* (Dodo Entitlements): a license-key grant names
@@ -1371,7 +1368,7 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
         let lookupDown = false;
         const extra: string[] = [];
         if (payId && await env.CODES.get(`order:${payId}`) === null) {
-            const r = await keysForPayment(env, payId, asStr(data?.customer?.customer_id), dodoBy);
+            const r = await keysForPayment(env, payId, asStr(data?.customer?.customer_id));
             if (r.ok) {
                 for (const key of r.value) {
                     const res = await indexPayment(env, payId, key);
@@ -1382,7 +1379,7 @@ export async function applyMorEvent(env: Env, evt: any, now: number): Promise<{ 
             } else if (r.reason === "unavailable") lookupDown = true;
         }
         // The purchase is over: a new one may be bought from that install now.
-        await clearBuying(env, payId, dodoBy);
+        await clearBuying(env, payId);
         const action = await applyLifecycle(env, payId, revoke);
         for (const key of extra) await applyToCode(env, key, revoke);
         // Dodo could not be asked and no code was found: the revoke is staged

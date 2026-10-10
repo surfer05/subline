@@ -718,15 +718,3 @@ describe("reissued key", () => {
         expect(dodo.calls).toHaveLength(0);
     });
 });
-
-describe("the webhook's Dodo budget caps the look-ups", () => {
-    it("a spent outer deadline: no Dodo call, answer unavailable (never 'no key')", async () => {
-        vi.spyOn(console, "warn").mockImplementation(() => {});
-        const { keysForPayment, paymentForKey } = await import("../src/orders");
-        installDodo({ grants: { [CUS]: [grant(KEY, PAY)] } });
-        const e = env(fakeKV());
-        expect(await keysForPayment(e, PAY, CUS, Date.now() - 1)).toEqual({ ok: false, reason: "unavailable" });
-        expect(await paymentForKey(e, KEY, "", CUS, Date.now() - 1)).toEqual({ ok: false, reason: "unavailable" });
-        expect(dodo.calls).toHaveLength(0);
-    });
-});

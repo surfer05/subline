@@ -35,7 +35,6 @@
  */
 import type { Env } from "./codes";
 import { DEFAULT_DODO_API_BASE } from "./checkout";
-import { dodoFetch } from "./dodoFetch";
 
 export type Lookup<T> = { ok: true; value: T } | { ok: false; reason: "not_configured" | "unavailable" };
 
@@ -53,16 +52,15 @@ const PAGE_SIZE = 100;
  * TIME BUDGET. Dodo gives a webhook 30 s (docs: developer-resources/webhooks)
  * and a webhook that times out is retried. One look-up (every Dodo GET it
  * makes, all pages, both sources) gets LOOKUP_BUDGET_MS in total, and one GET
- * at most DODO_GET_TIMEOUT_MS (dodoFetch.ts). Past the budget the answer is "unavailable",
+ * at most REQUEST_TIMEOUT_MS. Past the budget the answer is "unavailable",
  * never "Dodo has no key", so the caller retries instead of concluding.
  */
 export const LOOKUP_BUDGET_MS = 10_000;
+const REQUEST_TIMEOUT_MS = 5_000;
 
-/** When a look-up started now must stop asking Dodo (epoch ms), never past
- *  the caller's own deadline (a webhook's whole Dodo budget). */
-export function lookupDeadline(outer?: number): number {
-    const own = Date.now() + LOOKUP_BUDGET_MS;
-    return outer === undefined ? own : Math.min(own, outer);
+/** The moment a look-up started now must stop asking Dodo (epoch ms). */
+export function lookupDeadline(): number {
+    return Date.now() + LOOKUP_BUDGET_MS;
 }
 
 function base(env: Env): string {
@@ -78,12 +76,18 @@ const str = (v: unknown): string => (typeof v === "string" ? v : "");
 /** GET a Dodo path. 404 → null; any other failure, or no time left → "unavailable". */
 async function dodoGet(env: Env, path: string, deadline: number): Promise<any | null | "unavailable"> {
     const where = path.split("?")[0]!.slice(0, 80);
+    const left = deadline - Date.now();
+    if (left <= 0) {
+        console.warn("dodo lookup skipped: time budget spent", { path: where });
+        return "unavailable";
+    }
     let res: Response;
     try {
-        res = await dodoFetch(`${base(env)}${path}`, {
+        res = await fetch(`${base(env)}${path}`, {
             method: "GET",
-            headers: { authorization: `Bearer ${env.DODO_API_KEY}` }
-        }, deadline);
+            headers: { authorization: `Bearer ${env.DODO_API_KEY}` },
+            signal: AbortSignal.timeout(Math.min(REQUEST_TIMEOUT_MS, left))
+        });
     } catch (e) {
         console.warn("dodo lookup failed", { path: where, error: cause(e) });
         return "unavailable";
@@ -184,10 +188,10 @@ export async function keysOfCustomer(
 }
 
 /** The keys a payment paid for (normally one). Empty when Dodo has none. */
-export async function keysForPayment(env: Env, paymentId: string, customerId?: string, outer?: number): Promise<Lookup<string[]>> {
+export async function keysForPayment(env: Env, paymentId: string, customerId?: string): Promise<Lookup<string[]>> {
     if (!env.DODO_API_KEY) return { ok: false, reason: "not_configured" };
     if (!paymentId) return { ok: true, value: [] };
-    const deadline = lookupDeadline(outer);
+    const deadline = lookupDeadline();
     let cid = customerId || "";
     if (!cid) {
         const info = await paymentInfo(env, paymentId, deadline);
@@ -201,11 +205,11 @@ export async function keysForPayment(env: Env, paymentId: string, customerId?: s
 }
 
 /** The payment that issued `key` (matched by key string or key id). Null when Dodo has none. */
-export async function paymentForKey(env: Env, key: string, keyId: string, customerId: string, outer?: number): Promise<Lookup<string | null>> {
+export async function paymentForKey(env: Env, key: string, keyId: string, customerId: string): Promise<Lookup<string | null>> {
     if (!env.DODO_API_KEY) return { ok: false, reason: "not_configured" };
     if (!customerId) return { ok: true, value: null };
     const isIt = (k: IssuedKey) => k.key === key || (!!keyId && k.keyId === keyId);
-    const keys = await keysOfCustomer(env, customerId, k => isIt(k) && !!k.paymentId, lookupDeadline(outer));
+    const keys = await keysOfCustomer(env, customerId, k => isIt(k) && !!k.paymentId, lookupDeadline());
     if (!keys.ok) return keys;
     const hit = keys.value.find(k => isIt(k) && !!k.paymentId);
     return { ok: true, value: hit?.paymentId || null };
