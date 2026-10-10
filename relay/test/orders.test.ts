@@ -7,9 +7,8 @@ import worker from "../src/index";
 // ===========================================================================
 //  THE PAYMENT-ID INDEX (order:<payment_id>) for one-time Automatic codes.
 //
-//  Hardening (live keys do carry payment_id; a 2026-10-08 report of a
-//  missing row was a misread id): without order:<payment_id>, refunds and
-//  disputes could not revoke a code and purchase-status would say
+//  Live bug 2026-10-08: a real Automatic purchase left no order:<payment_id>
+//  row, so refunds/disputes could not revoke it and purchase-status said
 //  "unknown". Dodo types LicenseKey.payment_id as optional and nullable
 //  ("if any"), and keys are issued through Entitlements, whose grant carries
 //  the payment id. Payload shapes below are copied from Dodo's own types and
@@ -438,7 +437,7 @@ describe("POST /admin/backfill-orders", () => {
     const PAY_REFUNDED = "pay_0TestRefundedFull00001";
     const KEY_REFUNDED = "LK-TEST-AUTO-0003";
     const seed = () => fakeKV({
-        // A code with no payment index (made from a key without payment_id).
+        // The live bug's state: an Automatic code with no payment index.
         [`code:${KEY}`]: codeRec({ plan: "automatic", dailyCap: 5, createdAt: NOW }),
         // An AI subscription with only its sub index.
         [`code:${KEY_AI}`]: codeRec({ plan: "monthly", dailyCap: 2000, mor_subscription_id: SUB, orderRef: SUB, expiresAt: NOW + 30 * 86_400_000 }),
