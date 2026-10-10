@@ -173,9 +173,6 @@ describe("R6. refunds and lost disputes take the code; nothing else does (signed
     for (const [label, type, data] of keep) {
         it(`${label} → the code stays active`, async () => {
             vi.spyOn(console, "warn").mockImplementation(() => {});
-            // Dodo knows no such payment (GET /payments/{id} → 404): the
-            // missing-index fallback finds no key, so nothing is revoked.
-            vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ message: "not found" }), { status: 404 })));
             const kv = fakeKV();
             const e = env(kv, { PROMO: fakePromo().ns });
             await buyBoth(e);

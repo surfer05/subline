@@ -32,7 +32,6 @@ import { createCoupon, handleCheckout, handlePurchaseStatus, purchaseFor } from 
 import { readCapped } from "./body";
 import { dayRowKey, type ReserveReq } from "./budget";
 import { adminPatchHealth, handlePatchHealth } from "./patchHealth";
-import { backfillOrders } from "./backfill";
 export { Budget } from "./budget";
 export { Promo } from "./promo";
 export { PatchHealth } from "./patchHealth";
@@ -834,21 +833,6 @@ export default {
             const body = await readBody(req);
             if (!body) return fail("bad request", 400);
             return adminReissue(env, body, Date.now());
-        }
-
-        // ---- POST /admin/backfill-orders — fill missing payment-id rows from
-        // Dodo's records (backfill.ts). Dry run unless {"apply":true}; counts only.
-        if (url.pathname === "/admin/backfill-orders") {
-            const refused = await adminRefusal(req, env, "POST");
-            if (refused) return refused;
-            const body = await readBody(req);
-            if (!body) return fail("bad request", 400);
-            try {
-                return await backfillOrders(env, body);
-            } catch (e) {
-                console.warn("admin: backfill failed", { error: String((e as any)?.message ?? e).slice(0, 200) });
-                return fail("backfill failed", 500);
-            }
         }
 
         // ---- POST /admin/promo — create a promo code (ADMIN_TOKEN) ---------
